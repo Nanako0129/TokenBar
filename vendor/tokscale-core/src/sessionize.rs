@@ -327,6 +327,103 @@ where
     }
 }
 
+/// Streaming accumulator that builds [`SessionInterval`]s one message at a time.
+///
+/// Equivalent to [`sessionize`] but does not require a materialised
+/// `&[UnifiedMessage]` slice.  Call [`SessionizeAccumulator::feed`] for each
+/// incoming message (timestamp ≤ 0 are silently skipped, matching the behaviour
+/// of [`sessionize`]), then call [`SessionizeAccumulator::finalize`] to obtain
+/// the sorted `Vec<SessionInterval>`.  Output is bit-for-bit identical to
+/// `sessionize(all_messages, idle_gap_ms)` for the same stream.
+pub struct SessionizeAccumulator {
+    groups: std::collections::HashMap<(String, String), SessionAcc>,
+}
+
+struct SessionAcc {
+    timestamps: Vec<i64>,
+    tokens: TokenBreakdown,
+    cost: f64,
+    message_count: i32,
+}
+
+impl Default for SessionizeAccumulator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SessionizeAccumulator {
+    pub fn new() -> Self {
+        Self {
+            groups: std::collections::HashMap::new(),
+        }
+    }
+
+    /// Feed one message into the accumulator. Messages with timestamp ≤ 0 are
+    /// skipped (identical behaviour to [`sessionize`]).
+    pub fn feed(&mut self, msg: &UnifiedMessage) {
+        if msg.timestamp <= 0 {
+            return;
+        }
+        let key = (msg.client.clone(), msg.session_id.clone());
+        let acc = self.groups.entry(key).or_insert_with(|| SessionAcc {
+            timestamps: Vec::new(),
+            tokens: TokenBreakdown::default(),
+            cost: 0.0,
+            message_count: 0,
+        });
+        acc.timestamps.push(msg.timestamp);
+        acc.tokens.input += msg.tokens.input;
+        acc.tokens.output += msg.tokens.output;
+        acc.tokens.cache_read += msg.tokens.cache_read;
+        acc.tokens.cache_write += msg.tokens.cache_write;
+        acc.tokens.reasoning += msg.tokens.reasoning;
+        acc.cost += msg.cost;
+        acc.message_count += msg.message_count.max(1);
+    }
+
+    /// Consume the accumulator and produce a sorted `Vec<SessionInterval>`.
+    ///
+    /// Output is identical to [`sessionize`] called on the same messages.
+    pub fn finalize(self, idle_gap_ms: i64) -> Vec<SessionInterval> {
+        let mut intervals: Vec<SessionInterval> = Vec::with_capacity(self.groups.len());
+
+        for ((client, session_id), mut acc) in self.groups {
+            if acc.timestamps.is_empty() {
+                continue;
+            }
+            acc.timestamps.sort_unstable();
+
+            let start_ts = acc.timestamps[0];
+            let end_ts = *acc.timestamps.last().unwrap();
+            let wall_duration_ms = end_ts - start_ts;
+
+            let mut active_duration_ms: i64 = 0;
+            for w in acc.timestamps.windows(2) {
+                let gap = w[1] - w[0];
+                if gap <= idle_gap_ms {
+                    active_duration_ms += gap;
+                }
+            }
+
+            intervals.push(SessionInterval {
+                client,
+                session_id,
+                start_ts,
+                end_ts,
+                wall_duration_ms,
+                active_duration_ms,
+                message_count: acc.message_count,
+                tokens: acc.tokens,
+                cost: acc.cost,
+            });
+        }
+
+        intervals.sort_unstable_by_key(|s| s.start_ts);
+        intervals
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -629,4 +726,146 @@ mod tests {
         assert_eq!(daily.get("2026-01-02"), Some(&1_800_000));
         assert_eq!(daily.len(), 2);
     }
+    // =========================================================================
+    // SessionizeAccumulator parity tests
+    // =========================================================================
+
+    fn make_msg_full(
+        client: &str,
+        session_id: &str,
+        timestamp: i64,
+        input: i64,
+        output: i64,
+        cost: f64,
+        message_count: i32,
+    ) -> UnifiedMessage {
+        UnifiedMessage {
+            client: client.to_string(),
+            model_id: "model".to_string(),
+            provider_id: "provider".to_string(),
+            session_id: session_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            timestamp,
+            date: "2024-01-01".to_string(),
+            tokens: TokenBreakdown { input, output, cache_read: 0, cache_write: 0, reasoning: 0 },
+            cost,
+            message_count,
+            agent: None,
+            dedup_key: None,
+            is_turn_start: false,
+            duration_ms: None,
+        }
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_empty() {
+        let acc = SessionizeAccumulator::new();
+        let result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_parity_single_session() {
+        let msgs = vec![
+            make_msg("opencode", "s1", 1_000_000),
+            make_msg("opencode", "s1", 1_060_000),
+            make_msg("opencode", "s1", 1_120_000),
+        ];
+
+        let reference = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(reference.len(), result.len(), "session count must match");
+        assert_eq!(reference[0].start_ts,           result[0].start_ts);
+        assert_eq!(reference[0].end_ts,             result[0].end_ts);
+        assert_eq!(reference[0].wall_duration_ms,   result[0].wall_duration_ms);
+        assert_eq!(reference[0].active_duration_ms, result[0].active_duration_ms);
+        assert_eq!(reference[0].message_count,      result[0].message_count);
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_parity_idle_gap() {
+        // Gap > threshold in the middle: first two close, last one far.
+        let msgs = vec![
+            make_msg("opencode", "ses1", 1_000_000),
+            make_msg("opencode", "ses1", 1_060_000),
+            make_msg("opencode", "ses1", 1_060_000 + 5 * 60_000), // 5 min gap
+        ];
+        let reference = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(reference[0].active_duration_ms, result[0].active_duration_ms,
+            "active_duration_ms must match (idle gap excluded)");
+        assert_eq!(reference[0].wall_duration_ms, result[0].wall_duration_ms);
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_parity_multi_session_multi_client() {
+        let msgs = vec![
+            make_msg("claude",   "s1", 1_000_000),
+            make_msg("claude",   "s1", 1_060_000),
+            make_msg("opencode", "s2", 1_000_000),
+            make_msg("opencode", "s2", 1_120_000),
+            make_msg("codex",    "s3", 2_000_000),
+        ];
+        let mut reference = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let mut result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(reference.len(), result.len(), "session count must match");
+        // Sort both by (client, session_id) for deterministic comparison
+        reference.sort_by(|a, b| a.client.cmp(&b.client).then(a.session_id.cmp(&b.session_id)));
+        result.sort_by(|a, b| a.client.cmp(&b.client).then(a.session_id.cmp(&b.session_id)));
+        for (r, a) in reference.iter().zip(result.iter()) {
+            assert_eq!(r.session_id, a.session_id, "session_id must match");
+            assert_eq!(r.start_ts, a.start_ts, "start_ts mismatch for session {}", r.session_id);
+            assert_eq!(r.wall_duration_ms, a.wall_duration_ms,
+                "wall_duration_ms mismatch for session {}", r.session_id);
+            assert_eq!(r.active_duration_ms, a.active_duration_ms,
+                "active_duration_ms mismatch for session {}", r.session_id);
+            assert_eq!(r.message_count, a.message_count,
+                "message_count mismatch for session {}", r.session_id);
+        }
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_skips_zero_timestamp() {
+        let msgs = vec![
+            make_msg("opencode", "s1", 0),         // skipped
+            make_msg("opencode", "s1", 1_000_000), // kept
+        ];
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].message_count, 1); // only non-zero counted
+    }
+
+    #[test]
+    fn test_sessionize_accumulator_parity_tokens_and_cost() {
+        let msgs = vec![
+            make_msg_full("claude", "s1", 1_000_000, 100, 50, 0.01, 1),
+            make_msg_full("claude", "s1", 1_060_000, 200, 80, 0.02, 2),
+        ];
+        let reference = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+
+        assert_eq!(result.len(), 1);
+        assert_eq!(reference[0].tokens.input,  result[0].tokens.input,  "input tokens");
+        assert_eq!(reference[0].tokens.output, result[0].tokens.output, "output tokens");
+        assert!((reference[0].cost - result[0].cost).abs() < 1e-9, "cost");
+        assert_eq!(reference[0].message_count, result[0].message_count, "message_count");
+    }
+
+
 }

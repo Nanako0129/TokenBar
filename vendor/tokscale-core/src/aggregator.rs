@@ -8,7 +8,7 @@ use crate::{
     SessionContribution, TokenBreakdown, YearSummary,
 };
 use rayon::prelude::*;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Aggregate messages into daily contributions
 pub fn aggregate_by_date(messages: Vec<UnifiedMessage>) -> Vec<DailyContribution> {
@@ -722,6 +722,135 @@ fn calculate_intensities(contributions: &mut [DailyContribution]) {
             0
         };
     }
+}
+
+// =============================================================================
+// StreamingAggregator — zero-copy fold path
+// =============================================================================
+
+/// Streaming aggregator that folds messages one-by-one without materialising a
+/// full clone of the message list.  Trae messages are buffered until
+/// [`StreamingAggregator::finalize`] so only the latest-per-session survives.
+pub struct StreamingAggregator {
+    days: HashMap<String, DayAccumulator>,
+    seen: HashSet<String>,
+    trae_latest: HashMap<String, UnifiedMessage>,
+}
+
+impl Default for StreamingAggregator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StreamingAggregator {
+    pub fn new() -> Self {
+        Self {
+            days: HashMap::new(),
+            seen: HashSet::new(),
+            trae_latest: HashMap::new(),
+        }
+    }
+
+    pub fn feed(&mut self, msg: &UnifiedMessage) {
+        if msg.client == "trae" {
+            let entry = self.trae_latest.entry(msg.session_id.clone());
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let existing = slot.get();
+                    let should_replace = msg.timestamp > existing.timestamp
+                        || (msg.timestamp == existing.timestamp
+                            && msg.dedup_key.as_ref().is_some_and(|k| {
+                                existing
+                                    .dedup_key
+                                    .as_ref()
+                                    .is_none_or(|ek| k.as_str() > ek.as_str())
+                            }));
+                    if should_replace {
+                        *slot.get_mut() = msg.clone();
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(msg.clone());
+                }
+            }
+            return;
+        }
+
+        if let Some(key) = &msg.dedup_key {
+            if !key.is_empty() {
+                if self.seen.contains(key.as_str()) {
+                    return;
+                }
+                self.seen.insert(key.clone());
+            }
+        }
+
+        self.days
+            .entry(msg.date.clone())
+            .or_default()
+            .add_message(msg);
+    }
+
+    /// Feed a message that has already been deduplicated by the scan driver.
+    ///
+    /// Skips the trae-buffer and dedup_key gate — the caller guarantees this
+    /// message is unique and should be counted. Use only from
+    /// `scan_messages_streaming` where the driver layer owns dedup.
+    pub fn feed_pre_deduped(&mut self, msg: &UnifiedMessage) {
+        self.days
+            .entry(msg.date.clone())
+            .or_default()
+            .add_message(msg);
+    }
+
+    pub fn finalize(mut self) -> Vec<DailyContribution> {
+        for msg in self.trae_latest.into_values() {
+            if let Some(key) = &msg.dedup_key {
+                if !key.is_empty() {
+                    if self.seen.contains(key.as_str()) {
+                        continue;
+                    }
+                    self.seen.insert(key.clone());
+                }
+            }
+            self.days
+                .entry(msg.date.clone())
+                .or_default()
+                .add_message(&msg);
+        }
+
+        if self.days.is_empty() {
+            return Vec::new();
+        }
+
+        let mut contributions: Vec<DailyContribution> = self
+            .days
+            .into_iter()
+            .map(|(date, acc)| acc.into_contribution(date))
+            .collect();
+
+        contributions.sort_by(|a, b| a.date.cmp(&b.date));
+        calculate_intensities(&mut contributions);
+        contributions
+    }
+}
+
+/// Iterator-driven internal path.  Phase 2 can drive this with STORE_MEMO Arc
+/// entries without materialising a full Vec.
+pub fn fold_messages_iter<'a>(
+    iter: impl Iterator<Item = &'a UnifiedMessage>,
+) -> Vec<DailyContribution> {
+    let mut agg = StreamingAggregator::new();
+    for msg in iter {
+        agg.feed(msg);
+    }
+    agg.finalize()
+}
+
+/// Slice-based public API — thin wrapper over [`fold_messages_iter`].
+pub fn fold_messages_streaming(messages: &[UnifiedMessage]) -> Vec<DailyContribution> {
+    fold_messages_iter(messages.iter())
 }
 
 #[cfg(test)]
@@ -1552,4 +1681,299 @@ mod tests {
         // Spot-check key field is present in JSON.
         assert!(json.contains("\"session_id\":\"019e1e27"));
     }
+
+    // =========================================================================
+    // StreamingAggregator RED tests
+    // =========================================================================
+
+    /// Build a deterministic UnifiedMessage fixture for streaming aggregator tests.
+    /// All dedup-sensitive fields are explicit; no real JSONL files required.
+    fn streaming_msg(
+        date: &str,
+        client: &str,
+        model: &str,
+        session_id: &str,
+        dedup_key: Option<&str>,
+        timestamp_ms: i64,
+        input: i64,
+        output: i64,
+        cost: f64,
+    ) -> UnifiedMessage {
+        UnifiedMessage {
+            client: client.to_string(),
+            model_id: model.to_string(),
+            provider_id: "anthropic".to_string(),
+            session_id: session_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            timestamp: timestamp_ms,
+            date: date.to_string(),
+            tokens: TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            duration_ms: None,
+            message_count: 1,
+            agent: None,
+            dedup_key: dedup_key.map(|s| s.to_string()),
+            is_turn_start: false,
+        }
+    }
+
+    // scenario: no_dedup
+    // Messages with no dedup_key are all folded — none are dropped.
+    #[test]
+    fn test_streaming_aggregator_no_dedup_all_messages_counted() {
+        // scenario: no_dedup
+        let msgs: Vec<UnifiedMessage> = (0..3)
+            .map(|i| {
+                streaming_msg(
+                    "2025-01-01",
+                    "claude",
+                    "claude-sonnet-4-5",
+                    &format!("sess-{i}"),
+                    None,
+                    1_700_000_000_000 + i as i64 * 1000,
+                    100,
+                    50,
+                    0.01,
+                )
+            })
+            .collect();
+
+        let mut agg = StreamingAggregator::new();
+        for msg in &msgs {
+            agg.feed(msg);
+        }
+        let contributions = agg.finalize();
+
+        assert_eq!(contributions.len(), 1, "all msgs on same date -> 1 day bucket");
+        assert_eq!(
+            contributions[0].totals.messages, 3,
+            "all 3 messages with no dedup_key must be retained"
+        );
+        assert!(
+            (contributions[0].totals.cost - 0.03).abs() < 1e-9,
+            "total cost must reflect all 3 messages"
+        );
+    }
+
+    // scenario: cross_file_dedup
+    // Messages with the same dedup_key fed across multiple batches (simulating
+    // multiple file lanes) — the second occurrence must be silently dropped.
+    #[test]
+    fn test_streaming_aggregator_cross_file_dedup_drops_duplicate() {
+        // scenario: cross_file_dedup
+        let first = streaming_msg(
+            "2025-02-01",
+            "claude",
+            "claude-sonnet-4-5",
+            "sess-a",
+            Some("dedup-key-abc"),
+            1_700_100_000_000,
+            200,
+            100,
+            0.05,
+        );
+        let duplicate = streaming_msg(
+            "2025-02-01",
+            "claude",
+            "claude-sonnet-4-5",
+            "sess-a",
+            Some("dedup-key-abc"),
+            1_700_100_001_000,
+            200,
+            100,
+            0.05,
+        );
+        let unique = streaming_msg(
+            "2025-02-01",
+            "claude",
+            "claude-opus-4-5",
+            "sess-b",
+            Some("dedup-key-xyz"),
+            1_700_100_002_000,
+            50,
+            25,
+            0.02,
+        );
+
+        let mut agg = StreamingAggregator::new();
+        agg.feed(&first);
+        agg.feed(&duplicate);
+        agg.feed(&unique);
+        let contributions = agg.finalize();
+
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].totals.messages, 2,
+            "duplicate dedup_key must be dropped; only 2 unique messages retained"
+        );
+        assert!(
+            (contributions[0].totals.cost - 0.07).abs() < 1e-9,
+            "cost must exclude the duplicated message"
+        );
+    }
+
+    // scenario: trae_keep_latest
+    // Trae messages with the same session_id: only the one with the highest
+    // timestamp survives (order-dependent replacement semantics).
+    #[test]
+    fn test_streaming_aggregator_trae_keep_latest_by_timestamp() {
+        // scenario: trae_keep_latest
+        let older = streaming_msg(
+            "2025-03-01",
+            "trae",
+            "claude-sonnet-4-5",
+            "trae-sess-1",
+            Some("trae-key-old"),
+            1_710_000_000_000,
+            300,
+            100,
+            0.08,
+        );
+        let newer = streaming_msg(
+            "2025-03-01",
+            "trae",
+            "claude-sonnet-4-5",
+            "trae-sess-1",
+            Some("trae-key-new"),
+            1_710_000_001_000,
+            500,
+            150,
+            0.12,
+        );
+        let other_session = streaming_msg(
+            "2025-03-01",
+            "trae",
+            "claude-haiku-4-5",
+            "trae-sess-2",
+            Some("trae-key-other"),
+            1_710_000_002_000,
+            100,
+            50,
+            0.03,
+        );
+
+        let mut agg = StreamingAggregator::new();
+        agg.feed(&older);
+        agg.feed(&newer);
+        agg.feed(&other_session);
+        let contributions = agg.finalize();
+
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].totals.messages, 2,
+            "trae: only the latest per session_id survives"
+        );
+        assert!(
+            (contributions[0].totals.cost - 0.15).abs() < 1e-9,
+            "cost must use newer trae message, not the older one"
+        );
+        assert_eq!(
+            contributions[0].totals.tokens, 800,
+            "tokens must reflect the winning newer trae message"
+        );
+    }
+
+    // scenario: multi_day_bucketing
+    // Messages on different calendar dates land in separate daily buckets and
+    // are sorted chronologically in finalize() output.
+    #[test]
+    fn test_streaming_aggregator_multi_day_bucketing_produces_separate_buckets() {
+        // scenario: multi_day_bucketing
+        let day1a = streaming_msg(
+            "2025-04-01", "opencode", "gpt-4o", "sess-d1", None,
+            1_743_000_000_000, 100, 50, 0.01,
+        );
+        let day1b = streaming_msg(
+            "2025-04-01", "opencode", "gpt-4o", "sess-d1", None,
+            1_743_000_001_000, 200, 100, 0.02,
+        );
+        let day2 = streaming_msg(
+            "2025-04-02", "opencode", "gpt-4o", "sess-d2", None,
+            1_743_086_400_000, 400, 200, 0.04,
+        );
+        let day3 = streaming_msg(
+            "2025-04-03", "codex", "gpt-5", "sess-d3", None,
+            1_743_172_800_000, 1000, 500, 0.10,
+        );
+
+        let mut agg = StreamingAggregator::new();
+        for msg in &[&day1a, &day1b, &day2, &day3] {
+            agg.feed(msg);
+        }
+        let contributions = agg.finalize();
+
+        assert_eq!(contributions.len(), 3, "3 distinct dates -> 3 buckets");
+        assert_eq!(contributions[0].date, "2025-04-01");
+        assert_eq!(contributions[1].date, "2025-04-02");
+        assert_eq!(contributions[2].date, "2025-04-03");
+        assert_eq!(contributions[0].totals.messages, 2);
+        assert!(
+            (contributions[0].totals.cost - 0.03).abs() < 1e-9,
+            "day1 cost must aggregate both messages"
+        );
+        assert_eq!(contributions[1].totals.tokens, 600);
+        assert_eq!(contributions[2].totals.tokens, 1500);
+    }
+
+    // scenario: store_memo_snapshot
+    // Simulates Hermes/Zed lane entries (dedup_key=Some) alongside normal lane
+    // entries (dedup_key=None), fed in a single pass (snapshot semantics).
+    // Verifies that cross-lane dedup works correctly when processed together.
+    #[test]
+    fn test_streaming_aggregator_store_memo_snapshot_hermes_zed_dedup() {
+        // scenario: store_memo_snapshot
+        let hermes_msg = streaming_msg(
+            "2025-05-01", "hermes", "claude-sonnet-4-5", "hermes-sess-1",
+            Some("hermes-unique-key-1"), 1_746_000_000_000, 500, 200, 0.09,
+        );
+        let zed_msg = streaming_msg(
+            "2025-05-01", "zed", "claude-sonnet-4-5", "zed-sess-1",
+            Some("zed-unique-key-1"), 1_746_000_001_000, 300, 100, 0.05,
+        );
+        let normal_msg = streaming_msg(
+            "2025-05-01", "claude", "claude-haiku-4-5", "claude-sess-1",
+            None, 1_746_000_002_000, 100, 50, 0.01,
+        );
+        let hermes_dup = streaming_msg(
+            "2025-05-01", "hermes", "claude-sonnet-4-5", "hermes-sess-1",
+            Some("hermes-unique-key-1"), 1_746_000_003_000, 500, 200, 0.09,
+        );
+
+        let mut agg = StreamingAggregator::new();
+        agg.feed(&hermes_msg);
+        agg.feed(&zed_msg);
+        agg.feed(&normal_msg);
+        agg.feed(&hermes_dup);
+
+        let contributions = agg.finalize();
+
+        assert_eq!(contributions.len(), 1);
+        assert_eq!(
+            contributions[0].totals.messages, 3,
+            "store_memo_snapshot: hermes + zed + normal = 3; hermes-dup dropped"
+        );
+        assert!(
+            (contributions[0].totals.cost - 0.15).abs() < 1e-9,
+            "cost must exclude hermes duplicate"
+        );
+    }
+
+    // scenario: empty finalize (guard against panic)
+    #[test]
+    fn test_streaming_aggregator_finalize_empty_accumulator_returns_empty() {
+        let agg = StreamingAggregator::new();
+        let contributions = agg.finalize();
+        assert!(
+            contributions.is_empty(),
+            "finalize() on empty StreamingAggregator must return empty Vec without panicking"
+        );
+    }
+
 }

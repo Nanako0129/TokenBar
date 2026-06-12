@@ -18,8 +18,8 @@ pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
 pub use parser::*;
 pub use scanner::*;
 pub use sessionize::{
-    compute_daily_active_time, compute_time_metrics, sessionize, SessionInterval, TimeMetrics,
-    DEFAULT_IDLE_GAP_MS,
+    compute_daily_active_time, compute_time_metrics, sessionize, SessionizeAccumulator,
+    SessionInterval, TimeMetrics, DEFAULT_IDLE_GAP_MS,
 };
 pub use sessions::UnifiedMessage;
 
@@ -510,6 +510,7 @@ fn parse_all_messages_with_pricing(
     )
 }
 
+// TODO: remaining callers: parse_local_unified_messages_resolved (FFI/external, intentional Vec); parse_all_messages_with_pricing (dead_code wrapper). All report consumers have migrated to scan_messages_streaming.
 fn parse_all_messages_with_pricing_with_env_strategy(
     home_dir: &str,
     clients: &[String],
@@ -808,21 +809,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                             parsed.state,
                             fallback_timestamp_indices.clone(),
                         );
-                        if let Some(cache_entry) = cache_entry {
-                            let messages = finalize_codex_messages(
-                                raw_messages,
-                                pricing,
-                                is_headless,
-                                &fallback_timestamp_indices,
-                                fallback_timestamp,
-                            );
-
-                            return CachedParseOutcome {
-                                messages,
-                                cache_entry: Some(cache_entry),
-                                invalidate_cache: false,
-                            };
-                        }
+                        let Some(cache_entry) = cache_entry else {
+                            return reparse_from_start(true);
+                        };
+                        let messages = finalize_codex_messages(
+                            raw_messages,
+                            pricing,
+                            is_headless,
+                            &fallback_timestamp_indices,
+                            fallback_timestamp,
+                        );
+                        return CachedParseOutcome {
+                            messages,
+                            cache_entry: Some(cache_entry),
+                            invalidate_cache: false,
+                        };
                     }
                 }
             }
@@ -1536,31 +1537,55 @@ fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
         + tokens.reasoning.max(0)
 }
 
-pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
-    let start = Instant::now();
-
-    let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
+/// Returns the effective client list for a report: uses the caller-supplied
+/// list when present, or falls back to all known clients + "synthetic".
+fn resolve_report_clients(options: &ReportOptions) -> Vec<String> {
+    options.clients.clone().unwrap_or_else(|| {
         let mut clients: Vec<String> = ClientId::ALL
             .iter()
             .map(|c| c.as_str().to_string())
             .collect();
         clients.push("synthetic".to_string());
         clients
-    });
+    })
+}
+
+/// Returns `true` when the message should pass the cross-file dedup gate for
+/// lanes that track per-client seen keys.
+///
+/// Uses `contains` before `insert` to avoid cloning the key on the hot path
+/// when the key is already present (i.e. the message is a duplicate).
+fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
+    if seen.contains(key) {
+        return false;
+    }
+    seen.insert(key.to_owned());
+    true
+}
+
+pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
+    let start = Instant::now();
+
+    let home_dir = get_home_dir_string(&options.home_dir)?;
+    let clients = resolve_report_clients(&options);
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
+    let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
+    let since_s = options.since.clone();
+    let until_s = options.until.clone();
+    let msg_filter = |m: &UnifiedMessage| -> bool {
+        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
+        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
+        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        true
+    };
+    let mut model_msgs: Vec<UnifiedMessage> = Vec::new();
+    scan_messages_streaming(
+        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &msg_filter,
+        &mut |m: &UnifiedMessage| { model_msgs.push(m.clone()); },
     );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-    let entries = aggregate_model_usage_entries(filtered, &options.group_by);
+    let entries = aggregate_model_usage_entries(model_msgs, &options.group_by);
 
     let total_input: i64 = entries.iter().map(|e| e.input).sum();
     let total_output: i64 = entries.iter().map(|e| e.output).sum();
@@ -1596,48 +1621,44 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
+    let clients = resolve_report_clients(&options);
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-    );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
+    let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
+    let since_s = options.since.clone();
+    let until_s = options.until.clone();
+    let msg_filter = |m: &UnifiedMessage| -> bool {
+        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
+        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
+        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        true
+    };
 
     let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
 
-    for msg in filtered {
-        let month = if msg.date.len() >= 7 {
-            msg.date[..7].to_string()
-        } else {
-            continue;
-        };
+    scan_messages_streaming(
+        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &msg_filter,
+        &mut |msg: &UnifiedMessage| {
+            let month = if msg.date.len() >= 7 {
+                msg.date[..7].to_string()
+            } else {
+                return;
+            };
 
-        let entry = month_map.entry(month).or_default();
+            let entry = month_map.entry(month).or_default();
 
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.message_count += msg.message_count.max(0);
-        entry.cost += msg.cost;
-    }
+            entry
+                .models
+                .insert(normalize_model_for_grouping(&msg.model_id));
+            entry.input += msg.tokens.input;
+            entry.output += msg.tokens.output;
+            entry.cache_read += msg.tokens.cache_read;
+            entry.cache_write += msg.tokens.cache_write;
+            entry.message_count += msg.message_count.max(0);
+            entry.cost += msg.cost;
+        },
+    );
 
     let mut entries: Vec<MonthlyUsage> = month_map
         .into_iter()
@@ -1688,57 +1709,53 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
-
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
+    let clients = resolve_report_clients(&options);
 
     let pricing = load_pricing_for_local_parse().await;
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        pricing.as_deref(),
-        options.use_env_roots,
-        &options.scanner_settings,
-    );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
+    let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
+    let since_s = options.since.clone();
+    let until_s = options.until.clone();
+    let msg_filter = |m: &UnifiedMessage| -> bool {
+        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
+        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
+        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        true
+    };
 
     let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
 
-    for msg in filtered {
-        let hour_key = if msg.timestamp > 0 {
-            let ts_secs = msg.timestamp / 1000;
-            match Local.timestamp_opt(ts_secs, 0) {
-                chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
-                _ => format!("{} 00:00", msg.date),
+    scan_messages_streaming(
+        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &msg_filter,
+        &mut |msg: &UnifiedMessage| {
+            let hour_key = if msg.timestamp > 0 {
+                let ts_secs = msg.timestamp / 1000;
+                match Local.timestamp_opt(ts_secs, 0) {
+                    chrono::LocalResult::Single(dt) => dt.format("%Y-%m-%d %H:00").to_string(),
+                    _ => format!("{} 00:00", msg.date),
+                }
+            } else {
+                format!("{} 00:00", msg.date)
+            };
+
+            let entry = hour_map.entry(hour_key).or_default();
+
+            entry.clients.insert(msg.client.clone());
+            entry
+                .models
+                .insert(normalize_model_for_grouping(&msg.model_id));
+            entry.input += msg.tokens.input;
+            entry.output += msg.tokens.output;
+            entry.cache_read += msg.tokens.cache_read;
+            entry.cache_write += msg.tokens.cache_write;
+            entry.reasoning += msg.tokens.reasoning;
+            entry.message_count += msg.message_count.max(0);
+            if msg.is_turn_start {
+                entry.turn_count += 1;
             }
-        } else {
-            format!("{} 00:00", msg.date)
-        };
-
-        let entry = hour_map.entry(hour_key).or_default();
-
-        entry.clients.insert(msg.client.clone());
-        entry
-            .models
-            .insert(normalize_model_for_grouping(&msg.model_id));
-        entry.input += msg.tokens.input;
-        entry.output += msg.tokens.output;
-        entry.cache_read += msg.tokens.cache_read;
-        entry.cache_write += msg.tokens.cache_write;
-        entry.reasoning += msg.tokens.reasoning;
-        entry.message_count += msg.message_count.max(0);
-        if msg.is_turn_start {
-            entry.turn_count += 1;
-        }
-        entry.cost += msg.cost;
-    }
+            entry.cost += msg.cost;
+        },
+    );
 
     let mut entries: Vec<HourlyUsage> = hour_map
         .into_iter()
@@ -1776,6 +1793,392 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     })
 }
 
+/// Streaming scan driver — mirrors `parse_all_messages_with_pricing_with_env_strategy`
+/// but never materialises a full-history `Vec<UnifiedMessage>`.
+///
+/// For file-backed lanes with a cache hit: iterates `cached.messages` by
+/// reference (one clone per message, not one clone of the whole Vec), applies
+/// pricing on the temporary copy, and immediately calls `sink`.  Peak memory
+/// per lane is O(messages_in_that_file), not O(sum_of_all_files).
+///
+/// Cross-file dedup_key gate and trae keep-latest buffer both live here so
+/// both the day-aggregator and the sessionize accumulator see a consistent,
+/// de-duplicated stream.  `filter` is applied after dedup gate.
+///
+/// `sink` receives each final message exactly once.  Trae winners are flushed
+/// at the very end (after all other lanes), matching `StreamingAggregator`
+/// semantics.
+fn scan_messages_streaming<F, S>(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    filter: &F,
+    sink: &mut S,
+)
+where
+    F: Fn(&UnifiedMessage) -> bool,
+    S: FnMut(&UnifiedMessage),
+{
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        home_dir,
+        clients,
+        use_env_roots,
+        scanner_settings,
+    );
+    let headless_roots = scanner::headless_roots_with_env_strategy(home_dir, use_env_roots);
+    let mut source_cache = message_cache::SourceMessageCache::load();
+    source_cache.prune_missing_files();
+
+    let include_all = clients.is_empty();
+    let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
+    let requested: HashSet<&str> = clients.iter().map(String::as_str).collect();
+
+    // Inline helper: should this message pass the client filter?
+    let passes_client = |m: &UnifiedMessage| -> bool {
+        include_all
+            || retain_for_requested_clients(&m.client, &m.model_id, &m.provider_id, &requested)
+    };
+
+    // Cross-file dedup gate shared across non-trae, non-opencode, non-claude, non-codex lanes.
+    let mut seen_keys: HashSet<String> = HashSet::new();
+
+    // Trae keep-latest buffer — flushed after all other lanes.
+    let mut trae_latest: HashMap<String, UnifiedMessage> = HashMap::new();
+
+    // ---- OpenCode SQLite ----
+    let mut opencode_seen: HashSet<String> = HashSet::new();
+    for db_path in &scan_result.opencode_dbs {
+        for mut m in sessions::opencode::parse_opencode_sqlite(db_path) {
+            apply_pricing_if_available(&mut m, pricing);
+            let keep = m.dedup_key.as_ref().is_none_or(|k| dedup_gate_passes(k, &mut opencode_seen));
+            if keep && passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+    // OpenCode JSON legacy
+    let opencode_parsed: Vec<Vec<UnifiedMessage>> = scan_result
+        .get(ClientId::OpenCode)
+        .par_iter()
+        .map(|path| sessions::opencode::parse_opencode_file(path).into_iter().collect::<Vec<_>>())
+        .collect();
+    for msgs in opencode_parsed {
+        for mut m in msgs {
+            apply_pricing_if_available(&mut m, pricing);
+            let keep = m.dedup_key.as_ref().is_none_or(|k| dedup_gate_passes(k, &mut opencode_seen));
+            if keep && passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+
+    // ---- Claude Code JSONL (cache-aware, reference-iterate on hit) ----
+    let claude_home = PathBuf::from(home_dir);
+    let mut claude_seen: HashSet<String> = HashSet::new();
+    for path in scan_result.get(ClientId::Claude) {
+        let fp = message_cache::SourceFingerprint::from_claude_code_path_with_home(path, Some(&claude_home));
+        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(path).filter(|c| &c.fingerprint == fp && !c.messages.is_empty()));
+        if let Some(cached) = cache_hit {
+            for msg in cached.messages.iter() {
+                let mut m = msg.clone();
+                m.refresh_derived_fields();
+                apply_pricing_if_available(&mut m, pricing);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        } else {
+            let msgs = sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home));
+            for mut m in msgs {
+                apply_pricing_if_available(&mut m, pricing);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Codex JSONL (cache-aware, headless-aware) ----
+    let mut codex_seen: HashSet<String> = HashSet::new();
+    for path in scan_result.get(ClientId::Codex) {
+        let fp = message_cache::SourceFingerprint::from_path(path);
+        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(path).filter(|c| &c.fingerprint == fp));
+        if let Some(cached) = cache_hit {
+            let is_headless = is_headless_path(path, &headless_roots);
+            let fallback_ts = sessions::utils::file_modified_timestamp_ms(path);
+            let fti = &cached.fallback_timestamp_indices;
+            for (idx, msg) in cached.messages.iter().enumerate() {
+                let mut m = msg.clone();
+                if fti.contains(&idx) { m.set_timestamp(fallback_ts); } else { m.refresh_derived_fields(); }
+                apply_pricing_if_available(&mut m, pricing);
+                apply_headless_agent(&mut m, is_headless);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        } else {
+            let is_headless = is_headless_path(path, &headless_roots);
+            let fallback_ts = sessions::utils::file_modified_timestamp_ms(path);
+            let parsed = sessions::codex::parse_codex_file_incremental(
+                path, 0, sessions::codex::CodexParseState::default(),
+            );
+            let mut msgs = parsed.messages;
+            for idx in &parsed.fallback_timestamp_indices {
+                if let Some(m) = msgs.get_mut(*idx) { m.set_timestamp(fallback_ts); }
+            }
+            for mut m in msgs {
+                apply_pricing_if_available(&mut m, pricing);
+                apply_headless_agent(&mut m, is_headless);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Simple file-backed lanes (shared seen_keys, cache-aware) ----
+    // Cache hit  → iterate cached.messages by reference (one clone per message),
+    //              refresh_derived_fields, apply pricing, dedup, filter, sink.
+    // Cache miss → par-collect parse results, then sequential: writeback + emit.
+    // Mirrors load_or_parse_source semantics from parse_all_messages_with_pricing_with_env_strategy.
+    macro_rules! simple_lane {
+        ($client_id:expr, $parse_fn:expr) => {{
+            // Separate paths into cache-hit (emit immediately) vs cache-miss (par-parse).
+            let mut miss_paths: Vec<&PathBuf> = Vec::new();
+            for path in scan_result.get($client_id) {
+                let fp = message_cache::SourceFingerprint::from_path(path);
+                let cache_hit = fp.as_ref().and_then(|fp| {
+                    source_cache.get(path).filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
+                });
+                if let Some(cached) = cache_hit {
+                    for msg in cached.messages.iter() {
+                        let mut m = msg.clone();
+                        m.refresh_derived_fields();
+                        apply_pricing_if_available(&mut m, pricing);
+                        if !passes_client(&m) { continue; }
+                        let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                        if keep && filter(&m) { sink(&m); }
+                    }
+                } else {
+                    miss_paths.push(path);
+                }
+            }
+            // Par-parse all cache-miss files, then sequential writeback + emit.
+            let parsed_misses: Vec<(&PathBuf, Vec<UnifiedMessage>)> = miss_paths
+                .par_iter()
+                .map(|path| (*path, $parse_fn(*path)))
+                .collect();
+            for (path, msgs) in parsed_misses {
+                if !msgs.is_empty() {
+                    if let Some(fp) = message_cache::SourceFingerprint::from_path(path) {
+                        let entry = message_cache::CachedSourceEntry::new(
+                            path, fp, msgs.clone(), Vec::new(), None,
+                        );
+                        source_cache.insert(entry);
+                    }
+                }
+                for mut m in msgs {
+                    apply_pricing_if_available(&mut m, pricing);
+                    if !passes_client(&m) { continue; }
+                    let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                    if keep && filter(&m) { sink(&m); }
+                }
+            }
+        }};
+    }
+    simple_lane!(ClientId::Copilot,   sessions::copilot::parse_copilot_file);
+    simple_lane!(ClientId::Cursor,    sessions::cursor::parse_cursor_file);
+    simple_lane!(ClientId::Warp,      sessions::warp::parse_warp_file);
+    simple_lane!(ClientId::Amp,       sessions::amp::parse_amp_file);
+    simple_lane!(ClientId::Codebuff,  sessions::codebuff::parse_codebuff_file);
+    simple_lane!(ClientId::Droid,     sessions::droid::parse_droid_file);
+    simple_lane!(ClientId::OpenClaw,  sessions::openclaw::parse_openclaw_transcript);
+    simple_lane!(ClientId::Pi,        sessions::pi::parse_pi_file);
+    simple_lane!(ClientId::Kimi,      sessions::kimi::parse_kimi_file);
+    simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
+    simple_lane!(ClientId::RooCode,   sessions::roocode::parse_roocode_file);
+    simple_lane!(ClientId::KiloCode,  sessions::kilocode::parse_kilocode_file);
+    simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
+    simple_lane!(ClientId::Kiro,      sessions::kiro::parse_kiro_file);
+
+    // ---- Gemini (cache-aware with invalidate_cache semantics) ----
+    // Uses load_or_parse_source_with_fingerprint_and_policy equivalent:
+    // cacheable=false → remove stale cache entry (invalidate_cache).
+    {
+        let mut gemini_miss_paths: Vec<&PathBuf> = Vec::new();
+        for path in scan_result.get(ClientId::Gemini) {
+            let fp = message_cache::SourceFingerprint::from_path(path);
+            let cache_hit = fp.as_ref().and_then(|fp| {
+                source_cache.get(path).filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
+            });
+            if let Some(cached) = cache_hit {
+                for msg in cached.messages.iter() {
+                    let mut m = msg.clone();
+                    m.refresh_derived_fields();
+                    apply_pricing_if_available(&mut m, pricing);
+                    if !passes_client(&m) { continue; }
+                    let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                    if keep && filter(&m) { sink(&m); }
+                }
+            } else {
+                gemini_miss_paths.push(path);
+            }
+        }
+        let gemini_parsed: Vec<(&PathBuf, sessions::gemini::GeminiParseResult)> = gemini_miss_paths
+            .par_iter()
+            .map(|path| (*path, sessions::gemini::parse_gemini_file_with_cache_status(path)))
+            .collect();
+        for (path, parsed) in gemini_parsed {
+            if parsed.cacheable && !parsed.messages.is_empty() {
+                if let Some(fp) = message_cache::SourceFingerprint::from_path(path) {
+                    let entry = message_cache::CachedSourceEntry::new(
+                        path, fp, parsed.messages.clone(), Vec::new(), None,
+                    );
+                    source_cache.insert(entry);
+                }
+            } else if !parsed.cacheable {
+                source_cache.remove(path);
+            }
+            for mut m in parsed.messages {
+                apply_pricing_if_available(&mut m, pricing);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Kilo SQLite ----
+    if let Some(db_path) = &scan_result.kilo_db {
+        for mut m in sessions::kilo::parse_kilo_sqlite(db_path) {
+            apply_pricing_if_available(&mut m, pricing);
+            if passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+
+    // ---- Hermes SQLite (own dedup set) ----
+    {
+        let mut hermes_seen: HashSet<String> = HashSet::new();
+        for db_path in scan_result.hermes_db_paths() {
+            for m in parse_hermes_sqlite_with_pricing(&db_path, pricing) {
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut hermes_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Goose SQLite ----
+    if let Some(db_path) = &scan_result.goose_db {
+        for mut m in sessions::goose::parse_goose_sqlite(db_path) {
+            apply_pricing_if_available(&mut m, pricing);
+            if passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+
+    // ---- Zed SQLite (cache-aware reference-iterate) ----
+    for db_path in scan_result.zed_db_paths() {
+        let fp = message_cache::SourceFingerprint::from_sqlite_path(&db_path);
+        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(&db_path).filter(|c| &c.fingerprint == fp));
+        if let Some(cached) = cache_hit {
+            for msg in cached.messages.iter() {
+                let mut m = msg.clone();
+                m.refresh_derived_fields();
+                apply_pricing_if_available(&mut m, pricing);
+                if passes_client(&m) && filter(&m) { sink(&m); }
+            }
+        } else {
+            for mut m in sessions::zed::parse_zed_sqlite(&db_path) {
+                apply_pricing_if_available(&mut m, pricing);
+                if passes_client(&m) && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Kiro SQLite ----
+    if let Some(db_path) = &scan_result.kiro_db {
+        for mut m in sessions::kiro::parse_kiro_sqlite(db_path) {
+            apply_pricing_if_available(&mut m, pricing);
+            if passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+
+    // ---- Crush SQLite ----
+    for source in &scan_result.crush_dbs {
+        for mut m in sessions::crush::parse_crush_sqlite(&source.db_path) {
+            m.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
+            apply_pricing_if_available(&mut m, pricing);
+            if passes_client(&m) && filter(&m) { sink(&m); }
+        }
+    }
+
+    // ---- Antigravity ----
+    {
+        let parsed: Vec<Vec<UnifiedMessage>> = scan_result
+            .get(ClientId::Antigravity)
+            .par_iter()
+            .map(|path| sessions::antigravity::parse_antigravity_file(path))
+            .collect();
+        for msgs in parsed {
+            for mut m in msgs {
+                apply_pricing_if_available(&mut m, pricing);
+                if passes_client(&m) && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Trae (keep-latest per session_id, buffer — flushed below) ----
+    {
+        let trae_raw: Vec<UnifiedMessage> = scan_result
+            .get(ClientId::Trae)
+            .par_iter()
+            .flat_map(|path| sessions::trae::parse_trae_file("trae", path))
+            .collect();
+        for m in trae_raw {
+            let entry = trae_latest.entry(m.session_id.clone());
+            match entry {
+                std::collections::hash_map::Entry::Occupied(mut slot) => {
+                    let existing = slot.get();
+                    let replace = m.timestamp > existing.timestamp
+                        || (m.timestamp == existing.timestamp
+                            && m.dedup_key.as_ref().is_some_and(|k| {
+                                existing.dedup_key.as_ref().is_none_or(|ek| k.as_str() > ek.as_str())
+                            }));
+                    if replace { *slot.get_mut() = m; }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => { slot.insert(m); }
+            }
+        }
+    }
+
+    // ---- Synthetic ----
+    if let Some(db_path) = scan_result.synthetic_db.as_ref().filter(|_| include_synthetic) {
+        let fp = message_cache::SourceFingerprint::from_sqlite_path(db_path);
+        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(db_path).filter(|c| &c.fingerprint == fp));
+        if let Some(cached) = cache_hit {
+            for msg in cached.messages.iter() {
+                let mut m = msg.clone();
+                m.refresh_derived_fields();
+                apply_pricing_if_available(&mut m, pricing);
+                sessions::synthetic::normalize_synthetic_gateway_fields(&mut m.model_id, &mut m.provider_id);
+                if passes_client(&m) && filter(&m) { sink(&m); }
+            }
+        } else {
+            for mut m in sessions::synthetic::parse_octofriend_sqlite(db_path) {
+                apply_pricing_if_available(&mut m, pricing);
+                sessions::synthetic::normalize_synthetic_gateway_fields(&mut m.model_id, &mut m.provider_id);
+                if passes_client(&m) && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
+    // ---- Flush trae keep-latest (after all other lanes) ----
+    for m in trae_latest.into_values() {
+        if passes_client(&m) && filter(&m) { sink(&m); }
+    }
+
+    source_cache.save_if_dirty();
+}
+
+
 async fn generate_graph_with_loaded_pricing(
     options: ReportOptions,
     pricing: Option<&pricing::PricingService>,
@@ -1783,32 +2186,50 @@ async fn generate_graph_with_loaded_pricing(
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
+    let clients = resolve_report_clients(&options);
 
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
+    // Build filter closure from report options (year/since/until).
+    let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
+    let since_s = options.since.clone();
+    let until_s = options.until.clone();
+    let msg_filter = |m: &UnifiedMessage| -> bool {
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) { return false; }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() { return false; }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() { return false; }
+        }
+        true
+    };
 
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
+    // Dual-sink: day aggregator + sessionize accumulator fed in one pass.
+    // scan_messages_streaming handles all dedup (trae keep-latest + dedup_key gate).
+    // StreamingAggregator.feed_pre_deduped() bypasses its internal dedup gate
+    // since the driver already guarantees uniqueness.
+    let mut day_agg = aggregator::StreamingAggregator::new();
+    let mut sess_agg = sessionize::SessionizeAccumulator::new();
+
+    scan_messages_streaming(
         &home_dir,
         &clients,
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
+        &msg_filter,
+        &mut |m: &UnifiedMessage| {
+            day_agg.feed_pre_deduped(m);
+            sess_agg.feed(m);
+        },
     );
 
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
+    let contributions = day_agg.finalize();
+    let intervals = sess_agg.finalize(sessionize::DEFAULT_IDLE_GAP_MS);
     let time_metrics =
         sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
-
     let daily_active_time = sessionize::compute_daily_active_time(&intervals);
-    let contributions = aggregator::aggregate_by_date(filtered);
 
     let processing_time_ms = start.elapsed().as_millis() as u32;
     let mut result = aggregator::generate_graph_result(contributions, processing_time_ms);
@@ -1833,27 +2254,24 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
+    let clients = resolve_report_clients(&options);
 
-    let clients: Vec<String> = options.clients.clone().unwrap_or_else(|| {
-        let mut clients: Vec<String> = ClientId::ALL
-            .iter()
-            .map(|c| c.as_str().to_string())
-            .collect();
-        clients.push("synthetic".to_string());
-        clients
-    });
-
-    let all_messages = parse_all_messages_with_pricing_with_env_strategy(
-        &home_dir,
-        &clients,
-        None,
-        options.use_env_roots,
-        &options.scanner_settings,
+    let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
+    let since_s = options.since.clone();
+    let until_s = options.until.clone();
+    let msg_filter = |m: &UnifiedMessage| -> bool {
+        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
+        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
+        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        true
+    };
+    let mut sess_agg = sessionize::SessionizeAccumulator::new();
+    scan_messages_streaming(
+        &home_dir, &clients, None, options.use_env_roots, &options.scanner_settings,
+        &msg_filter,
+        &mut |m: &UnifiedMessage| { sess_agg.feed(m); },
     );
-
-    let filtered = filter_messages_for_report(all_messages, &options);
-
-    let intervals = sessionize::sessionize(&filtered, sessionize::DEFAULT_IDLE_GAP_MS);
+    let intervals = sess_agg.finalize(sessionize::DEFAULT_IDLE_GAP_MS);
     let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
 
     Ok(TimeMetricsReport {
@@ -1872,26 +2290,21 @@ pub async fn generate_local_graph_report(options: ReportOptions) -> Result<Graph
     generate_graph_with_loaded_pricing(options, pricing.as_deref()).await
 }
 
-fn filter_messages_for_report(
-    messages: Vec<UnifiedMessage>,
-    options: &ReportOptions,
-) -> Vec<UnifiedMessage> {
-    let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
-    filtered
+/// Streaming graph entry-point.
+///
+/// Accepts an already-parsed message slice, applies an optional `since`
+/// date prefix filter (`msg.date.as_str() >= since`), then folds through
+/// `StreamingAggregator` and wraps the result via
+/// `aggregator::generate_graph_result`.
+pub fn build_graph_result_from_messages(
+    messages: &[UnifiedMessage],
+    since: Option<&str>,
+) -> GraphResult {
+    let iter = messages.iter().filter(|msg| {
+        since.is_none_or(|s| msg.date.as_str() >= s)
+    });
+    let contributions = aggregator::fold_messages_iter(iter);
+    aggregator::generate_graph_result(contributions, 0)
 }
 
 fn is_headless_path(path: &Path, headless_roots: &[PathBuf]) -> bool {
@@ -2677,10 +3090,11 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parsed_to_unified, pricing, retain_for_requested_clients, scanner,
-        select_local_parse_pricing, unified_to_parsed, ClientId, GroupBy, LocalParseOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        fold_messages_streaming, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
+        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -6528,4 +6942,310 @@ mod tests {
         assert!(dates.contains(&local_date(thread_created + 2000)));
         assert!(dates.contains(&local_date(ledger_timestamp)));
     }
+
+    // =========================================================================
+    // fold_messages_streaming parity tests (RED — fold_messages_streaming not yet impl)
+    // =========================================================================
+
+    /// Deterministic UnifiedMessage fixture helper shared with parity tests.
+    /// Uses no real JSONL files; all fields are constructed inline.
+    #[cfg(test)]
+    fn parity_msg(
+        date: &str,
+        client: &str,
+        model: &str,
+        session_id: &str,
+        dedup_key: Option<&str>,
+        timestamp_ms: i64,
+        input: i64,
+        output: i64,
+        cost: f64,
+    ) -> crate::sessions::UnifiedMessage {
+        use crate::TokenBreakdown;
+        crate::sessions::UnifiedMessage {
+            client: client.to_string(),
+            model_id: model.to_string(),
+            provider_id: "anthropic".to_string(),
+            session_id: session_id.to_string(),
+            workspace_key: None,
+            workspace_label: None,
+            timestamp: timestamp_ms,
+            date: date.to_string(),
+            tokens: TokenBreakdown {
+                input,
+                output,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            duration_ms: None,
+            message_count: 1,
+            agent: None,
+            dedup_key: dedup_key.map(|s| s.to_string()),
+            is_turn_start: false,
+        }
+    }
+
+    // A/B parity: fold_messages_streaming output == aggregate_by_date output
+    // for the same deterministic fixture (no dedup_keys, no trae).
+    #[test]
+    fn test_fold_messages_streaming_parity_with_aggregate_by_date_no_dedup() {
+        let messages = vec![
+            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
+                1_748_000_000_000, 100, 50, 0.01),
+            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
+                1_748_000_001_000, 200, 100, 0.02),
+            parity_msg("2025-06-02", "codex", "gpt-5", "s3", None,
+                1_748_086_400_000, 400, 200, 0.04),
+        ];
+
+        // Reference: existing aggregate_by_date (clone-based)
+        let reference = crate::aggregator::aggregate_by_date(messages.clone());
+
+        // Subject: new streaming path
+        let streaming = fold_messages_streaming(&messages);
+
+        assert_eq!(
+            reference.len(), streaming.len(),
+            "parity: day bucket count must match"
+        );
+        for (ref_day, stream_day) in reference.iter().zip(streaming.iter()) {
+            assert_eq!(ref_day.date, stream_day.date, "parity: date must match");
+            assert_eq!(
+                ref_day.totals.tokens, stream_day.totals.tokens,
+                "parity: tokens must match for date {}", ref_day.date
+            );
+            assert!(
+                (ref_day.totals.cost - stream_day.totals.cost).abs() < 1e-9,
+                "parity: cost must match for date {}", ref_day.date
+            );
+            assert_eq!(
+                ref_day.totals.messages, stream_day.totals.messages,
+                "parity: message_count must match for date {}", ref_day.date
+            );
+        }
+    }
+
+    // A/B parity with cross-file dedup: fold_messages_streaming must apply
+    // the same dedup_key filtering as the existing pipeline does via seen_keys.
+    #[test]
+    fn test_fold_messages_streaming_parity_cross_file_dedup() {
+        // Construct messages that include a duplicated dedup_key pair.
+        // The existing pipeline filters duplicates via the seen_keys HashSet.
+        // fold_messages_streaming must produce the same counts.
+        let unique = parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "u1",
+            Some("unique-key-1"), 1_749_000_000_000, 300, 150, 0.06);
+        let dup_first = parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "d1",
+            Some("dup-key-shared"), 1_749_000_001_000, 200, 100, 0.04);
+        let dup_second = parity_msg("2025-06-10", "claude", "claude-haiku-4-5", "d2",
+            Some("dup-key-shared"), 1_749_000_002_000, 200, 100, 0.04);
+
+        // The reference pipeline keeps only the first occurrence of dup-key-shared
+        // (seen_keys.insert returns false on second) — 2 messages total.
+        let all_msgs = vec![unique.clone(), dup_first.clone(), dup_second.clone()];
+
+        let streaming = fold_messages_streaming(&all_msgs);
+
+        assert_eq!(streaming.len(), 1, "all on same date -> 1 bucket");
+        assert_eq!(
+            streaming[0].totals.messages, 2,
+            "parity: duplicate dedup_key must reduce count from 3 to 2"
+        );
+        assert!(
+            (streaming[0].totals.cost - 0.10).abs() < 1e-9,
+            "parity: cost must exclude the duplicate message"
+        );
+    }
+
+    // =========================================================================
+    // Phase 2 RED tests: build_graph_result_from_messages streaming entry-point
+    // =========================================================================
+    //
+    // `build_graph_result_from_messages` does NOT exist yet.  These tests
+    // define the observable contract that the GREEN implementation must satisfy:
+    //   - accept a `&[UnifiedMessage]` slice and an optional `since` date string
+    //   - apply the `since` post-parse filter (date string prefix comparison,
+    //     same semantics as `filter_messages_for_report`)
+    //   - drive aggregation via `StreamingAggregator` (zero-clone fold path)
+    //   - return a `GraphResult` whose per-day tokens/cost match the reference
+    //     `aggregate_by_date` pipeline exactly (zero tolerance)
+    //
+    // All three tests will produce a **compile error** until the function is
+    // declared in lib.rs, which is the required RED state.
+
+    use crate::GraphResult;
+
+    /// Multi-client, multi-day fixture: streaming path total tokens and cost
+    /// per daily bucket must match hand-computed expected values.
+    ///
+    /// Hardcoded expected values — calculation:
+    ///
+    /// 2025-06-01 (no dedup):
+    ///   s1: input=500, output=250 → tokens=750, cost=0.05
+    ///   s2: input=300, output=150 → tokens=450, cost=0.03
+    ///   TOTAL: tokens=1200, cost=0.08, messages=2
+    ///
+    /// 2025-06-02 (trae session dedup — same session_id="trae-sess"):
+    ///   trae-k1: ts=1_748_822_400_000, input=100, output=50  → tokens=150, cost=0.01
+    ///   trae-k2: ts=1_748_822_500_000, input=200, output=100 → tokens=300, cost=0.02
+    ///   StreamingAggregator keeps latest timestamp → trae-k2 wins
+    ///   TOTAL: tokens=300, cost=0.02, messages=1
+    ///
+    /// 2025-06-03 (cross-file dedup_key — both carry "dup-phase2"):
+    ///   d1: input=400, output=200 → tokens=600, cost=0.04  (first seen — kept)
+    ///   d2: input=400, output=200 → tokens=600, cost=0.04  (same dedup_key — dropped)
+    ///   TOTAL: tokens=600, cost=0.04, messages=1
+    #[test]
+    fn test_build_graph_result_from_messages_matches_aggregate_by_date() {
+        let messages = vec![
+            // Day 2025-06-01: two clients, no dedup
+            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
+                1_748_736_000_000, 500, 250, 0.05),
+            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
+                1_748_736_001_000, 300, 150, 0.03),
+            // Day 2025-06-02: trae dedup by session_id — two entries same session, keep latest
+            parity_msg("2025-06-02", "trae", "gpt-5.2", "trae-sess", Some("trae-k1"),
+                1_748_822_400_000, 100, 50, 0.01),
+            parity_msg("2025-06-02", "trae", "gpt-5.2", "trae-sess", Some("trae-k2"),
+                1_748_822_500_000, 200, 100, 0.02),   // newer timestamp -> wins
+            // Day 2025-06-03: cross-file dedup pair — same dedup_key, second dropped
+            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "d1",
+                Some("dup-phase2"), 1_748_908_800_000, 400, 200, 0.04),
+            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "d2",
+                Some("dup-phase2"), 1_748_908_801_000, 400, 200, 0.04), // same dedup_key -> discarded
+        ];
+
+        // Subject: new streaming entry-point
+        let result: GraphResult =
+            crate::build_graph_result_from_messages(&messages, None);
+
+        // Verify bucket count: 3 distinct dates
+        assert_eq!(
+            result.contributions.len(), 3,
+            "phase2 streaming: must produce exactly 3 daily buckets"
+        );
+
+        // Locate each day bucket by date (sort order: ascending)
+        let day1 = result.contributions.iter().find(|c| c.date == "2025-06-01")
+            .expect("phase2: 2025-06-01 bucket must exist");
+        let day2 = result.contributions.iter().find(|c| c.date == "2025-06-02")
+            .expect("phase2: 2025-06-02 bucket must exist");
+        let day3 = result.contributions.iter().find(|c| c.date == "2025-06-03")
+            .expect("phase2: 2025-06-03 bucket must exist");
+
+        // 2025-06-01: s1 (750) + s2 (450) = 1200 tokens, 0.05+0.03=0.08 cost, 2 messages
+        assert_eq!(day1.totals.tokens, 1200,
+            "2025-06-01: tokens must be 750+450=1200");
+        assert!(
+            (day1.totals.cost - 0.08).abs() < 1e-9,
+            "2025-06-01: cost must be 0.05+0.03=0.08"
+        );
+        assert_eq!(day1.totals.messages, 2,
+            "2025-06-01: both non-trae non-dedup messages must be counted");
+
+        // 2025-06-02: trae session dedup — trae-k2 wins (larger timestamp)
+        // trae-k2: input=200, output=100 -> tokens=300, cost=0.02
+        assert_eq!(day2.totals.tokens, 300,
+            "2025-06-02: trae dedup — only winner (trae-k2, tokens=300) counted");
+        assert!(
+            (day2.totals.cost - 0.02).abs() < 1e-9,
+            "2025-06-02: trae dedup — cost must be 0.02 (trae-k2 only)"
+        );
+        assert_eq!(day2.totals.messages, 1,
+            "2025-06-02: trae dedup collapses 2 entries to 1 per session_id");
+
+        // 2025-06-03: cross-file dedup — d1 kept, d2 dropped (same dedup_key)
+        // d1: input=400, output=200 -> tokens=600, cost=0.04
+        assert_eq!(day3.totals.tokens, 600,
+            "2025-06-03: cross-file dedup — only d1 (tokens=600) counted, d2 dropped");
+        assert!(
+            (day3.totals.cost - 0.04).abs() < 1e-9,
+            "2025-06-03: cross-file dedup — cost must be 0.04 (d1 only)"
+        );
+        assert_eq!(day3.totals.messages, 1,
+            "2025-06-03: duplicate dedup_key dropped, 1 message retained");
+    }
+
+    /// `since` filter semantics: same fixture with `since = "2025-06-02"` must
+    /// produce only the 2025-06-02 and 2025-06-03 buckets, with their
+    /// token/cost totals matching a manually filtered reference.
+    #[test]
+    fn test_build_graph_result_from_messages_since_filter_excludes_earlier_dates() {
+        let messages = vec![
+            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
+                1_748_736_000_000, 500, 250, 0.05),
+            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
+                1_748_736_001_000, 300, 150, 0.03),
+            parity_msg("2025-06-02", "codex", "gpt-5", "s3", None,
+                1_748_822_400_000, 400, 200, 0.04),
+            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "s4", None,
+                1_748_908_800_000, 200, 100, 0.02),
+        ];
+
+        // Subject: streaming entry with since = "2025-06-02"
+        // (function does not exist yet -> RED compile error)
+        let result: GraphResult =
+            crate::build_graph_result_from_messages(&messages, Some("2025-06-02"));
+
+        // Only 2025-06-02 and 2025-06-03 must be present
+        assert_eq!(
+            result.contributions.len(), 2,
+            "since filter: must exclude 2025-06-01, leaving 2 buckets"
+        );
+
+        let dates: Vec<&str> = result.contributions.iter().map(|c| c.date.as_str()).collect();
+        assert!(dates.contains(&"2025-06-02"),
+            "since filter: 2025-06-02 bucket must be present");
+        assert!(dates.contains(&"2025-06-03"),
+            "since filter: 2025-06-03 bucket must be present");
+        assert!(!dates.contains(&"2025-06-01"),
+            "since filter: 2025-06-01 bucket must be absent");
+
+        // 2025-06-02 token total: input 400 + output 200 = 600
+        let day2 = result.contributions.iter().find(|c| c.date == "2025-06-02").unwrap();
+        assert_eq!(day2.totals.tokens, 600,
+            "since filter: 2025-06-02 token total must be 600");
+        assert!(
+            (day2.totals.cost - 0.04).abs() < 1e-9,
+            "since filter: 2025-06-02 cost must be 0.04"
+        );
+    }
+
+    /// Trae dedup in streaming path: two messages for the same trae session
+    /// (same `session_id`, different `dedup_key`, later timestamp wins) must
+    /// produce exactly ONE message worth of tokens/cost in the daily bucket.
+    #[test]
+    fn test_build_graph_result_from_messages_trae_session_dedup_keeps_latest() {
+        let messages = vec![
+            // Earlier trae message (should be dropped)
+            parity_msg("2025-06-10", "trae", "gpt-5.2", "trae-sess-a", Some("trae-early"),
+                1_749_513_600_000, 100, 50, 0.01),
+            // Later trae message for same session_id (should win)
+            parity_msg("2025-06-10", "trae", "gpt-5.2", "trae-sess-a", Some("trae-late"),
+                1_749_513_700_000, 300, 150, 0.03),
+            // Non-trae message (should be included as-is)
+            parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "c1", None,
+                1_749_513_800_000, 200, 100, 0.02),
+        ];
+
+        // Subject: streaming entry (does not exist yet -> RED compile error)
+        let result: GraphResult =
+            crate::build_graph_result_from_messages(&messages, None);
+
+        assert_eq!(result.contributions.len(), 1,
+            "trae dedup: all messages on same date -> 1 bucket");
+
+        let day = &result.contributions[0];
+        // Kept messages: trae-late (tokens=450) + claude (tokens=300) = 750 total tokens
+        assert_eq!(day.totals.tokens, 750,
+            "trae dedup: token total must reflect only the winning trae entry (450) + claude (300)");
+        assert!(
+            (day.totals.cost - 0.05).abs() < 1e-9,
+            "trae dedup: cost must be 0.03 (latest trae) + 0.02 (claude) = 0.05"
+        );
+        assert_eq!(day.totals.messages, 2,
+            "trae dedup: message count must be 2 (1 trae winner + 1 claude)");
+    }
+
 }
