@@ -1185,7 +1185,7 @@ fn map_window(label: &str, window: CodexWindow, now: DateTime<Utc>) -> UsageWind
         remaining_percent: (100.0 - used).max(0.0),
         resets_at: resets_at.map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true)),
         reset_text: resets_at.map(|date| reset_text(date, now)),
-        window_minutes: (window.limit_window_seconds > 0).then(|| window.limit_window_seconds / 60),
+        window_minutes: (window.limit_window_seconds > 0).then_some(window.limit_window_seconds / 60),
         historical_expected_percent: None,
         run_out_probability: None,
     }

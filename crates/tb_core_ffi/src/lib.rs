@@ -51,9 +51,13 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("build tokio runtime for tb_core_ffi")
 });
 
-/// year → (computed-at, mapped graph payload). Same role as the Tauri
-/// AppState cache: lets a popover re-open within seconds skip a full re-parse.
-static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, (Instant, serde_json::Value)>>> =
+/// year → (computed-at, source token, mapped graph payload). Same role as
+/// the Tauri AppState cache, plus a change token: when the cache entry ages
+/// past the oneshot window but `latest_source_mtime_ms` still matches the
+/// token, the entry is re-stamped and served — an idle machine never pays
+/// for a full re-aggregation just because time passed.
+type GraphCacheEntry = (Instant, u64, serde_json::Value);
+static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static TAILER: LazyLock<UsageTailer> = LazyLock::new(UsageTailer::new);
@@ -91,15 +95,30 @@ unsafe fn year_from(year: *const c_char) -> Result<String, String> {
 }
 
 fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
-    let cache = GRAPH_CACHE.lock().ok()?;
-    let (at, data) = cache.get(year)?;
-    (at.elapsed() <= max_age).then(|| data.clone())
+    let mut cache = GRAPH_CACHE.lock().ok()?;
+    let (at, token, data) = cache.get_mut(year)?;
+    if at.elapsed() <= max_age {
+        return Some(data.clone());
+    }
+    // Aged out — but if no source file changed since the compute, the graph
+    // cannot have changed either. Re-stamp so the next calls inside the
+    // oneshot window skip the probe entirely.
+    let fresh = tokscale_core::latest_source_mtime_ms(&Default::default()).ok()?;
+    if fresh == *token {
+        *at = Instant::now();
+        return Some(data.clone());
+    }
+    None
 }
 
 fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
+    // Probe before parsing: a write that lands mid-compute moves the mtime
+    // past this token, so the next aged-out read recomputes rather than
+    // serving a graph that missed it.
+    let token = tokscale_core::latest_source_mtime_ms(&Default::default()).unwrap_or(0);
     let data = usage_graph::run(year)?;
     if let Ok(mut cache) = GRAPH_CACHE.lock() {
-        cache.insert(year.to_string(), (Instant::now(), data.clone()));
+        cache.insert(year.to_string(), (Instant::now(), token, data.clone()));
     }
     Ok(data)
 }

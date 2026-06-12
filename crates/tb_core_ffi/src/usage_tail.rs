@@ -1,16 +1,12 @@
 //! Live tokens/min + per-(client, agent, model) trace for the popover and the
 //! menu-bar cat animation.
 //!
-//! Wave 2: parsing is delegated to the vendored `tokscale-core` crate, the same
-//! source the contribution graph uses, so the live signal covers every agent
-//! tokscale supports — not just the hand-tailed Claude/Codex/Hermes of before.
-//! tokscale-core has no streaming/tail API, but `parse_local_clients` is sync
-//! and cache-backed (disk message cache + Codex incremental + SQLite WAL
-//! invalidation), so re-parsing on every tick only touches changed files.
-//!
-//! Each `tick()` re-parses the last couple of days and *replaces* the in-memory
-//! event window. Snapshot-replace (rather than incremental append) means we
-//! lean on tokscale's own dedup and never carry cross-tick duplicates.
+//! Each `tick()` re-parses only files whose mtime falls inside the event
+//! window plus a small margin (`modified_after`), so steady-state cost is a
+//! stat sweep plus parsing the handful of currently-active session files.
+//! The event window is replaced wholesale each tick — snapshot-replace rather
+//! than incremental append means tokscale's own dedup handles duplicates and
+//! cross-tick state never accumulates.
 
 use chrono::{Duration, Local};
 use parking_lot::Mutex;
@@ -52,12 +48,17 @@ pub struct TraceBucket {
 
 pub struct UsageTailer {
     events: Mutex<Vec<UsageEvent>>,
+    /// `latest_source_mtime_ms` token from the last parse; when it hasn't
+    /// moved, the event window is still correct (rate queries re-filter by
+    /// timestamp on read) and the tick skips the parse entirely.
+    last_source_token: Mutex<Option<u64>>,
 }
 
 impl UsageTailer {
     pub fn new() -> Self {
         Self {
             events: Mutex::new(Vec::new()),
+            last_source_token: Mutex::new(None),
         }
     }
 
@@ -66,20 +67,34 @@ impl UsageTailer {
     /// and only used as a "did anything happen" hint by callers).
     pub fn tick(&self) -> usize {
         // `since` is date-granular; reach back one day so a sub-hour window that
-        // straddles midnight still sees yesterday's tail. tokscale's cache keeps
-        // this bounded regardless of total history size.
+        // straddles midnight still sees yesterday's tail.
         let since = (Local::now() - Duration::days(1))
             .format("%Y-%m-%d")
             .to_string();
+        // `modified_after` is what bounds the per-tick parse cost: a session
+        // log whose mtime predates the event window can't contain in-window
+        // events (logs are append-only, mtime >= last event's timestamp), so
+        // only files active within the window — plus a small margin for write
+        // latency and clock skew — are re-parsed each tick.
+        let window_reach_ms = (EVENT_WINDOW_SECS + 300) * 1000;
         let options = tokscale_core::LocalParseOptions {
             since: Some(since),
+            modified_after: Some((now_ms() - window_reach_ms) as u64),
             ..Default::default()
         };
+
+        // No source changed since the last parse → the window is already
+        // correct; skip the parse. Probe failure falls through to a parse.
+        let token = tokscale_core::latest_source_mtime_ms(&options).ok();
+        if token.is_some() && *self.last_source_token.lock() == token {
+            return self.events.lock().len();
+        }
 
         let parsed = match tokscale_core::parse_local_clients(options) {
             Ok(parsed) => parsed,
             Err(_) => return self.events.lock().len(),
         };
+        *self.last_source_token.lock() = token;
 
         let cutoff = now_ms() - EVENT_WINDOW_SECS * 1000;
         let mut next: Vec<UsageEvent> = parsed
@@ -110,6 +125,7 @@ impl UsageTailer {
         len
     }
 
+    #[allow(dead_code)] // kept for API symmetry with rate_in_window
     pub fn rate_per_min(&self) -> f32 {
         self.window_total(60) as f32
     }

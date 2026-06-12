@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
 const CACHE_SCHEMA_VERSION: u32 = 16;
@@ -17,6 +18,41 @@ const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
 const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
+
+/// Process-level memo keyed by (path, size, modified_ns). On a cache hit the
+/// caller skips `compute_sample_hashes` + `hash_prefix` (the expensive I/O +
+/// SHA-256 work). On lock poison or stat failure the caller falls back to the
+/// full recompute path — FAIL-LOUD, never returns stale/empty data.
+struct HashMemoEntry {
+    size: u64,
+    modified_ns: u64,
+    sample_hashes: Vec<FileSampleHash>,
+    content_hash: [u8; 32],
+}
+
+static HASH_MEMO: LazyLock<Mutex<HashMap<PathBuf, HashMemoEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Process-level memo for the deserialized store. On a cache hit (`path +
+/// size + modified_ns` all match) `load()` skips the bincode deserialize.
+/// Path is compared so a test-env config-dir switch never returns data from
+/// a different store file.
+struct StoreMemo {
+    cache_file: PathBuf,
+    file_size: u64,
+    file_modified_ns: u64,
+    entries: HashMap<CachedPath, Arc<CachedSourceEntry>>,
+}
+
+static STORE_MEMO: LazyLock<Mutex<Option<StoreMemo>>> =
+    LazyLock::new(|| Mutex::new(None));
+
+/// Convert a `Duration` (typically elapsed since UNIX_EPOCH) to nanoseconds
+/// as `u64`.
+/// u64 holds ~584 years of ns since epoch — truncation is theoretical.
+fn duration_to_nanos(d: std::time::Duration) -> u64 {
+    d.as_nanos() as u64
+}
 
 fn cache_dir() -> Option<PathBuf> {
     if crate::paths::is_config_dir_overridden()
@@ -286,10 +322,97 @@ struct CachedSourceStore {
 
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
-    pub entries: HashMap<CachedPath, CachedSourceEntry>,
+    pub entries: HashMap<CachedPath, Arc<CachedSourceEntry>>,
     dirty: bool,
     dirty_keys: HashSet<CachedPath>,
     deleted_paths: HashSet<CachedPath>,
+}
+
+/// Return the memo's entry map if `path + size + mtime_ns` all match.
+/// Returns `None` on lock poison, stat failure, or any mismatch.
+fn store_memo_entries_if_current(
+    path: &Path,
+) -> Option<HashMap<CachedPath, Arc<CachedSourceEntry>>> {
+    let guard = STORE_MEMO.lock().ok()?;
+    let memo = guard.as_ref()?;
+    if memo.cache_file != path {
+        return None;
+    }
+    let meta = fs::metadata(path).ok()?;
+    let size = meta.len();
+    let modified_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(duration_to_nanos)?;
+    if size != memo.file_size || modified_ns != memo.file_modified_ns {
+        return None;
+    }
+    Some(memo.entries.clone())
+}
+
+/// Write or replace the STORE_MEMO entry. Silently skips on lock poison or
+/// unreadable mtime — a miss on the next `load()` will just re-read disk.
+fn store_memo_update(
+    path: &Path,
+    meta: &std::fs::Metadata,
+    entries: &HashMap<CachedPath, Arc<CachedSourceEntry>>,
+) {
+    let size = meta.len();
+    let Some(modified_ns) = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(duration_to_nanos)
+    else {
+        return;
+    };
+    if let Ok(mut guard) = STORE_MEMO.lock() {
+        *guard = Some(StoreMemo {
+            cache_file: path.to_path_buf(),
+            file_size: size,
+            file_modified_ns: modified_ns,
+            entries: entries.clone(),
+        });
+    }
+}
+
+/// Load from legacy cache paths without memoizing (path would differ from
+/// the canonical path so the memo would never be a valid hit).
+fn load_from_legacy_paths() -> SourceMessageCache {
+    legacy_cache_paths()
+        .into_iter()
+        .find_map(|p| read_store_from_path(&p))
+        .map(|store| SourceMessageCache {
+            entries: store
+                .entries
+                .into_iter()
+                .map(|e| (e.path.clone(), Arc::new(e)))
+                .collect(),
+            dirty: false,
+            dirty_keys: HashSet::new(),
+            deleted_paths: HashSet::new(),
+        })
+        .unwrap_or_default()
+}
+
+/// Build the `merged_entries` base for `save_if_dirty`. Tries STORE_MEMO
+/// first to skip re-reading the on-disk store; falls back to disk on a miss.
+fn save_merge_base(
+    final_path: &Path,
+) -> HashMap<CachedPath, Arc<CachedSourceEntry>> {
+    if let Some(entries) = store_memo_entries_if_current(final_path) {
+        return entries;
+    }
+    read_store_from_path(final_path)
+        .map(|store| {
+            store
+                .entries
+                .into_iter()
+                .map(|e| (e.path.clone(), Arc::new(e)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 impl SourceMessageCache {
@@ -305,6 +428,22 @@ impl SourceMessageCache {
                 return Self::default();
             }
         }
+
+        // Check STORE_MEMO before acquiring the file lock. A hit means the
+        // on-disk store is almost certainly unchanged — the stat is taken
+        // outside the file lock, so a concurrent atomic-rename writer can
+        // theoretically race it; (path, size, mtime_ns) collision makes a
+        // false hit vanishingly unlikely. Path is part of the key so a
+        // test-env config-dir switch never returns data from a different file.
+        if let Some(entries) = store_memo_entries_if_current(&path) {
+            return Self {
+                entries,
+                dirty: false,
+                dirty_keys: HashSet::new(),
+                deleted_paths: HashSet::new(),
+            };
+        }
+
         let lock_file = match OpenOptions::new()
             .read(true)
             .write(true)
@@ -319,22 +458,31 @@ impl SourceMessageCache {
             return Self::default();
         }
 
+        // Stat inside the shared lock for a consistent size+mtime pair.
+        let locked_meta = fs::metadata(&path).ok();
+
         let store = match read_store_from_path_status(&path) {
             CacheReadStatus::Loaded(store) => Some(store),
-            CacheReadStatus::Missing => legacy_cache_paths()
-                .into_iter()
-                .find_map(|path| read_store_from_path(&path)),
+            CacheReadStatus::Missing => {
+                // Legacy paths: load but do not memoize (path mismatch).
+                return load_from_legacy_paths();
+            }
             CacheReadStatus::Invalid => None,
         };
         let Some(store) = store else {
             return Self::default();
         };
 
-        let entries = store
+        let entries: HashMap<CachedPath, Arc<CachedSourceEntry>> = store
             .entries
             .into_iter()
-            .map(|entry| (entry.path.clone(), entry))
+            .map(|entry| (entry.path.clone(), Arc::new(entry)))
             .collect();
+
+        // Update STORE_MEMO so the next load() on an unchanged file is free.
+        if let Some(meta) = locked_meta.as_ref() {
+            store_memo_update(&path, meta, &entries);
+        }
 
         Self {
             entries,
@@ -346,7 +494,7 @@ impl SourceMessageCache {
 
     pub(crate) fn insert(&mut self, entry: CachedSourceEntry) {
         let key = entry.path.clone();
-        self.entries.insert(key.clone(), entry);
+        self.entries.insert(key.clone(), Arc::new(entry));
         self.deleted_paths.remove(&key);
         self.dirty_keys.insert(key);
         self.dirty = true;
@@ -354,7 +502,7 @@ impl SourceMessageCache {
 
     pub(crate) fn get(&self, path: &Path) -> Option<&CachedSourceEntry> {
         let key = CachedPath::from_path(path);
-        self.entries.get(&key)
+        self.entries.get(&key).map(|a| a.as_ref())
     }
 
     pub(crate) fn remove(&mut self, path: &Path) {
@@ -363,6 +511,11 @@ impl SourceMessageCache {
             self.dirty_keys.remove(&key);
             self.deleted_paths.insert(key);
             self.dirty = true;
+        }
+        // Evict from HASH_MEMO so a deleted session file leaves no stale memo
+        // entry. Lock poison → silently skip; next access recomputes.
+        if let Ok(mut memo) = HASH_MEMO.lock() {
+            memo.remove(path);
         }
     }
 
@@ -377,10 +530,17 @@ impl SourceMessageCache {
             return;
         }
 
-        for path in removed_paths {
-            self.entries.remove(&path);
-            self.dirty_keys.remove(&path);
-            self.deleted_paths.insert(path);
+        for path in &removed_paths {
+            let path_buf = path.to_path_buf();
+            self.entries.remove(path);
+            self.dirty_keys.remove(path);
+            self.deleted_paths.insert(path.clone());
+            // Evict from HASH_MEMO so deleted session files leave no stale
+            // memo entries. Lock poison → silently skip; next access
+            // recomputes.
+            if let Ok(mut memo) = HASH_MEMO.lock() {
+                memo.remove(&path_buf);
+            }
         }
         self.dirty = true;
     }
@@ -417,16 +577,10 @@ impl SourceMessageCache {
             return;
         }
 
-        let mut merged_entries: HashMap<CachedPath, CachedSourceEntry> =
-            read_store_from_path(&final_path)
-                .map(|store| {
-                    store
-                        .entries
-                        .into_iter()
-                        .map(|entry| (entry.path.clone(), entry))
-                        .collect()
-                })
-                .unwrap_or_default();
+        // Build the merged entries. Try STORE_MEMO first to skip re-reading
+        // the on-disk store; fall back to disk read on a miss.
+        let mut merged_entries: HashMap<CachedPath, Arc<CachedSourceEntry>> =
+            save_merge_base(&final_path);
 
         for path in &self.deleted_paths {
             if !path.to_path_buf().exists() {
@@ -434,19 +588,19 @@ impl SourceMessageCache {
             }
         }
         for path in &self.dirty_keys {
-            if let Some(entry) = self.entries.get(path) {
-                merged_entries.insert(path.clone(), entry.clone());
+            if let Some(arc) = self.entries.get(path) {
+                merged_entries.insert(path.clone(), Arc::clone(arc));
             }
         }
 
         let store = CachedSourceStore {
             schema_version: CACHE_SCHEMA_VERSION,
-            entries: merged_entries.values().cloned().collect(),
+            entries: merged_entries.values().map(|e| (**e).clone()).collect(),
         };
 
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos() as u64)
+            .map(duration_to_nanos)
             .unwrap_or(0);
         let tmp_path = dir.join(format!(
             ".{}.{}.{:x}.tmp",
@@ -477,6 +631,12 @@ impl SourceMessageCache {
         if write_result.is_err() {
             let _ = fs::remove_file(&tmp_path);
             return;
+        }
+
+        // Stat final_path while exclusive lock is still held, then refresh
+        // STORE_MEMO so the next load() skips the disk read (race-safe).
+        if let Ok(meta) = fs::metadata(&final_path) {
+            store_memo_update(&final_path, &meta, &merged_entries);
         }
 
         self.entries = merged_entries;
@@ -614,10 +774,36 @@ fn file_fingerprint_parts(path: &Path) -> Option<(u64, u64, Vec<FileSampleHash>,
         .modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
-        .ok()?
-        .as_nanos() as u64;
+        .ok()
+        .map(duration_to_nanos)?;
+
+    // Check HASH_MEMO: if (path, size, modified_ns) all match, skip the
+    // expensive compute_sample_hashes + hash_prefix (file I/O + SHA-256).
+    // Lock poison or stat failure → fall through to full recompute (FAIL-LOUD).
+    if let Ok(memo) = HASH_MEMO.lock() {
+        if let Some(entry) = memo.get(path) {
+            if entry.size == size && entry.modified_ns == modified_ns {
+                return Some((size, modified_ns, entry.sample_hashes.clone(), entry.content_hash));
+            }
+        }
+    }
+
     let sample_hashes = compute_sample_hashes(path, size)?;
     let content_hash = hash_prefix(path, size)?;
+
+    // Update HASH_MEMO. Silently skip on lock poison — next call recomputes.
+    if let Ok(mut memo) = HASH_MEMO.lock() {
+        memo.insert(
+            path.to_path_buf(),
+            HashMemoEntry {
+                size,
+                modified_ns,
+                sample_hashes: sample_hashes.clone(),
+                content_hash,
+            },
+        );
+    }
+
     Some((size, modified_ns, sample_hashes, content_hash))
 }
 

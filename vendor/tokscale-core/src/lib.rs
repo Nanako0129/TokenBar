@@ -300,6 +300,12 @@ pub struct LocalParseOptions {
     /// Persistent scanner config loaded from `~/.config/tokscale/settings.json`.
     /// Defaults to empty when callers don't care about user-configured paths.
     pub scanner_settings: scanner::ScannerSettings,
+    /// Skip parsing file-backed session logs whose mtime (unix ms) is older
+    /// than this. Lets high-frequency callers (live tails) avoid re-parsing
+    /// an entire history when they only need recent messages — callers align
+    /// it with `since`. Database-backed sources (SQLite) are always parsed:
+    /// WAL writes may not touch the main db file's mtime.
+    pub modified_after: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -2011,6 +2017,75 @@ fn parse_local_unified_messages_resolved(
     );
     Ok(filter_unified_messages(messages, &options))
 }
+/// Max mtime (unix ms) across every file the local scan would read — the
+/// cheapest "did anything change" probe for callers that cache reports
+/// derived from `parse_local_clients` / the unified-message parsers.
+/// Database-backed sources contribute both the db file and its `-wal`
+/// sidecar (WAL writes may leave the main db file's mtime untouched).
+/// Stat failures contribute nothing, so a vanished file alone never
+/// invalidates a caller's cache — its replacement or sibling will.
+pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String> {
+    let (home_dir, clients) = resolve_local_parse_request(options)?;
+    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+        &home_dir,
+        &clients,
+        options.use_env_roots,
+        &options.scanner_settings,
+    );
+    let mut latest: u64 = 0;
+    for files in scan_result.files.iter() {
+        for path in files {
+            latest = latest.max(file_mtime_ms(path).unwrap_or(0));
+        }
+    }
+    let mut dbs: Vec<PathBuf> = scan_result.opencode_dbs.clone();
+    let single_dbs = [
+        &scan_result.synthetic_db,
+        &scan_result.kilo_db,
+        &scan_result.hermes_db,
+        &scan_result.goose_db,
+        &scan_result.zed_db,
+        &scan_result.kiro_db,
+    ];
+    dbs.extend(single_dbs.into_iter().flatten().cloned());
+    dbs.extend(scan_result.crush_dbs.iter().map(|c| c.db_path.clone()));
+    for db in dbs {
+        latest = latest.max(file_mtime_ms(&db).unwrap_or(0));
+        let mut wal = db.into_os_string();
+        wal.push("-wal");
+        latest = latest.max(file_mtime_ms(Path::new(&wal)).unwrap_or(0));
+    }
+    Ok(latest)
+}
+
+/// File mtime as unix ms; `None` on any stat failure.
+fn file_mtime_ms(path: &Path) -> Option<u64> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(duration.as_millis() as u64)
+}
+
+/// Drop file-backed session logs older than `threshold_ms` (unix ms, mtime)
+/// from a scan. Database-backed sources are left untouched: SQLite WAL writes
+/// may not update the main db file's mtime, so they are always parsed. Any
+/// stat failure keeps the file — over-parsing is safe, silently skipping is not.
+fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
+    for files in scan_result.files.iter_mut() {
+        files.retain(|path| {
+            let Ok(meta) = std::fs::metadata(path) else {
+                return true;
+            };
+            let Ok(modified) = meta.modified() else {
+                return true;
+            };
+            let Ok(duration) = modified.duration_since(std::time::UNIX_EPOCH) else {
+                return true;
+            };
+            duration.as_millis() as u64 >= threshold_ms
+        });
+    }
+}
+
 pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages, String> {
     let start = Instant::now();
 
@@ -2027,12 +2102,15 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+    let mut scan_result = scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
         &clients,
         options.use_env_roots,
         &options.scanner_settings,
     );
+    if let Some(threshold_ms) = options.modified_after {
+        prune_scan_result_by_mtime(&mut scan_result, threshold_ms);
+    }
     let headless_roots =
         scanner::headless_roots_with_env_strategy(&home_dir, options.use_env_roots);
 
@@ -3540,6 +3618,7 @@ mod tests {
                 until: None,
                 year: None,
                 scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
             })
             .unwrap();
 
@@ -4081,6 +4160,7 @@ mod tests {
                 until: None,
                 year: None,
                 scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
             })
             .unwrap();
 
@@ -4275,6 +4355,7 @@ mod tests {
                 until: None,
                 year: None,
                 scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
             })
             .unwrap();
 
@@ -5652,6 +5733,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
 
@@ -5713,6 +5795,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
 
@@ -5779,6 +5862,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
         assert_eq!(parsed_default.counts.get(ClientId::OpenCode), 0);
@@ -5797,6 +5881,7 @@ mod tests {
                 opencode_db_paths: vec![external_db.clone()],
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
         assert_eq!(
@@ -5835,6 +5920,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
         assert_eq!(parsed_default.counts.get(ClientId::Hermes), 0);
@@ -5853,6 +5939,7 @@ mod tests {
                 extra_scan_paths,
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -5890,6 +5977,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
         assert_eq!(parsed_default.counts.get(ClientId::Zed), 0);
@@ -5908,6 +5996,7 @@ mod tests {
                 extra_scan_paths,
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -5954,6 +6043,7 @@ mod tests {
                 extra_scan_paths,
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -5983,6 +6073,7 @@ mod tests {
                 extra_scan_paths,
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -6037,6 +6128,7 @@ mod tests {
                 extra_scan_paths,
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -6114,6 +6206,7 @@ mod tests {
                 opencode_db_paths: vec![external_db.clone()],
                 ..Default::default()
             },
+            modified_after: None,
         })
         .unwrap();
 
@@ -6166,6 +6259,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
 
@@ -6357,6 +6451,7 @@ mod tests {
             until: None,
             year: None,
             scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
         })
         .unwrap();
 
