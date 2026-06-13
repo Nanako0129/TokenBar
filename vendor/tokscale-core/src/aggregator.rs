@@ -1688,6 +1688,7 @@ mod tests {
 
     /// Build a deterministic UnifiedMessage fixture for streaming aggregator tests.
     /// All dedup-sensitive fields are explicit; no real JSONL files required.
+    #[allow(clippy::too_many_arguments)]
     fn streaming_msg(
         date: &str,
         client: &str,

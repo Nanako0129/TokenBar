@@ -10,6 +10,7 @@
 
 use tokscale_core::{StreamingAggregator, TokenBreakdown, UnifiedMessage};
 
+#[allow(clippy::too_many_arguments)]
 fn snapshot_msg(
     date: &str,
     client: &str,

@@ -1841,8 +1841,12 @@ where
             || retain_for_requested_clients(&m.client, &m.model_id, &m.provider_id, &requested)
     };
 
-    // Cross-file dedup gate shared across non-trae, non-opencode, non-claude, non-codex lanes.
-    let mut seen_keys: HashSet<String> = HashSet::new();
+    // Each client lane owns its dedup set (see `simple_lane!` / the Gemini
+    // block below). Sharing one set across clients would let a dedup_key from
+    // one client suppress an identical key from another — copilot uses
+    // `trace:span` keys but codebuff/kimi use raw upstream message ids with no
+    // client namespace, so a cross-client collision is possible. Per-client
+    // sets match the claude/codex/hermes/opencode lanes above.
 
     // Trae keep-latest buffer — flushed after all other lanes.
     let mut trae_latest: HashMap<String, UnifiedMessage> = HashMap::new();
@@ -1934,13 +1938,16 @@ where
         }
     }
 
-    // ---- Simple file-backed lanes (shared seen_keys, cache-aware) ----
+    // ---- Simple file-backed lanes (per-lane dedup set, cache-aware) ----
     // Cache hit  → iterate cached.messages by reference (one clone per message),
     //              refresh_derived_fields, apply pricing, dedup, filter, sink.
     // Cache miss → par-collect parse results, then sequential: writeback + emit.
     // Mirrors load_or_parse_source semantics from parse_all_messages_with_pricing_with_env_strategy.
     macro_rules! simple_lane {
         ($client_id:expr, $parse_fn:expr) => {{
+            // Per-lane dedup set: persists across this client's files, never
+            // shared with other clients (see the note above the trae buffer).
+            let mut seen_keys: HashSet<String> = HashSet::new();
             // Separate paths into cache-hit (emit immediately) vs cache-miss (par-parse).
             let mut miss_paths: Vec<&PathBuf> = Vec::new();
             for path in scan_result.get($client_id) {
@@ -2003,6 +2010,9 @@ where
     // Uses load_or_parse_source_with_fingerprint_and_policy equivalent:
     // cacheable=false → remove stale cache entry (invalidate_cache).
     {
+        // Per-lane dedup set (Gemini currently emits no dedup_key, so this is a
+        // no-op today, but keeps the lane consistent and collision-proof).
+        let mut seen_keys: HashSet<String> = HashSet::new();
         let mut gemini_miss_paths: Vec<&PathBuf> = Vec::new();
         for path in scan_result.get(ClientId::Gemini) {
             let fp = message_cache::SourceFingerprint::from_path(path);
@@ -3092,7 +3102,8 @@ mod tests {
         aggregate_model_usage_entries, apply_pricing_if_available, dedupe_latest_trae_messages,
         fold_messages_streaming, message_cache, normalize_model_for_grouping,
         parse_all_messages_with_pricing, parse_local_clients, parsed_to_unified, pricing,
-        retain_for_requested_clients, scanner, select_local_parse_pricing, unified_to_parsed,
+        retain_for_requested_clients, scan_messages_streaming, scanner, select_local_parse_pricing,
+        unified_to_parsed,
         ClientId, GroupBy, LocalParseOptions, TokenBreakdown, UnifiedMessage,
         UNKNOWN_WORKSPACE_LABEL,
     };
@@ -4049,6 +4060,68 @@ mod tests {
             assert_eq!(parsed.messages.len(), 4);
             assert_eq!(parsed.messages.iter().map(|m| m.input).sum::<i64>(), 40);
             assert_eq!(parsed.messages.iter().map(|m| m.output).sum::<i64>(), 5);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // Regression: the streaming driver must NOT share one dedup set across
+    // different clients. kimi and codebuff both emit raw upstream message ids
+    // as dedup_key with no client namespace, so a shared set would let one
+    // client's key suppress an identical key from the other. Here both a kimi
+    // message and a codebuff message carry dedup_key "COLLIDE"; both must
+    // survive. With a single shared `seen_keys` (the pre-fix behaviour) the
+    // second lane's message is silently dropped and this fails.
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_driver_does_not_dedup_across_clients() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            // kimi: one StatusUpdate carrying message_id "COLLIDE".
+            let kimi_dir = source_home.path().join(".kimi/sessions/g/s");
+            std::fs::create_dir_all(&kimi_dir).unwrap();
+            std::fs::write(
+                kimi_dir.join("wire.jsonl"),
+                r#"{"type": "metadata", "protocol_version": "1.3"}
+{"timestamp": 1770983410.0, "message": {"type": "StatusUpdate", "payload": {"token_usage": {"input_other": 100, "output": 50, "input_cache_read": 0, "input_cache_creation": 0}, "message_id": "COLLIDE"}}}"#,
+            )
+            .unwrap();
+
+            // codebuff: one assistant message whose upstream id is "COLLIDE".
+            let cb_dir = source_home.path().join(".config/manicode/projects/proj");
+            std::fs::create_dir_all(&cb_dir).unwrap();
+            std::fs::write(
+                cb_dir.join("chat-messages.json"),
+                r#"[{"role":"assistant","id":"COLLIDE","metadata":{"model":"claude-sonnet-4","usage":{"inputTokens":200,"outputTokens":80}},"credits":0.02}]"#,
+            )
+            .unwrap();
+
+            let mut seen: Vec<String> = Vec::new();
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["kimi".to_string(), "codebuff".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| seen.push(m.client.clone()),
+            );
+
+            assert!(
+                seen.iter().any(|c| c == "kimi"),
+                "kimi message with shared dedup_key must survive: {seen:?}"
+            );
+            assert!(
+                seen.iter().any(|c| c == "codebuff"),
+                "codebuff message with shared dedup_key must survive: {seen:?}"
+            );
         }
 
         match original_home {
@@ -6950,6 +7023,7 @@ mod tests {
     /// Deterministic UnifiedMessage fixture helper shared with parity tests.
     /// Uses no real JSONL files; all fields are constructed inline.
     #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
     fn parity_msg(
         date: &str,
         client: &str,
