@@ -140,7 +140,8 @@ impl UsageTailer {
     }
 
     fn window_total(&self, secs: i64) -> i64 {
-        let cutoff = now_ms() - secs * 1000;
+        // saturating so a pathological `secs` can't overflow the cutoff.
+        let cutoff = now_ms().saturating_sub(secs.saturating_mul(1000));
         let events = self.events.lock();
         events
             .iter()
@@ -153,7 +154,14 @@ impl UsageTailer {
     /// decides whether to collapse rows by client based on the user's
     /// "detailed trace" setting.
     pub fn trace(&self, window_secs: i64) -> Vec<TraceBucket> {
-        let cutoff = now_ms() - window_secs * 1000;
+        // Mirror rate_in_window's contract: a non-positive window has no events.
+        // saturating_* so a garbage window_secs from the C side can't overflow
+        // the cutoff; window_secs itself is left intact for the window_min
+        // divisor below, so the per-minute rate is never distorted by a clamp.
+        if window_secs <= 0 {
+            return Vec::new();
+        }
+        let cutoff = now_ms().saturating_sub(window_secs.saturating_mul(1000));
         let events = self.events.lock();
         let mut groups: HashMap<(String, String, String), (i64, u32)> = HashMap::new();
         for e in events.iter() {

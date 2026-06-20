@@ -368,10 +368,11 @@ static CLAUDE_USAGE_GATE: Mutex<ClaudeUsageGate> = Mutex::new(ClaudeUsageGate {
     last_good: None,
 });
 
-/// Lock the gate, recovering from a poisoned mutex instead of panicking. A
-/// panic in one locked section must not wedge the 429 gate (and take down the
-/// whole `tb_agent_usage` call) for the rest of the process — same stance as
-/// the live-tail lock in lib.rs.
+/// Lock the gate, recovering from a poisoned mutex instead of panicking. Under
+/// the release profile's unwind + FFI-boundary `catch_unwind` (see `guarded` in
+/// lib.rs), a panic caught mid-section poisons this static; `into_inner()` keeps
+/// the 429 gate working for the rest of the process instead of wedging every
+/// later `tb_agent_usage` call — same stance as the live-tail lock in lib.rs.
 fn lock_gate() -> std::sync::MutexGuard<'static, ClaudeUsageGate> {
     CLAUDE_USAGE_GATE
         .lock()

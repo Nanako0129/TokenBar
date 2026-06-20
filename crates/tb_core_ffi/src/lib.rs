@@ -79,6 +79,35 @@ fn envelope(result: Result<serde_json::Value, String>) -> *mut c_char {
     into_raw_json(json)
 }
 
+/// Run an FFI entry-point body, converting any panic into an error envelope
+/// instead of letting it unwind across the C ABI. The release profile unwinds
+/// (see the `[profile.release]` note in Cargo.toml): a panic inside one report —
+/// a serde error, a bad slice index in a ported module, an `.expect()` — is
+/// caught here and degrades that single call to `{"ok":false,...}`, leaving the
+/// rest of the menu-bar app running rather than aborting the whole process. The
+/// default panic hook still prints the panic location to stderr before we catch.
+///
+/// `AssertUnwindSafe` is sound here. State shared across calls is the three
+/// std::sync Mutex statics (GRAPH_CACHE / TAIL_LAST_TICK / CLAUDE_USAGE_GATE),
+/// each recovered from poison on the next lock via `into_inner()`, plus the live
+/// tail's parking_lot Mutexes, which never poison and release cleanly on unwind.
+/// A caught panic can leave a cache entry stale or a tail tick un-run, never
+/// torn: the next call re-derives the graph, and `tail_tick_if_stale` rolls its
+/// claim back on a tick panic so the tail re-parses immediately.
+fn guarded(name: &str, body: impl FnOnce() -> *mut c_char) -> *mut c_char {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
+        Ok(ptr) => ptr,
+        Err(payload) => {
+            let detail = payload
+                .downcast_ref::<&str>()
+                .copied()
+                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                .unwrap_or("panic");
+            envelope(Err(format!("{} panicked: {}", name, detail)))
+        }
+    }
+}
+
 /// Read an optional year filter from the C side. NULL or empty/whitespace
 /// means "all time" (the report modules' empty-string behavior).
 ///
@@ -95,18 +124,30 @@ unsafe fn year_from(year: *const c_char) -> Result<String, String> {
 }
 
 fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
-    let mut cache = GRAPH_CACHE.lock().ok()?;
-    let (at, token, data) = cache.get_mut(year)?;
-    if at.elapsed() <= max_age {
-        return Some(data.clone());
+    // Read the entry and release the lock before any filesystem I/O — never hold
+    // GRAPH_CACHE across the mtime stat sweep below (mirrors graph_compute, which
+    // probes outside the lock too), so concurrent tb_graph callers don't queue
+    // behind one another's stat.
+    let (fresh_enough, token, data) = {
+        let cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        let (at, token, data) = cache.get(year)?;
+        (at.elapsed() <= max_age, *token, data.clone())
+    };
+    if fresh_enough {
+        return Some(data);
     }
     // Aged out — but if no source file changed since the compute, the graph
-    // cannot have changed either. Re-stamp so the next calls inside the
-    // oneshot window skip the probe entirely.
+    // cannot have changed either. Probe with the lock released, then re-acquire
+    // briefly to re-stamp so the next calls inside the oneshot window skip the
+    // probe entirely. A lost re-stamp (entry evicted/replaced meanwhile) just
+    // degrades to the next call re-probing — benign.
     let fresh = tokscale_core::latest_source_mtime_ms(&Default::default()).ok()?;
-    if fresh == *token {
-        *at = Instant::now();
-        return Some(data.clone());
+    if fresh == token {
+        let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(entry) = cache.get_mut(year) {
+            entry.0 = Instant::now();
+        }
+        return Some(data);
     }
     None
 }
@@ -117,23 +158,56 @@ fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
     // serving a graph that missed it.
     let token = tokscale_core::latest_source_mtime_ms(&Default::default()).unwrap_or(0);
     let data = usage_graph::run(year)?;
-    if let Ok(mut cache) = GRAPH_CACHE.lock() {
-        cache.insert(year.to_string(), (Instant::now(), token, data.clone()));
-    }
+    GRAPH_CACHE
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(year.to_string(), (Instant::now(), token, data.clone()));
     Ok(data)
 }
 
 /// Re-parse the live tail if the last tick is stale (or never happened),
-/// otherwise leave the cached event window in place.
+/// otherwise leave the cached event window in place. The stale check claims the
+/// tick — stamps the clock — *before* releasing the lock, so a second concurrent
+/// poller sees "not stale" and serves the cached window instead of piling a
+/// duplicate re-parse behind this one; the heavy `TAILER.tick()` then runs with
+/// no lock held. Poison recovery is live again now the release profile unwinds:
+/// a panic caught at the FFI boundary while another call held this lock would
+/// poison it, and `into_inner()` keeps the tail ticking instead of wedging it.
+///
+/// `TickClaim` rolls the stamp back if `TAILER.tick()` panics (caught at the FFI
+/// boundary): without it, a single transient tick panic would suppress every
+/// re-parse for the next `TAIL_TICK_SECS`, freezing the live tail on a stale or
+/// empty window — the opposite of the graceful degradation this stance exists
+/// for. On success the claim is committed (`mem::forget`) so the stamp stands.
+fn lock_tick() -> std::sync::MutexGuard<'static, Option<Instant>> {
+    TAIL_LAST_TICK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Resets `TAIL_LAST_TICK` to `None` when dropped (i.e. when `TAILER.tick()`
+/// unwinds), so the next poll re-ticks immediately instead of waiting out the
+/// interval on a failed parse. `tail_tick_if_stale` `mem::forget`s it on success.
+struct TickClaim;
+impl Drop for TickClaim {
+    fn drop(&mut self) {
+        *lock_tick() = None;
+    }
+}
+
 fn tail_tick_if_stale() {
-    let mut last = match TAIL_LAST_TICK.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
+    let should_tick = {
+        let mut last = lock_tick();
+        let stale = last.is_none_or(|at| at.elapsed() >= Duration::from_secs(TAIL_TICK_SECS));
+        if stale {
+            *last = Some(Instant::now());
+        }
+        stale
     };
-    let stale = last.is_none_or(|at| at.elapsed() >= Duration::from_secs(TAIL_TICK_SECS));
-    if stale {
+    if should_tick {
+        let claim = TickClaim;
         TAILER.tick();
-        *last = Some(Instant::now());
+        std::mem::forget(claim); // tick completed — keep the stamp
     }
 }
 
@@ -142,12 +216,14 @@ fn tail_tick_if_stale() {
 /// (Legacy Phase 0 shape: `{"ok":true,"messages":N}`, no `data` wrapper.)
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
-    let opts = tokscale_core::LocalParseOptions::default();
-    let json = match tokscale_core::parse_local_clients(opts) {
-        Ok(pm) => format!(r#"{{"ok":true,"messages":{}}}"#, pm.messages.len()),
-        Err(e) => serde_json::json!({"ok": false, "err": e}).to_string(),
-    };
-    into_raw_json(json)
+    guarded("tb_probe", || {
+        let opts = tokscale_core::LocalParseOptions::default();
+        let json = match tokscale_core::parse_local_clients(opts) {
+            Ok(pm) => format!(r#"{{"ok":true,"messages":{}}}"#, pm.messages.len()),
+            Err(e) => serde_json::json!({"ok": false, "err": e}).to_string(),
+        };
+        into_raw_json(json)
+    })
 }
 
 /// Contribution-graph payload (`UsagePayload` in types.ts) for `year`
@@ -158,12 +234,14 @@ pub extern "C" fn tb_probe() -> *mut c_char {
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_graph(year: *const c_char) -> *mut c_char {
-    envelope(unsafe { year_from(year) }.and_then(|year| {
-        if let Some(data) = graph_cached(&year, Duration::from_secs(ONESHOT_MAX_AGE_SECS)) {
-            return Ok(data);
-        }
-        graph_compute(&year)
-    }))
+    guarded("tb_graph", || {
+        envelope(unsafe { year_from(year) }.and_then(|year| {
+            if let Some(data) = graph_cached(&year, Duration::from_secs(ONESHOT_MAX_AGE_SECS)) {
+                return Ok(data);
+            }
+            graph_compute(&year)
+        }))
+    })
 }
 
 /// Force-recompute the contribution graph for `year`, bypassing the cache.
@@ -172,7 +250,9 @@ pub unsafe extern "C" fn tb_graph(year: *const c_char) -> *mut c_char {
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_refresh_graph(year: *const c_char) -> *mut c_char {
-    envelope(unsafe { year_from(year) }.and_then(|year| graph_compute(&year)))
+    guarded("tb_refresh_graph", || {
+        envelope(unsafe { year_from(year) }.and_then(|year| graph_compute(&year)))
+    })
 }
 
 /// Per-model report (`ModelReport` in types.ts) for `year` (NULL/empty = all time).
@@ -181,7 +261,9 @@ pub unsafe extern "C" fn tb_refresh_graph(year: *const c_char) -> *mut c_char {
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_model_report(year: *const c_char) -> *mut c_char {
-    envelope(unsafe { year_from(year) }.and_then(|year| model_report::run(&year)))
+    guarded("tb_model_report", || {
+        envelope(unsafe { year_from(year) }.and_then(|year| model_report::run(&year)))
+    })
 }
 
 /// Per-hour report (`HourlyReport` in types.ts) for `year` (NULL/empty = all time).
@@ -190,7 +272,9 @@ pub unsafe extern "C" fn tb_model_report(year: *const c_char) -> *mut c_char {
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_hourly_report(year: *const c_char) -> *mut c_char {
-    envelope(unsafe { year_from(year) }.and_then(|year| hourly_report::run(&year)))
+    guarded("tb_hourly_report", || {
+        envelope(unsafe { year_from(year) }.and_then(|year| hourly_report::run(&year)))
+    })
 }
 
 /// Per-(sub-)agent report (`AgentsReport` in types.ts) for `year`
@@ -200,7 +284,9 @@ pub unsafe extern "C" fn tb_hourly_report(year: *const c_char) -> *mut c_char {
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_agents_report(year: *const c_char) -> *mut c_char {
-    envelope(unsafe { year_from(year) }.and_then(|year| agents_report::run(&year)))
+    guarded("tb_agents_report", || {
+        envelope(unsafe { year_from(year) }.and_then(|year| agents_report::run(&year)))
+    })
 }
 
 /// Live per-(client, agent, model) trace buckets over the trailing
@@ -208,21 +294,25 @@ pub unsafe extern "C" fn tb_agents_report(year: *const c_char) -> *mut c_char {
 /// Tauri `TraceBucket` serialization the frontend consumes.
 #[no_mangle]
 pub extern "C" fn tb_usage_trace(window_secs: i64) -> *mut c_char {
-    tail_tick_if_stale();
-    envelope(
-        serde_json::to_value(TAILER.trace(window_secs))
-            .map_err(|e| format!("serialize usage trace: {}", e)),
-    )
+    guarded("tb_usage_trace", || {
+        tail_tick_if_stale();
+        envelope(
+            serde_json::to_value(TAILER.trace(window_secs))
+                .map_err(|e| format!("serialize usage trace: {}", e)),
+        )
+    })
 }
 
 /// Live tokens/min estimate: `{"tokensPerMin": <f32>}`. Same 10-minute-window
 /// rate the Tauri `get_tokens_per_min` command reports.
 #[no_mangle]
 pub extern "C" fn tb_tokens_per_min() -> *mut c_char {
-    tail_tick_if_stale();
-    envelope(Ok(
-        serde_json::json!({"tokensPerMin": TAILER.rate_in_window(600)}),
-    ))
+    guarded("tb_tokens_per_min", || {
+        tail_tick_if_stale();
+        envelope(Ok(
+            serde_json::json!({"tokensPerMin": TAILER.rate_in_window(600)}),
+        ))
+    })
 }
 
 /// OAuth quota cards (`AgentUsagePayload` in agentUsage.ts) for
@@ -231,8 +321,18 @@ pub extern "C" fn tb_tokens_per_min() -> *mut c_char {
 /// snapshot's `error` field; the call itself only fails on serialization.
 #[no_mangle]
 pub extern "C" fn tb_agent_usage() -> *mut c_char {
-    let payload = RUNTIME.block_on(agent_usage::run());
-    envelope(serde_json::to_value(payload).map_err(|e| format!("serialize agent usage: {}", e)))
+    guarded("tb_agent_usage", || {
+        // No outer timeout on purpose: each provider carries its own 30s
+        // per-request reqwest timeout (which covers connect, so nothing hangs
+        // unbounded), and they run concurrently via tokio::join!. A single outer
+        // ceiling would instead collapse the whole payload to one error — losing
+        // the providers that already succeeded — and could cut off the legitimate
+        // expired-token path (sequential refresh + fetch, up to ~60s).
+        let payload = RUNTIME.block_on(agent_usage::run());
+        envelope(
+            serde_json::to_value(payload).map_err(|e| format!("serialize agent usage: {}", e)),
+        )
+    })
 }
 
 /// Release a string returned by any tb_* entry point.
@@ -245,5 +345,59 @@ pub unsafe extern "C" fn tb_free(p: *mut c_char) {
         unsafe {
             let _ = CString::from_raw(p);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use usage_tail::UsageTailer;
+
+    /// Read a heap JSON pointer into an owned String and free it — the test-side
+    /// equivalent of Swift's `decode`/`tb_free`.
+    unsafe fn take(p: *mut c_char) -> String {
+        let s = unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned();
+        unsafe { tb_free(p) };
+        s
+    }
+
+    #[test]
+    fn guarded_passes_success_through() {
+        let p = guarded("tb_test", || envelope(Ok(serde_json::json!({"v": 1}))));
+        let s = unsafe { take(p) };
+        assert!(s.contains(r#""ok":true"#), "got: {s}");
+        assert!(s.contains(r#""v":1"#), "got: {s}");
+    }
+
+    #[test]
+    fn guarded_converts_panic_to_error_envelope() {
+        // The whole point of the unwind + catch_unwind stance: a panic inside an
+        // entry-point body must NOT unwind across the C ABI (which would abort the
+        // process). It is caught and returned as {"ok":false,...} so one card
+        // fails while the rest of the app keeps running.
+        let p = guarded("tb_test", || panic!("boom"));
+        let s = unsafe { take(p) };
+        assert!(s.contains(r#""ok":false"#), "got: {s}");
+        assert!(s.contains("tb_test panicked: boom"), "got: {s}");
+    }
+
+    #[test]
+    fn tick_claim_rolls_back_stamp_on_panic() {
+        // A TickClaim dropped during unwind (the tick() panic path) must reset
+        // TAIL_LAST_TICK to None so the next poll re-ticks immediately, instead
+        // of suppressing re-parse for the whole TAIL_TICK_SECS interval.
+        *lock_tick() = Some(Instant::now());
+        drop(TickClaim);
+        assert!(lock_tick().is_none());
+    }
+
+    #[test]
+    fn trace_rejects_nonpositive_window() {
+        // window_secs <= 0 yields no buckets instead of an overflowed cutoff.
+        let tail = UsageTailer::new();
+        assert!(tail.trace(0).is_empty());
+        assert!(tail.trace(-5).is_empty());
+        // A pathological window must saturate, not panic/overflow.
+        assert!(tail.trace(i64::MAX).is_empty());
     }
 }

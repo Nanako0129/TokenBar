@@ -5,9 +5,13 @@ members = ["crates/tb_core_ffi", "vendor/tokscale-core"]
 [profile.release]
 lto = true
 strip = "debuginfo"
-# This builds a staticlib called over a C ABI from Swift. A panic must never
-# unwind across that boundary (UB), and we can't catch_unwind every entry
-# point cheaply, so abort on panic: a panic anywhere — including in serde,
-# tokio or reqwest — terminates the process deterministically instead of
-# unwinding into undefined behavior. Tests still unwind (dev profile).
-panic = "abort"
+# This builds a staticlib called over a C ABI from Swift. A panic must not
+# unwind across that boundary — since Rust 1.81 an `extern "C"` fn that unwinds
+# is a defined process abort (not UB), but a whole-app abort throws away the
+# per-card resilience the Swift side is built for. So rather than `panic =
+# "abort"`, every FFI entry point wraps its body in `catch_unwind` (see
+# `guarded` in tb_core_ffi/src/lib.rs) and turns a panic into an error envelope:
+# a panic inside one report — a serde error, a bad index in a ported module, an
+# `.expect()` — degrades that one card to an error and leaves the rest of the
+# app running. Unwinding also makes the Mutex poison-recovery in lib.rs /
+# agent_usage.rs meaningful again (a Mutex is only poisoned on unwind).
