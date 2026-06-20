@@ -182,6 +182,11 @@ enum SelfTest {
         expect(AgentLimitsCard.reorder(order, from: "a", to: "a") == order, "reorder onto itself is a no-op")
         expect(AgentLimitsCard.reorder(order, from: "x", to: "b") == order, "reorder unknown id is a no-op")
 
+        // FFI envelope/error contract (hermetic; no FFI allocation or live data).
+        for (label, passed) in TBCore.envelopeContractChecks() {
+            expect(passed, "envelope: \(label)")
+        }
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
