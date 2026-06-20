@@ -61,7 +61,17 @@ static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static TAILER: LazyLock<UsageTailer> = LazyLock::new(UsageTailer::new);
-static TAIL_LAST_TICK: Mutex<Option<Instant>> = Mutex::new(None);
+/// Live-tail tick bookkeeping. `last` is the completion time of the most recent
+/// successful re-parse; `in_flight` is set while a re-parse is running so a
+/// concurrent poller serves the cached window instead of launching a duplicate.
+struct TickState {
+    last: Option<Instant>,
+    in_flight: bool,
+}
+static TAIL_TICK: Mutex<TickState> = Mutex::new(TickState {
+    last: None,
+    in_flight: false,
+});
 
 fn into_raw_json(json: String) -> *mut c_char {
     // A JSON payload should never contain interior NULs; fall back to an
@@ -88,12 +98,12 @@ fn envelope(result: Result<serde_json::Value, String>) -> *mut c_char {
 /// default panic hook still prints the panic location to stderr before we catch.
 ///
 /// `AssertUnwindSafe` is sound here. State shared across calls is the three
-/// std::sync Mutex statics (GRAPH_CACHE / TAIL_LAST_TICK / CLAUDE_USAGE_GATE),
-/// each recovered from poison on the next lock via `into_inner()`, plus the live
+/// std::sync Mutex statics (GRAPH_CACHE / TAIL_TICK / CLAUDE_USAGE_GATE), each
+/// recovered from poison on the next lock via `into_inner()`, plus the live
 /// tail's parking_lot Mutexes, which never poison and release cleanly on unwind.
 /// A caught panic can leave a cache entry stale or a tail tick un-run, never
-/// torn: the next call re-derives the graph, and `tail_tick_if_stale` rolls its
-/// claim back on a tick panic so the tail re-parses immediately.
+/// torn: the next call re-derives the graph, and `tail_tick_if_stale` clears its
+/// in-flight flag without stamping on a tick panic so the tail re-parses next.
 fn guarded(name: &str, body: impl FnOnce() -> *mut c_char) -> *mut c_char {
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(ptr) => ptr,
@@ -165,49 +175,50 @@ fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
     Ok(data)
 }
 
-/// Re-parse the live tail if the last tick is stale (or never happened),
-/// otherwise leave the cached event window in place. The stale check claims the
-/// tick — stamps the clock — *before* releasing the lock, so a second concurrent
-/// poller sees "not stale" and serves the cached window instead of piling a
-/// duplicate re-parse behind this one; the heavy `TAILER.tick()` then runs with
-/// no lock held. Poison recovery is live again now the release profile unwinds:
-/// a panic caught at the FFI boundary while another call held this lock would
-/// poison it, and `into_inner()` keeps the tail ticking instead of wedging it.
-///
-/// `TickClaim` rolls the stamp back if `TAILER.tick()` panics (caught at the FFI
-/// boundary): without it, a single transient tick panic would suppress every
-/// re-parse for the next `TAIL_TICK_SECS`, freezing the live tail on a stale or
-/// empty window — the opposite of the graceful degradation this stance exists
-/// for. On success the claim is committed (`mem::forget`) so the stamp stands.
-fn lock_tick() -> std::sync::MutexGuard<'static, Option<Instant>> {
-    TAIL_LAST_TICK
+fn lock_tick() -> std::sync::MutexGuard<'static, TickState> {
+    TAIL_TICK
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-/// Resets `TAIL_LAST_TICK` to `None` when dropped (i.e. when `TAILER.tick()`
-/// unwinds), so the next poll re-ticks immediately instead of waiting out the
-/// interval on a failed parse. `tail_tick_if_stale` `mem::forget`s it on success.
-struct TickClaim;
-impl Drop for TickClaim {
+/// Clears the in-flight flag when dropped, on both the success and the panic
+/// path (a `TAILER.tick()` that unwinds, caught at the FFI boundary). On panic
+/// `last` is left unstamped, so the next poll re-ticks immediately instead of
+/// suppressing re-parse for the interval.
+struct TickGuard;
+impl Drop for TickGuard {
     fn drop(&mut self) {
-        *lock_tick() = None;
+        lock_tick().in_flight = false;
     }
 }
 
+/// Re-parse the live tail if the last *completed* tick is older than
+/// `TAIL_TICK_SECS`, unless a re-parse is already running. Single-flight: a
+/// second concurrent poller sees `in_flight` (or a fresh `last`) and serves the
+/// cached window immediately — it neither blocks on the lock nor launches a
+/// duplicate parse that could overwrite a newer one (last-writer-wins). The
+/// heavy `TAILER.tick()` runs with no lock held; the stamp is taken only after
+/// it completes, so a slow (> `TAIL_TICK_SECS`) parse can't be seen as stale
+/// mid-flight, and a tick panic leaves `last` unstamped to retry next call.
 fn tail_tick_if_stale() {
-    let should_tick = {
-        let mut last = lock_tick();
-        let stale = last.is_none_or(|at| at.elapsed() >= Duration::from_secs(TAIL_TICK_SECS));
-        if stale {
-            *last = Some(Instant::now());
+    let claimed = {
+        let mut st = lock_tick();
+        if st.in_flight {
+            false
+        } else {
+            let stale = st
+                .last
+                .is_none_or(|at| at.elapsed() >= Duration::from_secs(TAIL_TICK_SECS));
+            if stale {
+                st.in_flight = true;
+            }
+            stale
         }
-        stale
     };
-    if should_tick {
-        let claim = TickClaim;
+    if claimed {
+        let _guard = TickGuard; // clears in_flight on drop (success or panic)
         TAILER.tick();
-        std::mem::forget(claim); // tick completed — keep the stamp
+        lock_tick().last = Some(Instant::now()); // success only — panic skips this
     }
 }
 
@@ -382,13 +393,19 @@ mod tests {
     }
 
     #[test]
-    fn tick_claim_rolls_back_stamp_on_panic() {
-        // A TickClaim dropped during unwind (the tick() panic path) must reset
-        // TAIL_LAST_TICK to None so the next poll re-ticks immediately, instead
-        // of suppressing re-parse for the whole TAIL_TICK_SECS interval.
-        *lock_tick() = Some(Instant::now());
-        drop(TickClaim);
-        assert!(lock_tick().is_none());
+    fn tick_guard_clears_in_flight_without_stamping_on_panic() {
+        // Simulates a panic during TAILER.tick(): the guard, dropped mid-unwind,
+        // must clear in_flight (so a later poll can re-tick) and must NOT stamp
+        // `last` (so the tick is retried rather than suppressed for the interval).
+        {
+            let mut st = lock_tick();
+            st.in_flight = true;
+            st.last = None;
+        }
+        drop(TickGuard);
+        let st = lock_tick();
+        assert!(!st.in_flight);
+        assert!(st.last.is_none()); // unstamped → next poll re-ticks
     }
 
     #[test]
