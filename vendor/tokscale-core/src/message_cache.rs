@@ -11,7 +11,11 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
 use std::time::UNIX_EPOCH;
 
-const CACHE_SCHEMA_VERSION: u32 = 16;
+// 19: Codex fork-replay parsing now skips replayed parent usage, scopes the
+// token_count dedup key to the fork parent, and keeps user-fork turns after
+// repeated child session_meta rows. Cached messages store their dedup_key and
+// older entries can be empty, so they must be reparsed.
+const CACHE_SCHEMA_VERSION: u32 = 19;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

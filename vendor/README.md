@@ -16,16 +16,17 @@
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
-Specific later upstream fixes pulled in à la carte (we do **not** re-vendor
-wholesale — that would clobber the streaming/dedup/cowork patches below). The
+Specific later upstream fixes pulled in selectively (we do **not** re-vendor
+wholesale, which would clobber the streaming/dedup/cowork patches below). The
 next sync should treat these as already-present and not re-apply them.
 
 | Commit | What | Files |
 |---|---|---|
-| `#614` (1a305f0f) → `#658` (5c1fe659) → `#634` (aebe4ea8) | Modern-Claude pricing: parse `claude-{family}-{major}-{minor}` from the id instead of a hardcoded opus-4.7/4.6/4.5 chain, never-degrade veto on the resolve path, and skip-unusable exact entries. Fixes ~3x overcharge on newer minors (e.g. `opus-4-8`). **models.dev (`#665`) deliberately excluded.** | `src/pricing/lookup.rs` |
+| `#614` (1a305f0f), `#658` (5c1fe659), `#634` (aebe4ea8) | Modern-Claude pricing: parse `claude-{family}-{major}-{minor}` from the id instead of a hardcoded opus-4.7/4.6/4.5 chain, never-degrade veto on the resolve path, and skip-unusable exact entries. Fixes ~3x overcharge on newer minors (e.g. `opus-4-8`). **models.dev (`#665`) deliberately excluded.** | `src/pricing/lookup.rs` |
 | `#707` (5017eefb), *blocklist hunk only* | `FUZZY_BLOCKLIST` += `claude`/`anthropic`/`model`/`router`; `strips_claude_numeric_minor` hardened via new `is_version_segment`. Stops retired `claude-2.x` eroding to a bare brand token and fuzzy-matching an opus-fast key. The pass-reorder / `prefers_model_part_key` / models.dev parts of #707 were **not** taken. | `src/pricing/lookup.rs` |
 | `#659` (7500b303) | cc-mirror `tool_result` keeps its variant client id + provider hint (was hardcoded to `claude`); dedup_key namespaced by client. | `src/sessions/claudecode.rs` |
 | `#723` (cbbd0dff) | Copilot CLI OTEL underscore-format cache token attributes (`gen_ai.usage.cache_read_input_tokens`) read as fallbacks (were 0). | `src/sessions/copilot.rs` |
+| `#649` (44055841), `#651` (2d90f41d), `#681` (b43dc5f8), `#719` (3a68cf52) | Codex fork-replay correctness: skip replayed parent `token_count` rows in fork/subagent logs, scope the dedup key to the fork parent so sibling replays collapse, and keep user-fork own-turns after a repeated child `session_meta`. Fixes codex token over-counting (nested-parent + sibling forks) and under-counting (user forks). `CACHE_SCHEMA_VERSION` bumped to 19 to reparse stale entries. `lib.rs` change is the ported upstream integration tests (plus a streaming-path regression); production logic is in `codex.rs`. `#646` (turn detection) was already vendored. | `src/sessions/codex.rs`, `src/message_cache.rs`, `src/lib.rs` (tests) |
 
 ## Local patches (diverged from upstream)
 

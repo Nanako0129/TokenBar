@@ -4279,6 +4279,56 @@ mod tests {
         }
     }
 
+    // M2 (codex fork-replay): the parser-level fork dedup (#649/#681) must also
+    // collapse replayed parent token_count rows through OUR streaming report
+    // path (scan_messages_streaming), not just the materialized
+    // parse_all_messages_with_pricing path the upstream tests exercise. Without
+    // the fork-parent-scoped dedup key, each fork's replayed parent rows survive
+    // per child and inflate codex totals.
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_codex_collapses_parent_replay_across_forks() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_parent_replay_fixture(source_home.path());
+
+            let mut input_sum = 0i64;
+            let mut output_sum = 0i64;
+            let mut count = 0usize;
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| {
+                    input_sum += m.tokens.input;
+                    output_sum += m.tokens.output;
+                    count += 1;
+                },
+            );
+
+            // Same collapse as the materialized
+            // test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks:
+            // the parent's two turns plus the single own-turn shared (by identical
+            // cumulative total) across the two forks. Without #649/#681 the
+            // replayed parent rows would survive per fork and inflate this.
+            assert_eq!(count, 3, "replayed parent rows must collapse to 3 messages");
+            assert_eq!(input_sum, 140);
+            assert_eq!(output_sum, 14);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     // Issue #6: the agents report must dedup the simple_lane! clients
     // (copilot/codebuff/kimi/…) like the model/graph/hourly reports. Here
     // codebuff emits the SAME upstream message id "DUP" in two different
@@ -5094,6 +5144,113 @@ mod tests {
         .unwrap();
     }
 
+    fn write_codex_parent_replay_fixture(source_home: &std::path::Path) {
+        let codex_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&codex_dir).unwrap();
+        std::fs::write(
+            codex_dir.join("parent.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-05-24T20:00:00Z","type":"session_meta","payload":{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:01Z","type":"turn_context","payload":{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110},"last_token_usage":{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-05-24T20:00:03Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":130,"output_tokens":13,"total_tokens":143},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        for (filename, child_id, child_turn_id, timestamp) in [
+            (
+                "child-a.jsonl",
+                "019e5c03-1e99-7000-8000-000000000001",
+                "019e5c03-6425-7000-8000-000000000001",
+                "2026-05-24T21:00:00Z",
+            ),
+            (
+                "child-b.jsonl",
+                "019e5c04-1e99-7000-8000-000000000001",
+                "019e5c04-6425-7000-8000-000000000001",
+                "2026-05-24T22:00:00Z",
+            ),
+        ] {
+            std::fs::write(
+                codex_dir.join(filename),
+                format!(
+                    concat!(
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"{child_id}","forked_from_id":"019e5b00-0000-7000-8000-000000000001","source":{{"subagent":{{"thread_spawn":{{"parent_thread_id":"019e5b00-0000-7000-8000-000000000001","depth":1}}}}}},"model_provider":"openai","agent_nickname":"worker","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"session_meta","payload":{{"id":"019e5b00-0000-7000-8000-000000000001","source":"vscode","model_provider":"openai","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"019e5b00-0001-7000-8000-000000000001","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}},"last_token_usage":{{"input_tokens":100,"output_tokens":10,"total_tokens":110}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":130,"output_tokens":13,"total_tokens":143}},"last_token_usage":{{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"task_started","turn_id":"{child_turn_id}"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"turn_context","payload":{{"turn_id":"{child_turn_id}","model":"gpt-5.5","cwd":"/repo"}}}}"#,
+                        "\n",
+                        r#"{{"timestamp":"{timestamp}","type":"event_msg","payload":{{"type":"token_count","info":{{"total_token_usage":{{"input_tokens":140,"output_tokens":14,"total_tokens":154}},"last_token_usage":{{"input_tokens":10,"output_tokens":1,"total_tokens":11}}}}}}}}"#,
+                        "\n",
+                    ),
+                    timestamp = timestamp,
+                    child_id = child_id,
+                    child_turn_id = child_turn_id,
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    fn write_codex_user_fork_replay_fixture(source_home: &std::path::Path) {
+        let sessions_dir = source_home.join(".codex/sessions/2026/01/02");
+        let archived_dir = source_home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&archived_dir).unwrap();
+
+        std::fs::write(
+            archived_dir.join("rollout-2026-01-02T03-04-05-11111111-1111-7111-8111-111111111111.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-01-02T03:04:05Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:04:06Z","type":"turn_context","payload":{"turn_id":"11111111-3333-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:04:07Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:04:08Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":450,"output_tokens":120,"total_tokens":1320},"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20,"total_tokens":220}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        std::fs::write(
+            sessions_dir.join("rollout-2026-01-02T03-10-00-22222222-2222-7222-8222-222222222222.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-01-02T03:10:00Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:00Z","type":"session_meta","payload":{"id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:00Z","type":"turn_context","payload":{"turn_id":"11111111-3333-7333-8333-333333333333","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":400,"output_tokens":100,"total_tokens":1100}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:00Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":450,"output_tokens":120,"total_tokens":1320},"last_token_usage":{"input_tokens":200,"cached_input_tokens":50,"output_tokens":20,"total_tokens":220}}}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:30Z","type":"turn_context","payload":{"turn_id":"22222222-4444-7444-8444-444444444444","model":"gpt-5.5","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:30Z","type":"session_meta","payload":{"id":"22222222-2222-7222-8222-222222222222","forked_from_id":"11111111-1111-7111-8111-111111111111","source":"vscode","thread_source":"user","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-01-02T03:10:53Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":500,"output_tokens":150,"total_tokens":1650},"last_token_usage":{"input_tokens":300,"cached_input_tokens":50,"output_tokens":30,"total_tokens":330}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_parse_all_messages_with_pricing_codex_deduplicates_forked_history() {
@@ -5141,12 +5298,84 @@ mod tests {
         }
     }
 
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_keeps_user_fork_own_turn() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_user_fork_replay_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            let session_ids: HashSet<_> = messages
+                .iter()
+                .map(|message| message.session_id.as_str())
+                .collect();
+            assert!(session_ids.contains(
+                "rollout-2026-01-02T03-10-00-22222222-2222-7222-8222-222222222222"
+            ));
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
+            assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 500);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 150);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_parse_all_messages_with_pricing_codex_deduplicates_parent_replay_across_forks() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            write_codex_parent_replay_fixture(source_home.path());
+
+            let messages = parse_all_messages_with_pricing(
+                source_home.path().to_str().unwrap(),
+                &["codex".to_string()],
+                None,
+            );
+
+            // Parent contributes its two turns. The two forks each replay the
+            // parent history (skipped) and then emit one own turn that lands on
+            // the identical cumulative total (140/14). Sibling forks sharing a
+            // cumulative total is the signature of a replayed row, so the
+            // fork-parent-scoped dedup key collapses them into one. Real fork
+            // fan-out replays the same upstream totals into 10-100+ siblings;
+            // two distinct turns reaching a byte-identical cumulative vector by
+            // chance does not happen in practice because the cumulative encodes
+            // each fork's divergent context size.
+            assert_eq!(messages.len(), 3);
+            assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 140);
+            assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 14);
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
     fn write_codex_twin_token_count_fixture(source_home: &std::path::Path) {
         // Single session with two turns whose `last_token_usage` deltas are
         // byte-identical but emitted at different timestamps. The fork-dedup
-        // key includes timestamp, so both turns must survive — collapsing
-        // them would erase legitimate usage when a user happens to send two
-        // turns producing the same per-turn delta.
+        // key includes the cumulative total, so both turns must survive even
+        // when a user happens to send two turns producing the same per-turn
+        // delta.
         let codex_dir = source_home.join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(
