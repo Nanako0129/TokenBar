@@ -42,6 +42,7 @@ public enum ClientRegistry {
         "cline": ("Cline", "#5b8def"),
         "antigravity-cli": ("Antigravity CLI", "#6366f1"),
         "jcode": ("Jcode", "#84cc16"),
+        "micode": ("MiMo Code", "#fb923c"),
     ]
 
     public static func style(_ id: String) -> ClientStyle {

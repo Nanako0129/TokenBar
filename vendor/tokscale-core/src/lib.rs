@@ -1226,6 +1226,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // micode: WAL-mode SQLite, cached via from_sqlite_path (-wal-aware).
+    let micode_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::MiMoCode)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_sqlite_source(path, &source_cache, pricing, |path| {
+                sessions::micode::parse_micode_sqlite(path)
+            })
+        })
+        .collect();
+    let mut micode_seen: HashSet<String> = HashSet::new();
+    for outcome in micode_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut micode_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
         .par_iter()
@@ -2215,6 +2238,16 @@ where
         sessions::jcode::parse_jcode_file,
         message_cache::SourceFingerprint::from_jcode_path
     );
+    // micode is WAL-mode SQLite; fingerprint via from_sqlite_path so a `-wal`
+    // write invalidates the cache. Its authoritative per-message cost survives
+    // because apply_pricing only overwrites when the model resolves to a
+    // non-zero price (MiMo models are not in the pricing dataset) — this
+    // mirrors upstream, which passes pricing through the same loader.
+    simple_lane!(
+        ClientId::MiMoCode,
+        sessions::micode::parse_micode_sqlite,
+        message_cache::SourceFingerprint::from_sqlite_path
+    );
     simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
     simple_lane!(ClientId::Kiro,      sessions::kiro::parse_kiro_file);
 
@@ -2717,6 +2750,10 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
     // sidecars here too — a WAL-only write would otherwise leave the change
     // token unchanged and the live tail would never re-parse the new usage.
     dbs.extend(scan_result.get(ClientId::AntigravityCli).iter().cloned());
+    // micode `.db` files likewise arrive via the generic `*.db` glob and are
+    // WAL-mode SQLite, so probe their `-wal` sidecars for the live-tail change
+    // token too.
+    dbs.extend(scan_result.get(ClientId::MiMoCode).iter().cloned());
     for db in dbs {
         latest = latest.max(file_mtime_ms(&db).unwrap_or(0));
         let mut wal = db.into_os_string();
@@ -2745,6 +2782,7 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
         ClientId::Hermes as usize,
         ClientId::Zed as usize,
         ClientId::AntigravityCli as usize,
+        ClientId::MiMoCode as usize,
     ];
     for (lane, files) in scan_result.files.iter_mut().enumerate() {
         if db_lanes.contains(&lane) {
@@ -3084,6 +3122,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let jcode_count = summed_parsed_message_count(&jcode_msgs);
     counts.set(ClientId::Jcode, jcode_count);
     messages.extend(jcode_msgs);
+
+    let micode_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::MiMoCode)
+        .par_iter()
+        .flat_map(|path| sessions::micode::parse_micode_sqlite(path))
+        .collect();
+    let mut micode_seen: HashSet<String> = HashSet::new();
+    let micode_msgs: Vec<ParsedMessage> = micode_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut micode_seen, message))
+        .map(|m| unified_to_parsed(&m))
+        .collect();
+    let micode_count = summed_parsed_message_count(&micode_msgs);
+    counts.set(ClientId::MiMoCode, micode_count);
+    messages.extend(micode_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)
@@ -7456,6 +7509,104 @@ mod tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered
+    // via the generic `*.db` glob and flow through the streaming lane, keeping
+    // its authoritative per-message cost intact (MiMo models are unpriced, so
+    // apply_pricing leaves the embedded cost alone).
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_micode_flows_with_authoritative_cost() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let micode_dir = source_home.path().join(".local/share/micode");
+            std::fs::create_dir_all(&micode_dir).unwrap();
+            let db_path = micode_dir.join("test.db");
+            {
+                let conn = rusqlite::Connection::open(&db_path).unwrap();
+                conn.execute_batch(
+                    "CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);",
+                )
+                .unwrap();
+                conn.execute(
+                    "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![
+                        "msg_001",
+                        "ses_001",
+                        r#"{"role":"assistant","modelID":"mimo-v2.5-pro","providerID":"mimo","cost":0.05,"tokens":{"input":1000,"output":500},"time":{"created":1700000000000.0,"completed":1700000001000.0}}"#
+                    ],
+                )
+                .unwrap();
+            }
+
+            let mut cost_sum = 0.0f64;
+            let mut count = 0usize;
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["micode".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| {
+                    cost_sum += m.cost;
+                    count += 1;
+                },
+            );
+
+            assert_eq!(count, 1, "the micode assistant message must flow through the streaming lane");
+            assert!(
+                (cost_sum - 0.05).abs() < 1e-9,
+                "authoritative micode cost must survive pricing (got {cost_sum})"
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // micode `.db` is WAL-mode SQLite reached via the generic `*.db` glob, so it
+    // must be exempt from mtime pruning (a WAL-only write leaves the main db's
+    // mtime untouched) — same treatment as Antigravity CLI / Hermes / Zed.
+    #[test]
+    fn test_modified_after_never_prunes_micode_dbs() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let micode_db = temp_dir.path().join("micode.db");
+        std::fs::File::create(&micode_db).unwrap();
+        let claude_log = temp_dir.path().join("session.jsonl");
+        std::fs::File::create(&claude_log).unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::MiMoCode)
+            .push(micode_db.clone());
+        scan_result
+            .get_mut(ClientId::Claude)
+            .push(claude_log.clone());
+
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        crate::prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert_eq!(
+            scan_result.get(ClientId::MiMoCode),
+            std::slice::from_ref(&micode_db),
+            "micode .db (a WAL-mode SQLite source) must survive mtime pruning"
+        );
+        assert!(
+            scan_result.get(ClientId::Claude).is_empty(),
+            "a plain-file client's stale log is still pruned"
+        );
     }
 
     #[test]

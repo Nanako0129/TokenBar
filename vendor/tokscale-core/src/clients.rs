@@ -448,6 +448,19 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // MiMo Code (Xiaomi) stores sessions as WAL-mode SQLite under
+    // `$XDG_DATA_HOME/micode/*.db`, with authoritative per-message tokens,
+    // cost, and agent. Read directly via the generic `*.db` glob; exempt from
+    // mtime pruning + `-wal`-probed in `latest_source_mtime_ms` (see lib.rs).
+    MiMoCode = 28 => {
+        id: "micode",
+        root: PathRoot::XdgData,
+        relative: "micode",
+        pattern: "*.db",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -500,7 +513,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 28);
+        assert_eq!(ClientId::COUNT, 29);
     }
 
     #[test]
