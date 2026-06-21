@@ -40,6 +40,7 @@ public enum ClientRegistry {
         "trae": ("Trae", "#ef4444"),
         "warp": ("Warp", "#01a4ff"),
         "cline": ("Cline", "#5b8def"),
+        "antigravity-cli": ("Antigravity CLI", "#6366f1"),
     ]
 
     public static func style(_ id: String) -> ClientStyle {
@@ -55,8 +56,15 @@ public enum ClientRegistry {
     /// legend does ("Claude Code" → "Claude").
     public static func shortName(_ id: String) -> String {
         let name = style(id).displayName
+        let registeredNames = Set(entries.values.map { $0.displayName })
         for suffix in [" CLI", " Code", " IDE"] where name.hasSuffix(suffix) {
-            return String(name.dropLast(suffix.count))
+            let base = String(name.dropLast(suffix.count))
+            // Don't collapse onto a base that is itself another client's full
+            // name — e.g. "Antigravity CLI" must stay distinct from the IDE
+            // client "Antigravity".
+            if !registeredNames.contains(base) {
+                return base
+            }
         }
         return name
     }

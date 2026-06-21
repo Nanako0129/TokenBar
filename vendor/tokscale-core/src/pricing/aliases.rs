@@ -42,6 +42,7 @@ static MODEL_ALIASES: Lazy<HashMap<&'static str, &'static str>> = Lazy::new(|| {
     m.insert("gemini-3-pro-low", "gemini-3-pro");
     m.insert("gemini-3-flash", "gemini-3-flash-preview");
     m.insert("gemini-3-flash-c", "gemini-3-flash-preview");
+    m.insert("gemini-3-flash-a", "gemini-3-flash-preview");
 
     // Synthetic model variants (only where resolver needs help)
     m.insert("kimi-k2.5-nvfp4", "kimi-k2.5"); // Quantization variant → base model pricing
@@ -73,6 +74,10 @@ mod tests {
         );
         assert_eq!(
             resolve_alias("gemini-3-flash-c"),
+            Some("gemini-3-flash-preview")
+        );
+        assert_eq!(
+            resolve_alias("gemini-3-flash-a"),
             Some("gemini-3-flash-preview")
         );
         assert_eq!(

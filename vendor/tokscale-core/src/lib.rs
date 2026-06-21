@@ -1314,6 +1314,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .collect();
     all_messages.extend(antigravity_messages);
 
+    let antigravity_cli_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::AntigravityCli)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity_cli::parse_antigravity_cli_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    apply_pricing_if_available(&mut msg, pricing);
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(antigravity_cli_messages);
+
     // Trae API dump uses exact dollar_float totals, so pricing lookup is not needed.
     let trae_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Trae)
@@ -2231,6 +2246,19 @@ where
         }
     }
 
+    // ---- Antigravity CLI (.db protobuf, own dedup set on responseId) ----
+    {
+        let mut antigravity_cli_seen: HashSet<String> = HashSet::new();
+        for path in scan_result.get(ClientId::AntigravityCli) {
+            for mut m in sessions::antigravity_cli::parse_antigravity_cli_file(path) {
+                apply_pricing_if_available(&mut m, pricing);
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut antigravity_cli_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
     // ---- Goose SQLite ----
     if let Some(db_path) = &scan_result.goose_db {
         for mut m in sessions::goose::parse_goose_sqlite(db_path) {
@@ -2630,6 +2658,11 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
     dbs.extend(scan_result.hermes_db_paths());
     dbs.extend(scan_result.zed_db_paths());
     dbs.extend(scan_result.crush_dbs.iter().map(|c| c.db_path.clone()));
+    // Antigravity CLI conversation `.db` files arrive via the generic `files`
+    // lane (a `*.db` glob, no dedicated ScanResult field), so probe their `-wal`
+    // sidecars here too — a WAL-only write would otherwise leave the change
+    // token unchanged and the live tail would never re-parse the new usage.
+    dbs.extend(scan_result.get(ClientId::AntigravityCli).iter().cloned());
     for db in dbs {
         latest = latest.max(file_mtime_ms(&db).unwrap_or(0));
         let mut wal = db.into_os_string();
@@ -2649,11 +2682,16 @@ fn file_mtime_ms(path: &Path) -> Option<u64> {
 /// Drop file-backed session logs older than `threshold_ms` (unix ms, mtime)
 /// from a scan. Database-backed sources are left untouched: SQLite WAL writes
 /// may not update the main db file's mtime, so they are always parsed. The
-/// Hermes/Zed `files` lanes hold SQLite dbs discovered from user scan roots
-/// (see `hermes_db_paths`/`zed_db_paths`), so they are exempt too. Any stat
-/// failure keeps the file — over-parsing is safe, silently skipping is not.
+/// Hermes/Zed/Antigravity-CLI `files` lanes hold SQLite dbs (Hermes/Zed via
+/// user scan roots, Antigravity CLI via the `*.db` glob), so they are exempt
+/// too. Any stat failure keeps the file — over-parsing is safe, silently
+/// skipping is not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
-    let db_lanes = [ClientId::Hermes as usize, ClientId::Zed as usize];
+    let db_lanes = [
+        ClientId::Hermes as usize,
+        ClientId::Zed as usize,
+        ClientId::AntigravityCli as usize,
+    ];
     for (lane, files) in scan_result.files.iter_mut().enumerate() {
         if db_lanes.contains(&lane) {
             continue;
@@ -3096,6 +3134,20 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let antigravity_count = antigravity_msgs.len() as i32;
     counts.set(ClientId::Antigravity, antigravity_count);
     messages.extend(antigravity_msgs);
+
+    let antigravity_cli_msgs: Vec<ParsedMessage> = scan_result
+        .get(ClientId::AntigravityCli)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::antigravity_cli::parse_antigravity_cli_file(path)
+                .into_iter()
+                .map(|msg| unified_to_parsed(&msg))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    let antigravity_cli_count = summed_parsed_message_count(&antigravity_cli_msgs);
+    counts.set(ClientId::AntigravityCli, antigravity_cli_count);
+    messages.extend(antigravity_cli_msgs);
 
     let trae_msgs: Vec<ParsedMessage> = {
         let unique_trae_messages = dedupe_latest_trae_messages(
@@ -7147,6 +7199,46 @@ mod tests {
         assert_eq!(parsed.counts.get(ClientId::Hermes), 1);
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].session_id, "hermes-wal-session");
+    }
+
+    #[test]
+    fn test_modified_after_never_prunes_antigravity_cli_dbs() {
+        // Antigravity CLI conversation `.db` files arrive via the generic
+        // `files` lane (a `*.db` glob), but they are SQLite — WAL writes may
+        // leave the main db mtime untouched, so they must be exempt from mtime
+        // pruning like Hermes/Zed. A plain-file client with the same old mtime
+        // is still pruned (control).
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let cli_db = temp_dir.path().join("conv.db");
+        std::fs::File::create(&cli_db).unwrap();
+        let claude_log = temp_dir.path().join("session.jsonl");
+        std::fs::File::create(&claude_log).unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::AntigravityCli)
+            .push(cli_db.clone());
+        scan_result
+            .get_mut(ClientId::Claude)
+            .push(claude_log.clone());
+
+        // A threshold in the future would prune any real on-disk mtime.
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        crate::prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert_eq!(
+            scan_result.get(ClientId::AntigravityCli),
+            std::slice::from_ref(&cli_db),
+            "Antigravity CLI .db (a WAL-mode SQLite source) must survive mtime pruning"
+        );
+        assert!(
+            scan_result.get(ClientId::Claude).is_empty(),
+            "a plain-file client's stale log is still pruned"
+        );
     }
 
     #[test]
