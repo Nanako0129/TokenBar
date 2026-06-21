@@ -830,8 +830,9 @@ fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
 
 /// Sibling journal path for a jcode session snapshot: `session_x.json` ->
 /// `session_x.journal.jsonl` (replacing the `.json` suffix; falling back to a
-/// plain append when the name has no `.json` suffix).
-fn jcode_journal_path(path: &Path) -> PathBuf {
+/// plain append when the name has no `.json` suffix). `pub(crate)` so the
+/// live-tail change-token probe can stat the journal alongside the snapshot.
+pub(crate) fn jcode_journal_path(path: &Path) -> PathBuf {
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
         return append_path_suffix(path, ".journal.jsonl");
     };

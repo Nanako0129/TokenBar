@@ -433,10 +433,12 @@ define_clients!(
         parse_local: true,
         submit_default: true
     },
-    // jcode stores each session as JSONL under `~/.jcode/sessions/session_*.json`
-    // (honors `JCODE_HOME`). Each line carries authoritative per-message
-    // `token_usage`, so the lane prices via the usual path; a plain glob, no
-    // scanner discovery needed.
+    // jcode stores each session as a compact JSON snapshot at
+    // `~/.jcode/sessions/session_*.json` (honors `JCODE_HOME`) plus a sibling
+    // `<session>.journal.jsonl` append-log of newer turns. The scanner gains a
+    // `session_*.json` arm; the lane fingerprints snapshot + journal
+    // (from_jcode_path) and is exempt from mtime pruning so a journal-only
+    // append is never lost. Per-message `token_usage` is authoritative.
     Jcode = 27 => {
         id: "jcode",
         root: PathRoot::EnvVar {

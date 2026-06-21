@@ -2264,10 +2264,12 @@ where
         message_cache::SourceFingerprint::from_jcode_path
     );
     // micode is WAL-mode SQLite; fingerprint via from_sqlite_path so a `-wal`
-    // write invalidates the cache. Its authoritative per-message cost survives
-    // because apply_pricing only overwrites when the model resolves to a
-    // non-zero price (MiMo models are not in the pricing dataset) — this
-    // mirrors upstream, which passes pricing through the same loader.
+    // write invalidates the cache. Unlike gjc, this lane does not guard the
+    // embedded cost: apply_pricing overwrites it whenever the model resolves to
+    // a non-zero price. That is a no-op for native MiMo models (absent from the
+    // pricing dataset) but WOULD reprice a priced provider routed through MiMo
+    // Code — faithful to upstream, which passes pricing through the same loader
+    // unguarded.
     simple_lane!(
         ClientId::MiMoCode,
         sessions::micode::parse_micode_sqlite,
@@ -2803,6 +2805,17 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
         wal.push("-wal");
         latest = latest.max(file_mtime_ms(Path::new(&wal)).unwrap_or(0));
     }
+    // jcode snapshots (`session_*.json`) carry a sibling `.journal.jsonl`
+    // append-log; jcode writes new turns there between snapshot rewrites,
+    // leaving the snapshot's mtime untouched. The snapshot itself is already
+    // covered by the `scan_result.files` loop above, but the journal is
+    // deliberately excluded from the scan (the glob is `session_*.json`), so
+    // probe it here — otherwise a journal-only append leaves the change token
+    // unchanged and the live tail never re-parses the new usage.
+    for snapshot in scan_result.get(ClientId::Jcode) {
+        let journal = message_cache::jcode_journal_path(snapshot);
+        latest = latest.max(file_mtime_ms(&journal).unwrap_or(0));
+    }
     Ok(latest)
 }
 
@@ -2814,18 +2827,24 @@ fn file_mtime_ms(path: &Path) -> Option<u64> {
 }
 
 /// Drop file-backed session logs older than `threshold_ms` (unix ms, mtime)
-/// from a scan. Database-backed sources are left untouched: SQLite WAL writes
-/// may not update the main db file's mtime, so they are always parsed. The
-/// Hermes/Zed/Antigravity-CLI `files` lanes hold SQLite dbs (Hermes/Zed via
-/// user scan roots, Antigravity CLI via the `*.db` glob), so they are exempt
-/// too. Any stat failure keeps the file — over-parsing is safe, silently
-/// skipping is not.
+/// from a scan. Sources whose freshness is not captured by their scanned
+/// file's own mtime are left untouched, because a sibling can change without
+/// touching it: the Hermes/Zed/Antigravity-CLI/micode lanes hold SQLite dbs
+/// (WAL writes may not bump the main `.db` mtime), and the jcode lane holds a
+/// `session_*.json` snapshot whose sibling `.journal.jsonl` is appended between
+/// snapshot rewrites. Pruning any of these by the scanned file's mtime would
+/// drop a still-active source, so they are exempt and always parsed. Any stat
+/// failure keeps the file — over-parsing is safe, silently skipping is not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
+    // Lanes whose scanned file's mtime does not reflect a sibling write
+    // (SQLite `-wal`, or jcode's `.journal.jsonl`); kept in lockstep with the
+    // `-wal`/journal probes in `latest_source_mtime_ms`.
     let db_lanes = [
         ClientId::Hermes as usize,
         ClientId::Zed as usize,
         ClientId::AntigravityCli as usize,
         ClientId::MiMoCode as usize,
+        ClientId::Jcode as usize,
     ];
     for (lane, files) in scan_result.files.iter_mut().enumerate() {
         if db_lanes.contains(&lane) {
@@ -3182,8 +3201,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(micode_msgs);
 
     // Count path does not reprice (it produces message counts, not costs), so
-    // the A1 cost guard is unnecessary here — matches the materialized path's
-    // dedup and upstream's count lane.
+    // the A1 cost guard is unnecessary here. (Upstream counts gjc rows with
+    // `.len()`; `summed_parsed_message_count` is identical because gjc emits
+    // message_count = 1, and keeps gjc consistent with the other new clients'
+    // count lanes.)
     let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Gjc)
         .par_iter()
@@ -7718,6 +7739,96 @@ mod tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    // jcode's `session_*.json` snapshot is a file-lane source whose sibling
+    // `.journal.jsonl` is appended between snapshot rewrites without touching
+    // the snapshot mtime, so it must be exempt from mtime pruning like the WAL
+    // db lanes — otherwise an active session with a stale snapshot is dropped
+    // and its recent journal turns vanish from the live tail.
+    #[test]
+    fn test_modified_after_never_prunes_jcode_sessions() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let jcode_snapshot = temp_dir.path().join("session_x.json");
+        std::fs::File::create(&jcode_snapshot).unwrap();
+        let claude_log = temp_dir.path().join("session.jsonl");
+        std::fs::File::create(&claude_log).unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::Jcode)
+            .push(jcode_snapshot.clone());
+        scan_result
+            .get_mut(ClientId::Claude)
+            .push(claude_log.clone());
+
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        crate::prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert_eq!(
+            scan_result.get(ClientId::Jcode),
+            std::slice::from_ref(&jcode_snapshot),
+            "jcode snapshot (its journal sibling can change without it) must survive mtime pruning"
+        );
+        assert!(
+            scan_result.get(ClientId::Claude).is_empty(),
+            "a plain-file client's stale log is still pruned"
+        );
+    }
+
+    // The live-tail change token must move when jcode appends to the sibling
+    // `.journal.jsonl` even though the snapshot mtime is unchanged; otherwise
+    // UsageTail short-circuits and never reflects the new turn.
+    #[test]
+    #[serial_test::serial]
+    fn test_latest_source_mtime_ms_probes_jcode_journal() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let sessions_dir = source_home.path().join(".jcode/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let snapshot = sessions_dir.join("session_x.json");
+        std::fs::write(&snapshot, br#"{"id":"session_x","messages":[]}"#).unwrap();
+        let journal = sessions_dir.join("session_x.journal.jsonl");
+        std::fs::write(&journal, b"{\"append_messages\":[]}\n").unwrap();
+
+        // Snapshot old, journal strictly newer — the journal-only append the
+        // probe must catch. Skip gracefully if the FS rejects set_modified.
+        let snapshot_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let journal_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        let sf = std::fs::OpenOptions::new().write(true).open(&snapshot).unwrap();
+        let Ok(()) = sf.set_modified(snapshot_time) else {
+            return;
+        };
+        drop(sf);
+        let jf = std::fs::OpenOptions::new().write(true).open(&journal).unwrap();
+        let Ok(()) = jf.set_modified(journal_time) else {
+            return;
+        };
+        drop(jf);
+
+        let options = LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["jcode".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
+        };
+        let token = crate::latest_source_mtime_ms(&options).unwrap();
+
+        // The newer journal mtime must dominate; without the journal probe the
+        // token would stop at the older snapshot mtime (1_700_000_000_000).
+        assert_eq!(
+            token, 1_700_086_400_000,
+            "the change token must reflect the jcode journal mtime, not just the snapshot"
+        );
     }
 
     #[test]
