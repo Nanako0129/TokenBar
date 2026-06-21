@@ -16,6 +16,7 @@ pub mod droid;
 pub mod gemini;
 pub mod goose;
 pub mod hermes;
+pub mod jcode;
 pub mod kilo;
 pub mod kilocode;
 pub mod kimi;

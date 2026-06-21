@@ -432,6 +432,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // jcode stores each session as JSONL under `~/.jcode/sessions/session_*.json`
+    // (honors `JCODE_HOME`). Each line carries authoritative per-message
+    // `token_usage`, so the lane prices via the usual path; a plain glob, no
+    // scanner discovery needed.
+    Jcode = 27 => {
+        id: "jcode",
+        root: PathRoot::EnvVar {
+            var: "JCODE_HOME",
+            fallback_relative: ".jcode",
+        },
+        relative: "sessions",
+        pattern: "session_*.json",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -484,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 27);
+        assert_eq!(ClientId::COUNT, 28);
     }
 
     #[test]

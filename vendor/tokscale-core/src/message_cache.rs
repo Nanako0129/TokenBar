@@ -170,6 +170,17 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
+    /// Fingerprint for a jcode session snapshot plus its sibling
+    /// `<session>.journal.jsonl` append-log. jcode appends new turns to the
+    /// journal between snapshot rewrites, so a journal-only write leaves the
+    /// snapshot's size/mtime unchanged; including the journal in the fingerprint
+    /// invalidates the cache instead of serving stale (missing-turn) data.
+    pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
+        let related_paths =
+            std::iter::once((".journal.jsonl".to_string(), jcode_journal_path(path)));
+        Self::from_path_with_related(path, related_paths)
+    }
+
     /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
     /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
     /// the fingerprint changes and the cache invalidates.
@@ -817,6 +828,20 @@ fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os)
 }
 
+/// Sibling journal path for a jcode session snapshot: `session_x.json` ->
+/// `session_x.journal.jsonl` (replacing the `.json` suffix; falling back to a
+/// plain append when the name has no `.json` suffix).
+fn jcode_journal_path(path: &Path) -> PathBuf {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return append_path_suffix(path, ".journal.jsonl");
+    };
+    let journal_name = file_name
+        .strip_suffix(".json")
+        .map(|stem| format!("{stem}.journal.jsonl"))
+        .unwrap_or_else(|| format!("{file_name}.journal.jsonl"));
+    path.with_file_name(journal_name)
+}
+
 fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
@@ -901,6 +926,40 @@ mod tests {
     use crate::TokenBreakdown;
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
+
+    #[test]
+    fn from_jcode_path_invalidates_on_journal_only_change() {
+        // jcode appends new turns to `<session>.journal.jsonl` between snapshot
+        // rewrites. The cache fingerprint must include the journal, or a
+        // journal-only write (snapshot byte-identical) serves stale data.
+        let dir = TempDir::new().unwrap();
+        let snapshot = dir.path().join("session_test.json");
+        std::fs::write(&snapshot, br#"{"id":"session_test","messages":[]}"#).unwrap();
+        let journal = dir.path().join("session_test.journal.jsonl");
+        std::fs::write(&journal, b"{\"append_messages\":[]}\n").unwrap();
+
+        let jcode_before = SourceFingerprint::from_jcode_path(&snapshot).unwrap();
+        let plain_before = SourceFingerprint::from_path(&snapshot).unwrap();
+
+        // Append to the journal only; leave the snapshot byte-identical.
+        std::fs::write(
+            &journal,
+            b"{\"append_messages\":[]}\n{\"append_messages\":[{\"id\":\"x\"}]}\n",
+        )
+        .unwrap();
+
+        let jcode_after = SourceFingerprint::from_jcode_path(&snapshot).unwrap();
+        let plain_after = SourceFingerprint::from_path(&snapshot).unwrap();
+
+        assert_ne!(
+            jcode_before, jcode_after,
+            "a journal-only change must alter the jcode fingerprint"
+        );
+        assert_eq!(
+            plain_before, plain_after,
+            "from_path ignores the journal sibling (control)"
+        );
+    }
 
     fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
         unsafe {

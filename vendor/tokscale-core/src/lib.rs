@@ -1200,6 +1200,32 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let jcode_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Jcode)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_jcode_path,
+                sessions::jcode::parse_jcode_file,
+            )
+        })
+        .collect();
+    let mut jcode_seen: HashSet<String> = HashSet::new();
+    for outcome in jcode_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut jcode_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
         .par_iter()
@@ -2113,14 +2139,25 @@ where
     // Cache miss → par-collect parse results, then sequential: writeback + emit.
     // Mirrors load_or_parse_source semantics from parse_all_messages_with_pricing_with_env_strategy.
     macro_rules! simple_lane {
-        ($client_id:expr, $parse_fn:expr) => {{
+        // Default: fingerprint the source file itself.
+        ($client_id:expr, $parse_fn:expr) => {
+            simple_lane!(
+                $client_id,
+                $parse_fn,
+                message_cache::SourceFingerprint::from_path
+            )
+        };
+        // Custom fingerprint fn — for sources whose cache validity depends on a
+        // sibling file (e.g. jcode's `.journal.jsonl`), so a sibling-only write
+        // still invalidates the cache instead of serving stale data.
+        ($client_id:expr, $parse_fn:expr, $fingerprint_fn:expr) => {{
             // Per-lane dedup set: persists across this client's files, never
             // shared with other clients (see the note above the trae buffer).
             let mut seen_keys: HashSet<String> = HashSet::new();
             // Separate paths into cache-hit (emit immediately) vs cache-miss (par-parse).
             let mut miss_paths: Vec<&PathBuf> = Vec::new();
             for path in scan_result.get($client_id) {
-                let fp = message_cache::SourceFingerprint::from_path(path);
+                let fp = $fingerprint_fn(path);
                 let cache_hit = fp.as_ref().and_then(|fp| {
                     source_cache.get(path).filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
                 });
@@ -2144,7 +2181,7 @@ where
                 .collect();
             for (path, msgs) in parsed_misses {
                 if !msgs.is_empty() {
-                    if let Some(fp) = message_cache::SourceFingerprint::from_path(path) {
+                    if let Some(fp) = $fingerprint_fn(path) {
                         let entry = message_cache::CachedSourceEntry::new(
                             path, fp, msgs.clone(), Vec::new(), None,
                         );
@@ -2173,6 +2210,11 @@ where
     simple_lane!(ClientId::RooCode,   sessions::roocode::parse_roocode_file);
     simple_lane!(ClientId::KiloCode,  sessions::kilocode::parse_kilocode_file);
     simple_lane!(ClientId::Cline,     sessions::cline::parse_cline_file);
+    simple_lane!(
+        ClientId::Jcode,
+        sessions::jcode::parse_jcode_file,
+        message_cache::SourceFingerprint::from_jcode_path
+    );
     simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
     simple_lane!(ClientId::Kiro,      sessions::kiro::parse_kiro_file);
 
@@ -3027,6 +3069,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let cline_count = summed_parsed_message_count(&cline_msgs);
     counts.set(ClientId::Cline, cline_count);
     messages.extend(cline_msgs);
+
+    let jcode_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Jcode)
+        .par_iter()
+        .flat_map(|path| sessions::jcode::parse_jcode_file(path))
+        .collect();
+    let mut jcode_seen: HashSet<String> = HashSet::new();
+    let jcode_msgs: Vec<ParsedMessage> = jcode_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut jcode_seen, message))
+        .map(|m| unified_to_parsed(&m))
+        .collect();
+    let jcode_count = summed_parsed_message_count(&jcode_msgs);
+    counts.set(ClientId::Jcode, jcode_count);
+    messages.extend(jcode_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)
@@ -7347,6 +7404,52 @@ mod tests {
                 vec!["conv-aaa".to_string(), "conv-bbb".to_string()],
                 "both conversations reusing responseId \"SHARED\" must survive"
             );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    // jcode (`~/.jcode/sessions/session_*.json`) must be discovered by the
+    // generic scanner (EnvVar JCODE_HOME / .jcode root, `session_*.json` glob)
+    // and flow through the streaming lane with its authoritative per-message
+    // token_usage.
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_jcode_flows_through_lane() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let sessions_dir = source_home.path().join(".jcode/sessions");
+            std::fs::create_dir_all(&sessions_dir).unwrap();
+            std::fs::write(
+                sessions_dir.join("session_test.json"),
+                r#"{"id":"session_test","provider_key":"cliproxyapi","model":"claude-sonnet-4","working_dir":"/x","messages":[{"id":"u1","role":"user","timestamp":"2026-06-16T12:00:00Z"},{"id":"a1","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":1200,"output_tokens":300}}]}"#,
+            )
+            .unwrap();
+
+            let mut input_sum = 0i64;
+            let mut count = 0usize;
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["jcode".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| {
+                    input_sum += m.tokens.input;
+                    count += 1;
+                },
+            );
+
+            assert_eq!(count, 1, "the jcode assistant message must flow through the streaming lane");
+            assert_eq!(input_sum, 1200);
         }
 
         match original_home {
