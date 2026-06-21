@@ -2253,7 +2253,19 @@ where
             for mut m in sessions::antigravity_cli::parse_antigravity_cli_file(path) {
                 apply_pricing_if_available(&mut m, pricing);
                 if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut antigravity_cli_seen));
+                // A responseId is unique only within a conversation DB (the
+                // parser already drops repeats per-file), so namespace the
+                // cross-file gate by session to avoid collapsing two independent
+                // conversations that happen to reuse a responseId. Upstream has
+                // no cross-file gate here at all; this keeps the streaming lane's
+                // numbers identical to it while staying collision-proof.
+                let keep = m.dedup_key.as_ref().is_none_or(|k| {
+                    k.is_empty()
+                        || dedup_gate_passes(
+                            &format!("{}:{}", m.session_id, k),
+                            &mut antigravity_cli_seen,
+                        )
+                });
                 if keep && filter(&m) { sink(&m); }
             }
         }
@@ -7239,6 +7251,108 @@ mod tests {
             scan_result.get(ClientId::Claude).is_empty(),
             "a plain-file client's stale log is still pruned"
         );
+    }
+
+    /// Write a minimal Antigravity CLI conversation DB (one priced
+    /// `gen_metadata` row carrying `response_id`). The `trajectory_metadata_blob`
+    /// table is omitted on purpose — the parser tolerates its absence and falls
+    /// back to the file mtime for the timestamp.
+    fn write_antigravity_cli_db(
+        conversations_dir: &std::path::Path,
+        file_stem: &str,
+        response_id: &str,
+    ) {
+        fn encode_varint(mut value: u64) -> Vec<u8> {
+            let mut out = Vec::new();
+            loop {
+                let mut byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value != 0 {
+                    byte |= 0x80;
+                }
+                out.push(byte);
+                if value == 0 {
+                    break;
+                }
+            }
+            out
+        }
+        fn enc_varint(field: u64, value: u64) -> Vec<u8> {
+            let mut out = encode_varint(field << 3);
+            out.extend(encode_varint(value));
+            out
+        }
+        fn enc_len(field: u64, payload: &[u8]) -> Vec<u8> {
+            let mut out = encode_varint((field << 3) | 2);
+            out.extend(encode_varint(payload.len() as u64));
+            out.extend_from_slice(payload);
+            out
+        }
+
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(2, 500)); // new input
+        usage.extend(enc_varint(9, 300)); // output
+        usage.extend(enc_len(11, response_id.as_bytes())); // responseId
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let gen_blob = enc_len(1, &chat_model);
+
+        std::fs::create_dir_all(conversations_dir).unwrap();
+        let path = conversations_dir.join(format!("{file_stem}.db"));
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE gen_metadata (idx integer, data blob, size integer);")
+            .unwrap();
+        conn.execute(
+            "INSERT INTO gen_metadata (idx, data, size) VALUES (0, ?1, 0)",
+            rusqlite::params![gen_blob],
+        )
+        .unwrap();
+    }
+
+    // Two independent Antigravity CLI conversation DBs that reuse the same
+    // responseId must both survive the streaming report path. responseIds are
+    // unique only within a conversation, so the cross-file dedup gate is
+    // namespaced by session; with a bare-responseId key (the pre-fix behaviour)
+    // the second conversation is silently dropped and this fails (count == 1).
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_antigravity_cli_keeps_colliding_response_ids_across_conversations() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let conversations_dir = source_home
+                .path()
+                .join(".gemini/antigravity-cli/conversations");
+            write_antigravity_cli_db(&conversations_dir, "conv-aaa", "SHARED");
+            write_antigravity_cli_db(&conversations_dir, "conv-bbb", "SHARED");
+
+            let mut sessions: Vec<String> = Vec::new();
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["antigravity-cli".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| sessions.push(m.session_id.clone()),
+            );
+
+            sessions.sort();
+            assert_eq!(
+                sessions,
+                vec!["conv-aaa".to_string(), "conv-bbb".to_string()],
+                "both conversations reusing responseId \"SHARED\" must survive"
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
