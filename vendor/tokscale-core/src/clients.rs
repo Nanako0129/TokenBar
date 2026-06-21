@@ -461,6 +461,22 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    // gjc (gajae-code) stores sessions as JSONL under
+    // `$GJC_CODING_AGENT_DIR/sessions/*.jsonl` (default `~/.gjc/agent`), each
+    // assistant message carrying an authoritative `usage.cost.total` (USD).
+    // The lane reprices only when that cost is absent (A1 guard, see lib.rs).
+    Gjc = 29 => {
+        id: "gjc",
+        root: PathRoot::EnvVar {
+            var: "GJC_CODING_AGENT_DIR",
+            fallback_relative: ".gjc/agent",
+        },
+        relative: "sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -513,7 +529,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 29);
+        assert_eq!(ClientId::COUNT, 30);
     }
 
     #[test]

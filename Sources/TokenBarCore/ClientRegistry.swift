@@ -43,6 +43,7 @@ public enum ClientRegistry {
         "antigravity-cli": ("Antigravity CLI", "#6366f1"),
         "jcode": ("Jcode", "#84cc16"),
         "micode": ("MiMo Code", "#fb923c"),
+        "gjc": ("gjc", "#e11d48"),
     ]
 
     public static func style(_ id: String) -> ClientStyle {

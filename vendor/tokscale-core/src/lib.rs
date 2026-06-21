@@ -1249,6 +1249,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    // gjc: non-cached so the authoritative embedded cost is never repriced by
+    // the source cache. Reprice only when usage.cost.total was absent (A1
+    // guard); message-level dedup collapses depth-1/depth-2 replays.
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_messages: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| {
+            sessions::gjc::parse_gjc_file(path)
+                .into_iter()
+                .map(|mut msg| {
+                    if msg.cost <= 0.0 {
+                        apply_pricing_if_available(&mut msg, pricing);
+                    }
+                    msg
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    all_messages.extend(
+        gjc_messages
+            .into_iter()
+            .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
+    );
+
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
         .par_iter()
@@ -2346,6 +2371,24 @@ where
         }
     }
 
+    // ---- gjc (gajae-code) JSONL, authoritative embedded cost (A1 guard) ----
+    // gjc embeds `usage.cost.total` (USD). Reprice ONLY when it was absent
+    // (cost <= 0.0); routing through the cached/simple_lane path would reprice
+    // unconditionally and overwrite the authoritative cost.
+    {
+        let mut gjc_seen: HashSet<String> = HashSet::new();
+        for path in scan_result.get(ClientId::Gjc) {
+            for mut m in sessions::gjc::parse_gjc_file(path) {
+                if m.cost <= 0.0 {
+                    apply_pricing_if_available(&mut m, pricing);
+                }
+                if !passes_client(&m) { continue; }
+                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut gjc_seen));
+                if keep && filter(&m) { sink(&m); }
+            }
+        }
+    }
+
     // ---- Goose SQLite ----
     if let Some(db_path) = &scan_result.goose_db {
         for mut m in sessions::goose::parse_goose_sqlite(db_path) {
@@ -3137,6 +3180,24 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let micode_count = summed_parsed_message_count(&micode_msgs);
     counts.set(ClientId::MiMoCode, micode_count);
     messages.extend(micode_msgs);
+
+    // Count path does not reprice (it produces message counts, not costs), so
+    // the A1 cost guard is unnecessary here — matches the materialized path's
+    // dedup and upstream's count lane.
+    let gjc_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Gjc)
+        .par_iter()
+        .flat_map(|path| sessions::gjc::parse_gjc_file(path))
+        .collect();
+    let mut gjc_seen: HashSet<String> = HashSet::new();
+    let gjc_msgs: Vec<ParsedMessage> = gjc_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut gjc_seen, message))
+        .map(|m| unified_to_parsed(&m))
+        .collect();
+    let gjc_count = summed_parsed_message_count(&gjc_msgs);
+    counts.set(ClientId::Gjc, gjc_count);
+    messages.extend(gjc_msgs);
 
     let mux_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Mux)
@@ -7607,6 +7668,56 @@ mod tests {
             scan_result.get(ClientId::Claude).is_empty(),
             "a plain-file client's stale log is still pruned"
         );
+    }
+
+    // gjc (`$GJC_CODING_AGENT_DIR/sessions/*.jsonl`) must be discovered via the
+    // EnvVar fallback root (`.gjc/agent`) + `*.jsonl` glob and flow through the
+    // streaming lane, keeping its authoritative embedded `usage.cost.total`
+    // (A1). With pricing absent the guard's reprice branch is a no-op; the
+    // materialized path mirrors upstream's proven reprice-when-absent guard.
+    #[test]
+    #[serial_test::serial]
+    fn test_streaming_gjc_flows_with_authoritative_cost() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+
+        {
+            let gjc_dir = source_home.path().join(".gjc/agent/sessions");
+            std::fs::create_dir_all(&gjc_dir).unwrap();
+            std::fs::write(
+                gjc_dir.join("test.jsonl"),
+                "{\"type\":\"session\",\"id\":\"gjc_ses_001\",\"cwd\":\"/work/pi\"}\n{\"type\":\"message\",\"id\":\"msg_001\",\"message\":{\"role\":\"assistant\",\"model\":\"claude-sonnet-4\",\"provider\":\"anthropic\",\"timestamp\":1767225601000,\"usage\":{\"input\":100,\"output\":50,\"cost\":{\"total\":0.3}}}}\n",
+            )
+            .unwrap();
+
+            let mut cost_sum = 0.0f64;
+            let mut count = 0usize;
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &["gjc".to_string()],
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_m: &UnifiedMessage| true,
+                &mut |m: &UnifiedMessage| {
+                    cost_sum += m.cost;
+                    count += 1;
+                },
+            );
+
+            assert_eq!(count, 1, "the gjc assistant message must flow through the streaming lane");
+            assert!(
+                (cost_sum - 0.3).abs() < 1e-9,
+                "authoritative gjc cost must reach the sink (got {cost_sum})"
+            );
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
     }
 
     #[test]
