@@ -39,6 +39,7 @@ public enum ClientRegistry {
         "kiro": ("Kiro", "#9046ff"),
         "trae": ("Trae", "#ef4444"),
         "warp": ("Warp", "#01a4ff"),
+        "cline": ("Cline", "#5b8def"),
     ]
 
     public static func style(_ id: String) -> ClientStyle {

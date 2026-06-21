@@ -581,6 +581,31 @@ fn discover_crush_dbs(home_dir: &str, use_env_roots: bool) -> Vec<CrushDbSource>
     dbs
 }
 
+fn cline_additional_vscode_task_roots(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots = vec![PathBuf::from(home_dir)
+        .join("Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks")];
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|value| !value.is_empty()) {
+            roots.push(
+                PathBuf::from(app_data)
+                    .join("Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
+            );
+        }
+    }
+
+    roots.push(
+        PathBuf::from(home_dir)
+            .join("AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks"),
+    );
+    roots.push(
+        PathBuf::from(home_dir)
+            .join(".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks"),
+    );
+
+    roots
+}
+
 fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Kilo CLI currently loads a single SQLite DB via `scan_result.kilo_db`
     // Roo/KiloCode require local + remote and server task roots, and Crush
@@ -724,6 +749,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::OpenClaw
                 | ClientId::RooCode
                 | ClientId::KiloCode
+                | ClientId::Cline
                 | ClientId::Kilo
                 | ClientId::Hermes
                 | ClientId::Goose
@@ -940,6 +966,17 @@ fn scan_all_clients_with_env_strategy_inner(
             ClientId::KiloCode,
             server_path,
         );
+    }
+
+    if enabled.contains(&ClientId::Cline) {
+        let local_path = ClientId::Cline
+            .data()
+            .resolve_path_with_env_strategy(home_dir, use_env_roots);
+        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, local_path);
+
+        for root in cline_additional_vscode_task_roots(home_dir, use_env_roots) {
+            push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, root);
+        }
     }
 
     if enabled.contains(&ClientId::Kilo) {
@@ -1508,6 +1545,28 @@ mod tests {
         fs::create_dir_all(&local).unwrap();
         fs::create_dir_all(&server).unwrap();
         File::create(local.join("ui_messages.json")).unwrap();
+        File::create(server.join("ui_messages.json")).unwrap();
+    }
+
+    fn setup_mock_cline_dir(base: &std::path::Path) {
+        let local =
+            base.join(".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-local");
+        let macos = base.join(
+            "Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-macos",
+        );
+        let windows = base.join(
+            "AppData/Roaming/Code/User/globalStorage/saoudrizwan.claude-dev/tasks/task-windows",
+        );
+        let server = base.join(
+            ".vscode-server/data/User/globalStorage/saoudrizwan.claude-dev/tasks/task-server",
+        );
+        fs::create_dir_all(&local).unwrap();
+        fs::create_dir_all(&macos).unwrap();
+        fs::create_dir_all(&windows).unwrap();
+        fs::create_dir_all(&server).unwrap();
+        File::create(local.join("ui_messages.json")).unwrap();
+        File::create(macos.join("ui_messages.json")).unwrap();
+        File::create(windows.join("ui_messages.json")).unwrap();
         File::create(server.join("ui_messages.json")).unwrap();
     }
 
@@ -2740,6 +2799,20 @@ mod tests {
         assert_eq!(result.get(ClientId::KiloCode).len(), 2);
         assert!(result
             .get(ClientId::KiloCode)
+            .iter()
+            .all(|p| p.ends_with("ui_messages.json")));
+    }
+
+    #[test]
+    fn test_scan_all_clients_cline() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_cline_dir(home);
+
+        let result = scan_all_clients(home.to_str().unwrap(), &["cline".to_string()]);
+        assert_eq!(result.get(ClientId::Cline).len(), 4);
+        assert!(result
+            .get(ClientId::Cline)
             .iter()
             .all(|p| p.ends_with("ui_messages.json")));
     }
