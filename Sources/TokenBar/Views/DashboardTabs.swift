@@ -24,6 +24,8 @@ struct DashboardTabs: View {
                             color: style.color, index: i + 2)
                     }
                 }
+                // Let a plain vertical mouse wheel scroll this horizontal row.
+                .background(HorizontalWheelScroll())
             }
             .onChange(of: active) { _, next in
                 withAnimation(.easeOut(duration: 0.15)) {

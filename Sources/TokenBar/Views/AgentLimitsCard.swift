@@ -55,9 +55,16 @@ struct AgentLimitsCard: View {
     ]
 
     private var snapshots: [String: AgentUsageSnapshot] {
-        Dictionary(
+        var dict = Dictionary(
             (agentUsage?.agents ?? []).map { ($0.clientId, $0) },
             uniquingKeysWith: { first, _ in first })
+        // Antigravity CLI shares the Antigravity IDE's account and quota, so it
+        // gets no snapshot of its own; surface the Antigravity snapshot under
+        // its id so its limit card mirrors Antigravity's.
+        if dict["antigravity-cli"] == nil, let shared = dict["antigravity"] {
+            dict["antigravity-cli"] = shared
+        }
+        return dict
     }
 
     /// Clients whose live tail shows activity right now.

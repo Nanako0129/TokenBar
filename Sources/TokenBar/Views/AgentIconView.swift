@@ -18,15 +18,32 @@ struct AgentIconView: View {
     private static let fullIds: Set<String> = [
         "codex", "droid", "kilocode", "kilo", "synthetic", "codebuff",
         "antigravity", "kiro",
+        // Official brand icons for the newer local clients (png/svg).
+        "cline", "jcode", "micode", "gjc",
     ]
+
+    /// Clients that share another client's brand icon. The Antigravity CLI is
+    /// the same product family as the Antigravity IDE and uses its logo.
+    private static let iconAliases: [String: String] = [
+        "antigravity-cli": "antigravity",
+    ]
+
+    /// Resolve the id whose `agent-icons/<id>.svg` should render for a client.
+    private static func iconId(_ clientId: String) -> String {
+        iconAliases[clientId] ?? clientId
+    }
 
     @MainActor private static var cache: [String: NSImage] = [:]
 
     @MainActor private static func image(_ id: String) -> NSImage? {
         if let cached = cache[id] { return cached }
-        guard monoIds.contains(id) || fullIds.contains(id),
-              let url = Bundle.tokenBarResources.url(
-                  forResource: id, withExtension: "svg", subdirectory: "agent-icons"),
+        guard monoIds.contains(id) || fullIds.contains(id) else { return nil }
+        let bundle = Bundle.tokenBarResources
+        // SVG (vector) preferred; some brand icons ship only as PNG.
+        guard let url = bundle.url(
+                forResource: id, withExtension: "svg", subdirectory: "agent-icons")
+                ?? bundle.url(
+                    forResource: id, withExtension: "png", subdirectory: "agent-icons"),
               let image = NSImage(contentsOf: url)
         else { return nil }
         cache[id] = image
@@ -35,15 +52,16 @@ struct AgentIconView: View {
 
     var body: some View {
         let style = ClientRegistry.style(clientId)
+        let iconId = Self.iconId(clientId)
         ZStack {
-            if Self.fullIds.contains(clientId), let image = Self.image(clientId) {
+            if Self.fullIds.contains(iconId), let image = Self.image(iconId) {
                 Image(nsImage: image)
                     .resizable()
                     .scaledToFit()
                     .clipShape(Circle())
             } else {
                 Circle().fill(Color(hex: style.color))
-                if Self.monoIds.contains(clientId), let image = Self.image(clientId) {
+                if Self.monoIds.contains(iconId), let image = Self.image(iconId) {
                     Image(nsImage: image)
                         .renderingMode(.template)
                         .resizable()
