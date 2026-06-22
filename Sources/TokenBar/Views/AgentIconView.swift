@@ -28,6 +28,10 @@ struct AgentIconView: View {
         "antigravity-cli": "antigravity",
     ]
 
+    /// Full icons whose mark is dark and mostly transparent, so they need a
+    /// light disc behind to stay visible on a dark popover.
+    private static let lightBackedIds: Set<String> = ["cline"]
+
     /// Resolve the id whose `agent-icons/<id>.svg` should render for a client.
     private static func iconId(_ clientId: String) -> String {
         iconAliases[clientId] ?? clientId
@@ -55,10 +59,17 @@ struct AgentIconView: View {
         let iconId = Self.iconId(clientId)
         ZStack {
             if Self.fullIds.contains(iconId), let image = Self.image(iconId) {
-                Image(nsImage: image)
-                    .resizable()
-                    .scaledToFit()
-                    .clipShape(Circle())
+                ZStack {
+                    // Dark, mostly-transparent marks (e.g. Cline's robot) are
+                    // invisible on a dark popover; back them with a light disc.
+                    if Self.lightBackedIds.contains(iconId) {
+                        Circle().fill(.white)
+                    }
+                    Image(nsImage: image)
+                        .resizable()
+                        .scaledToFit()
+                        .clipShape(Circle())
+                }
             } else {
                 Circle().fill(Color(hex: style.color))
                 if Self.monoIds.contains(iconId), let image = Self.image(iconId) {

@@ -59,9 +59,11 @@ struct AgentLimitsCard: View {
             (agentUsage?.agents ?? []).map { ($0.clientId, $0) },
             uniquingKeysWith: { first, _ in first })
         // Antigravity CLI shares the Antigravity IDE's account and quota, so it
-        // gets no snapshot of its own; surface the Antigravity snapshot under
-        // its id so its limit card mirrors Antigravity's.
-        if dict["antigravity-cli"] == nil, let shared = dict["antigravity"] {
+        // gets no snapshot of its own. In its single-client view, surface the
+        // Antigravity snapshot under its id so the card still shows the quota.
+        // Only in `restrict` mode — the overview already renders Antigravity's
+        // own card, so aliasing there would duplicate it.
+        if restrict, dict["antigravity-cli"] == nil, let shared = dict["antigravity"] {
             dict["antigravity-cli"] = shared
         }
         return dict
