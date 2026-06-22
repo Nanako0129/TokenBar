@@ -50,7 +50,7 @@ jobs:
         run: |
           umask 077
           printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_ed.key
-          scripts/make_appcast.sh "TokenBar.app.tar.gz" "$VERSION" "$BUILD" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
+          scripts/make_appcast.sh "TokenBar.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
           rm -f /tmp/sparkle_ed.key
 
       # Tauri migration manifest: the old Tauri app's updater endpoint

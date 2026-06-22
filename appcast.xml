@@ -30,5 +30,36 @@
         length="7047740"
         type="application/octet-stream"/>
     </item>
+    <item>
+      <title>1.1.0</title>
+      <pubDate>Sun, 21 Jun 2026 18:15:56 +0000</pubDate>
+      <sparkle:version>151</sparkle:version>
+      <sparkle:shortVersionString>1.1.0</sparkle:shortVersionString>
+      <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+
+      <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.1.0</link>
+      <description><![CDATA[
+<b>New:</b>
+<ul>
+<li>Tracks five more local AI coding tools: Cline, Antigravity CLI, jcode, MiMo Code, and gjc.</li>
+</ul>
+<b>Improved:</b>
+<ul>
+<li>More accurate cost and per-tool attribution across AI token usage.</li>
+<li>Corrected Codex usage counts for forked and sub-agent sessions.</li>
+<li>Antigravity CLI usage is now dated per turn, so the live view and daily totals reflect when each turn actually happened.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>The app no longer crashes if the usage parser hits an unexpected error.</li>
+<li>More reliable live usage updates, including for the newly added tools.</li>
+</ul>
+      ]]></description>
+      <enclosure
+        url="https://github.com/Nanako0129/TokenBar/releases/download/v1.1.0/TokenBar.app.tar.gz"
+        sparkle:edSignature="8AmcpkHvF9b7d7hR2Wk7xHMvxPtYvhKmqAYleU/9HSBQassIVVwZ2G+3JoF8OPXSzz1r144CszEOKJRL+lOpDA=="
+        length="6894840"
+        type="application/octet-stream"/>
+    </item>
   </channel>
 </rss>
