@@ -32,6 +32,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
         BetaMigration.runIfNeeded() // before anything reads defaults
+        // refreshIntervalMin's initializer ran at AppDelegate construction in
+        // main.swift, BEFORE the migration above — re-read it now so a migrated
+        // (non-default) data-refresh interval is honored this session instead of
+        // staying at the pre-migration default until the next defaults write.
+        refreshIntervalMin = AppDelegate.readIntervalMin()
         _ = UpdaterService.shared // arm Sparkle when bundled
 
         let controller = StatusItemController()

@@ -116,15 +116,23 @@ enum AppView: String, CaseIterable {
     }
 
     private func apply(payload: UsagePayload, report: ModelReport?) {
+        // A year-filtered payload reports only the selected year (empty if that
+        // year has no data). Validate the filter against THIS fresh payload —
+        // not the knownYears union, which never drops a year once seen — so a
+        // selected year whose logs were deleted/moved (even while the popover
+        // stays open) clears instead of stranding the dashboard on an empty
+        // slice. Re-fetch unfiltered so all data shows immediately.
+        if let year, !payload.years.contains(where: { $0.year == year }) {
+            self.year = nil
+            UserDefaults.standard.removeObject(forKey: Self.yearKey)
+            Task { [weak self] in await self?.reload(force: false) }
+            return
+        }
         self.payload = payload
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         modelReport = report
         colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
-        if let year, !knownYears.contains(year) {
-            self.year = nil
-            UserDefaults.standard.removeObject(forKey: Self.yearKey)
-        }
         phase = .ready
     }
 
