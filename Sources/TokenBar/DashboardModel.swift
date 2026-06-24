@@ -102,6 +102,11 @@ enum AppView: String, CaseIterable {
         guard let payload = try? await payloadTask else { return }
         let report = await reportTask
         apply(payload: payload, report: report)
+        // If apply() cleared a now-empty year filter, it spawned its own
+        // unfiltered reload that re-fetches the lazy lenses for the new (nil)
+        // year — skip the stale-`year` re-fetch here, or an empty year-filtered
+        // hourly/agents could land after it and blank those lenses.
+        guard self.year == year else { return }
         // Re-fetch the lazy lenses that were already loaded.
         if hourly != nil {
             hourly = await Task.detached(priority: .userInitiated) {
@@ -165,6 +170,10 @@ enum AppView: String, CaseIterable {
             // slice so the chart never flickers to the wrong year.
             guard self.year == year, let payload = fetched else { continue }
             apply(payload: payload, report: report)
+            // apply() may have cleared a now-empty year filter and spawned an
+            // unfiltered reload; skip the stale-`year` lazy re-fetch so it
+            // can't blank Hourly/Agents with empty year-filtered reports.
+            guard self.year == year else { continue }
             // Re-fetch the lazy lenses that were already loaded (mirrors reload).
             if hourly != nil {
                 hourly = await Task.detached(priority: .utility) {

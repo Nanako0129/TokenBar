@@ -159,8 +159,11 @@ final class TrayAnimator {
 
     /// Persist the last good remaining percent so a relaunch shows it
     /// immediately. Called at quota-arrival points, not from the getter.
+    /// Reads `quotaRemaining` (not `cachedQuotaRemaining`) so it resolves the
+    /// fresh value even for cat/parrot styles, where `renderGaugeIcon()`
+    /// returns early without touching the cache.
     private func persistRemaining() {
-        if let value = cachedQuotaRemaining {
+        if let value = quotaRemaining {
             UserDefaults.standard.set(value, forKey: Self.lastRemainingKey)
         }
     }
