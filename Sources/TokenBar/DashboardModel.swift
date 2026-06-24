@@ -120,9 +120,9 @@ enum AppView: String, CaseIterable {
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
-    /// it stays open. The SwiftUI view is built once (StatusItemController
-    /// keeps a single NSHostingController across every transient open/close),
-    /// so `.task { load() }` runs only once per process — without this loop the
+    /// it stays open. StatusItemController tears down and rebuilds PopoverView
+    /// on each open/close cycle, so `.task { load() }` runs on every open and
+    /// this loop is cancelled on close — but while open, without this loop the
     /// overview bars never pick up today's usage until a manual Refresh. Uses
     /// the non-forced graph() path: the staticlib's mtime-aware cache makes
     /// idle ticks cheap and only re-aggregates when logs actually change.

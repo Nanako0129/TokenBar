@@ -2,7 +2,7 @@ import AppKit
 import TokenBarCore
 
 /// App bootstrap: accessory activation policy (menu-bar only, no Dock icon),
-/// the status-item controller, and the 60s tray-title refresh loop.
+/// the status-item controller, and the tray-title refresh loop.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let titleRefreshSecs: UInt64 = 300
@@ -25,15 +25,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let animator = TrayAnimator(controller: controller)
         trayAnimator = animator
         controller.quotaPayloadProvider = { [weak animator] in animator?.quota }
-        // A fresh quota fetch re-renders the title right away (the quota
-        // title mode shouldn't wait out the next 60s tick).
+        // A fresh quota or rate fetch re-renders the title right away.
         animator.onQuotaUpdated = { [weak self] in self?.applyTitle() }
         animator.start()
         startTitleRefresh()
 
         // Re-render the title the moment a setting changes (tray mode, quota
-        // source from the right-click menu or the panel) instead of waiting
-        // out the 60s refresh tick. Cheap: recomputes from cached data only.
+        // source from the right-click menu or the panel). Cheap: recomputes
+        // from cached data only.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { _ in
@@ -67,18 +66,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     /// Compose the tray title from the cached data and the current settings.
+    /// The rate prefers the animator's 30s-fresh value over lastRate (which
+    /// is only updated on the 5-minute title-refresh cycle).
     private func applyTitle() {
         let mode = TrayMode.current
         let quotaRemaining = trayAnimator?.quotaRemaining
+        let rate = trayAnimator?.tokensPerMinRate ?? lastRate
         statusController?.updateTitle(
-            mode.title(graph: lastGraph, tokensPerMin: lastRate, quotaRemaining: quotaRemaining),
+            mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),
             color: mode.titleColor(quotaRemaining: quotaRemaining))
     }
 
-    /// Refreshes the tray title every 60s in the user's chosen mode. Reads
-    /// usually hit the <=30s staticlib cache; a full log re-read
-    /// (tb_refresh_graph) is forced every "Data refresh" interval from
-    /// settings. Tray animation joins in a later phase.
+    /// Background graph refresh: serves the graph-based title modes (today's
+    /// tokens/cost, total tokens/cost). The rate and quota title modes are
+    /// covered by TrayAnimator's load/quota polling via onQuotaUpdated.
+    /// A full log re-read (tb_refresh_graph) is forced every "Data refresh"
+    /// interval from settings; between forced refreshes the staticlib's
+    /// mtime-aware cache makes ticks cheap.
     private func startTitleRefresh() {
         titleRefreshTask = Task { [weak self] in
             var lastFullRefresh = Date.distantPast

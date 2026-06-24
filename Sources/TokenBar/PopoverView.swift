@@ -20,9 +20,11 @@ struct PopoverView: View {
     @AppStorage("tokenbar.chart.view") private var chartViewRaw = "2d"
     @AppStorage("tokenbar.view") private var activeViewRaw = AppView.overview.rawValue
     @AppStorage("tokenbar.bridge.dismissed") private var bridgeDismissed = false
-    /// "overview" or a client id. Not persisted, matching the Tauri app.
+    /// "overview" or a client id. Persisted so the selection survives the
+    /// popover's rootView teardown/rebuild cycle (StatusItemController swaps
+    /// the live view for a placeholder on close).
     /// `--tab=<id>` preselects a client tab (debug/screenshot aid).
-    @State private var activeTab =
+    @AppStorage("tokenbar.activeTab") private var activeTab =
         CommandLine.arguments
             .first(where: { $0.hasPrefix("--tab=") })
             .map { String($0.dropFirst("--tab=".count)) } ?? "overview"

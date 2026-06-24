@@ -12,6 +12,7 @@ final class StatusItemController: NSObject {
     /// Source of truth for the popover's (user-adjustable) height.
     let chrome = PopoverChrome()
     private var defaultsObserver: NSObjectProtocol?
+    private var closeObserver: NSObjectProtocol?
     private var host: NSHostingController<AnyView>?
 
     override init() {
@@ -34,7 +35,7 @@ final class StatusItemController: NSObject {
         // the SettingsWindowController pattern. Without this, PopoverView's
         // .task loops run for the process lifetime because the hosting
         // controller persists across transient open/close cycles.
-        NotificationCenter.default.addObserver(
+        closeObserver = NotificationCenter.default.addObserver(
             forName: NSPopover.didCloseNotification, object: popover, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
@@ -143,6 +144,8 @@ final class StatusItemController: NSObject {
     func tearDown() {
         if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
         defaultsObserver = nil
+        if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
+        closeObserver = nil
         if popover.isShown { popover.performClose(nil) }
         popover.contentViewController = nil
         NSStatusBar.system.removeStatusItem(statusItem)

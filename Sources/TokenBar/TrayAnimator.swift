@@ -53,16 +53,24 @@ final class TrayAnimator {
     }
 
     private var defaultsObserver: NSObjectProtocol?
+    private var appearanceObserver: NSKeyValueObservation?
 
     func start() {
         startAnimationLoop()
         startLoadPolling()
         startQuotaPolling()
         // Re-render the gauge the moment a setting changes (style, coloring,
-        // quota source) — the 2s loop alone reads as a laggy beat.
+        // quota source) — the 30s gauge loop alone is too slow.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.renderGaugeIcon() }
+        }
+        // Re-render on dark/light mode flip so gauge icons don't show the
+        // wrong color scheme for up to 30s (the gauge loop's sleep interval).
+        appearanceObserver = NSApp.observe(
+            \.effectiveAppearance, options: [.new]
+        ) { [weak self] _, _ in
             MainActor.assumeIsolated { self?.renderGaugeIcon() }
         }
     }
@@ -72,6 +80,7 @@ final class TrayAnimator {
         loadTask?.cancel()
         quotaTask?.cancel()
         if let defaultsObserver { NotificationCenter.default.removeObserver(defaultsObserver) }
+        appearanceObserver?.invalidate()
     }
 
     /// Draws the current gauge style immediately (no-op for cat/parrot,
@@ -193,6 +202,10 @@ final class TrayAnimator {
         }
     }
 
+    /// The raw tokens/min value from the last load poll — exposed so the
+    /// tray title can display it without its own FFI call.
+    private(set) var tokensPerMinRate: Double?
+
     /// Poll the live rate to feed the spin speed. 30s cadence balances
     /// animation responsiveness against the rayon wakeup cost of each FFI
     /// call (the staticlib's mtime check wakes the entire rayon pool).
@@ -203,7 +216,11 @@ final class TrayAnimator {
                     try TBCore.tokensPerMin()
                 }.value
                 guard let self, !Task.isCancelled else { break }
-                if let rate { self.load = min(rate / 10_000.0, 100.0) }
+                if let rate {
+                    self.load = min(rate / 10_000.0, 100.0)
+                    self.tokensPerMinRate = rate
+                    self.onQuotaUpdated?()
+                }
                 try? await Task.sleep(for: .seconds(30))
             }
         }
