@@ -54,20 +54,42 @@ final class TrayAnimator {
 
     private var defaultsObserver: NSObjectProtocol?
     private var appearanceObserver: NSKeyValueObservation?
+    /// Snapshot of the icon-affecting defaults the observer reacts to. The
+    /// global didChangeNotification carries no key and fires for every write
+    /// (popover height, active tab, year, quota cache…), so we compare this
+    /// signature and act only when an icon setting actually changed —
+    /// otherwise an unrelated write would needlessly re-render the gauge and
+    /// tear down + restart the animation loop on every keystroke.
+    private var iconSettingsSignature = ""
+
+    private static func currentIconSignature() -> String {
+        let d = UserDefaults.standard
+        return [
+            d.string(forKey: styleKey) ?? "",
+            d.object(forKey: animateKey).map { "\($0)" } ?? "",
+            d.string(forKey: quotaSourceKey) ?? "",
+            d.string(forKey: IconColoring.storageKey) ?? "",
+        ].joined(separator: "|")
+    }
 
     func start() {
         startAnimationLoop()
         startLoadPolling()
         startQuotaPolling()
-        // Re-render the gauge the moment a setting changes (style, coloring,
-        // quota source) — the 30s gauge loop alone is too slow. Also restart
-        // the animation loop so a gauge→cat/parrot switch takes effect
-        // immediately instead of stalling until the 30s sleep finishes.
+        iconSettingsSignature = Self.currentIconSignature()
+        // Re-render the gauge and restart the animation loop the moment an
+        // icon setting changes (style, animate, quota source, coloring) — the
+        // 30s gauge loop alone is too slow, and a gauge→cat/parrot switch
+        // would otherwise stall until the sleep finishes. Gated on a signature
+        // compare so unrelated defaults writes don't churn the loop.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                let next = Self.currentIconSignature()
+                guard next != self.iconSettingsSignature else { return }
+                self.iconSettingsSignature = next
                 self.renderGaugeIcon()
                 self.animationTask?.cancel()
                 self.startAnimationLoop()
@@ -118,19 +140,29 @@ final class TrayAnimator {
 
     /// The selected quota window's remaining percent, holding the last good
     /// value across failed refreshes (nil only before any data ever arrived).
+    /// Pure read: it updates the in-memory cache but does NOT write
+    /// UserDefaults — persisting here (a side effect inside a getter that
+    /// renderGaugeIcon / applyTitle call on every observer pass) re-posted
+    /// didChangeNotification and re-entered the observers. `persistRemaining()`
+    /// is called explicitly when fresh quota data arrives instead.
     var quotaRemaining: Double? {
         let selection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
         if let value = QuotaResolver.resolve(payload: quota, selection: selection)?
             .window.remainingPercent
         {
-            if value != cachedQuotaRemaining {
-                cachedQuotaRemaining = value
-                UserDefaults.standard.set(value, forKey: Self.lastRemainingKey)
-            }
+            cachedQuotaRemaining = value
             return value
         }
         return cachedQuotaRemaining
+    }
+
+    /// Persist the last good remaining percent so a relaunch shows it
+    /// immediately. Called at quota-arrival points, not from the getter.
+    private func persistRemaining() {
+        if let value = cachedQuotaRemaining {
+            UserDefaults.standard.set(value, forKey: Self.lastRemainingKey)
+        }
     }
 
     private func currentFrames() -> [NSImage] {
@@ -201,7 +233,8 @@ final class TrayAnimator {
                 guard let self, !Task.isCancelled else { break }
                 if let payload {
                     self.quota = payload
-                    self.renderGaugeIcon()
+                    self.renderGaugeIcon() // refreshes cachedQuotaRemaining
+                    self.persistRemaining()
                     self.onQuotaUpdated?()
                 }
                 try? await Task.sleep(for: .seconds(300))

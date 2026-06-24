@@ -40,8 +40,16 @@ final class StatusItemController: NSObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
-                self.host?.rootView = AnyView(
-                    Color.clear.frame(width: self.chrome.width, height: self.chrome.minHeight))
+                // didCloseNotification fires on a later runloop turn (after the
+                // ~200ms close animation), by which point a fast close→reopen
+                // may already have reinstalled the live view. Re-check on the
+                // next turn and only blank if the popover is still closed, so a
+                // reopen that landed meanwhile isn't swapped to the placeholder.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, !self.popover.isShown else { return }
+                    self.host?.rootView = AnyView(
+                        Color.clear.frame(width: self.chrome.width, height: self.chrome.minHeight))
+                }
             }
         }
 

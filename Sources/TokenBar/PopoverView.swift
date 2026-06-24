@@ -47,12 +47,6 @@ struct PopoverView: View {
                     kbdHints: cmdHeld)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
-                    .onChange(of: stats.presentClients) {
-                        if activeTab != "overview",
-                           !stats.presentClients.contains(activeTab) {
-                            activeTab = "overview"
-                        }
-                    }
             }
             ViewSwitch(active: activeView)
                 .padding(.horizontal, 12)
@@ -81,8 +75,28 @@ struct PopoverView: View {
         .task { await model.pollAgentUsage() }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
-        .onAppear { installKeyMonitors() }
+        .onAppear {
+            installKeyMonitors()
+            // `--tab=` must win even after activeTab is persisted (@AppStorage
+            // only reads the launch default when the key is absent), so the
+            // screenshot/debug flag keeps preselecting the tab on every launch.
+            if let tabArg = CommandLine.arguments
+                .first(where: { $0.hasPrefix("--tab=") })
+                .map({ String($0.dropFirst("--tab=".count)) }) {
+                activeTab = tabArg
+            }
+        }
         .onDisappear { removeKeyMonitors() }
+        // Reset a stale persisted tab whenever the loaded client set changes —
+        // attached to the always-present root, not the tab row (which is hidden
+        // when only one client is present), so a saved client id that no longer
+        // exists can't strand the dashboard on an empty single-client slice
+        // with no visible tab row to return to Overview.
+        .onChange(of: model.stats?.presentClients) { _, clients in
+            if activeTab != "overview", let clients, !clients.contains(activeTab) {
+                activeTab = "overview"
+            }
+        }
     }
 
     // MARK: - Sections
