@@ -31,13 +31,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         startTitleRefresh()
 
         // Re-render the title the moment a setting changes (tray mode, quota
-        // source from the right-click menu or the panel). Cheap: recomputes
-        // from cached data only.
+        // source from the right-click menu or the panel), and restart the
+        // refresh loop so a new data-refresh interval takes effect immediately
+        // instead of stalling until the previous sleep expires.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { _ in
             MainActor.assumeIsolated {
-                (NSApp.delegate as? AppDelegate)?.applyTitle()
+                guard let self = NSApp.delegate as? AppDelegate else { return }
+                self.applyTitle()
+                self.titleRefreshTask?.cancel()
+                self.startTitleRefresh()
             }
         }
 

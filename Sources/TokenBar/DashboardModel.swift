@@ -121,6 +121,10 @@ enum AppView: String, CaseIterable {
         modelReport = report
         colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
+        if let year, !knownYears.contains(year) {
+            self.year = nil
+            UserDefaults.standard.removeObject(forKey: Self.yearKey)
+        }
         phase = .ready
     }
 
