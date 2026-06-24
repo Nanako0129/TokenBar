@@ -12,6 +12,7 @@ final class StatusItemController: NSObject {
     /// Source of truth for the popover's (user-adjustable) height.
     let chrome = PopoverChrome()
     private var defaultsObserver: NSObjectProtocol?
+    private var host: NSHostingController<AnyView>?
 
     override init() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -19,13 +20,29 @@ final class StatusItemController: NSObject {
         super.init()
 
         popover.behavior = .transient
-        let host = NSHostingController(rootView: PopoverView().environmentObject(chrome))
+        let host = NSHostingController(rootView: AnyView(PopoverView().environmentObject(chrome)))
+        self.host = host
         // The SwiftUI root has a fixed frame; let the popover keep our size
         // instead of chasing intrinsic-size updates. The real size is set per
         // open in showPopover() against the status item's actual screen.
         host.sizingOptions = []
         popover.contentSize = NSSize(width: chrome.width, height: chrome.minHeight)
         popover.contentViewController = host
+
+        // Swap the live UI for a placeholder when the popover closes for any
+        // reason (transient outside-click, Esc, programmatic close) — mirrors
+        // the SettingsWindowController pattern. Without this, PopoverView's
+        // .task loops run for the process lifetime because the hosting
+        // controller persists across transient open/close cycles.
+        NotificationCenter.default.addObserver(
+            forName: NSPopover.didCloseNotification, object: popover, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.host?.rootView = AnyView(
+                    Color.clear.frame(width: self.chrome.width, height: self.chrome.minHeight))
+            }
+        }
 
         // The chrome model drives the popover window from three inputs: the
         // bottom drag handle, the settings slider, and the screen-size resolve.
@@ -101,6 +118,9 @@ final class StatusItemController: NSObject {
 
     func showPopover() {
         guard !popover.isShown, let button = statusItem.button else { return }
+        // Reinstall the live PopoverView so its .task loops start fresh
+        // (the previous close swapped it for a static placeholder).
+        host?.rootView = AnyView(PopoverView().environmentObject(chrome))
         // Size against the screen the status item actually lives on (reliable,
         // unlike NSScreen.main at launch with no key window) every time we open.
         let visible = (button.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 900

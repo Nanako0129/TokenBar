@@ -142,11 +142,13 @@ final class TrayAnimator {
             while !Task.isCancelled {
                 guard let self else { break }
                 let style = UserDefaults.standard.string(forKey: Self.styleKey) ?? "cat"
-                // Gauge styles: instant renders happen on settings/quota
-                // changes; this loop just tracks appearance flips.
+                // Gauge styles: event-driven renders happen on quota
+                // changes (onQuotaUpdated) and settings changes (defaults
+                // observer). This loop only catches appearance flips (light/
+                // dark mode), so a long sleep is fine.
                 if QuotaIconStyle(rawValue: style) != nil {
                     self.renderGaugeIcon()
-                    try? await Task.sleep(for: .seconds(2))
+                    try? await Task.sleep(for: .seconds(30))
                     continue
                 }
                 let set = self.currentFrames()
@@ -191,8 +193,9 @@ final class TrayAnimator {
         }
     }
 
-    /// The staticlib's tail re-parses at most every 10s, so poll the live
-    /// rate on that cadence to feed the spin speed.
+    /// Poll the live rate to feed the spin speed. 30s cadence balances
+    /// animation responsiveness against the rayon wakeup cost of each FFI
+    /// call (the staticlib's mtime check wakes the entire rayon pool).
     private func startLoadPolling() {
         loadTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -201,7 +204,7 @@ final class TrayAnimator {
                 }.value
                 guard let self, !Task.isCancelled else { break }
                 if let rate { self.load = min(rate / 10_000.0, 100.0) }
-                try? await Task.sleep(for: .seconds(10))
+                try? await Task.sleep(for: .seconds(30))
             }
         }
     }

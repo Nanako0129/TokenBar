@@ -5,7 +5,7 @@ import TokenBarCore
 /// the status-item controller, and the 60s tray-title refresh loop.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let titleRefreshSecs: UInt64 = 60
+    private static let titleRefreshSecs: UInt64 = 300
 
     private var statusController: StatusItemController?
     private var trayAnimator: TrayAnimator?

@@ -22,3 +22,4 @@ chrono = "0.4"
 # App-data dir resolution (~/Library/Application Support) without Tauri APIs;
 # same version line tokscale-core already pulls in.
 dirs = "5"
+rayon = "1.10"

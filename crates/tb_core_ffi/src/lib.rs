@@ -51,6 +51,19 @@ static RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(|| {
         .expect("build tokio runtime for tb_core_ffi")
 });
 
+/// Cap rayon's global thread pool to 2 workers. tokscale-core uses rayon for
+/// parallel log parsing (55+ par_iter sites); the default pool size is num_cpus
+/// which is fine for a one-shot CLI but ruinous for a resident menu-bar daemon:
+/// each idle worker busy-waits before parking, and every 10s poll wakes the
+/// entire pool for trivial mtime-check work. 2 threads keep I/O parallelism
+/// while cutting idle spinning overhead by ~80%.
+static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(2)
+        .build_global()
+        .ok();
+});
+
 /// year → (computed-at, source token, mapped graph payload). Same role as
 /// the Tauri AppState cache, plus a change token: when the cache entry ages
 /// past the oneshot window but `latest_source_mtime_ms` still matches the
@@ -105,6 +118,7 @@ fn envelope(result: Result<serde_json::Value, String>) -> *mut c_char {
 /// torn: the next call re-derives the graph, and `tail_tick_if_stale` clears its
 /// in-flight flag without stamping on a tick panic so the tail re-parses next.
 fn guarded(name: &str, body: impl FnOnce() -> *mut c_char) -> *mut c_char {
+    LazyLock::force(&RAYON_INIT);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(ptr) => ptr,
         Err(payload) => {
