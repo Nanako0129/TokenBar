@@ -60,11 +60,18 @@ final class TrayAnimator {
         startLoadPolling()
         startQuotaPolling()
         // Re-render the gauge the moment a setting changes (style, coloring,
-        // quota source) — the 30s gauge loop alone is too slow.
+        // quota source) — the 30s gauge loop alone is too slow. Also restart
+        // the animation loop so a gauge→cat/parrot switch takes effect
+        // immediately instead of stalling until the 30s sleep finishes.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.renderGaugeIcon() }
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.renderGaugeIcon()
+                self.animationTask?.cancel()
+                self.startAnimationLoop()
+            }
         }
         // Re-render on dark/light mode flip so gauge icons don't show the
         // wrong color scheme for up to 30s (the gauge loop's sleep interval).

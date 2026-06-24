@@ -5,7 +5,7 @@ import TokenBarCore
 /// the status-item controller, and the tray-title refresh loop.
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
-    private static let titleRefreshSecs: UInt64 = 300
+    private static let defaultRefreshSecs: UInt64 = 300
 
     private var statusController: StatusItemController?
     private var trayAnimator: TrayAnimator?
@@ -106,7 +106,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
                 guard !Task.isCancelled else { break }
                 self?.applyTitle()
-                try? await Task.sleep(for: .seconds(Double(Self.titleRefreshSecs)))
+                let sleepSecs = Double(max(60, intervalMin * 60))
+                try? await Task.sleep(for: .seconds(sleepSecs))
             }
         }
     }

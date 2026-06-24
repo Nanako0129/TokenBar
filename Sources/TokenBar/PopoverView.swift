@@ -47,6 +47,12 @@ struct PopoverView: View {
                     kbdHints: cmdHeld)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
+                    .onChange(of: stats.presentClients) {
+                        if activeTab != "overview",
+                           !stats.presentClients.contains(activeTab) {
+                            activeTab = "overview"
+                        }
+                    }
             }
             ViewSwitch(active: activeView)
                 .padding(.horizontal, 12)

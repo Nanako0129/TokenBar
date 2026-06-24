@@ -23,13 +23,17 @@ enum AppView: String, CaseIterable {
     }
 
     private(set) var phase: Phase = .loading
+    private static let yearKey = "tokenbar.dashboard.year"
+
     /// Year filter for every lens (HeaderBar's year select in the Tauri app);
-    /// nil = all time. Not persisted, matching the web app's useState.
+    /// nil = all time. Persisted so the selection survives the popover's
+    /// rootView teardown/rebuild cycle.
     /// `--year=<yyyy>` preselects a year (debug/screenshot aid).
     private(set) var year: String? =
         CommandLine.arguments
             .first(where: { $0.hasPrefix("--year=") })
             .map { String($0.dropFirst("--year=".count)) }
+        ?? UserDefaults.standard.string(forKey: yearKey)
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
@@ -81,6 +85,7 @@ enum AppView: String, CaseIterable {
     func setYear(_ newYear: String?) async {
         guard newYear != year, !refreshing else { return }
         year = newYear
+        UserDefaults.standard.set(newYear, forKey: Self.yearKey)
         refreshing = true
         defer { refreshing = false }
         await reload(force: false)
