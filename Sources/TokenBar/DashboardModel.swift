@@ -11,19 +11,56 @@ enum AppView: String, CaseIterable {
     var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
 }
 
+/// Snapshot of the model's essential state, captured on each successful
+/// load so a fresh DashboardModel can start in `.ready` state instead of
+/// flashing "Loading usage…" every time the popover reopens.
+private struct DashboardSnapshot {
+    let payload: UsagePayload
+    let stats: UsageStats
+    let modelReport: ModelReport?
+    let colors: ModelColorMap
+    let knownYears: [String]
+    let year: String?
+    let hourly: HourlyReport?
+    let agents: AgentsReport?
+    let agentUsage: AgentUsagePayload?
+    let trace: [TraceBucket]
+}
+
 /// Shared dashboard data for every lens. Base data (graph + model report)
 /// loads when the popover opens; the hourly/agents reports load lazily the
 /// first time their lens becomes active, mirroring the Tauri app's
 /// empty-year short-circuit hooks.
 @MainActor @Observable final class DashboardModel {
+    /// Survives the model's deallocation so the next PopoverView starts
+    /// with cached data instead of `.loading`.
+    private static var lastSnapshot: DashboardSnapshot?
     enum Phase {
         case loading
         case ready
         case failed(String)
     }
 
-    private(set) var phase: Phase = .loading
+    private(set) var phase: Phase
     private static let yearKey = "tokenbar.dashboard.year"
+
+    init() {
+        if let snap = Self.lastSnapshot {
+            payload = snap.payload
+            stats = snap.stats
+            modelReport = snap.modelReport
+            colors = snap.colors
+            knownYears = snap.knownYears
+            year = snap.year
+            hourly = snap.hourly
+            agents = snap.agents
+            agentUsage = snap.agentUsage
+            trace = snap.trace
+            phase = .ready
+        } else {
+            phase = .loading
+        }
+    }
 
     /// Year filter for every lens (HeaderBar's year select in the Tauri app);
     /// nil = all time. Persisted so the selection survives the popover's
@@ -139,6 +176,11 @@ enum AppView: String, CaseIterable {
         colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
+        Self.lastSnapshot = DashboardSnapshot(
+            payload: payload, stats: stats!, modelReport: report,
+            colors: colors, knownYears: knownYears, year: year,
+            hourly: hourly, agents: agents, agentUsage: agentUsage,
+            trace: trace)
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
