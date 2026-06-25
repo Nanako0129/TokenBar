@@ -8,6 +8,9 @@ import TokenBarCore
 /// changes reflect instantly without touching the popover's transient
 /// behavior.
 struct SettingsWindowView: View {
+    // Default cachesSnapshot: false — this window's model must never write the
+    // popover's restore snapshot (its `year` is frozen at init; clobbering the
+    // cache with it would re-introduce the reopen flash).
     @State private var model = DashboardModel()
     @State private var tokensPerMin: Double?
 

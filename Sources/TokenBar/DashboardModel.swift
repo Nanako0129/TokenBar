@@ -14,6 +14,14 @@ enum AppView: String, CaseIterable {
 /// Snapshot of the model's essential state, captured on each successful
 /// load so a fresh DashboardModel can start in `.ready` state instead of
 /// flashing "Loading usage…" every time the popover reopens.
+///
+/// Only `hourly`/`agents` are excluded: they are the lazy lenses that
+/// `ensureData(for:)` refetches *solely when nil*, so restoring stale non-nil
+/// values would strand them on a previous year's slice (Codex P2-1/P2-3)
+/// until the 60s pollGraph tick. `agentUsage`/`trace` are NOT lazy lenses —
+/// their pollers (`pollAgentUsage`/`pollTrace`) fetch-first and overwrite
+/// unconditionally — so caching them is staleness-free and keeps the Overview
+/// tab's live/quota cards populated on reopen instead of flashing placeholders.
 private struct DashboardSnapshot {
     let payload: UsagePayload
     let stats: UsageStats
@@ -21,8 +29,6 @@ private struct DashboardSnapshot {
     let colors: ModelColorMap
     let knownYears: [String]
     let year: String?
-    let hourly: HourlyReport?
-    let agents: AgentsReport?
     let agentUsage: AgentUsagePayload?
     let trace: [TraceBucket]
 }
@@ -32,9 +38,22 @@ private struct DashboardSnapshot {
 /// first time their lens becomes active, mirroring the Tauri app's
 /// empty-year short-circuit hooks.
 @MainActor @Observable final class DashboardModel {
-    /// Survives the model's deallocation so the next PopoverView starts
-    /// with cached data instead of `.loading`.
+    /// Survives the model's deallocation so the next PopoverView starts with
+    /// cached data instead of `.loading`. A deliberate process-lifetime cache
+    /// (one COW-shared value snapshot, never invalidated). Every model may
+    /// *read* it on init, but only the popover's model *writes* it (gated by
+    /// `cachesSnapshot`): SettingsWindowView's independent DashboardModel runs
+    /// the same poll loops on a year frozen at its own init, so letting it
+    /// write here would clobber the snapshot with the settings model's stale
+    /// year and re-introduce the reopen flash. TODO: the cleaner end-state is
+    /// StatusItemController owning one long-lived DashboardModel injected via
+    /// `.environment`, with the poll loops started/stopped explicitly on
+    /// popover open/close — that deletes this static, DashboardSnapshot, and
+    /// the year guard while preserving the Phase B CPU win.
     private static var lastSnapshot: DashboardSnapshot?
+    /// Whether this model owns the shared `lastSnapshot` (true only for the
+    /// popover's model, whose teardown/rebuild is what the cache speeds up).
+    private let cachesSnapshot: Bool
     enum Phase {
         case loading
         case ready
@@ -44,16 +63,37 @@ private struct DashboardSnapshot {
     private(set) var phase: Phase
     private static let yearKey = "tokenbar.dashboard.year"
 
-    init() {
-        if let snap = Self.lastSnapshot {
+    /// Resolve the active year filter: the `--year=` debug flag wins, else the
+    /// persisted selection. Shared by `init()`'s snapshot guard and the `year`
+    /// property initializer so the two can never drift (the guard MUST compute
+    /// the same value the property does, or it would mis-classify a consistent
+    /// snapshot as stale). nil = all time.
+    private static func resolveYear() -> String? {
+        CommandLine.arguments
+            .first(where: { $0.hasPrefix("--year=") })
+            .map { String($0.dropFirst("--year=".count)) }
+            ?? UserDefaults.standard.string(forKey: yearKey)
+    }
+
+    /// `cachesSnapshot` = true only for the popover's model (PopoverView), the
+    /// one whose per-open teardown/rebuild the cache exists to speed up; the
+    /// settings window passes false so it never writes the shared snapshot.
+    init(cachesSnapshot: Bool = false) {
+        self.cachesSnapshot = cachesSnapshot
+        // Guard snapshot restore on year-consistency: if the user changed the
+        // year filter after the snapshot was written (e.g. setYear() persisted
+        // the new year but reload() failed before apply() ran), the cached
+        // payload is for the wrong slice — fall through to .loading so load()
+        // fetches fresh. resolveYear() is a static (no `self`); @Observable
+        // turns `year` into a computed accessor that touches self, so it is not
+        // readable here until `phase` is set — hence the shared static helper,
+        // which mirrors the `year` property initializer exactly.
+        if let snap = Self.lastSnapshot, snap.year == Self.resolveYear() {
             payload = snap.payload
             stats = snap.stats
             modelReport = snap.modelReport
             colors = snap.colors
             knownYears = snap.knownYears
-            year = snap.year
-            hourly = snap.hourly
-            agents = snap.agents
             agentUsage = snap.agentUsage
             trace = snap.trace
             phase = .ready
@@ -66,11 +106,7 @@ private struct DashboardSnapshot {
     /// nil = all time. Persisted so the selection survives the popover's
     /// rootView teardown/rebuild cycle.
     /// `--year=<yyyy>` preselects a year (debug/screenshot aid).
-    private(set) var year: String? =
-        CommandLine.arguments
-            .first(where: { $0.hasPrefix("--year=") })
-            .map { String($0.dropFirst("--year=".count)) }
-        ?? UserDefaults.standard.string(forKey: yearKey)
+    private(set) var year: String? = DashboardModel.resolveYear()
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
@@ -95,6 +131,11 @@ private struct DashboardSnapshot {
             }.value
             let payload = try await payloadTask
             let report = await reportTask
+            // The year may have changed while we were off-actor (the user can
+            // open the year menu during the initial load); drop a stale slice
+            // so apply() never tags the new year — and the static snapshot —
+            // with the old year's payload. Mirrors reload()/pollGraph().
+            guard self.year == year else { return }
             apply(payload: payload, report: report)
         } catch {
             // Keep showing stale data over an error screen when a previous
@@ -176,11 +217,37 @@ private struct DashboardSnapshot {
         colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
+        cacheSnapshot()
+    }
+
+    /// Capture the full restore cache from the current state. Called ONLY from
+    /// apply(), where the year-scoped payload/stats and `year` are set together
+    /// and `year` has been validated against the payload — so the snapshot's
+    /// `year` always matches the slice its `payload` holds. No-op unless this
+    /// model owns the cache and a base payload has loaded.
+    private func cacheSnapshot() {
+        guard cachesSnapshot, let payload, let stats else { return }
         Self.lastSnapshot = DashboardSnapshot(
-            payload: payload, stats: stats!, modelReport: report,
+            payload: payload, stats: stats, modelReport: modelReport,
             colors: colors, knownYears: knownYears, year: year,
-            hourly: hourly, agents: agents, agentUsage: agentUsage,
-            trace: trace)
+            agentUsage: agentUsage, trace: trace)
+    }
+
+    /// Refresh only the live, year-independent fields (agentUsage/trace) of the
+    /// existing snapshot from their pollers, keeping the payload/year pair that
+    /// apply() last wrote. The pollers run outside apply() and must NOT
+    /// re-capture payload/year: self.year can momentarily disagree with
+    /// self.payload mid year-switch (setYear flips year before reload's apply
+    /// lands) or after the empty-year auto-clear, and writing that pair would
+    /// mis-tag a stale payload with a changed year that the init guard can't
+    /// catch. Preserving snap.payload/snap.year keeps the cache consistent.
+    /// No-op until apply() has written a base snapshot.
+    private func refreshSnapshotLiveData() {
+        guard cachesSnapshot, let snap = Self.lastSnapshot else { return }
+        Self.lastSnapshot = DashboardSnapshot(
+            payload: snap.payload, stats: snap.stats, modelReport: snap.modelReport,
+            colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
+            agentUsage: agentUsage, trace: trace)
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
@@ -239,7 +306,10 @@ private struct DashboardSnapshot {
                 try TBCore.agentUsage()
             }.value
             if Task.isCancelled { break }
-            if let payload { agentUsage = payload }
+            if let payload {
+                agentUsage = payload
+                refreshSnapshotLiveData() // keep the reopen cache's quota cards current
+            }
             try? await Task.sleep(for: .seconds(60))
         }
     }
@@ -253,23 +323,36 @@ private struct DashboardSnapshot {
                 try TBCore.usageTrace(windowSecs: 600)
             }.value
             if Task.isCancelled { break }
-            if let buckets { trace = buckets }
+            if let buckets {
+                trace = buckets
+                refreshSnapshotLiveData() // keep the reopen cache's live trace current
+            }
             try? await Task.sleep(for: .seconds(10))
         }
     }
 
-    /// Fetch the lazy per-lens reports on first activation.
+    /// Fetch the lazy per-lens reports on first activation — and, because
+    /// PopoverView's `.task` is keyed on the year too, again for the active
+    /// lens after a year switch. Re-checks the year after the off-actor fetch
+    /// (mirrors load()/reload()/pollGraph()): a year change mid-fetch drops the
+    /// stale slice instead of stranding the previous year's report on the lens,
+    /// and the keyed `.task` re-fires to fetch the new year while the report is
+    /// still nil (reload()'s lazy re-fetch only covers an already-loaded lens).
     func ensureData(for view: AppView) async {
         let year = self.year
         switch view {
         case .hourly where hourly == nil:
-            hourly = await Task.detached(priority: .userInitiated) {
+            let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.hourlyReport(year: year)
             }.value
+            guard self.year == year else { return }
+            hourly = report
         case .agents where agents == nil:
-            agents = await Task.detached(priority: .userInitiated) {
+            let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.agentsReport(year: year)
             }.value
+            guard self.year == year else { return }
+            agents = report
         default:
             break
         }

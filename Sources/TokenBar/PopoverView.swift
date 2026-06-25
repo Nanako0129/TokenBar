@@ -10,7 +10,9 @@ struct PopoverView: View {
     /// Height at the start of the active resize drag (global-space gesture).
     @State private var dragBase: CGFloat?
 
-    @State private var model = DashboardModel()
+    // The popover's model owns the shared restore snapshot — its per-open
+    // teardown/rebuild is exactly what the cache exists to speed up.
+    @State private var model = DashboardModel(cachesSnapshot: true)
     @State private var tokensPerMin: Double?
     /// True while Cmd has been held alone for a beat — shows shortcut pins.
     @State private var cmdHeld = false
@@ -68,7 +70,12 @@ struct PopoverView: View {
         .background(PopoverBackdrop().ignoresSafeArea())
         .overlay(alignment: .bottom) { resizeHandle }
         .task { await model.load() }
-        .task(id: activeViewRaw) {
+        // Keyed on the year too: a year switch must re-fetch the active lazy
+        // lens (Hourly/Agents) for the new slice. Without the year in the key,
+        // switching years while parked on Hourly/Agents would keep showing the
+        // old year (reload()'s lazy re-fetch only refreshes an already-loaded
+        // lens, so a lens still nil from the reopen would never reload).
+        .task(id: "\(activeViewRaw)|\(model.year ?? "")") {
             await model.ensureData(for: activeView.wrappedValue)
         }
         .task { await pollTokensPerMin() }
