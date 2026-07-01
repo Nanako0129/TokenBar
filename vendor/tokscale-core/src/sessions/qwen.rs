@@ -84,6 +84,9 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let reader = BufReader::new(file);
     let mut messages: Vec<UnifiedMessage> = Vec::new();
+    // Qwen JSONL lines carry no per-message id, so anchor the dedup key to the
+    // stable position of the emitted message within its session.
+    let mut message_index: usize = 0;
 
     for line in reader.lines() {
         let line = match line {
@@ -137,7 +140,10 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
         let line_session_id =
             extract_session_id_with_fallback(path, qwen_line.session_id.as_deref());
 
-        let mut unified = UnifiedMessage::new(
+        let dedup_key = Some(format!("qwen:{line_session_id}:{message_index}"));
+        message_index += 1;
+
+        let mut unified = UnifiedMessage::new_with_dedup(
             "qwen",
             model,
             DEFAULT_PROVIDER,
@@ -151,6 +157,7 @@ pub fn parse_qwen_file(path: &Path) -> Vec<UnifiedMessage> {
                 reasoning,
             },
             0.0, // Cost calculated later by pricing resolver
+            dedup_key,
         );
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
@@ -524,5 +531,33 @@ not valid json at all
             messages[2].session_id.contains("mixed")
                 || messages[2].session_id.contains("test_project")
         );
+    }
+
+    /// #760 regression: qwen JSONL lines carry no per-message id, so each emitted
+    /// message must get a stable position-anchored dedup key
+    /// (`qwen:<session>:<index>`) and re-parsing must reproduce it. Without a
+    /// dedup key, an incremental re-parse double-counts the same messages.
+    #[test]
+    fn test_parse_qwen_emits_stable_positional_dedup_keys() {
+        let content = r#"{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:24:56.857Z", "sessionId": "sess_dk", "usageMetadata": {"promptTokenCount": 100, "candidatesTokenCount": 200, "thoughtsTokenCount": 0, "cachedContentTokenCount": 0}}
+{"type": "assistant", "model": "qwen3.5-plus", "timestamp": "2026-02-23T14:25:00.000Z", "sessionId": "sess_dk", "usageMetadata": {"promptTokenCount": 300, "candidatesTokenCount": 400, "thoughtsTokenCount": 0, "cachedContentTokenCount": 0}}"#;
+        let (_dir, path) = create_test_file_with_name(content, "dedupkeys");
+
+        let messages = parse_qwen_file(&path);
+        assert_eq!(messages.len(), 2);
+        let session = messages[0].session_id.clone();
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some(format!("qwen:{session}:0").as_str())
+        );
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some(format!("qwen:{session}:1").as_str())
+        );
+        // Re-parsing the same file yields identical keys, so the dedup set
+        // collapses them instead of double-counting.
+        let reparsed = parse_qwen_file(&path);
+        assert_eq!(reparsed[0].dedup_key, messages[0].dedup_key);
+        assert_eq!(reparsed[1].dedup_key, messages[1].dedup_key);
     }
 }

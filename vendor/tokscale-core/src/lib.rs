@@ -7138,7 +7138,8 @@ mod tests {
         assert_eq!(parsed.messages.len(), 1);
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
-        assert_eq!(parsed.messages[0].provider_id, "fireworks");
+        // opencode canonicalizes the raw "fireworks" gateway id to "fireworks_ai" (#760).
+        assert_eq!(parsed.messages[0].provider_id, "fireworks_ai");
     }
 
     #[test]
@@ -7168,7 +7169,8 @@ mod tests {
         );
         assert_eq!(messages[0].client, "opencode");
         assert_eq!(messages[0].model_id, "deepseek-v3-0324");
-        assert_eq!(messages[0].provider_id, "fireworks");
+        // opencode canonicalizes the raw "fireworks" gateway id to "fireworks_ai" (#760).
+        assert_eq!(messages[0].provider_id, "fireworks_ai");
     }
 
     #[test]
@@ -7203,7 +7205,8 @@ mod tests {
         );
         assert_eq!(parsed.messages[0].client, "opencode");
         assert_eq!(parsed.messages[0].model_id, "deepseek-v3-0324");
-        assert_eq!(parsed.messages[0].provider_id, "fireworks");
+        // opencode canonicalizes the raw "fireworks" gateway id to "fireworks_ai" (#760).
+        assert_eq!(parsed.messages[0].provider_id, "fireworks_ai");
     }
 
     #[test]

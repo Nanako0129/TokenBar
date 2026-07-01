@@ -4,6 +4,7 @@
 
 use super::utils::file_modified_timestamp_ms;
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::io::{BufRead, BufReader};
@@ -128,9 +129,14 @@ pub fn parse_pi_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
+        // A missing provider field is recoverable: infer it from the model name
+        // (and fall back to "pi") rather than dropping a message that carries
+        // valid tokens.
         let provider = match message.provider {
             Some(p) => p,
-            None => continue,
+            None => inferred_provider_from_model(&model)
+                .unwrap_or("pi")
+                .to_string(),
         };
 
         let timestamp = entry
@@ -241,5 +247,29 @@ not valid json
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o-mini");
         assert_eq!(messages[0].provider_id, "openai");
+    }
+
+    /// #760 regression: a message carrying valid tokens but NO provider field is
+    /// recovered (provider inferred from the model, falling back to "pi") instead
+    /// of being dropped. The pre-#760 parser did `None => continue`, silently
+    /// discarding the spend.
+    #[test]
+    fn test_parse_pi_missing_provider_recovered_not_dropped() {
+        // Model "m" yields no inferred provider, so the parser falls back to
+        // "pi" and keeps the message rather than discarding its tokens.
+        let content = r#"{"type":"session","id":"pi_ses_np","timestamp":"2026-01-01T00:00:00.000Z","cwd":"/tmp"}
+{"type":"message","id":"msg_np","timestamp":"2026-01-01T00:00:01.000Z","message":{"role":"assistant","model":"m","usage":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"totalTokens":150}}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_pi_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "missing provider must be recovered, not dropped"
+        );
+        assert_eq!(messages[0].provider_id, "pi");
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 50);
     }
 }
