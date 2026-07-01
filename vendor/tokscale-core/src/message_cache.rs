@@ -15,7 +15,13 @@ use std::time::UNIX_EPOCH;
 // token_count dedup key to the fork parent, and keeps user-fork turns after
 // repeated child session_meta rows. Cached messages store their dedup_key and
 // older entries can be empty, so they must be reparsed.
-const CACHE_SCHEMA_VERSION: u32 = 19;
+// 20 (#760 vendoring): session parsers now canonicalize provider ids
+// (fireworks->fireworks_ai, vertex/gemini/azure aliases), recover
+// missing-provider messages (gjc/pi), infer codex provider from the model, and
+// emit stable dedup keys (qwen/mux) — all of which change cached parser output,
+// so stale entries must be reparsed. (Our own schema counter; do not mirror
+// upstream's number.)
+const CACHE_SCHEMA_VERSION: u32 = 20;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

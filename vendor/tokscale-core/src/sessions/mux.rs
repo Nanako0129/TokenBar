@@ -73,8 +73,7 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
 
     by_model
         .into_iter()
-        .enumerate()
-        .filter_map(|(index, (model_key, model_usage))| {
+        .filter_map(|(model_key, model_usage)| {
             let tokens =
                 |b: &Option<MuxTokenBucket>| b.as_ref().and_then(|b| b.tokens).unwrap_or(0).max(0);
             let cost =
@@ -94,9 +93,14 @@ pub fn parse_mux_file(path: &Path) -> Vec<UnifiedMessage> {
                 return None;
             }
 
-            // Stable per-row dedup key so incremental re-parse collapses the
-            // same model entry instead of double-counting it.
-            let dedup_key = Some(format!("mux:{model_key}:{index}"));
+            // Dedup key scoped to (workspace session, model): stable across
+            // re-parses (no HashMap-iteration index) and unique per workspace,
+            // so two workspaces reporting the same model are not collided into
+            // one — only a genuine re-parse of the same workspace+model
+            // collapses. Local fix: upstream #760 keyed on the HashMap
+            // iteration index, which is unstable across re-parses and collides
+            // cross-file (reported upstream).
+            let dedup_key = Some(format!("mux:{session_id}:{model_key}"));
 
             // Strip "provider:" prefix for model ID (e.g., "anthropic:claude-opus-4-6" -> "claude-opus-4-6")
             let (provider, model_id) = if model_key.contains(':') {
@@ -317,5 +321,46 @@ mod tests {
         assert_eq!(msgs.len(), 1);
         assert_eq!(msgs[0].provider_id, "provider");
         assert_eq!(msgs[0].model_id, "sub:model-name");
+    }
+
+    /// Local fix over upstream #760: the dedup key is scoped to the workspace
+    /// session (parent dir name), not the HashMap iteration index. Two
+    /// workspaces reporting the SAME model must produce DIFFERENT dedup keys so
+    /// the streaming per-client seen set keeps both instead of dropping the
+    /// second; re-parsing the same workspace reproduces the key so a genuine
+    /// duplicate still collapses.
+    #[test]
+    fn test_mux_dedup_key_scoped_by_workspace_not_hashmap_index() {
+        use std::fs;
+        let json = r#"{ "version": 1, "byModel": {
+            "anthropic:claude-opus-4-6": { "input": { "tokens": 100, "cost_usd": 0.01 }, "output": { "tokens": 50, "cost_usd": 0.005 } }
+        }, "lastRequest": { "timestamp": 1700000000000 } }"#;
+        let root = tempfile::TempDir::new().unwrap();
+        let ws_a = root.path().join("ws_alpha");
+        let ws_b = root.path().join("ws_beta");
+        fs::create_dir_all(&ws_a).unwrap();
+        fs::create_dir_all(&ws_b).unwrap();
+        let file_a = ws_a.join("session-usage.json");
+        let file_b = ws_b.join("session-usage.json");
+        fs::write(&file_a, json).unwrap();
+        fs::write(&file_b, json).unwrap();
+
+        let a = parse_mux_file(&file_a);
+        let b = parse_mux_file(&file_b);
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        // Same model, different workspaces -> distinct keys (both survive the
+        // cross-file dedup gate instead of colliding on "mux:<model>:0").
+        assert_eq!(
+            a[0].dedup_key.as_deref(),
+            Some("mux:ws_alpha:anthropic:claude-opus-4-6")
+        );
+        assert_eq!(
+            b[0].dedup_key.as_deref(),
+            Some("mux:ws_beta:anthropic:claude-opus-4-6")
+        );
+        assert_ne!(a[0].dedup_key, b[0].dedup_key);
+        // Re-parsing the same workspace reproduces the key (true duplicate).
+        assert_eq!(parse_mux_file(&file_a)[0].dedup_key, a[0].dedup_key);
     }
 }
