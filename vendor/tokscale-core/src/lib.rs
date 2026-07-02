@@ -1156,9 +1156,16 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::RooCode)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::roocode::parse_roocode_file(path)
-            })
+            // from_roo_path folds the sibling api_conversation_history.json into
+            // the fingerprint (parse_roo_kilo_file reads model/agent from it), so
+            // a history-only rewrite invalidates the cache (#741).
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_roo_path,
+                sessions::roocode::parse_roocode_file,
+            )
         })
         .collect();
     for outcome in roocode_outcomes {
@@ -1172,9 +1179,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::KiloCode)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kilocode::parse_kilocode_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_roo_path,
+                sessions::kilocode::parse_kilocode_file,
+            )
         })
         .collect();
     for outcome in kilocode_outcomes {
@@ -1188,9 +1199,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Cline)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::cline::parse_cline_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_roo_path,
+                sessions::cline::parse_cline_file,
+            )
         })
         .collect();
     for outcome in cline_outcomes {
@@ -2255,9 +2270,24 @@ where
     simple_lane!(ClientId::Pi,        sessions::pi::parse_pi_file);
     simple_lane!(ClientId::Kimi,      sessions::kimi::parse_kimi_file);
     simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
-    simple_lane!(ClientId::RooCode,   sessions::roocode::parse_roocode_file);
-    simple_lane!(ClientId::KiloCode,  sessions::kilocode::parse_kilocode_file);
-    simple_lane!(ClientId::Cline,     sessions::cline::parse_cline_file);
+    // roo family: fingerprint via from_roo_path so a history-only rewrite of the
+    // sibling api_conversation_history.json (which parse_roo_kilo_file reads for
+    // model/agent) invalidates the cached lane (#741).
+    simple_lane!(
+        ClientId::RooCode,
+        sessions::roocode::parse_roocode_file,
+        message_cache::SourceFingerprint::from_roo_path
+    );
+    simple_lane!(
+        ClientId::KiloCode,
+        sessions::kilocode::parse_kilocode_file,
+        message_cache::SourceFingerprint::from_roo_path
+    );
+    simple_lane!(
+        ClientId::Cline,
+        sessions::cline::parse_cline_file,
+        message_cache::SourceFingerprint::from_roo_path
+    );
     simple_lane!(
         ClientId::Jcode,
         sessions::jcode::parse_jcode_file,

@@ -21,7 +21,13 @@ use std::time::UNIX_EPOCH;
 // emit stable dedup keys (qwen/mux) — all of which change cached parser output,
 // so stale entries must be reparsed. (Our own schema counter; do not mirror
 // upstream's number.)
-const CACHE_SCHEMA_VERSION: u32 = 20;
+// 21 (M5b: vendoring our own upstream-merged fixes): codex same-millisecond
+// fork-replay gate (#735), micode row-id-fallback dedup namespaced by db (#742),
+// and gjc header-less session fallback by file name (#743) all change cached
+// dedup keys / codex token output, so stale entries must be reparsed. (#741
+// roo-family sibling fingerprinting also invalidates naturally, and #737's
+// antigravity-cli timestamps converge with our dropped local patch.)
+const CACHE_SCHEMA_VERSION: u32 = 21;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -184,6 +190,20 @@ impl SourceFingerprint {
     pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
         let related_paths =
             std::iter::once((".journal.jsonl".to_string(), jcode_journal_path(path)));
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint for a Roo-family task (`ui_messages.json`) and its sibling
+    /// `api_conversation_history.json`. `parse_roo_kilo_file` reads the history
+    /// sibling for the model and agent, so a history-only rewrite (the UI file
+    /// unchanged) must still invalidate the cache or reports keep stale
+    /// model/agent/pricing.
+    pub(crate) fn from_roo_path(path: &Path) -> Option<Self> {
+        let history = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("api_conversation_history.json");
+        let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
         Self::from_path_with_related(path, related_paths)
     }
 
@@ -965,6 +985,37 @@ mod tests {
         assert_eq!(
             plain_before, plain_after,
             "from_path ignores the journal sibling (control)"
+        );
+    }
+
+    #[test]
+    fn from_roo_path_invalidates_on_history_only_change() {
+        // parse_roo_kilo_file reads model/agent from the sibling
+        // api_conversation_history.json, so a history-only rewrite (ui_messages
+        // byte-identical) must change the fingerprint or the cache serves stale
+        // model/agent/pricing.
+        let dir = TempDir::new().unwrap();
+        let ui = dir.path().join("ui_messages.json");
+        std::fs::write(&ui, b"[]").unwrap();
+        let history = dir.path().join("api_conversation_history.json");
+        std::fs::write(&history, b"<model>claude-sonnet-4</model>").unwrap();
+
+        let roo_before = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_before = SourceFingerprint::from_path(&ui).unwrap();
+
+        // Rewrite the history only; leave ui_messages.json byte-identical.
+        std::fs::write(&history, b"<model>claude-opus-4</model>").unwrap();
+
+        let roo_after = SourceFingerprint::from_roo_path(&ui).unwrap();
+        let plain_after = SourceFingerprint::from_path(&ui).unwrap();
+
+        assert_ne!(
+            roo_before, roo_after,
+            "a history-only change must alter the roo fingerprint"
+        );
+        assert_eq!(
+            plain_before, plain_after,
+            "from_path ignores the history sibling (control)"
         );
     }
 
