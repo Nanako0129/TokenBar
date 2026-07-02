@@ -1942,9 +1942,22 @@ pub async fn get_agents_report(options: ReportOptions) -> Result<AgentReport, St
     // Cost desc, then total-tokens desc — matches the old FFI agents report
     // ordering. This token-total formula MUST stay identical to the `total`
     // computed in the FFI mapper (crates/tb_core_ffi/src/agents_report.rs).
+    // saturating_add so #766's i64::MAX-clamped buckets from a corrupt
+    // Antigravity DB can't overflow the sort key (matches the model report's
+    // saturating total; for normal >=0 tokens the result is unchanged).
     entries.sort_by(|a, b| {
-        let a_total = a.input + a.output + a.cache_read + a.cache_write + a.reasoning;
-        let b_total = b.input + b.output + b.cache_read + b.cache_write + b.reasoning;
+        let a_total = a
+            .input
+            .saturating_add(a.output)
+            .saturating_add(a.cache_read)
+            .saturating_add(a.cache_write)
+            .saturating_add(a.reasoning);
+        let b_total = b
+            .input
+            .saturating_add(b.output)
+            .saturating_add(b.cache_read)
+            .saturating_add(b.cache_write)
+            .saturating_add(b.reasoning);
         b.cost
             .partial_cmp(&a.cost)
             .unwrap_or(std::cmp::Ordering::Equal)

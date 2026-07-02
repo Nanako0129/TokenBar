@@ -77,8 +77,15 @@ fn map_report(report: tokscale_core::AgentReport) -> AgentsReportData {
                 // Single source of the `total` formula; it MUST stay identical
                 // to the token-total used for the cost-then-total sort in
                 // tokscale-core's get_agents_report. The core preserves order,
-                // so this mapper does NOT re-sort.
-                let total = e.input + e.output + e.cache_read + e.cache_write + e.reasoning;
+                // so this mapper does NOT re-sort. saturating_add so #766's
+                // i64::MAX-clamped buckets (corrupt Antigravity DB) can't
+                // overflow this FFI-exposed total in debug/release.
+                let total = e
+                    .input
+                    .saturating_add(e.output)
+                    .saturating_add(e.cache_read)
+                    .saturating_add(e.cache_write)
+                    .saturating_add(e.reasoning);
                 AgentEntry {
                     agent: e.agent,
                     clients: e.clients,
@@ -95,5 +102,36 @@ fn map_report(report: tokscale_core::AgentReport) -> AgentsReportData {
             .collect(),
         total_cost: report.total_cost,
         total_messages: report.total_messages,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #766 clamps corrupt Antigravity varints to `i64::MAX` per bucket. Two
+    /// such buckets in one agent entry must saturate the mapped `total`, not
+    /// overflow it (a plain `+` panics in debug / wraps in release).
+    #[test]
+    fn total_saturates_on_overlarge_buckets() {
+        let report = tokscale_core::AgentReport {
+            entries: vec![tokscale_core::AgentReportEntry {
+                agent: "Main".to_string(),
+                clients: vec!["antigravity_cli".to_string()],
+                input: i64::MAX,
+                output: i64::MAX,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+                cost: 0.0,
+                messages: 1,
+            }],
+            total_cost: 0.0,
+            total_messages: 1,
+            processing_time_ms: 0,
+        };
+
+        let mapped = map_report(report);
+        assert_eq!(mapped.entries[0].total, i64::MAX);
     }
 }
