@@ -12,25 +12,44 @@ struct AgentIconView: View {
     var size: CGFloat = 14
 
     private static let monoIds: Set<String> = [
-        "claude", "gemini", "opencode", "copilot", "cursor", "amp", "pi",
-        "kimi", "qwen", "warp",
+        "claude", "gemini", "opencode", "copilot", "qwen",
     ]
     private static let fullIds: Set<String> = [
-        "codex", "droid", "kilocode", "kilo", "synthetic", "codebuff",
-        "antigravity", "kiro",
+        "codex", "droid", "kilocode", "synthetic", "codebuff",
+        "antigravity", "kiro", "cursor", "warp", "amp", "pi", "kimi",
         // Official brand icons for the newer local clients (png/svg).
         "cline", "jcode", "micode", "gjc",
+        // Newly onboarded brand icons (png/svg).
+        "hermes", "roocode", "mux", "crush", "goose", "zed", "trae", "openclaw",
     ]
 
     /// Clients that share another client's brand icon. The Antigravity CLI is
-    /// the same product family as the Antigravity IDE and uses its logo.
+    /// the same product family as the Antigravity IDE and uses its logo; Kilo
+    /// CLI and KiloCode are the same Kilo-Org brand.
     private static let iconAliases: [String: String] = [
         "antigravity-cli": "antigravity",
+        "kilo": "kilocode",
     ]
 
-    /// Full icons whose mark is dark and mostly transparent, so they need a
-    /// light disc behind to stay visible on a dark popover.
-    private static let lightBackedIds: Set<String> = ["cline"]
+    /// Full icons whose mark has no opaque background of its own (dark ink or
+    /// light text on transparent), so they need a solid disc behind them to
+    /// stay legible against the popover. Color chosen per-icon to match how
+    /// the brand actually presents the mark (e.g. Cline/Hermes/Codex's marks
+    /// are dark-on-light; Mux/Amp's marks are light-on-dark).
+    private static let backgroundFills: [String: Color] = [
+        "cline": .white,
+        "hermes": .white,
+        "codex": .white,
+        "mux": .black,
+        "amp": .black,
+    ]
+
+    /// Full icons whose source art reaches the edges of its square canvas
+    /// (antennae, ears, corners) and would be clipped by the circular mask at
+    /// 100% scale — rendered slightly inset instead.
+    private static let insetScale: [String: CGFloat] = [
+        "cline": 0.82,
+    ]
 
     /// Resolve the id whose `agent-icons/<id>.svg` should render for a client.
     private static func iconId(_ clientId: String) -> String {
@@ -60,14 +79,17 @@ struct AgentIconView: View {
         ZStack {
             if Self.fullIds.contains(iconId), let image = Self.image(iconId) {
                 ZStack {
-                    // Dark, mostly-transparent marks (e.g. Cline's robot) are
-                    // invisible on a dark popover; back them with a light disc.
-                    if Self.lightBackedIds.contains(iconId) {
-                        Circle().fill(.white)
+                    // Marks with no opaque background of their own (dark ink
+                    // or light text on transparent) are invisible on their
+                    // own; back them with a solid disc in the brand's color.
+                    if let fill = Self.backgroundFills[iconId] {
+                        Circle().fill(fill)
                     }
+                    let scale = Self.insetScale[iconId] ?? 1
                     Image(nsImage: image)
                         .resizable()
                         .scaledToFit()
+                        .frame(width: size * scale, height: size * scale)
                         .clipShape(Circle())
                 }
             } else {

@@ -83,6 +83,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 SettingsWindowController.shared.show()
             }
         }
+        if CommandLine.arguments.contains("--icon-gallery") {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                IconGalleryWindowController.show()
+            }
+        }
     }
 
     func applicationWillTerminate(_ notification: Notification) {
