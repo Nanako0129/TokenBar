@@ -1247,12 +1247,18 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    // micode: WAL-mode SQLite, cached via from_sqlite_path (-wal-aware).
+    // micode: WAL-mode SQLite, cached via from_sqlite_path (-wal-aware). Pass
+    // pricing: None so the loader returns the raw embedded cost, then reprice
+    // below only when it's absent (cost-guarded, #742 Part 2 — mirrors the
+    // streaming lane and gjc so MiMo Code's authoritative cost is never
+    // overwritten by a recomputed tokens*rate). This materialized path is dead
+    // code today (public API only), guarded here for parity with the streaming
+    // lane.
     let micode_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::MiMoCode)
         .par_iter()
         .map(|path| {
-            load_or_parse_sqlite_source(path, &source_cache, pricing, |path| {
+            load_or_parse_sqlite_source(path, &source_cache, None, |path| {
                 sessions::micode::parse_micode_sqlite(path)
             })
         })
@@ -1263,6 +1269,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             outcome
                 .messages
                 .into_iter()
+                .map(|mut m| {
+                    if m.cost <= 0.0 {
+                        apply_pricing_if_available(&mut m, pricing);
+                    }
+                    m
+                })
                 .filter(|message| should_keep_deduped_message(&mut micode_seen, message)),
         );
         if let Some(entry) = outcome.cache_entry {
@@ -2245,7 +2257,16 @@ where
         // Custom fingerprint fn — for sources whose cache validity depends on a
         // sibling file (e.g. jcode's `.journal.jsonl`), so a sibling-only write
         // still invalidates the cache instead of serving stale data.
-        ($client_id:expr, $parse_fn:expr, $fingerprint_fn:expr) => {{
+        ($client_id:expr, $parse_fn:expr, $fingerprint_fn:expr) => {
+            simple_lane!($client_id, $parse_fn, $fingerprint_fn, false)
+        };
+        // 4-arg (cost-guarded reprice): clients that embed an authoritative
+        // per-message cost (e.g. MiMo Code — #742 Part 2) pass `true`, so a
+        // recomputed tokens*rate never clobbers the embedded cost; only a
+        // missing cost (`<= 0.0`) is repriced. The cache still stores raw
+        // (unpriced) messages, so the guard is applied on emit here — exactly
+        // like the default unconditional path (which passes `false`).
+        ($client_id:expr, $parse_fn:expr, $fingerprint_fn:expr, $guard_cost:expr) => {{
             // Per-lane dedup set: persists across this client's files, never
             // shared with other clients (see the note above the trae buffer).
             let mut seen_keys: HashSet<String> = HashSet::new();
@@ -2260,7 +2281,7 @@ where
                     for msg in cached.messages.iter() {
                         let mut m = msg.clone();
                         m.refresh_derived_fields();
-                        apply_pricing_if_available(&mut m, pricing);
+                        reprice_lane_message(&mut m, pricing, $guard_cost);
                         if !passes_client(&m) { continue; }
                         let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
                         if keep && filter(&m) { sink(&m); }
@@ -2284,7 +2305,7 @@ where
                     }
                 }
                 for mut m in msgs {
-                    apply_pricing_if_available(&mut m, pricing);
+                    reprice_lane_message(&mut m, pricing, $guard_cost);
                     if !passes_client(&m) { continue; }
                     let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
                     if keep && filter(&m) { sink(&m); }
@@ -2326,16 +2347,20 @@ where
         message_cache::SourceFingerprint::from_jcode_path
     );
     // micode is WAL-mode SQLite; fingerprint via from_sqlite_path so a `-wal`
-    // write invalidates the cache. Unlike gjc, this lane does not guard the
-    // embedded cost: apply_pricing overwrites it whenever the model resolves to
-    // a non-zero price. That is a no-op for native MiMo models (absent from the
-    // pricing dataset) but WOULD reprice a priced provider routed through MiMo
-    // Code — faithful to upstream, which passes pricing through the same loader
-    // unguarded.
+    // write invalidates the cache. MiMo Code records an authoritative per-message
+    // cost (usage.cost), so this lane is cost-guarded (`true`): apply_pricing
+    // only runs when the embedded cost is absent (`<= 0.0`), never overwriting a
+    // real embedded cost with a recomputed tokens*rate. Today MiMo models are
+    // absent from the pricing dataset so unconditional repricing would be a
+    // no-op, but the guard future-proofs against a priced provider routed
+    // through MiMo Code / the model being added to the dataset. (#742 Part 2 —
+    // upstream applies this guard in its materialized lane, which is dead code
+    // for us; the streaming lane is where the app actually reprices.)
     simple_lane!(
         ClientId::MiMoCode,
         sessions::micode::parse_micode_sqlite,
-        message_cache::SourceFingerprint::from_sqlite_path
+        message_cache::SourceFingerprint::from_sqlite_path,
+        true
     );
     simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
     simple_lane!(ClientId::Kiro,      sessions::kiro::parse_kiro_file);
@@ -2742,6 +2767,24 @@ fn apply_pricing_if_available(
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
+    }
+}
+
+/// Reprice a streaming-lane message, respecting an authoritative embedded cost.
+///
+/// Clients that record a real per-message cost of their own (e.g. MiMo Code,
+/// which stores `usage.cost`) pass `guard_authoritative_cost = true`: the
+/// message is repriced only when its embedded cost is absent (`<= 0.0`), so a
+/// recomputed `tokens * rate` never clobbers the authoritative value if the
+/// model later resolves to a price. Every other lane passes `false` and
+/// reprices unconditionally (unchanged behaviour). `#742` Part 2.
+fn reprice_lane_message(
+    message: &mut UnifiedMessage,
+    pricing: Option<&pricing::PricingService>,
+    guard_authoritative_cost: bool,
+) {
+    if !guard_authoritative_cost || message.cost <= 0.0 {
+        apply_pricing_if_available(message, pricing);
     }
 }
 
@@ -3600,7 +3643,8 @@ mod tests {
         dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_model_report,
         message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
         parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
-        retain_for_requested_clients, scan_messages_streaming, scanner, select_local_parse_pricing,
+        reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
+        select_local_parse_pricing,
         unified_to_parsed,
         AgentAccumulator, ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
         UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
@@ -7754,6 +7798,73 @@ mod tests {
             Some(home) => std::env::set_var("HOME", home),
             None => std::env::remove_var("HOME"),
         }
+    }
+
+    // #742 Part 2: the micode lane is cost-guarded so MiMo Code's authoritative
+    // embedded cost is never overwritten by a recomputed tokens*rate when the
+    // model resolves to a price. reprice_lane_message(.., guard=true) reprices
+    // only when the embedded cost is absent (<= 0.0); guard=false is the old
+    // unconditional behavior that this fix replaces for micode.
+    #[test]
+    fn test_reprice_lane_message_guards_authoritative_micode_cost() {
+        // A pricing service that WOULD recompute a large cost for the MiMo model
+        // (1000*0.001 + 500*0.002 = 2.0, versus the embedded 0.05).
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "mimo-v2.5-pro".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let recomputed = 1000.0 * 0.001 + 500.0 * 0.002; // 2.0
+
+        let make = |embedded_cost: f64| {
+            UnifiedMessage::new(
+                "micode",
+                "mimo-v2.5-pro",
+                "mimo",
+                "ses",
+                1_700_000_000_000,
+                TokenBreakdown {
+                    input: 1000,
+                    output: 500,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                embedded_cost,
+            )
+        };
+
+        // guard=true + embedded cost present -> authoritative cost survives.
+        let mut guarded = make(0.05);
+        reprice_lane_message(&mut guarded, Some(&pricing), true);
+        assert!(
+            (guarded.cost - 0.05).abs() < 1e-9,
+            "cost-guarded reprice must keep the embedded 0.05, got {}",
+            guarded.cost
+        );
+
+        // guard=false (old behavior) -> unconditionally overwritten by the recompute.
+        let mut unguarded = make(0.05);
+        reprice_lane_message(&mut unguarded, Some(&pricing), false);
+        assert!(
+            (unguarded.cost - recomputed).abs() < 1e-9,
+            "unguarded reprice overwrites the embedded cost with {recomputed}, got {}",
+            unguarded.cost
+        );
+
+        // guard=true + embedded cost absent (<= 0.0) -> still repriced (fallback).
+        let mut absent = make(0.0);
+        reprice_lane_message(&mut absent, Some(&pricing), true);
+        assert!(
+            (absent.cost - recomputed).abs() < 1e-9,
+            "a missing embedded cost must still be priced, got {}",
+            absent.cost
+        );
     }
 
     // micode `.db` is WAL-mode SQLite reached via the generic `*.db` glob, so it
