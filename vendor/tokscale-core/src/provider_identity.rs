@@ -129,6 +129,7 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         || contains_delimited(&lower, "opus")
         || contains_delimited(&lower, "sonnet")
         || contains_delimited(&lower, "haiku")
+        || contains_delimited(&lower, "fable")
     {
         return Some("anthropic");
     }
@@ -234,6 +235,21 @@ mod tests {
             Some("fireworks")
         ));
         assert!(!matches_provider_hint("openai/gpt-4", Some("anthropic")));
+    }
+
+    #[test]
+    fn fable_models_map_to_anthropic() {
+        // Fable is a Claude model family; the bare, claude-prefixed, and [1m]
+        // context-variant forms must all attribute to Anthropic.
+        assert_eq!(inferred_provider_from_model("fable-5"), Some("anthropic"));
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5"),
+            Some("anthropic")
+        );
+        assert_eq!(
+            inferred_provider_from_model("claude-fable-5[1m]"),
+            Some("anthropic")
+        );
     }
 
     #[test]

@@ -27,7 +27,12 @@ use std::time::UNIX_EPOCH;
 // dedup keys / codex token output, so stale entries must be reparsed. (#741
 // roo-family sibling fingerprinting also invalidates naturally, and #737's
 // antigravity-cli timestamps converge with our dropped local patch.)
-const CACHE_SCHEMA_VERSION: u32 = 21;
+// 22 (M6: follow-up correctness + attribution): jcode journal-wins over stale
+// snapshot + tz-less timestamps (#754), micode epoch seconds/ms normalization
+// (#747), fable->anthropic provider inference (#762), and copilot per-message
+// agent attribution (#724/#751) all change cached parser output, so stale
+// entries must be reparsed. (Our own schema counter; do not mirror upstream's.)
+const CACHE_SCHEMA_VERSION: u32 = 22;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

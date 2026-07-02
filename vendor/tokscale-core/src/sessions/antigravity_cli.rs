@@ -104,11 +104,15 @@ fn parse_gen_metadata(
     // constant #1 is, to the best of our reverse-engineering, the agent's fixed
     // system prompt and counts as billable input; if an official schema later
     // contradicts this, only the input total needs revisiting.
-    let input =
-        varint_field(usage, 1).unwrap_or(0) as i64 + varint_field(usage, 2).unwrap_or(0) as i64;
-    let cache_read = varint_field(usage, 5).unwrap_or(0) as i64;
-    let output = varint_field(usage, 9).unwrap_or(0) as i64;
-    let reasoning = varint_field(usage, 10).unwrap_or(0) as i64;
+    // Clamp untrusted u64 varints into i64 (a corrupt/malicious blob could
+    // encode a value > i64::MAX, which `as i64` would wrap to a negative count)
+    // and combine with saturating_add so totals never overflow.
+    let to_i64 = |v: u64| i64::try_from(v).unwrap_or(i64::MAX);
+    let input = to_i64(varint_field(usage, 1).unwrap_or(0))
+        .saturating_add(to_i64(varint_field(usage, 2).unwrap_or(0)));
+    let cache_read = to_i64(varint_field(usage, 5).unwrap_or(0));
+    let output = to_i64(varint_field(usage, 9).unwrap_or(0));
+    let reasoning = to_i64(varint_field(usage, 10).unwrap_or(0));
     if input == 0 && output == 0 && cache_read == 0 && reasoning == 0 {
         return None;
     }
@@ -435,6 +439,27 @@ mod tests {
         blob.extend(enc_len(1, &workspace));
         blob.extend(enc_len(2, &created));
         blob
+    }
+
+    #[test]
+    fn overlarge_varint_token_counts_are_clamped_not_wrapped() {
+        // A corrupt/malicious blob encoding a varint > i64::MAX must clamp to a
+        // non-negative i64 (saturating), never wrap `as i64` to a negative count.
+        let mut usage = Vec::new();
+        usage.extend(enc_varint(1, u64::MAX)); // huge fixed system prompt
+        usage.extend(enc_varint(2, 10)); // + small input -> saturating_add
+        usage.extend(enc_varint(9, u64::MAX)); // huge output
+        usage.extend(enc_len(11, b"resp-overflow"));
+        let mut chat_model = Vec::new();
+        chat_model.extend(enc_len(4, &usage));
+        chat_model.extend(enc_len(19, b"gemini-3-flash-a"));
+        let blob = enc_len(1, &chat_model);
+
+        let mut seen = HashSet::new();
+        let msg = parse_gen_metadata(&blob, "s", 1_000, &mut seen).expect("parses");
+        assert_eq!(msg.tokens.output, i64::MAX);
+        assert_eq!(msg.tokens.input, i64::MAX); // saturating_add, not negative
+        assert!(msg.tokens.input >= 0 && msg.tokens.output >= 0);
     }
 
     #[test]

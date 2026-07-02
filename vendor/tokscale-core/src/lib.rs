@@ -181,7 +181,13 @@ pub struct TokenBreakdown {
 
 impl TokenBreakdown {
     pub fn total(&self) -> i64 {
-        self.input + self.output + self.cache_read + self.cache_write + self.reasoning
+        // saturating so clamped (i64::MAX) buckets from a corrupt source can't
+        // overflow the sum.
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
+            .saturating_add(self.reasoning)
     }
 }
 
@@ -1626,11 +1632,13 @@ fn aggregate_model_usage_entries(
     let mut entries: Vec<ModelUsage> = model_map
         .into_values()
         .map(|mut entry| {
-            let total_tokens = entry.input.max(0)
-                + entry.output.max(0)
-                + entry.cache_read.max(0)
-                + entry.cache_write.max(0)
-                + entry.reasoning.max(0);
+            let total_tokens = entry
+                .input
+                .max(0)
+                .saturating_add(entry.output.max(0))
+                .saturating_add(entry.cache_read.max(0))
+                .saturating_add(entry.cache_write.max(0))
+                .saturating_add(entry.reasoning.max(0));
             entry.performance.finalize(total_tokens);
             let mut providers: Vec<&str> = entry.provider.split(", ").collect();
             providers.sort_unstable();
@@ -1653,11 +1661,14 @@ fn aggregate_model_usage_entries(
 }
 
 fn positive_token_total(tokens: &TokenBreakdown) -> i64 {
-    tokens.input.max(0)
-        + tokens.output.max(0)
-        + tokens.cache_read.max(0)
-        + tokens.cache_write.max(0)
-        + tokens.reasoning.max(0)
+    // saturating so multiple clamped (i64::MAX) buckets can't overflow the sum.
+    tokens
+        .input
+        .max(0)
+        .saturating_add(tokens.output.max(0))
+        .saturating_add(tokens.cache_read.max(0))
+        .saturating_add(tokens.cache_write.max(0))
+        .saturating_add(tokens.reasoning.max(0))
 }
 
 /// Returns the effective client list for a report: uses the caller-supplied
@@ -7639,7 +7650,7 @@ mod tests {
         std::env::set_var("HOME", cache_home.path());
 
         {
-            let micode_dir = source_home.path().join(".local/share/micode");
+            let micode_dir = source_home.path().join(".local/share/mimocode");
             std::fs::create_dir_all(&micode_dir).unwrap();
             let db_path = micode_dir.join("test.db");
             {
