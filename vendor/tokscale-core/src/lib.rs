@@ -1854,6 +1854,14 @@ impl AgentAccumulator {
 /// streaming migration.
 fn agent_bucket_key(msg: &UnifiedMessage) -> String {
     match msg.agent.as_deref() {
+        // Copilot emits raw OTEL agent ids (e.g. "github.copilot.default",
+        // "Plugin:team:slug") via #724; upstream prettifies them in its CLI TUI
+        // (which we do not vendor), so apply the copilot-specific normalization
+        // here on our streaming agents-report path. Every other client keeps the
+        // generic normalization (opencode already normalizes at parse time).
+        Some(raw) if !raw.trim().is_empty() && msg.client == "copilot" => {
+            sessions::normalize_copilot_agent_name(raw)
+        }
         Some(raw) if !raw.trim().is_empty() => sessions::normalize_agent_name(raw),
         _ => "Main".to_string(),
     }
@@ -4891,6 +4899,43 @@ mod tests {
         assert!((acc.cost - 1.0).abs() < 1e-9);
         assert_eq!(acc.messages, 2, "message_count.max(0): 2 + 0");
         assert!(acc.clients.contains("codebuff"));
+    }
+
+    #[test]
+    fn test_agent_bucket_key_copilot_uses_copilot_normalizer() {
+        // #724/#751: copilot messages carry a raw OTEL agent id. Our agents
+        // report must prettify it with the copilot-specific normalizer (the
+        // prettification upstream does in its CLI), while other clients keep the
+        // generic normalization.
+        let msg = |client: &str, agent: &str| {
+            UnifiedMessage::new_with_agent(
+                client,
+                "m",
+                "p",
+                "s",
+                0,
+                TokenBreakdown::default(),
+                0.0,
+                Some(agent.to_string()),
+            )
+        };
+
+        // Copilot: raw OTEL ids resolve to their pretty display form.
+        assert_eq!(
+            agent_bucket_key(&msg("copilot", "github.copilot.default")),
+            "GitHub Copilot"
+        );
+        assert_eq!(
+            agent_bucket_key(&msg("copilot", "Plugin:code-review-team:api-reviewer")),
+            "Code Review Team: API Reviewer"
+        );
+
+        // A non-copilot client with the same raw id must NOT get the
+        // copilot-specific prettification (proves the branch is client-scoped).
+        assert_ne!(
+            agent_bucket_key(&msg("codebuff", "github.copilot.default")),
+            "GitHub Copilot"
+        );
     }
 
     #[test]
