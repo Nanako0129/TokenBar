@@ -724,14 +724,34 @@ type ClaudeHeaderCacheEntry = (DateTime<Utc>, String, Vec<UsageWindow>);
 static CLAUDE_HEADER_CACHE: Mutex<Option<ClaudeHeaderCacheEntry>> = Mutex::new(None);
 const CLAUDE_HEADER_TTL_SECS: i64 = 300;
 
+/// Refresh the relative `reset_text` on cached header windows so a 300s-cached
+/// probe doesn't show a frozen countdown. Returns None if any window's reset has
+/// already passed — the cache is then stale, so the caller re-probes for fresh
+/// utilization instead of serving post-reset numbers.
+fn refresh_cached_windows(windows: &[UsageWindow], now: DateTime<Utc>) -> Option<Vec<UsageWindow>> {
+    let mut refreshed = Vec::with_capacity(windows.len());
+    for window in windows {
+        let mut window = window.clone();
+        if let Some(reset) = window.resets_at.as_deref().and_then(parse_datetime) {
+            if now >= reset {
+                return None;
+            }
+            window.reset_text = Some(reset_text(reset, now));
+        }
+        refreshed.push(window);
+    }
+    Some(refreshed)
+}
+
 async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>, String> {
     {
+        let now = Utc::now();
         let guard = CLAUDE_HEADER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((fetched_at, token, windows)) = guard.as_ref() {
-            if token == access_token
-                && (Utc::now() - *fetched_at).num_seconds() < CLAUDE_HEADER_TTL_SECS
-            {
-                return Ok(windows.clone());
+            if token == access_token && (now - *fetched_at).num_seconds() < CLAUDE_HEADER_TTL_SECS {
+                if let Some(refreshed) = refresh_cached_windows(windows, now) {
+                    return Ok(refreshed);
+                }
             }
         }
     }
@@ -2145,5 +2165,24 @@ mod tests {
         assert_eq!(token.as_deref(), Some("sk-ant-oat01-test"));
         assert!(claude_token_from_lookup(|_| None).is_none());
         assert!(claude_token_from_lookup(|_| Some("   ".to_string())).is_none());
+    }
+
+    #[test]
+    fn refreshes_or_expires_cached_windows() {
+        let base = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let window =
+            unified_ratelimit_window("Session", Some(0.2), Some(1_700_000_000 + 3600), base)
+                .unwrap();
+
+        // 30 min later, still before the reset: reset_text recomputed to the
+        // shorter countdown (not the frozen original).
+        let later = base + chrono::Duration::seconds(1800);
+        let refreshed = refresh_cached_windows(std::slice::from_ref(&window), later).unwrap();
+        assert_eq!(refreshed.len(), 1);
+        assert!(refreshed[0].reset_text.as_deref().unwrap().contains("30m"));
+
+        // Past the reset: stale -> expire (None) so the caller re-probes.
+        let after = base + chrono::Duration::seconds(3700);
+        assert!(refresh_cached_windows(std::slice::from_ref(&window), after).is_none());
     }
 }
