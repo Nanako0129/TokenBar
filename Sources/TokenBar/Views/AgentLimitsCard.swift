@@ -269,14 +269,16 @@ struct AgentLimitsCard: View {
     /// Keychain command that hands TokenBar a Claude setup-token when the
     /// automatic shell/env detection can't reach it (e.g. a plain `~/.zshrc`
     /// export a Finder-launched app never inherits).
+    // `-w` is given last with no value on purpose: `security(1)` then prompts for
+    // the token interactively, so it never lands in shell history or process args.
     private static let claudeSetupCommand =
-        #"security add-generic-password -a "$USER" -s tokenbar-claude-oauth-token -w "<setup-token>""#
+        #"security add-generic-password -a "$USER" -s tokenbar-claude-oauth-token -w"#
 
     /// Setup prompt shown for Claude when no credential is configured at all
     /// (source "unconfigured"), instead of a red "credentials not found" error.
     @ViewBuilder private func setupPrompt() -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain:")
+            Text("Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)

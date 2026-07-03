@@ -585,33 +585,29 @@ async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
     }
 
     // A stored full login (TokenBar env override / Keychain / file) uses the
-    // richer oauth/usage endpoint. On ANY failure -- expired token that can't
-    // refresh, revoked login, 429 -- fall back to the tokenbar Keychain
-    // setup-token so a stale login can't strand the user (issue #26 variants).
-    if let Some(credentials) = load_claude_login_credentials()? {
-        match fetch_claude_oauth_usage(credentials).await {
+    // richer oauth/usage endpoint. Any failure -- a login that can't refresh, or
+    // a credentials file that exists but can't be read (permissions / I/O) -- is
+    // deferred: we still try the tokenbar Keychain setup-token below, and surface
+    // the error only if that misses too. So a stale login / read error never
+    // strands a working setup-token, yet a genuine failure isn't masked by the
+    // generic "unconfigured" setup prompt.
+    let deferred_error: Option<String> = match load_claude_login_credentials() {
+        Ok(Some(credentials)) => match fetch_claude_oauth_usage(credentials).await {
             Ok(snapshot) => return Ok(snapshot),
-            Err(login_error) => {
-                if let Some(token) = resolve_claude_keychain_token() {
-                    return claude_header_snapshot(
-                        &claude_credentials_from_access_token(token),
-                        Utc::now(),
-                    )
-                    .await;
-                }
-                return Err(login_error);
-            }
-        }
-    }
+            Err(login_error) => Some(login_error),
+        },
+        Ok(None) => None,
+        Err(read_error) => Some(read_error),
+    };
 
-    // No login either: the tokenbar-claude-oauth-token Keychain item reads limits
+    // Last resort: the tokenbar-claude-oauth-token Keychain item reads limits
     // straight from the ratelimit headers (no oauth/usage GET, no 429 gate).
     if let Some(token) = resolve_claude_keychain_token() {
         return claude_header_snapshot(&claude_credentials_from_access_token(token), Utc::now())
             .await;
     }
 
-    Err(CLAUDE_UNCONFIGURED_ERROR.to_string())
+    Err(deferred_error.unwrap_or_else(|| CLAUDE_UNCONFIGURED_ERROR.to_string()))
 }
 
 async fn fetch_claude_oauth_usage(
@@ -718,7 +714,28 @@ async fn fetch_claude_oauth_usage(
 /// token *can* make returns `anthropic-ratelimit-unified-*` headers carrying the
 /// same Session/Weekly windows. Reads headers on 200 AND 429 (an over-limit
 /// token still returns them). Does NOT arm the oauth/usage rate-limit gate.
+/// Cache for the header-probe windows. The probe is a real `/v1/messages`
+/// inference (it spends the very budget it measures), so reuse the result across
+/// the frequent quota polls (60s popover / 300s tray) instead of probing on
+/// every refresh. Keyed on the token so a changed token re-probes.
+/// `(fetched_at, token, windows)` — the token keys the entry so a changed token
+/// re-probes rather than serving another account's cached windows.
+type ClaudeHeaderCacheEntry = (DateTime<Utc>, String, Vec<UsageWindow>);
+static CLAUDE_HEADER_CACHE: Mutex<Option<ClaudeHeaderCacheEntry>> = Mutex::new(None);
+const CLAUDE_HEADER_TTL_SECS: i64 = 300;
+
 async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>, String> {
+    {
+        let guard = CLAUDE_HEADER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((fetched_at, token, windows)) = guard.as_ref() {
+            if token == access_token
+                && (Utc::now() - *fetched_at).num_seconds() < CLAUDE_HEADER_TTL_SECS
+            {
+                return Ok(windows.clone());
+            }
+        }
+    }
+
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
@@ -749,6 +766,10 @@ async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>
     if status.is_success() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
         if windows.is_empty() {
             return Err("Claude header probe returned no unified rate-limit headers.".to_string());
+        }
+        {
+            let mut guard = CLAUDE_HEADER_CACHE.lock().unwrap_or_else(|e| e.into_inner());
+            *guard = Some((Utc::now(), access_token.to_string(), windows.clone()));
         }
         return Ok(windows);
     }
@@ -853,12 +874,25 @@ fn load_claude_login_credentials() -> Result<Option<ClaudeCredentials>, String> 
             return Ok(Some(credentials));
         }
     }
-    if let Ok(raw) = fs::read_to_string(claude_credentials_path()) {
-        if let Ok(credentials) = parse_claude_credentials_data(&raw) {
-            return Ok(Some(credentials));
+    match fs::read_to_string(claude_credentials_path()) {
+        Ok(raw) => {
+            if let Ok(credentials) = parse_claude_credentials_data(&raw) {
+                return Ok(Some(credentials));
+            }
+            // Parsed but unusable (logged-out / no accessToken): fall through.
+            Ok(None)
         }
+        // Absent is normal (no file login). A genuine read failure (permissions /
+        // I/O) is a real problem — return it so the caller can surface the
+        // actionable error after setup-token fallbacks miss, rather than the
+        // generic "unconfigured" setup prompt.
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!(
+            "read Claude credentials file {}: {}",
+            claude_credentials_path().display(),
+            error
+        )),
     }
-    Ok(None)
 }
 
 /// `CLAUDE_CODE_OAUTH_TOKEN` as Claude Code itself resolves it: this process's
