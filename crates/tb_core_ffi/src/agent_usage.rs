@@ -574,15 +574,25 @@ async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
 }
 
 async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
-    // A full login (structured OAuth blob) tries the richer oauth/usage endpoint.
-    // On ANY failure -- expired token that can't refresh, revoked login, 429 --
-    // fall back to a configured setup-token so a stale login can't strand the
-    // user (issue #26 variants).
+    // Mirror Claude Code's auth precedence: CLAUDE_CODE_OAUTH_TOKEN (our env, or
+    // harvested from the user's ~/.zshrc) outranks a stored subscription /login,
+    // because Claude Code itself consumes that token first. So TokenBar reports
+    // the account Claude Code is actually spending against, read from the
+    // ratelimit headers. (This is why the harvest runs even for /login users.)
+    if let Some(token) = resolve_claude_code_oauth_token().await {
+        return claude_header_snapshot(&claude_credentials_from_access_token(token), Utc::now())
+            .await;
+    }
+
+    // A stored full login (TokenBar env override / Keychain / file) uses the
+    // richer oauth/usage endpoint. On ANY failure -- expired token that can't
+    // refresh, revoked login, 429 -- fall back to the tokenbar Keychain
+    // setup-token so a stale login can't strand the user (issue #26 variants).
     if let Some(credentials) = load_claude_login_credentials()? {
         match fetch_claude_oauth_usage(credentials).await {
             Ok(snapshot) => return Ok(snapshot),
             Err(login_error) => {
-                if let Some(token) = resolve_claude_setup_token().await {
+                if let Some(token) = resolve_claude_keychain_token() {
                     return claude_header_snapshot(
                         &claude_credentials_from_access_token(token),
                         Utc::now(),
@@ -594,9 +604,9 @@ async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
         }
     }
 
-    // No full login: a bare setup-token reads limits straight from the ratelimit
-    // headers, skipping the guaranteed-403 oauth/usage GET (and its 429 gate).
-    if let Some(token) = resolve_claude_setup_token().await {
+    // No login either: the tokenbar-claude-oauth-token Keychain item reads limits
+    // straight from the ratelimit headers (no oauth/usage GET, no 429 gate).
+    if let Some(token) = resolve_claude_keychain_token() {
         return claude_header_snapshot(&claude_credentials_from_access_token(token), Utc::now())
             .await;
     }
@@ -851,19 +861,22 @@ fn load_claude_login_credentials() -> Result<Option<ClaudeCredentials>, String> 
     Ok(None)
 }
 
-/// A bare setup-token (inference-only), resolved seamlessly so the user does
-/// nothing: the app's own env (C), then a login-shell harvest of `~/.zshrc`
-/// (D), then the `tokenbar-claude-oauth-token` Keychain item (B). Callers read
-/// limits straight from the ratelimit headers, so this never touches the
-/// oauth/usage GET (nor its 429 gate).
-async fn resolve_claude_setup_token() -> Option<String> {
+/// `CLAUDE_CODE_OAUTH_TOKEN` as Claude Code itself resolves it: this process's
+/// own environment (covers `launchctl setenv` / terminal launch), then a
+/// login-shell harvest of the user's `~/.zshrc` (so a plain export a
+/// Finder-launched GUI app never inherits is still found). Per Claude Code's
+/// auth precedence this outranks a stored subscription `/login`.
+async fn resolve_claude_code_oauth_token() -> Option<String> {
     if let Some(token) = claude_direct_env_token() {
-        return Some(token); // C
+        return Some(token);
     }
-    if let Some(token) = harvest_shell_env_token().await {
-        return Some(token); // D
-    }
-    load_claude_raw_token_from_keychain().ok().flatten() // B
+    harvest_shell_env_token().await
+}
+
+/// The `tokenbar-claude-oauth-token` Keychain item (a TokenBar-specific setup
+/// token). A last-resort fallback, below the stored `/login`.
+fn resolve_claude_keychain_token() -> Option<String> {
+    load_claude_raw_token_from_keychain().ok().flatten()
 }
 
 fn load_claude_credentials_from_environment() -> Result<Option<ClaudeCredentials>, String> {
@@ -975,12 +988,13 @@ fn claude_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<S
 /// Cache for the shell-harvested token — harvesting spawns a full interactive
 /// login shell, so we do it at most once per TTL rather than per poll.
 static CLAUDE_HARVEST_CACHE: Mutex<Option<(DateTime<Utc>, Option<String>)>> = Mutex::new(None);
-// A found token rarely changes → cache it for an hour. A miss uses a shorter TTL
-// so a freshly-added `~/.zshrc` export is picked up within minutes (an app
-// restart clears the cache and picks it up immediately either way), while still
-// sparing a Claude-less user a login-shell spawn on every poll.
+// A found token rarely changes → cache it for an hour. Because the harvest now
+// runs for every user (to mirror Claude Code's CLAUDE_CODE_OAUTH_TOKEN-before-
+// /login precedence), a miss is also cached for a while so we don't re-spawn a
+// login shell on every poll; a freshly-added `~/.zshrc` export is picked up
+// within this window, or immediately on app restart (which clears the cache).
 const CLAUDE_HARVEST_TTL_SECS: i64 = 3600;
-const CLAUDE_HARVEST_NEGATIVE_TTL_SECS: i64 = 600;
+const CLAUDE_HARVEST_NEGATIVE_TTL_SECS: i64 = 1800;
 
 /// D — harvest `CLAUDE_CODE_OAUTH_TOKEN` from the user's login shell, so a plain
 /// `~/.zshrc` export is picked up even though a Finder/login-item GUI app does
