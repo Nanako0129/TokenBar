@@ -16,6 +16,17 @@ const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 const CLAUDE_REFRESH_URL: &str = "https://platform.claude.com/v1/oauth/token";
 const CLAUDE_CLIENT_ID: &str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 const CLAUDE_KEYCHAIN_SERVICE: &str = "Claude Code-credentials";
+// Minimal-request endpoint whose response headers carry the unified rate-limit
+// windows. Used as a fallback for inference-only `claude setup-token` tokens,
+// which get HTTP 403 on the oauth/usage endpoint (it requires user:profile).
+const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
+// Cheapest model for the header probe. Alias (not a dated snapshot) so it
+// outlives model retirements.
+const CLAUDE_PROBE_MODEL: &str = "claude-haiku-4-5";
+// Keychain generic-password service holding a RAW setup-token (`sk-ant-oat01-…`),
+// the launch-method-independent way to hand TokenBar a token for the limits card:
+//   security add-generic-password -a "$USER" -s tokenbar-claude-oauth-token -w "<token>"
+const CLAUDE_RAW_TOKEN_KEYCHAIN_SERVICE: &str = "tokenbar-claude-oauth-token";
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -556,7 +567,7 @@ async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
 }
 
 async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
-    let mut credentials = load_claude_credentials()?;
+    let mut credentials = load_claude_credentials().await?;
     if claude_credentials_expired(&credentials) {
         credentials = refresh_claude_credentials(&credentials).await?;
     }
@@ -567,10 +578,9 @@ async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
             .iter()
             .any(|scope| scope == "user:profile")
     {
-        return Err(
-            "Claude OAuth token lacks the user:profile scope. Run `claude logout && claude login`."
-                .to_string(),
-        );
+        // Inference-only token declared explicit non-user:profile scopes — skip
+        // the (guaranteed-403) oauth/usage GET and read limits from headers.
+        return claude_header_snapshot(&credentials, Utc::now()).await;
     }
 
     let client = reqwest::Client::builder()
@@ -605,6 +615,14 @@ async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
         );
     }
     if status == reqwest::StatusCode::FORBIDDEN {
+        // oauth/usage requires user:profile. An inference-only token (e.g.
+        // `claude setup-token`) is denied *specifically* for that scope — fall
+        // back to the unified rate-limit headers, which it *is* allowed to read.
+        // Any other 403 keeps the actionable re-auth error (and skips the probe,
+        // so we don't spend an inference call on an unrelated denial).
+        if body.contains("user:profile") {
+            return claude_header_snapshot(&credentials, Utc::now()).await;
+        }
         return Err(
             "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile."
                 .to_string(),
@@ -642,6 +660,82 @@ async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
         }),
         windows,
         credits: claude_credits(usage.extra_usage.as_ref()),
+        error: None,
+    })
+}
+
+/// Fallback for inference-only tokens (`claude setup-token`): the oauth/usage
+/// endpoint requires `user:profile`, but a minimal `/v1/messages` request the
+/// token *can* make returns `anthropic-ratelimit-unified-*` headers carrying the
+/// same Session/Weekly windows. Reads headers on 200 AND 429 (an over-limit
+/// token still returns them). Does NOT arm the oauth/usage rate-limit gate.
+async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("build Claude header-probe client: {}", e))?;
+
+    let response = client
+        .post(CLAUDE_MESSAGES_URL)
+        .bearer_auth(access_token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .header(reqwest::header::USER_AGENT, claude_user_agent())
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .json(&serde_json::json!({
+            "model": CLAUDE_PROBE_MODEL,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "hi" }],
+        }))
+        .send()
+        .await
+        .map_err(|e| format!("Claude header probe failed: {}", e))?;
+
+    let status = response.status();
+    // Read headers before consuming the body — this returns an owned Vec, ending
+    // the borrow of `response`.
+    let windows = parse_unified_ratelimit_windows(response.headers(), Utc::now());
+
+    if status.is_success() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        if windows.is_empty() {
+            return Err("Claude header probe returned no unified rate-limit headers.".to_string());
+        }
+        return Ok(windows);
+    }
+
+    let body = response.text().await.unwrap_or_default();
+    Err(format!(
+        "Claude header probe returned {} ({}).",
+        status.as_u16(),
+        body.chars().take(200).collect::<String>()
+    ))
+}
+
+/// Build a Claude snapshot from the unified rate-limit headers. Shared by the
+/// scope-guard and HTTP-403 branches of `fetch_claude_inner`. `source` is
+/// `"setup-token"` — it doubles as the limits-card badge, so it names the auth
+/// method the user recognizes rather than the fetch mechanism, and still lets
+/// telemetry tell it apart from the richer oauth/usage path.
+async fn claude_header_snapshot(
+    credentials: &ClaudeCredentials,
+    now: DateTime<Utc>,
+) -> Result<AgentUsageSnapshot, String> {
+    let windows = fetch_claude_via_headers(&credentials.access_token).await?;
+    Ok(AgentUsageSnapshot {
+        client_id: "claude".to_string(),
+        source: "setup-token".to_string(),
+        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+        identity: Some(AgentIdentity {
+            email: None,
+            plan: first_non_empty([
+                credentials.subscription_type.as_deref(),
+                credentials.rate_limit_tier.as_deref(),
+            ])
+            .map(clean_plan),
+        }),
+        windows,
+        credits: None,
         error: None,
     })
 }
@@ -688,29 +782,49 @@ fn load_codex_credentials() -> Result<CodexCredentials, String> {
     })
 }
 
-fn load_claude_credentials() -> Result<ClaudeCredentials, String> {
+async fn load_claude_credentials() -> Result<ClaudeCredentials, String> {
     if let Some(credentials) = load_claude_credentials_from_environment()? {
         return Ok(credentials);
     }
 
+    // Full-login sources (Keychain, then file). A present-but-logged-out entry
+    // (has `claudeAiOauth` but no `accessToken`) or an unparseable blob must NOT
+    // short-circuit — fall through to the setup-token fallbacks below. This is
+    // exactly the issue #26 daily-logout state: the `Claude Code-credentials`
+    // item still exists but carries no token ("have no access token").
     if let Some(raw) = load_claude_credentials_from_keychain()? {
-        return parse_claude_credentials_data(&raw);
+        if let Ok(credentials) = parse_claude_credentials_data(&raw) {
+            return Ok(credentials);
+        }
     }
-
-    let credentials_path = claude_credentials_path();
-    match fs::read_to_string(&credentials_path) {
-        Ok(raw) => return parse_claude_credentials_data(&raw),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(format!(
-                "read Claude credentials file {}: {}",
-                credentials_path.display(),
-                error
-            ));
+    if let Ok(raw) = fs::read_to_string(claude_credentials_path()) {
+        if let Ok(credentials) = parse_claude_credentials_data(&raw) {
+            return Ok(credentials);
         }
     }
 
-    Err("Claude OAuth credentials not found. Run `claude` to authenticate.".to_string())
+    // Setup-token fallbacks (inference-only tokens → header-based limits, see
+    // `claude_header_snapshot`). Deliberately BELOW the full-login sources above
+    // so a real subscription login (richer per-model windows via oauth/usage)
+    // always wins even when CLAUDE_CODE_OAUTH_TOKEN also happens to be set.
+    // Order C → D → B: cheapest first; harvest only when the token isn't already
+    // in our own process environment.
+    if let Some(token) = claude_direct_env_token() {
+        return Ok(claude_credentials_from_access_token(token)); // C
+    }
+    if let Some(token) = harvest_shell_env_token().await {
+        return Ok(claude_credentials_from_access_token(token)); // D
+    }
+    if let Some(token) = load_claude_raw_token_from_keychain()? {
+        return Ok(claude_credentials_from_access_token(token)); // B
+    }
+
+    Err(
+        "Claude OAuth credentials not found. Run `claude` to authenticate, or set \
+         CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item \
+         to use a setup-token."
+            .to_string(),
+    )
 }
 
 fn load_claude_credentials_from_environment() -> Result<Option<ClaudeCredentials>, String> {
@@ -789,6 +903,191 @@ fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
 
 #[cfg(not(target_os = "macos"))]
 fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
+    Ok(None)
+}
+
+/// Build credentials from a bare access token (no refresh/expiry/scope metadata).
+/// Used by the setup-token delivery paths (env var, shell harvest, raw keychain);
+/// empty scopes make `fetch_claude_inner` skip the scope guard and reach the
+/// header fallback on the resulting oauth/usage 403.
+fn claude_credentials_from_access_token(access_token: String) -> ClaudeCredentials {
+    ClaudeCredentials {
+        access_token,
+        refresh_token: None,
+        expires_at: None,
+        scopes: Vec::new(),
+        rate_limit_tier: None,
+        subscription_type: None,
+    }
+}
+
+/// C — `CLAUDE_CODE_OAUTH_TOKEN` from this process's own environment (covers
+/// `launchctl setenv` and terminal-launched runs).
+fn claude_direct_env_token() -> Option<String> {
+    claude_token_from_lookup(|key| std::env::var(key).ok())
+}
+
+fn claude_token_from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Option<String> {
+    lookup("CLAUDE_CODE_OAUTH_TOKEN")
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Cache for the shell-harvested token — harvesting spawns a full interactive
+/// login shell, so we do it at most once per TTL rather than per poll.
+static CLAUDE_HARVEST_CACHE: Mutex<Option<(DateTime<Utc>, Option<String>)>> = Mutex::new(None);
+// A found token rarely changes → cache it for an hour. A miss uses a shorter TTL
+// so a freshly-added `~/.zshrc` export is picked up within minutes (an app
+// restart clears the cache and picks it up immediately either way), while still
+// sparing a Claude-less user a login-shell spawn on every poll.
+const CLAUDE_HARVEST_TTL_SECS: i64 = 3600;
+const CLAUDE_HARVEST_NEGATIVE_TTL_SECS: i64 = 600;
+
+/// D — harvest `CLAUDE_CODE_OAUTH_TOKEN` from the user's login shell, so a plain
+/// `~/.zshrc` export is picked up even though a Finder/login-item GUI app does
+/// not inherit shell environments. Cached; returns None on timeout/miss so the
+/// keychain fallback can still fire.
+async fn harvest_shell_env_token() -> Option<String> {
+    // Scope the guard so it is dropped before the `.await` below (never hold a
+    // std Mutex across an await). Recover a poisoned lock (like `lock_gate`) so a
+    // stray panic can't permanently disable the cache and reintroduce a per-poll
+    // shell spawn.
+    {
+        let guard = CLAUDE_HARVEST_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some((fetched_at, token)) = guard.as_ref() {
+            let ttl = if token.is_some() {
+                CLAUDE_HARVEST_TTL_SECS
+            } else {
+                CLAUDE_HARVEST_NEGATIVE_TTL_SECS
+            };
+            if (Utc::now() - *fetched_at).num_seconds() < ttl {
+                return token.clone();
+            }
+        }
+    }
+    let token = harvest_shell_env_token_uncached().await;
+    {
+        let mut guard = CLAUDE_HARVEST_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *guard = Some((Utc::now(), token.clone()));
+    }
+    token
+}
+
+#[cfg(target_os = "macos")]
+async fn harvest_shell_env_token_uncached() -> Option<String> {
+    // Interactive (-i) so ~/.zshrc is sourced (login -l alone runs ~/.zprofile
+    // only). Null-delimited markers isolate the value from any rc stdout chatter;
+    // rc noise (p10k/gitstatus warnings) goes to stderr, which we discard.
+    let shell = detect_login_shell();
+    let script = "printf '\\0__TB_OAT_S__\\0%s\\0__TB_OAT_E__\\0' \"$CLAUDE_CODE_OAUTH_TOKEN\"";
+    let future = tokio::process::Command::new(&shell)
+        .args(["-l", "-i", "-c", script])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        // On the 5s timeout the future is dropped; kill the child so a hanging rc
+        // (e.g. a blocking prompt) doesn't leave an orphaned login shell running.
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(5), future)
+        .await
+        .ok()?
+        .ok()?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let start_marker = "\0__TB_OAT_S__\0";
+    let end_marker = "\0__TB_OAT_E__\0";
+    let start = stdout.find(start_marker)? + start_marker.len();
+    let rest = &stdout[start..];
+    let end = rest.find(end_marker)?;
+    let token = rest[..end].trim().to_string();
+    (!token.is_empty()).then_some(token)
+}
+
+#[cfg(not(target_os = "macos"))]
+async fn harvest_shell_env_token_uncached() -> Option<String> {
+    None
+}
+
+/// Resolve the user's login shell for the harvest. `$SHELL` is usually unset for
+/// a launchd-spawned GUI app, so fall back to Directory Services.
+#[cfg(target_os = "macos")]
+fn detect_login_shell() -> String {
+    if let Ok(shell) = std::env::var("SHELL") {
+        let shell = shell.trim();
+        if !shell.is_empty() {
+            return shell.to_string();
+        }
+    }
+    if let Some(user) = current_username() {
+        if let Ok(output) = std::process::Command::new("/usr/bin/dscl")
+            .args([".", "-read", &format!("/Users/{}", user), "UserShell"])
+            .output()
+        {
+            if output.status.success() {
+                if let Ok(text) = String::from_utf8(output.stdout) {
+                    // "UserShell: /bin/zsh"
+                    if let Some(path) = text.split_whitespace().nth(1) {
+                        if !path.is_empty() {
+                            return path.to_string();
+                        }
+                    }
+                }
+            }
+        }
+    }
+    "/bin/zsh".to_string()
+}
+
+#[cfg(target_os = "macos")]
+fn current_username() -> Option<String> {
+    if let Ok(user) = std::env::var("USER") {
+        let user = user.trim();
+        if !user.is_empty() {
+            return Some(user.to_string());
+        }
+    }
+    let output = std::process::Command::new("/usr/bin/id")
+        .arg("-un")
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let user = String::from_utf8(output.stdout).ok()?.trim().to_string();
+    (!user.is_empty()).then_some(user)
+}
+
+/// B — a RAW setup-token stored in the `tokenbar-claude-oauth-token` Keychain
+/// service. Works regardless of launch method (unlike the env var), which is why
+/// it's the reliable fallback for a Finder/login-item GUI app.
+#[cfg(target_os = "macos")]
+fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
+    let output = std::process::Command::new("/usr/bin/security")
+        .args([
+            "find-generic-password",
+            "-s",
+            CLAUDE_RAW_TOKEN_KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .output()
+        .map_err(|e| format!("read TokenBar Claude token from Keychain: {}", e))?;
+    if !output.status.success() {
+        return Ok(None);
+    }
+    let raw = String::from_utf8(output.stdout)
+        .map_err(|_| "TokenBar Claude Keychain token is not UTF-8.".to_string())?;
+    let raw = raw.trim().to_string();
+    if raw.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(raw))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
     Ok(None)
 }
 
@@ -1071,6 +1370,68 @@ fn map_claude_window(
 ) -> Option<UsageWindow> {
     let used = window.utilization?.clamp(0.0, 100.0);
     let resets_at = window.resets_at.as_deref().and_then(parse_datetime);
+    Some(UsageWindow {
+        label: label.to_string(),
+        used_percent: used,
+        remaining_percent: (100.0 - used).max(0.0),
+        resets_at: resets_at.map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true)),
+        reset_text: resets_at.map(|date| reset_text(date, now)),
+        window_minutes: claude_window_minutes(label),
+        historical_expected_percent: None,
+        run_out_probability: None,
+    })
+}
+
+/// Parse the `anthropic-ratelimit-unified-{5h,7d}-{utilization,reset}` response
+/// headers into Session/Weekly usage windows. Pure — no network or I/O.
+///
+/// Unlike the oauth/usage JSON body (`utilization` 0..100, RFC3339 reset), these
+/// headers use a 0..1 fraction and a Unix-epoch-seconds reset. This is the
+/// fallback source for inference-only `claude setup-token` tokens.
+fn parse_unified_ratelimit_windows(
+    headers: &reqwest::header::HeaderMap,
+    now: DateTime<Utc>,
+) -> Vec<UsageWindow> {
+    let read_f64 = |name: &str| -> Option<f64> {
+        headers.get(name)?.to_str().ok()?.trim().parse::<f64>().ok()
+    };
+    let read_i64 = |name: &str| -> Option<i64> {
+        headers.get(name)?.to_str().ok()?.trim().parse::<i64>().ok()
+    };
+    let mut windows = Vec::new();
+    if let Some(window) = unified_ratelimit_window(
+        "Session",
+        read_f64("anthropic-ratelimit-unified-5h-utilization"),
+        read_i64("anthropic-ratelimit-unified-5h-reset"),
+        now,
+    ) {
+        windows.push(window);
+    }
+    if let Some(window) = unified_ratelimit_window(
+        "Weekly",
+        read_f64("anthropic-ratelimit-unified-7d-utilization"),
+        read_i64("anthropic-ratelimit-unified-7d-reset"),
+        now,
+    ) {
+        windows.push(window);
+    }
+    windows
+}
+
+/// Build one window from a unified-ratelimit header pair. Gated on utilization
+/// (mirrors `map_claude_window`); reset is optional. `utilization_fraction` is
+/// 0..1 (scaled ×100); `reset_epoch_seconds` is Unix seconds (like the Codex
+/// `map_window` epoch handling).
+fn unified_ratelimit_window(
+    label: &str,
+    utilization_fraction: Option<f64>,
+    reset_epoch_seconds: Option<i64>,
+    now: DateTime<Utc>,
+) -> Option<UsageWindow> {
+    let used = (utilization_fraction? * 100.0).clamp(0.0, 100.0);
+    let resets_at = reset_epoch_seconds
+        .filter(|seconds| *seconds > 0)
+        .and_then(|seconds| Utc.timestamp_opt(seconds, 0).single());
     Some(UsageWindow {
         label: label.to_string(),
         used_percent: used,
@@ -1596,5 +1957,106 @@ mod tests {
             windows.iter().map(|w| w.label.as_str()).collect::<Vec<_>>(),
             vec!["Session", "Weekly", "Sonnet", "Designs", "Daily Routines"]
         );
+    }
+
+    fn header_map(pairs: &[(&'static str, &'static str)]) -> reqwest::header::HeaderMap {
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (name, value) in pairs {
+            headers.insert(
+                reqwest::header::HeaderName::from_static(name),
+                reqwest::header::HeaderValue::from_static(value),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn parses_unified_ratelimit_headers() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let headers = header_map(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.11"),
+            ("anthropic-ratelimit-unified-5h-reset", "1783111200"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.6"),
+            ("anthropic-ratelimit-unified-7d-reset", "1783504800"),
+        ]);
+        let windows = parse_unified_ratelimit_windows(&headers, now);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].label, "Session");
+        assert!((windows[0].used_percent - 11.0).abs() < 1e-9);
+        assert!((windows[0].remaining_percent - 89.0).abs() < 1e-9);
+        assert_eq!(windows[0].window_minutes, Some(300));
+        assert!(windows[0].resets_at.is_some());
+        assert!(windows[0].reset_text.is_some());
+        assert_eq!(windows[1].label, "Weekly");
+        assert!((windows[1].used_percent - 60.0).abs() < 1e-9);
+        assert!((windows[1].remaining_percent - 40.0).abs() < 1e-9);
+        assert_eq!(windows[1].window_minutes, Some(10_080));
+    }
+
+    #[test]
+    fn unified_reset_text_is_relative() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let reset = 1_700_000_000 + 3600; // now + 1h
+        let window = unified_ratelimit_window("Session", Some(0.5), Some(reset), now).unwrap();
+        assert!((window.used_percent - 50.0).abs() < 1e-9);
+        assert!(window.reset_text.as_deref().unwrap().contains("1h"));
+    }
+
+    #[test]
+    fn unified_windows_skip_missing_and_unparseable() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        // empty -> nothing
+        assert!(parse_unified_ratelimit_windows(&header_map(&[]), now).is_empty());
+
+        // only 5h -> just Session
+        let windows = parse_unified_ratelimit_windows(
+            &header_map(&[("anthropic-ratelimit-unified-5h-utilization", "0.2")]),
+            now,
+        );
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Session");
+
+        // unparseable 5h + valid 7d -> just Weekly
+        let windows = parse_unified_ratelimit_windows(
+            &header_map(&[
+                ("anthropic-ratelimit-unified-5h-utilization", "abc"),
+                ("anthropic-ratelimit-unified-7d-utilization", "0.4"),
+            ]),
+            now,
+        );
+        assert_eq!(windows.len(), 1);
+        assert_eq!(windows[0].label, "Weekly");
+
+        // utilization present, reset absent -> window with no reset fields
+        let window = unified_ratelimit_window("Weekly", Some(0.4), None, now).unwrap();
+        assert!(window.resets_at.is_none());
+        assert!(window.reset_text.is_none());
+    }
+
+    #[test]
+    fn unified_window_scales_and_clamps_fraction() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let zero = unified_ratelimit_window("Session", Some(0.0), None, now).unwrap();
+        assert!((zero.used_percent - 0.0).abs() < 1e-9);
+        assert!((zero.remaining_percent - 100.0).abs() < 1e-9);
+        let full = unified_ratelimit_window("Session", Some(1.0), None, now).unwrap();
+        assert!((full.used_percent - 100.0).abs() < 1e-9);
+        assert!((full.remaining_percent - 0.0).abs() < 1e-9);
+        let over = unified_ratelimit_window("Session", Some(1.5), None, now).unwrap();
+        assert!((over.used_percent - 100.0).abs() < 1e-9);
+        assert!((over.remaining_percent - 0.0).abs() < 1e-9);
+        // None utilization -> no window
+        assert!(unified_ratelimit_window("Session", None, Some(1_783_111_200), now).is_none());
+    }
+
+    #[test]
+    fn reads_claude_code_oauth_token_via_lookup() {
+        let token = claude_token_from_lookup(|key| match key {
+            "CLAUDE_CODE_OAUTH_TOKEN" => Some("  sk-ant-oat01-test  ".to_string()),
+            _ => None,
+        });
+        assert_eq!(token.as_deref(), Some("sk-ant-oat01-test"));
+        assert!(claude_token_from_lookup(|_| None).is_none());
+        assert!(claude_token_from_lookup(|_| Some("   ".to_string())).is_none());
     }
 }
