@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import TokenBarCore
 
@@ -225,21 +226,25 @@ struct AgentLimitsCard: View {
                 Spacer()
                 statusBadge(snapshot: snapshot, isLive: isLive)
             }
-            if let detail = detailText(snapshot) {
-                Text(detail)
-                    .font(.caption2)
-                    .foregroundStyle(snapshot?.error != nil ? .red : .secondary)
-                    .lineLimit(2)
-                    .help(snapshot?.error ?? detail)
-            }
-            VStack(spacing: 8) {
-                if let snapshot, !snapshot.windows.isEmpty {
-                    ForEach(snapshot.windows, id: \.label) { window in
-                        windowRow(window, brand: style.color)
-                    }
-                } else {
-                    ForEach(Self.placeholderRows[id] ?? ["Limit"], id: \.self) { label in
-                        placeholderRow(label, brand: style.color)
+            if snapshot?.source == "unconfigured" {
+                setupPrompt()
+            } else {
+                if let detail = detailText(snapshot) {
+                    Text(detail)
+                        .font(.caption2)
+                        .foregroundStyle(snapshot?.error != nil ? .red : .secondary)
+                        .lineLimit(2)
+                        .help(snapshot?.error ?? detail)
+                }
+                VStack(spacing: 8) {
+                    if let snapshot, !snapshot.windows.isEmpty {
+                        ForEach(snapshot.windows, id: \.label) { window in
+                            windowRow(window, brand: style.color)
+                        }
+                    } else {
+                        ForEach(Self.placeholderRows[id] ?? ["Limit"], id: \.self) { label in
+                            placeholderRow(label, brand: style.color)
+                        }
                     }
                 }
             }
@@ -261,10 +266,48 @@ struct AgentLimitsCard: View {
             })
     }
 
+    /// Keychain command that hands TokenBar a Claude setup-token when the
+    /// automatic shell/env detection can't reach it (e.g. a plain `~/.zshrc`
+    /// export a Finder-launched app never inherits).
+    private static let claudeSetupCommand =
+        #"security add-generic-password -a "$USER" -s tokenbar-claude-oauth-token -w "<setup-token>""#
+
+    /// Setup prompt shown for Claude when no credential is configured at all
+    /// (source "unconfigured"), instead of a red "credentials not found" error.
+    @ViewBuilder private func setupPrompt() -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain:")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(alignment: .top, spacing: 6) {
+                Text(Self.claudeSetupCommand)
+                    .font(.system(.caption2, design: .monospaced))
+                    .textSelection(.enabled)
+                    .lineLimit(3)
+                    .truncationMode(.middle)
+                    .padding(6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.06)))
+                Button {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(Self.claudeSetupCommand, forType: .string)
+                } label: {
+                    Image(systemName: "doc.on.doc").font(.caption2)
+                }
+                .buttonStyle(.borderless)
+                .help("Copy command")
+            }
+        }
+    }
+
     private func statusBadge(snapshot: AgentUsageSnapshot?, isLive: Bool) -> some View {
         let text: String
         var color: Color = .secondary
-        if snapshot?.error != nil {
+        if snapshot?.source == "unconfigured" {
+            // Not set up yet -- neutral prompt, not an alarming red error.
+            text = "Set up"
+        } else if snapshot?.error != nil {
             text = "Error"
             color = .red
         } else if let snapshot, !snapshot.windows.isEmpty {

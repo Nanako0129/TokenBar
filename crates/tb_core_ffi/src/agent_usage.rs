@@ -466,9 +466,16 @@ async fn fetch_claude() -> AgentUsageSnapshot {
             if let Some(blocked_until) = claude_gate_blocked_until(now) {
                 return claude_gate_fallback(blocked_until, now);
             }
+            // "unconfigured" == no credential at all, so the UI shows a setup
+            // prompt; every other error is a real failure of a present credential.
+            let source = if error.as_str() == CLAUDE_UNCONFIGURED_ERROR {
+                "unconfigured"
+            } else {
+                "oauth"
+            };
             AgentUsageSnapshot {
                 client_id: "claude".to_string(),
-                source: "oauth".to_string(),
+                source: source.to_string(),
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: None,
                 windows: Vec::new(),
@@ -567,7 +574,39 @@ async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
 }
 
 async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
-    let mut credentials = load_claude_credentials().await?;
+    // A full login (structured OAuth blob) tries the richer oauth/usage endpoint.
+    // On ANY failure -- expired token that can't refresh, revoked login, 429 --
+    // fall back to a configured setup-token so a stale login can't strand the
+    // user (issue #26 variants).
+    if let Some(credentials) = load_claude_login_credentials()? {
+        match fetch_claude_oauth_usage(credentials).await {
+            Ok(snapshot) => return Ok(snapshot),
+            Err(login_error) => {
+                if let Some(token) = resolve_claude_setup_token().await {
+                    return claude_header_snapshot(
+                        &claude_credentials_from_access_token(token),
+                        Utc::now(),
+                    )
+                    .await;
+                }
+                return Err(login_error);
+            }
+        }
+    }
+
+    // No full login: a bare setup-token reads limits straight from the ratelimit
+    // headers, skipping the guaranteed-403 oauth/usage GET (and its 429 gate).
+    if let Some(token) = resolve_claude_setup_token().await {
+        return claude_header_snapshot(&claude_credentials_from_access_token(token), Utc::now())
+            .await;
+    }
+
+    Err(CLAUDE_UNCONFIGURED_ERROR.to_string())
+}
+
+async fn fetch_claude_oauth_usage(
+    mut credentials: ClaudeCredentials,
+) -> Result<AgentUsageSnapshot, String> {
     if claude_credentials_expired(&credentials) {
         credentials = refresh_claude_credentials(&credentials).await?;
     }
@@ -782,49 +821,49 @@ fn load_codex_credentials() -> Result<CodexCredentials, String> {
     })
 }
 
-async fn load_claude_credentials() -> Result<ClaudeCredentials, String> {
-    if let Some(credentials) = load_claude_credentials_from_environment()? {
-        return Ok(credentials);
-    }
+/// Marker error for "no Claude credential is configured at all" (as opposed to a
+/// credential that exists but failed). `fetch_claude` turns this into a snapshot
+/// with `source == "unconfigured"`, so the UI shows a setup prompt rather than a
+/// red error.
+const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
 
-    // Full-login sources (Keychain, then file). A present-but-logged-out entry
-    // (has `claudeAiOauth` but no `accessToken`) or an unparseable blob must NOT
-    // short-circuit — fall through to the setup-token fallbacks below. This is
-    // exactly the issue #26 daily-logout state: the `Claude Code-credentials`
-    // item still exists but carries no token ("have no access token").
+/// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
+/// `Claude Code-credentials`, then `~/.claude/.credentials.json`) plus the
+/// TokenBar env override. These carry refresh tokens / scopes / expiry and go
+/// through the richer oauth/usage endpoint. A present-but-logged-out entry (has
+/// `claudeAiOauth` but no `accessToken` — the #26 daily-logout state) or an
+/// unparseable blob is skipped, not treated as a hard error, so a configured
+/// setup-token can still take over.
+fn load_claude_login_credentials() -> Result<Option<ClaudeCredentials>, String> {
+    if let Some(credentials) = load_claude_credentials_from_environment()? {
+        return Ok(Some(credentials));
+    }
     if let Some(raw) = load_claude_credentials_from_keychain()? {
         if let Ok(credentials) = parse_claude_credentials_data(&raw) {
-            return Ok(credentials);
+            return Ok(Some(credentials));
         }
     }
     if let Ok(raw) = fs::read_to_string(claude_credentials_path()) {
         if let Ok(credentials) = parse_claude_credentials_data(&raw) {
-            return Ok(credentials);
+            return Ok(Some(credentials));
         }
     }
+    Ok(None)
+}
 
-    // Setup-token fallbacks (inference-only tokens → header-based limits, see
-    // `claude_header_snapshot`). Deliberately BELOW the full-login sources above
-    // so a real subscription login (richer per-model windows via oauth/usage)
-    // always wins even when CLAUDE_CODE_OAUTH_TOKEN also happens to be set.
-    // Order C → D → B: cheapest first; harvest only when the token isn't already
-    // in our own process environment.
+/// A bare setup-token (inference-only), resolved seamlessly so the user does
+/// nothing: the app's own env (C), then a login-shell harvest of `~/.zshrc`
+/// (D), then the `tokenbar-claude-oauth-token` Keychain item (B). Callers read
+/// limits straight from the ratelimit headers, so this never touches the
+/// oauth/usage GET (nor its 429 gate).
+async fn resolve_claude_setup_token() -> Option<String> {
     if let Some(token) = claude_direct_env_token() {
-        return Ok(claude_credentials_from_access_token(token)); // C
+        return Some(token); // C
     }
     if let Some(token) = harvest_shell_env_token().await {
-        return Ok(claude_credentials_from_access_token(token)); // D
+        return Some(token); // D
     }
-    if let Some(token) = load_claude_raw_token_from_keychain()? {
-        return Ok(claude_credentials_from_access_token(token)); // B
-    }
-
-    Err(
-        "Claude OAuth credentials not found. Run `claude` to authenticate, or set \
-         CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item \
-         to use a setup-token."
-            .to_string(),
-    )
+    load_claude_raw_token_from_keychain().ok().flatten() // B
 }
 
 fn load_claude_credentials_from_environment() -> Result<Option<ClaudeCredentials>, String> {
