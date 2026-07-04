@@ -34,12 +34,11 @@ struct AgentIconView: View {
     /// Full icons whose mark has no opaque background of its own (dark ink or
     /// light text on transparent), so they need a solid disc behind them to
     /// stay legible against the popover. Color chosen per-icon to match how
-    /// the brand actually presents the mark (e.g. Cline/Hermes/Codex's marks
-    /// are dark-on-light; Mux/Amp's marks are light-on-dark).
+    /// the brand actually presents the mark (e.g. Cline/Hermes's marks are
+    /// dark-on-light; Mux/Amp's marks are light-on-dark).
     private static let backgroundFills: [String: Color] = [
         "cline": .white,
         "hermes": .white,
-        "codex": .white,
         "mux": .black,
         "amp": .black,
     ]
