@@ -148,7 +148,9 @@ final class TrayAnimator {
     var quotaRemaining: Double? {
         let selection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
-        if let value = QuotaResolver.resolve(payload: quota, selection: selection)?
+        if let value = QuotaResolver.resolve(
+            payload: quota, selection: selection,
+            excluding: ClientRegistry.quotaExcludedClients())?
             .window.remainingPercent
         {
             cachedQuotaRemaining = value
@@ -249,11 +251,30 @@ final class TrayAnimator {
     /// tray title can display it without its own FFI call.
     private(set) var tokensPerMinRate: Double?
 
+    // Monotonic rate-fetch generation. Every rate fetch reserves a token at
+    // START via `nextRateGeneration()`; `applyRate` discards a result whose
+    // token is older than the last applied one. This stops a slow 30s-poll
+    // fetch (unfiltered rate) that was in flight during a hide toggle from
+    // landing AFTER — and clobbering — the observer's fresh filtered refetch.
+    private var rateGeneration = 0
+    private var lastAppliedRateGen = 0
+
+    /// Reserve the next rate-fetch generation token (call on the main actor,
+    /// before launching the detached fetch).
+    func nextRateGeneration() -> Int {
+        rateGeneration += 1
+        return rateGeneration
+    }
+
     /// Apply a freshly-fetched live rate to the spin speed and cached rate, and
     /// re-render the title. Shared by the 30s poll and the immediate refresh
     /// AppDelegate kicks when the hidden-tabs set changes (so the filtered rate
-    /// updates without waiting for the next poll tick).
-    func applyRate(_ rate: Double) {
+    /// updates without waiting for the next poll tick). `generation` must be the
+    /// token reserved at that fetch's start; a stale (superseded) result is
+    /// dropped.
+    func applyRate(_ rate: Double, generation: Int) {
+        guard generation >= lastAppliedRateGen else { return }
+        lastAppliedRateGen = generation
         load = min(rate / 10_000.0, 100.0)
         tokensPerMinRate = rate
         onQuotaUpdated?()
@@ -265,11 +286,12 @@ final class TrayAnimator {
     private func startLoadPolling() {
         loadTask = Task { [weak self] in
             while !Task.isCancelled {
+                guard let gen = self?.nextRateGeneration() else { break }
                 let rate = try? await Task.detached(priority: .utility) {
                     try LiveRate.current()
                 }.value
                 guard let self, !Task.isCancelled else { break }
-                if let rate { self.applyRate(rate) }
+                if let rate { self.applyRate(rate, generation: gen) }
                 try? await Task.sleep(for: .seconds(30))
             }
         }

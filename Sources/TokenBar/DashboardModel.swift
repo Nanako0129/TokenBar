@@ -405,6 +405,11 @@ private struct DashboardSnapshot {
         let selection = Set(clients)
         switch view {
         case .hourly where hourly == nil || hourlyClients != selection:
+            // Nil the stale report on a slice change so the view shows its
+            // loading state instead of rendering the OLD mixed-bucket totals
+            // against the NEW clientIds for one FFI latency (a shared hour's
+            // hidden stripe would flash). Also covers plain tab switches.
+            if hourly != nil, hourlyClients != selection { hourly = nil; hourlyClients = selection }
             let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.hourlyReport(year: year, clients: clients)
             }.value
@@ -418,6 +423,8 @@ private struct DashboardSnapshot {
             hourly = report
             hourlyClients = selection
         case .agents where agents == nil || agentsClients != selection:
+            // Nil the stale report on a slice change (see the hourly case).
+            if agents != nil, agentsClients != selection { agents = nil; agentsClients = selection }
             let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.agentsReport(year: year, clients: clients)
             }.value

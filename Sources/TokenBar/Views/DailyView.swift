@@ -7,7 +7,9 @@ import TokenBarCore
 /// scoped to the date.
 struct DailyView: View {
     let payload: UsagePayload
-    /// Restrict to these clients; empty = show everything.
+    /// Restrict to these clients (strict membership). Empty = show nothing —
+    /// consistent with the day rows and DayBars/UsageStats — so an all-hidden
+    /// slice can't leak the drill-down.
     var clientIds: [String] = []
     let colors: ModelColorMap
 
@@ -57,7 +59,7 @@ struct DailyView: View {
         let allow = Set(clientIds)
         var grouped: [String: ModelSlice] = [:]
         for cc in c.clients {
-            if !allow.isEmpty && !allow.contains(cc.client) { continue }
+            if !allow.contains(cc.client) { continue }
             let tokens = Self.tokenTotal(cc.tokens)
             if tokens <= 0 && cc.cost <= 0 { continue }
             let model = cc.modelId.isEmpty ? "unknown" : cc.modelId

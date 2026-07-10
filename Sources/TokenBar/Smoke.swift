@@ -79,6 +79,34 @@ enum Smoke {
                 + "\(graph.summary.totalTokens) tok / $\(String(format: "%.2f", graph.summary.totalCost))"
         }
 
+        // Parity probes (issue #36): the hourly/agents FFI filter, given the
+        // FULL present-client list, must byte-match the unfiltered (clients:nil)
+        // report — the "all present == unfiltered" claim the two-level split
+        // rests on. Print-only; a mismatch flags that summary.clients diverged
+        // from the scannable set (e.g. synthetic) or a filter regression.
+        let presentClients = (try? TBCore.graph().summary.clients) ?? []
+        summarize("hourlyDrift") {
+            let all = try TBCore.hourlyReport(clients: nil)
+            let filtered = try TBCore.hourlyReport(clients: presentClients)
+            let allTok = all.entries.reduce(Int64(0)) { $0.saturatingAdding($1.total) }
+            let filTok = filtered.entries.reduce(Int64(0)) { $0.saturatingAdding($1.total) }
+            let match = all.entries.count == filtered.entries.count && allTok == filTok
+                && abs(all.totalCost - filtered.totalCost) < 0.01
+            return "\(match ? "match" : "MISMATCH") — all \(all.entries.count) slots/\(allTok) tok"
+                + " vs full-list \(filtered.entries.count)/\(filTok) tok"
+        }
+        summarize("agentsDrift") {
+            let all = try TBCore.agentsReport(clients: nil)
+            let filtered = try TBCore.agentsReport(clients: presentClients)
+            let allTok = all.entries.reduce(Int64(0)) { $0.saturatingAdding($1.total) }
+            let filTok = filtered.entries.reduce(Int64(0)) { $0.saturatingAdding($1.total) }
+            let match = all.entries.count == filtered.entries.count && allTok == filTok
+                && all.totalMessages == filtered.totalMessages
+                && abs(all.totalCost - filtered.totalCost) < 0.01
+            return "\(match ? "match" : "MISMATCH") — all \(all.entries.count) agents/\(allTok) tok"
+                + " vs full-list \(filtered.entries.count)/\(filTok) tok"
+        }
+
         summarize("agentUsage") {
             let usage = try TBCore.agentUsage()
             let cards = usage.agents.map { snapshot in

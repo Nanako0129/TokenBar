@@ -133,13 +133,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// refetch — mirrors the 30s poll's delivery so the tokens/min mode and the
     /// animated-icon speed react to a visibility toggle immediately.
     private func refreshFilteredRate() {
+        // Reserve a fresh generation up front so this refetch wins over any 30s
+        // poll fetch still in flight (which carries an older generation).
+        guard let generation = trayAnimator?.nextRateGeneration() else { return }
         Task { [weak self] in
             let rate = try? await Task.detached(priority: .utility) {
                 try LiveRate.current()
             }.value
             guard let self, let rate else { return }
             self.lastRate = rate
-            self.trayAnimator?.applyRate(rate)
+            self.trayAnimator?.applyRate(rate, generation: generation)
         }
     }
 

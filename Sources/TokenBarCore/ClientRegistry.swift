@@ -124,6 +124,13 @@ public enum ClientRegistry {
         parseIdSet(UserDefaults.standard.string(forKey: limitsHiddenKey) ?? "")
     }
 
+    /// Clients excluded from the menu-bar quota AUTO pick: tab-hidden ∪
+    /// limits-hidden. A client hidden from either surface must not drive the
+    /// tray quota % (an explicit tray selection is honored separately).
+    public static func quotaExcludedClients() -> Set<String> {
+        hiddenClients().union(hiddenLimitsClients())
+    }
+
     /// The superset of client ids that can show a row in the multi-agent
     /// Agent-limits card: `present` clients that carry a known limit
     /// (a placeholder row or a live quota snapshot), unioned with every client

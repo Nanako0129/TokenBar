@@ -52,7 +52,9 @@ struct SettingsWindowView: View {
         .task { await model.pollAgentUsage() }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
-        .task { await pollTokensPerMin() }
+        // Key the rate poll on the hidden raw so a hide toggle restarts it and
+        // re-fetches the filtered rate immediately, instead of lagging ≤10s.
+        .task(id: tabsHiddenRaw) { await pollTokensPerMin() }
     }
 
     // MARK: - Preview column
@@ -176,9 +178,12 @@ private struct MenuBarMock: View {
     }
 
     /// Mirrors TrayAnimator.quotaRemaining minus the write-back: live resolve
-    /// first, then the persisted last-good reading.
+    /// first, then the persisted last-good reading. Excludes the tab- and
+    /// limits-hidden clients from the auto pick, same as the real tray.
     private var quotaRemaining: Double? {
-        QuotaResolver.resolve(payload: agentUsage, selection: quotaSource)?
+        QuotaResolver.resolve(
+            payload: agentUsage, selection: quotaSource,
+            excluding: ClientRegistry.quotaExcludedClients())?
             .window.remainingPercent
             ?? UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
     }

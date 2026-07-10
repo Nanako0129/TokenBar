@@ -209,6 +209,50 @@ enum SelfTest {
             QuotaResolver.resolve(payload: quotaPayload, selection: "nope|Session") == nil,
             "unknown quota selection is nil")
         expect(QuotaResolver.resolve(payload: nil, selection: "auto") == nil, "no payload, no quota")
+        // Auto pick excludes hidden clients (issue #36): hiding the tightest
+        // (claude|Session, 12%) makes auto fall to the next healthy window
+        // (codex|Weekly, 35%); an EXPLICIT pick of a hidden client is honored;
+        // empty exclusion is byte-identical to the default.
+        let autoExClaude = QuotaResolver.resolve(
+            payload: quotaPayload, selection: "auto", excluding: ["claude"])
+        expect(autoExClaude?.clientId == "codex" && autoExClaude?.window.label == "Weekly",
+            "auto skips a hidden tightest-window client")
+        expect(
+            QuotaResolver.resolve(payload: quotaPayload, selection: "claude|Session", excluding: ["claude"])?
+                .window.remainingPercent == 12,
+            "explicit selection of a hidden client still resolves")
+        expect(
+            QuotaResolver.resolve(payload: quotaPayload, selection: "auto", excluding: [])?
+                .clientId == tightest?.clientId,
+            "empty exclusion is byte-identical to the default auto pick")
+
+        // Year picker visibility (issue #36): years in which only hidden clients
+        // had activity drop from the picker. Fixture: vis active in 2025, hid
+        // only in 2026 → hiding hid leaves {2025} visible.
+        let yearJSON = """
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2025-06-01","end":"2026-06-01"}},
+         "summary":{"totalTokens":0,"totalCost":0,"totalDays":0,"activeDays":0,"averagePerDay":0,
+                    "maxCostInSingleDay":0,"clients":["vis","hid"],"models":[]},
+         "years":[],
+         "contributions":[
+           {"date":"2025-06-01","totals":{"tokens":10,"cost":1,"messages":1},"intensity":1,
+            "tokenBreakdown":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+            "clients":[{"client":"vis","modelId":"m","providerId":"p","cost":1,"messages":1,
+             "tokens":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]},
+           {"date":"2026-06-01","totals":{"tokens":10,"cost":1,"messages":1},"intensity":1,
+            "tokenBreakdown":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+            "clients":[{"client":"hid","modelId":"m","providerId":"p","cost":1,"messages":1,
+             "tokens":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
+         ]}
+        """
+        let yearPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(yearJSON.utf8))
+        let visYears = UsageStats.yearsWithVisibleActivity(
+            contributions: yearPayload.contributions, hidden: ["hid"])
+        expect(visYears == ["2025"], "year picker drops a year only hidden clients used")
+        expect(
+            UsageStats.yearsWithVisibleActivity(contributions: yearPayload.contributions, hidden: [])
+                == ["2025", "2026"],
+            "no hidden clients keeps every active year")
 
         // Limits-card drag reorder: direction-aware insert (down → after the
         // target, up → before it) so single-step moves both work.

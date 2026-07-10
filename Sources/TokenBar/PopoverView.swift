@@ -52,6 +52,22 @@ struct PopoverView: View {
             present: model.stats?.presentClients ?? [], hiddenRaw: hiddenRaw, orderRaw: orderRaw)
     }
 
+    /// Years shown in the picker: `knownYears` minus years in which ONLY hidden
+    /// clients had activity. Best-effort — derivable only from an all-time
+    /// payload (contributions span every year); when the payload is year-scoped
+    /// (e.g. a snapshot restore before any all-time load has been seen) we keep
+    /// the full known list (graceful degradation). Reactive via `hiddenRaw`; the
+    /// empty-hidden fast path is byte-identical to the raw known list.
+    private var visibleYears: [String] {
+        let hidden = ClientRegistry.parseIdSet(hiddenRaw)
+        guard !hidden.isEmpty, model.year == nil,
+              let contributions = model.payload?.contributions, !contributions.isEmpty
+        else { return model.knownYears }
+        let visible = UsageStats.yearsWithVisibleActivity(
+            contributions: contributions, hidden: hidden)
+        return model.knownYears.filter { visible.contains($0) }
+    }
+
     /// The active tab's client slice, mirroring `lensContent`'s `clientIds`:
     /// the displayed (non-hidden) clients on Overview, or the single client on
     /// a client tab. Threaded into `ensureData` so the Hourly/Agents FFI fetch
@@ -105,7 +121,10 @@ struct PopoverView: View {
         .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lensClientIds.joined(separator: ","))") {
             await model.ensureData(for: activeView.wrappedValue, clients: lensClientIds)
         }
-        .task { await pollTokensPerMin() }
+        // Keyed on the hidden raw so a hide toggle restarts the loop and
+        // re-fetches the filtered rate immediately (badge would otherwise lag
+        // ≤10s). The loop fetches first, then sleeps.
+        .task(id: hiddenRaw) { await pollTokensPerMin() }
         .task { await model.pollAgentUsage() }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
@@ -180,7 +199,8 @@ struct PopoverView: View {
     /// (nil) is the native default; concrete years come from the payloads
     /// seen so far.
     @ViewBuilder private var yearMenu: some View {
-        if !model.knownYears.isEmpty {
+        let years = visibleYears
+        if !years.isEmpty {
             Menu {
                 Picker("Year", selection: Binding(
                     get: { model.year ?? "" },
@@ -189,7 +209,7 @@ struct PopoverView: View {
                     }
                 )) {
                     Text("All years").tag("")
-                    ForEach(model.knownYears, id: \.self) { year in
+                    ForEach(years, id: \.self) { year in
                         Text(year).tag(year)
                     }
                 }
@@ -326,9 +346,13 @@ struct PopoverView: View {
 
     @ViewBuilder private var lensContent: some View {
         if let payload = model.payload, let stats = model.stats {
-            let singleClient = activeTab == "overview" ? nil : activeTab
-            // Use the reactive `displayClients` (observes the hidden/order raws)
-            // so a live hide re-derives the Overview slice, matching the tab row.
+            // Treat a just-hidden (or unknown) active tab as Overview for THIS
+            // frame's slice, so the hidden client's slice never renders even for
+            // the single body pass before `resetTabIfHidden()` fixes the
+            // persisted `activeTab`. Use the reactive `displayClients` (observes
+            // the hidden/order raws) so a live hide re-derives the slice.
+            let singleClient = (activeTab != "overview" && displayClients.contains(activeTab))
+                ? activeTab : nil
             let clientIds = singleClient.map { [$0] } ?? displayClients
             // Every displayed number must exclude hidden clients — including the
             // Overview aggregates. The model reuses the precomputed full `stats`
@@ -342,7 +366,8 @@ struct PopoverView: View {
                     payload: payload, clientIds: clientIds, stats: activeStats,
                     modelReport: model.modelReport, colors: model.colors,
                     trace: model.trace, agentUsage: model.agentUsage,
-                    singleClient: singleClient, year: model.year)
+                    singleClient: singleClient, year: model.year,
+                    hidden: ClientRegistry.parseIdSet(hiddenRaw))
             case .models:
                 ModelsView(
                     report: model.modelReport, clientIds: clientIds, colors: model.colors)

@@ -136,6 +136,30 @@ public struct UsageStats: Sendable {
     }
 }
 
+extension UsageStats {
+    /// The set of `YYYY` years in which at least one NON-hidden client had
+    /// activity (tokens or cost), derived from a payload's contributions. Used
+    /// to drop from the year picker years that only hidden clients used. Only
+    /// meaningful over an all-time payload (contributions spanning every year);
+    /// callers fall back to the unfiltered known-year list when the payload is
+    /// year-scoped.
+    public static func yearsWithVisibleActivity(
+        contributions: [Contribution], hidden: Set<String>
+    ) -> Set<String> {
+        var years = Set<String>()
+        for c in contributions {
+            let year = String(c.date.prefix(4))
+            if years.contains(year) { continue }
+            if c.clients.contains(where: {
+                !hidden.contains($0.client) && ($0.tokens.total > 0 || $0.cost > 0)
+            }) {
+                years.insert(year)
+            }
+        }
+        return years
+    }
+}
+
 extension Streaks {
     /// Port of computeStreaks: walk every calendar day in the range; a day is
     /// active when it has tokens. Current counts back from the range end.

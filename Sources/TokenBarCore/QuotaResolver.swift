@@ -10,13 +10,20 @@ public enum QuotaResolver {
         "\(clientId)|\(label)"
     }
 
+    /// `excluding` is the set of client ids to skip in AUTO mode only (the
+    /// user's tab-hidden ∪ limits-hidden clients) — so the menu-bar quota can't
+    /// surface a client the popover hides. An EXPLICIT `clientId|window`
+    /// selection is always honored, even for an excluded client (the user
+    /// deliberately picked it as the tray source). Empty set = pre-hide
+    /// behavior, byte-identical.
     public static func resolve(
-        payload: AgentUsagePayload?, selection: String
+        payload: AgentUsagePayload?, selection: String, excluding: Set<String> = []
     ) -> (clientId: String, window: UsageWindow)? {
         guard let payload else { return nil }
         if selection.isEmpty || selection == Self.auto {
             var best: (clientId: String, window: UsageWindow)?
-            for agent in payload.agents where agent.error == nil {
+            for agent in payload.agents
+            where agent.error == nil && !excluding.contains(agent.clientId) {
                 for window in agent.windows where window.remainingPercent.isFinite {
                     if best == nil || window.remainingPercent < best!.window.remainingPercent {
                         best = (agent.clientId, window)

@@ -17,6 +17,10 @@ struct OverviewView: View {
     var singleClient: String?
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
+    /// The user's tab-hidden set, passed in from the observing parent
+    /// (PopoverView) so the dependency is explicit rather than an imperative
+    /// `ClientRegistry.hiddenClients()` read in this body.
+    var hidden: Set<String> = []
 
     /// Master switch: off hides the Agent-limits card everywhere.
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
@@ -48,7 +52,7 @@ struct OverviewView: View {
                         clients: clientIds, trace: trace, agentUsage: agentUsage,
                         reorderable: true)
                 }
-                UsageTraceCard(buckets: trace, windowSecs: 600, hidden: ClientRegistry.hiddenClients())
+                UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors)
             }
