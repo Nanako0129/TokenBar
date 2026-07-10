@@ -63,6 +63,22 @@ enum Smoke {
             return "\(buckets.count) buckets (10m window), tokens/min \(String(format: "%.1f", rate))"
         }
 
+        // Drift probe (issue #35): force trayTotals' slow re-sum path over the
+        // REAL payload (a hidden id that matches no client excludes nothing) and
+        // compare to the FFI summary. Print-only — a mismatch never fails the
+        // run; it flags a vendor-sync regression in the aggregator's clamp
+        // granularity (see UsagePayload.trayTotals' doc comment).
+        summarize("trayDrift") {
+            let graph = try TBCore.graph()
+            let totals = graph.trayTotals(hidden: ["__none__"], today: Format.todayKey())
+            let tokenMatch = totals.totalTokens == graph.summary.totalTokens
+            let costMatch = abs(totals.totalCost - graph.summary.totalCost) < 0.01
+            let status = tokenMatch && costMatch ? "match" : "MISMATCH"
+            return "\(status) — reSum \(totals.totalTokens) tok / "
+                + "$\(String(format: "%.2f", totals.totalCost)) vs summary "
+                + "\(graph.summary.totalTokens) tok / $\(String(format: "%.2f", graph.summary.totalCost))"
+        }
+
         summarize("agentUsage") {
             let usage = try TBCore.agentUsage()
             let cards = usage.agents.map { snapshot in

@@ -298,15 +298,11 @@ struct PopoverView: View {
             let singleClient = activeTab == "overview" ? nil : activeTab
             let clientIds = singleClient.map { [$0] } ?? ClientRegistry.displayClients(present: stats.presentClients)
             // Every displayed number must exclude hidden clients — including the
-            // Overview aggregates. Reuse the precomputed full `stats` only when
-            // the selected set is exactly all present clients (the common
-            // no-hidden Overview case); otherwise re-aggregate over the slice.
-            // This keeps the per-body recompute off the hot path while still
-            // dropping hidden clients from Overview/Stats totals and streaks.
-            let selected = Set(clientIds)
-            let activeStats = selected == Set(stats.presentClients)
-                ? stats
-                : UsageStats(payload: payload, selectedClients: selected)
+            // Overview aggregates. The model reuses the precomputed full `stats`
+            // for the all-present slice and memoizes the hidden/single-client
+            // slice, so this hot path (re-evals every ~10s trace poll) doesn't
+            // re-aggregate UsageStats on every body eval.
+            let activeStats = model.stats(selecting: Set(clientIds)) ?? stats
             switch activeView.wrappedValue {
             case .overview:
                 OverviewView(

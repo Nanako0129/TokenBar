@@ -9,6 +9,10 @@ public struct TokenBreakdown: Decodable, Sendable {
     public let cacheRead: Int64
     public let cacheWrite: Int64
     public let reasoning: Int64
+
+    /// Sum of every token lane — the single definition shared by the tray
+    /// totals, DayBars, and UsageStats aggregations.
+    public var total: Int64 { input + output + cacheRead + cacheWrite + reasoning }
 }
 
 public struct ContributionClient: Decodable, Sendable {
@@ -94,6 +98,14 @@ extension UsagePayload {
     /// today contribution totals directly, so the numbers are byte-identical
     /// to the pre-hide implementation (regression guard). With any client
     /// hidden, the figures are re-summed from the surviving per-client stripes.
+    ///
+    /// Clamp-granularity caveat: vendor/tokscale-core's aggregator clamps a
+    /// day's `totals.tokens` with `.max(0)` at the aggregate level, while each
+    /// per-client stripe lane clamps independently. With pathological negative
+    /// token deltas the re-summed slow path can therefore differ slightly from
+    /// `summary` — the day-level clamp is not reproducible from the stripes
+    /// alone, so we do NOT try to. Smoke's `trayDrift` probe compares the two
+    /// on real data every run to catch any vendor-sync regression.
     public func trayTotals(hidden: Set<String>, today: String) -> TrayTotals {
         if hidden.isEmpty {
             let todayEntry = contributions.last(where: { $0.date == today })
@@ -110,8 +122,7 @@ extension UsagePayload {
         for c in contributions {
             let isToday = c.date == today
             for cc in c.clients where !hidden.contains(cc.client) {
-                let t = cc.tokens
-                let sum = t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning
+                let sum = cc.tokens.total
                 totalTokens += sum
                 totalCost += cc.cost
                 if isToday {

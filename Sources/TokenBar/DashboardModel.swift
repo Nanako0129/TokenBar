@@ -119,6 +119,35 @@ private struct DashboardSnapshot {
     private(set) var agentUsage: AgentUsagePayload?
     private(set) var trace: [TraceBucket] = []
 
+    // Memo for the hidden-client Overview slice: lensContent re-evals on every
+    // ~10s trace poll, and re-aggregating UsageStats (incl. Streaks' full-range
+    // double pass) each time is wasteful. Keyed on the payload's generatedAt
+    // plus the selected set, so it recomputes only when either changes.
+    // @ObservationIgnored: pure derived cache, never a view dependency, so
+    // reading/writing it during a view update triggers no observation churn.
+    @ObservationIgnored private var statsMemoGeneratedAt: String?
+    @ObservationIgnored private var statsMemoSelected: Set<String>?
+    @ObservationIgnored private var statsMemoValue: UsageStats?
+
+    /// UsageStats for a client slice, with hidden clients already removed from
+    /// `selected`. Returns the precomputed full `stats` when the slice covers
+    /// every present client (the common no-hidden case — no recompute); other-
+    /// wise returns a memoized instance, recomputing only when the payload or
+    /// the selected set changes. Call site: PopoverView.lensContent.
+    func stats(selecting selected: Set<String>) -> UsageStats? {
+        guard let payload, let stats else { return nil }
+        if selected == Set(stats.presentClients) { return stats }
+        if statsMemoGeneratedAt == payload.meta.generatedAt,
+           statsMemoSelected == selected, let memo = statsMemoValue {
+            return memo
+        }
+        let computed = UsageStats(payload: payload, selectedClients: selected)
+        statsMemoGeneratedAt = payload.meta.generatedAt
+        statsMemoSelected = selected
+        statsMemoValue = computed
+        return computed
+    }
+
     /// TBCore is blocking — every fetch hops off the main actor.
     func load() async {
         do {

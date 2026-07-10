@@ -41,18 +41,22 @@ enum TrayMode: String, CaseIterable {
         }
         guard self != .hidden, let graph else { return "" }
         // Hidden clients must not appear in any tray figure. An empty hidden
-        // set is byte-identical to the pre-hide summary/today totals.
-        let totals = graph.trayTotals(
-            hidden: ClientRegistry.hiddenClients(), today: Format.todayKey())
+        // set is byte-identical to the pre-hide summary/today totals. Computed
+        // lazily only in the branches that read it — title() runs on every
+        // UserDefaults write (AppDelegate's observer), and the rate/early modes
+        // never touch the aggregate.
+        func totals() -> TrayTotals {
+            graph.trayTotals(hidden: ClientRegistry.hiddenClients(), today: Format.todayKey())
+        }
         switch self {
         case .todayTokens:
-            return Format.compactTokens(totals.todayTokens)
+            return Format.compactTokens(totals().todayTokens)
         case .todayCost:
-            return Format.usd(totals.todayCost)
+            return Format.usd(totals().todayCost)
         case .totalTokens:
-            return Format.compactTokens(totals.totalTokens)
+            return Format.compactTokens(totals().totalTokens)
         case .totalCost:
-            return Format.usd(totals.totalCost)
+            return Format.usd(totals().totalCost)
         case .tokensPerMin:
             guard let tokensPerMin else { return "—/m" }
             return "\(Format.compactTokens(Int64(max(0, tokensPerMin).rounded())))/m"

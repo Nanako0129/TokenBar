@@ -13,14 +13,18 @@ struct SettingsWindowView: View {
     // cache with it would re-introduce the reopen flash).
     @State private var model = DashboardModel()
     @State private var tokensPerMin: Double?
-
     /// Master switch: off hides the preview's Agent-limits card too.
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
-    /// Observed so the preview's tab list re-derives the instant the user
-    /// toggles visibility or reorders in the left panel, instead of lagging a
-    /// poller tick behind.
+    /// Observed so the preview (tab list, limits card, trace card) re-derives
+    /// the instant the user toggles visibility or reorders in the left panel,
+    /// instead of lagging a poller tick behind.
     @AppStorage(ClientRegistry.tabHiddenKey) private var tabsHiddenRaw = ""
     @AppStorage(ClientRegistry.tabOrderKey) private var tabsOrderRaw = ""
+
+    /// The user's hidden client set, parsed from the observed raw string.
+    private var hiddenClients: Set<String> {
+        ClientRegistry.parseIdSet(tabsHiddenRaw)
+    }
 
     var body: some View {
         HStack(spacing: 0) {
@@ -83,9 +87,7 @@ struct SettingsWindowView: View {
             }
 
             section("Live session card") {
-                UsageTraceCard(
-                    buckets: model.trace, windowSecs: 600,
-                    clientIds: ClientRegistry.displayClients(present: model.stats?.presentClients ?? []))
+                UsageTraceCard(buckets: model.trace, windowSecs: 600, hidden: hiddenClients)
             }
         }
     }

@@ -88,8 +88,7 @@ public struct UsageStats: Sendable {
             for cc in c.clients {
                 present.insert(cc.client)
                 guard selectedClients.contains(cc.client) else { continue }
-                let t = cc.tokens
-                dayTokens += t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning
+                dayTokens += cc.tokens.total
                 dayCost += cc.cost
             }
             if dayTokens == 0 && dayCost == 0 { continue }

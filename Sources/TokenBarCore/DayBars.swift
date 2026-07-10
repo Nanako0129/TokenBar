@@ -68,8 +68,7 @@ public enum DayBars {
         var grouped: [String: DaySegment] = [:]
         for client in contribution.clients {
             guard allowed.contains(client.client) else { continue }
-            let t = client.tokens
-            let tokens = t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning
+            let tokens = client.tokens.total
             if tokens <= 0 && client.cost <= 0 { continue }
             let model = client.modelId.isEmpty ? "unknown" : client.modelId
             let key = stackBy == .model ? model : client.client

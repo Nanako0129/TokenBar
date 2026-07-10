@@ -7,9 +7,12 @@ struct UsageTraceCard: View {
     let buckets: [TraceBucket]
     let windowSecs: Int
     var title = "Live session"
-    /// Restrict rows to these client ids (nil = every client). Callers pass
-    /// the displayed client set so hidden clients drop out of the total rate.
-    var clientIds: [String]?
+    /// Client ids to exclude (the user's hidden set). A deny-list, matching the
+    /// menu-bar rate (LiveRate) — an allow-list blanked the card whenever the
+    /// caller's client list had not loaded yet, and the two bases could
+    /// transiently disagree on a client live in the tail but not yet in the
+    /// graph's presentClients. Empty set = show every client (pre-#35 behavior).
+    var hidden: Set<String> = []
 
     /// When true, rows split by (client, agent, model); off collapses per
     /// client. The settings panel edits the same key.
@@ -18,14 +21,12 @@ struct UsageTraceCard: View {
     private static let maxRows = 5
 
     var body: some View {
-        let visible = clientIds.map { ids in
-            let allowed = Set(ids)
-            return buckets.filter { allowed.contains($0.client) }
-        } ?? buckets
+        let visible = buckets.filter { !hidden.contains($0.client) }
         let rows = detailed ? visible : TraceBucket.collapseByClient(visible)
         let top = Array(rows.prefix(Self.maxRows))
         let maxRate = top.map(\.tokensPerMin).max() ?? 0
-        let totalRate = rows.reduce(0) { $0 + $1.tokensPerMin }
+        // Single source of truth for the sum, shared with LiveRate.
+        let totalRate = TraceBucket.totalRate(buckets, hidden: hidden)
         let windowMin = max(1, Int((Double(windowSecs) / 60).rounded()))
 
         DashCard(title, trailing: {
