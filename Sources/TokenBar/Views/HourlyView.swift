@@ -47,7 +47,7 @@ struct HourlyView: View {
             guard e.hour.count >= 13, let hh = Int(e.hour.dropFirst(11).prefix(2)),
                   (0...23).contains(hh)
             else { continue }
-            out[hh].tokens += e.total
+            out[hh].tokens = out[hh].tokens.saturatingAdding(e.total)
             out[hh].cost += e.cost
         }
         return out

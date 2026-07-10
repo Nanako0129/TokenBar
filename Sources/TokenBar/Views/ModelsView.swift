@@ -24,7 +24,7 @@ struct ModelsView: View {
             .filter { allow.contains($0.client) }
             .sorted { $0.cost != $1.cost ? $0.cost > $1.cost : $0.total > $1.total }
         let totalCost = rows.reduce(0) { $0 + $1.cost }
-        let totalTokens = rows.reduce(0) { $0 + $1.total }
+        let totalTokens = rows.reduce(Int64(0)) { $0.saturatingAdding($1.total) }
 
         DashCard(
             "Models by cost",

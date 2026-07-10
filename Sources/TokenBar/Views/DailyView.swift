@@ -31,7 +31,8 @@ struct DailyView: View {
     }
 
     private static func tokenTotal(_ t: TokenBreakdown) -> Int64 {
-        t.input + t.output + t.cacheRead + t.cacheWrite + t.reasoning
+        // Delegate to the shared saturating sum (was a plain-`+` 4th copy).
+        t.total
     }
 
     private var rows: [DayRow] {
@@ -42,7 +43,7 @@ struct DailyView: View {
             var messages = 0
             for cc in c.clients {
                 if !allow.contains(cc.client) { continue }
-                tokens += Self.tokenTotal(cc.tokens)
+                tokens = tokens.saturatingAdding(Self.tokenTotal(cc.tokens))
                 cost += cc.cost
                 messages += cc.messages
             }
@@ -64,7 +65,7 @@ struct DailyView: View {
             var slot = grouped[key] ?? ModelSlice(
                 key: key, model: model, provider: cc.providerId,
                 color: colors.color(cc.providerId, model), tokens: 0, cost: 0)
-            slot.tokens += tokens
+            slot.tokens = slot.tokens.saturatingAdding(tokens)
             slot.cost += cc.cost
             grouped[key] = slot
         }
