@@ -69,6 +69,14 @@ final class TrayAnimator {
             d.object(forKey: animateKey).map { "\($0)" } ?? "",
             d.string(forKey: quotaSourceKey) ?? "",
             d.string(forKey: IconColoring.storageKey) ?? "",
+            // The Auto gauge value now depends on the exclusion set, so a hide
+            // toggle must re-render (and re-resolve) the gauge — renderGaugeIcon
+            // reads `quotaRemaining`, which resolves with the live exclusion.
+            // Without these keys the icon kept the excluded client's % until the
+            // 30s gauge loop / next quota poll. Value-gated: one re-render on an
+            // actual change, unrelated writes stay free.
+            d.string(forKey: ClientRegistry.tabHiddenKey) ?? "",
+            d.string(forKey: ClientRegistry.limitsHiddenKey) ?? "",
         ].joined(separator: "|")
     }
 
