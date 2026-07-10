@@ -335,6 +335,32 @@ enum SelfTest {
             TokenBreakdown.self,
             from: Data(#"{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":2}"#.utf8))
         expect(normalLanes.total == 167, "TokenBreakdown.total is exact for normal lanes")
+        // UsageStats' day/total accumulators (the filtered Overview/Stats path)
+        // must saturate too — a single Int64.max-clamped stripe folded with a
+        // normal one renders a pinned total, never a trapping crash.
+        let satJSON = """
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"2026-07-01"}},
+         "summary":{"totalTokens":0,"totalCost":0,"totalDays":1,"activeDays":1,"averagePerDay":0,
+                    "maxCostInSingleDay":0,"clients":["big","small"],"models":[]},
+         "years":[],
+         "contributions":[
+           {"date":"2026-07-01","totals":{"tokens":0,"cost":2,"messages":2},"intensity":1,
+            "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+            "clients":[
+              {"client":"big","modelId":"m","providerId":"p","cost":1,"messages":1,
+               "tokens":{"input":9223372036854775807,"output":9223372036854775807,"cacheRead":0,"cacheWrite":0,"reasoning":0}},
+              {"client":"small","modelId":"m","providerId":"p","cost":1,"messages":1,
+               "tokens":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
+         ]}
+        """
+        let satPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(satJSON.utf8))
+        let satAll = UsageStats(payload: satPayload, selectedClients: ["big", "small"])
+        expect(satAll.totalTokens == .max && satAll.perDayMap["2026-07-01"]?.tokens == .max
+            && satAll.maxTokens == .max,
+            "UsageStats saturates an Int64.max stripe instead of trapping")
+        let satSmall = UsageStats(payload: satPayload, selectedClients: ["small"])
+        expect(satSmall.totalTokens == 150 && satSmall.perDayMap["2026-07-01"]?.tokens == 150,
+            "UsageStats is exact for normal stripes")
 
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {

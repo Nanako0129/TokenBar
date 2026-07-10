@@ -26,7 +26,7 @@ public struct DaySegment: Sendable {
 
 public struct DayBar: Sendable {
     public let date: String
-    public var totalTokens: Int64 { segments.reduce(0) { $0 + $1.tokens } }
+    public var totalTokens: Int64 { segments.reduce(0) { $0.saturatingAdding($1.tokens) } }
     public var totalCost: Double { segments.reduce(0) { $0 + $1.cost } }
     public var segments: [DaySegment]
     public var isEmpty: Bool { segments.isEmpty }
@@ -84,7 +84,7 @@ public enum DayBars {
                         color: ClientRegistry.style(client.client).color, tokens: 0, cost: 0)
                 }
             }()
-            slot.tokens += tokens
+            slot.tokens = slot.tokens.saturatingAdding(tokens)
             slot.cost += client.cost
             grouped[key] = slot
         }
@@ -102,7 +102,7 @@ public enum DayBars {
             for seg in bar.segments {
                 var slot = agg[seg.key]
                     ?? DaySegment(key: seg.key, label: seg.label, color: seg.color, tokens: 0, cost: 0)
-                slot.tokens += seg.tokens
+                slot.tokens = slot.tokens.saturatingAdding(seg.tokens)
                 slot.cost += seg.cost
                 agg[seg.key] = slot
             }

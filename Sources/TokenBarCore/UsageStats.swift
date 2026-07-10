@@ -88,14 +88,17 @@ public struct UsageStats: Sendable {
             for cc in c.clients {
                 present.insert(cc.client)
                 guard selectedClients.contains(cc.client) else { continue }
-                dayTokens += cc.tokens.total
+                // Saturating: a corrupt Antigravity stripe can be Int64.max
+                // (Rust-side #766 clamp), and the filtered Overview/Stats path
+                // folds these here — a trapping `+=` would crash the dashboard.
+                dayTokens = dayTokens.saturatingAdding(cc.tokens.total)
                 dayCost += cc.cost
             }
             if dayTokens == 0 && dayCost == 0 { continue }
             let entry = PerDay(date: c.date, tokens: dayTokens, cost: dayCost, intensity: c.intensity)
             perDay.append(entry)
             perDayMap[c.date] = entry
-            totalTokens += dayTokens
+            totalTokens = totalTokens.saturatingAdding(dayTokens)
             totalCost += dayCost
             if dayTokens > maxTokens { maxTokens = dayTokens }
             if bestDay == nil || dayCost > bestDay!.cost { bestDay = (c.date, dayCost) }

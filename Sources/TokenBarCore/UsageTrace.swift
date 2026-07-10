@@ -62,7 +62,7 @@ public struct TraceBucket: Decodable, Sendable {
                 order.append(bucket.client)
                 return Slot()
             }()
-            slot.tokens += bucket.tokens
+            slot.tokens = slot.tokens.saturatingAdding(bucket.tokens)
             slot.messages += bucket.messages
             slot.tokensPerMin += bucket.tokensPerMin
             slot.agents.insert(bucket.agent)
