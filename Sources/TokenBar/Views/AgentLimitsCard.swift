@@ -482,9 +482,16 @@ struct AgentLimitsCard: View {
     }
 
     /// The live tail reports raw client ids; quota snapshots use short ids.
-    /// Thin wrapper over the hoisted `ClientRegistry.canonicalClient` so the
-    /// trace deny-filters and this card share one mapping.
+    /// Layers this card's deliberate quota-attribution fold on top of the shared
+    /// explicit aliases: after the registry's exact mappings, a generic `-cli`
+    /// strip folds CLI variants onto their base client so e.g. `antigravity-cli`
+    /// shares the `antigravity` quota snapshot. This generic fold is intentional
+    /// HERE (quota grouping) and must NOT leak into the hidden-set deny-filters,
+    /// which need `antigravity-cli` kept distinct — hence it lives in the card,
+    /// not in `ClientRegistry.canonicalClient`.
     static func normalizeTraceClient(_ id: String) -> String {
-        ClientRegistry.canonicalClient(id)
+        let canonical = ClientRegistry.canonicalClient(id)
+        guard canonical == id else { return canonical } // an explicit alias applied
+        return id.hasSuffix("-cli") ? String(id.dropLast(4)) : id
     }
 }

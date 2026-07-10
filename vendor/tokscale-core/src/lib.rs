@@ -4913,6 +4913,84 @@ mod tests {
         std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY");
     }
 
+    // Issue #36: the client selection must be applied at the STREAMING SCAN,
+    // not by a downstream membership filter over the pre-aggregated buckets.
+    // codebuff (200/80) and kimi (100/50) fold into ONE shared "Main" agent
+    // bucket; the FFI/DashboardModel now thread the selection into
+    // ReportOptions.clients, so filtering to codebuff yields ONLY its 200/80 —
+    // NOT the mixed 300/130. The old approach (unfiltered report + a Swift
+    // membership filter over whole buckets) kept the entire shared bucket and
+    // would read 300/130 here, so this test is RED against it and GREEN now.
+    #[test]
+    #[serial_test::serial]
+    fn test_agents_report_client_filter_scopes_shared_bucket_issue36() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+        std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
+
+        {
+            let cb_dir = source_home.path().join(".config/manicode/projects/proj");
+            std::fs::create_dir_all(&cb_dir).unwrap();
+            std::fs::write(
+                cb_dir.join("chat-messages.json"),
+                r#"[{"role":"assistant","id":"A","metadata":{"model":"claude-sonnet-4","usage":{"inputTokens":200,"outputTokens":80}},"credits":0.02}]"#,
+            )
+            .unwrap();
+            let kimi_dir = source_home.path().join(".kimi/sessions/g/s");
+            std::fs::create_dir_all(&kimi_dir).unwrap();
+            std::fs::write(
+                kimi_dir.join("wire.jsonl"),
+                "{\"type\": \"metadata\", \"protocol_version\": \"1.3\"}\n{\"timestamp\": 1770983410.0, \"message\": {\"type\": \"StatusUpdate\", \"payload\": {\"token_usage\": {\"input_other\": 100, \"output\": 50, \"input_cache_read\": 0, \"input_cache_creation\": 0}, \"message_id\": \"K\"}}}",
+            )
+            .unwrap();
+
+            let home = source_home.path().to_str().unwrap().to_string();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let run = |clients: Option<Vec<String>>| {
+                rt.block_on(get_agents_report(ReportOptions {
+                    home_dir: Some(home.clone()),
+                    use_env_roots: false,
+                    clients,
+                    ..Default::default()
+                }))
+                .unwrap()
+            };
+
+            // All clients: one shared "Main" bucket carrying the mixed total.
+            let all = run(None);
+            assert_eq!(all.entries.len(), 1, "codebuff + kimi share one Main bucket");
+            assert_eq!(all.entries[0].agent, "Main");
+            assert_eq!(all.entries[0].input, 300, "mixed bucket = 200 + 100");
+            assert_eq!(all.entries[0].output, 130, "mixed bucket = 80 + 50");
+            assert_eq!(all.total_messages, 2);
+
+            // Filtered to codebuff: the SAME shared bucket, scoped at the scan
+            // to codebuff's contribution alone — proves the FFI-level filter,
+            // not a whole-bucket membership keep (which would still read 300).
+            let filtered = run(Some(vec!["codebuff".to_string()]));
+            assert_eq!(filtered.entries.len(), 1);
+            assert_eq!(filtered.entries[0].agent, "Main");
+            assert_eq!(
+                filtered.entries[0].input, 200,
+                "filtered = codebuff only, not the mixed 300"
+            );
+            assert_eq!(filtered.entries[0].output, 80);
+            assert_eq!(filtered.entries[0].clients, vec!["codebuff".to_string()]);
+            assert_eq!(filtered.total_messages, 1, "kimi's message is gone");
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY");
+    }
+
     // Agent bucketing + fold arithmetic in isolation (no fixtures): normalized
     // names, the "Main" fallback, plain `+=` token sums, and message_count.max(0).
     #[test]

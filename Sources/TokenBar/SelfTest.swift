@@ -157,8 +157,11 @@ enum SelfTest {
         expect(TraceBucket.totalRate(rateRows, hidden: ["claude", "codex"]) == 0, "rate all-hidden is zero")
 
         // Trace id canonicalization (issue #36): raw tail ids fold to the
-        // registry's short ids; a mixed set drops only the hidden client, the
-        // generic "-cli" suffix strips, and already-canonical ids pass through.
+        // registry's short ids via EXPLICIT aliases only — a mixed set drops
+        // only the hidden client, and already-canonical ids pass through. There
+        // is deliberately NO generic "-cli" strip: `antigravity-cli` is a
+        // registered client distinct from the `antigravity` IDE, so stripping
+        // would conflate them.
         let mixedRows = [
             bucket("claude-code", "Main", "m", 100),
             bucket("codex-cli", "Main", "m", 50),
@@ -166,8 +169,15 @@ enum SelfTest {
         ]
         expect(TraceBucket.totalRate(mixedRows, hidden: ["claude"]) == 80, "canonical hide drops only claude-code rows")
         expect(ClientRegistry.canonicalClient("gemini-cli") == "gemini", "canonical explicit gemini-cli")
-        expect(ClientRegistry.canonicalClient("droid-cli") == "droid", "canonical generic -cli strip")
+        expect(ClientRegistry.canonicalClient("antigravity-cli") == "antigravity-cli", "canonical preserves registered antigravity-cli")
+        expect(ClientRegistry.canonicalClient("droid-cli") == "droid-cli", "canonical does NOT strip a generic -cli")
         expect(ClientRegistry.canonicalClient("claude") == "claude", "canonical short id passes through")
+        // AgentLimitsCard keeps its own generic "-cli" fold for quota-card
+        // attribution: explicit aliases via the registry, then a local strip so
+        // antigravity-cli shares the antigravity quota snapshot — this fold must
+        // NOT leak into the deny-filter canonicalizer above.
+        expect(AgentLimitsCard.normalizeTraceClient("codex-cli") == "codex", "limits wrapper applies explicit alias")
+        expect(AgentLimitsCard.normalizeTraceClient("antigravity-cli") == "antigravity", "limits wrapper folds generic -cli for quota attribution")
 
         // Quota resolver: auto picks the tightest window across agents,
         // erroring agents are skipped, explicit selections parse. The payload

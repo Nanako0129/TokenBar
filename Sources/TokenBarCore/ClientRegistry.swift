@@ -84,15 +84,18 @@ public enum ClientRegistry {
     /// Canonicalize a live-tail client id to the registry's short id. The
     /// usage trace reports raw ids (`claude-code`, `codex-cli`, `gemini-cli`)
     /// while the hidden set, quota snapshots, and registry all key on short ids
-    /// (`claude`, `codex`, `gemini`). Explicit cases first, then a generic
-    /// `-cli` suffix strip. Single source shared by the trace deny-filters and
-    /// `AgentLimitsCard.normalizeTraceClient`.
+    /// (`claude`, `codex`, `gemini`). EXPLICIT aliases only — no generic `-cli`
+    /// suffix rule: `antigravity-cli` is a registered client id distinct from
+    /// the `antigravity` IDE, so stripping `-cli` would conflate the two (hiding
+    /// one would mis-target the other). Single source shared by the trace
+    /// deny-filters and `AgentLimitsCard.normalizeTraceClient` (which layers its
+    /// own generic `-cli` fold on top for quota-card attribution).
     public static func canonicalClient(_ id: String) -> String {
         switch id {
         case "claude-code": return "claude"
         case "codex-cli": return "codex"
         case "gemini-cli": return "gemini"
-        default: return id.hasSuffix("-cli") ? String(id.dropLast(4)) : id
+        default: return id
         }
     }
 

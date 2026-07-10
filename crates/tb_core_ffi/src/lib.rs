@@ -147,6 +147,28 @@ unsafe fn year_from(year: *const c_char) -> Result<String, String> {
         .map_err(|_| "year filter is not valid UTF-8".to_string())
 }
 
+/// Read an optional client filter from the C side: a comma-joined list of
+/// canonical client ids. NULL or empty/whitespace means "all clients" (`None`),
+/// exactly the pre-filter behavior. Blank entries between commas are dropped.
+///
+/// # Safety
+/// `clients` must be NULL or a valid NUL-terminated string.
+unsafe fn clients_from(clients: *const c_char) -> Result<Option<Vec<String>>, String> {
+    if clients.is_null() {
+        return Ok(None);
+    }
+    let raw = unsafe { CStr::from_ptr(clients) }
+        .to_str()
+        .map_err(|_| "client filter is not valid UTF-8".to_string())?;
+    let list: Vec<String> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    Ok(if list.is_empty() { None } else { Some(list) })
+}
+
 fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
     // Read the entry and release the lock before any filesystem I/O — never hold
     // GRAPH_CACHE across the mtime stat sweep below (mirrors graph_compute, which
@@ -291,26 +313,44 @@ pub unsafe extern "C" fn tb_model_report(year: *const c_char) -> *mut c_char {
     })
 }
 
-/// Per-hour report (`HourlyReport` in types.ts) for `year` (NULL/empty = all time).
+/// Per-hour report (`HourlyReport` in types.ts) for `year` (NULL/empty = all
+/// time), restricted to `clients` (NULL/empty = all clients; comma-joined
+/// canonical ids otherwise). The filter is applied in the streaming scan so
+/// shared-hour buckets carry only the selected clients' totals.
 ///
 /// # Safety
-/// `year` must be NULL or a valid NUL-terminated string.
+/// `year` and `clients` must each be NULL or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn tb_hourly_report(year: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tb_hourly_report(
+    year: *const c_char,
+    clients: *const c_char,
+) -> *mut c_char {
     guarded("tb_hourly_report", || {
-        envelope(unsafe { year_from(year) }.and_then(|year| hourly_report::run(&year)))
+        envelope(unsafe { year_from(year) }.and_then(|year| {
+            let clients = unsafe { clients_from(clients) }?;
+            hourly_report::run(&year, clients)
+        }))
     })
 }
 
 /// Per-(sub-)agent report (`AgentsReport` in types.ts) for `year`
-/// (NULL/empty = all time).
+/// (NULL/empty = all time), restricted to `clients` (NULL/empty = all clients;
+/// comma-joined canonical ids otherwise). The filter is applied in the
+/// streaming scan so agent buckets shared across clients carry only the
+/// selected clients' totals.
 ///
 /// # Safety
-/// `year` must be NULL or a valid NUL-terminated string.
+/// `year` and `clients` must each be NULL or a valid NUL-terminated string.
 #[no_mangle]
-pub unsafe extern "C" fn tb_agents_report(year: *const c_char) -> *mut c_char {
+pub unsafe extern "C" fn tb_agents_report(
+    year: *const c_char,
+    clients: *const c_char,
+) -> *mut c_char {
     guarded("tb_agents_report", || {
-        envelope(unsafe { year_from(year) }.and_then(|year| agents_report::run(&year)))
+        envelope(unsafe { year_from(year) }.and_then(|year| {
+            let clients = unsafe { clients_from(clients) }?;
+            agents_report::run(&year, clients)
+        }))
     })
 }
 

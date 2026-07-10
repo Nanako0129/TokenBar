@@ -9,11 +9,12 @@ import TokenBarCore
 /// view tree.
 struct HourlyView: View {
     let report: HourlyReport?
-    /// Restrict slots to those involving any of these clients; empty = all.
-    /// Per-slot totals are not split by client, so filtered totals are coarse
-    /// — the view surfaces that caveat.
+    /// The active client slice. The report arrives already filtered to this
+    /// slice at the FFI (per-client-accurate totals even for hours shared
+    /// across clients), so this membership check is now a harmless pass-through
+    /// for a loaded slice — kept only as the strict all-hidden guard (an empty
+    /// slice shows nothing, consistent with the other lenses/DayBars).
     var clientIds: [String] = []
-    var filtered = false
 
     private enum Mode: String {
         case timeline, profile
@@ -80,11 +81,6 @@ struct HourlyView: View {
             subtitle: subtitle(buckets: buckets, timeline: timeline, hasData: hasData),
             trailing: { modeToggle }
         ) {
-            if filtered && hasData {
-                Text("Filtered hours include each slot's full total across agents.")
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
-            }
             if report == nil {
                 Text("Loading…")
                     .font(.caption)

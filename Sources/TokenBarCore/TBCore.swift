@@ -96,6 +96,23 @@ public enum TBCore {
         return year.withCString { body($0) }
     }
 
+    /// Pass an optional year filter and optional client filter across the
+    /// boundary. nil year = all time; nil OR empty clients = all clients (the
+    /// FFI treats a NULL/empty client arg as "every client"). Client ids are
+    /// comma-joined. NOTE: an empty selection therefore reaches the core as
+    /// "all clients", not "no clients" — the all-hidden case is enforced by the
+    /// lens views' strict membership filter, not here.
+    private static func withYearAndClients<R>(
+        _ year: String?, _ clients: [String]?,
+        _ body: (UnsafePointer<CChar>?, UnsafePointer<CChar>?) -> R
+    ) -> R {
+        let joined = (clients?.isEmpty ?? true) ? nil : clients!.joined(separator: ",")
+        return withYear(year) { yearPtr in
+            guard let joined else { return body(yearPtr, nil) }
+            return joined.withCString { body(yearPtr, $0) }
+        }
+    }
+
     public static func probe() throws -> ProbeResult {
         let result: ProbeResult = try decode(tb_probe())
         if !result.ok { throw TBCoreError.bridge(result.err ?? "unknown") }
@@ -117,12 +134,20 @@ public enum TBCore {
         try unwrap(withYear(year) { tb_model_report($0) })
     }
 
-    public static func hourlyReport(year: String? = nil) throws -> HourlyReport {
-        try unwrap(withYear(year) { tb_hourly_report($0) })
+    /// Per-hour report for `year` (nil = all time), restricted to `clients`
+    /// (nil/empty = all clients). The core filters at the streaming scan, so a
+    /// client slice yields accurate per-client totals for hours shared across
+    /// clients (a downstream membership filter cannot — buckets fold all
+    /// clients into one mixed total).
+    public static func hourlyReport(year: String? = nil, clients: [String]? = nil) throws -> HourlyReport {
+        try unwrap(withYearAndClients(year, clients) { tb_hourly_report($0, $1) })
     }
 
-    public static func agentsReport(year: String? = nil) throws -> AgentsReport {
-        try unwrap(withYear(year) { tb_agents_report($0) })
+    /// Per-agent report for `year` (nil = all time), restricted to `clients`
+    /// (nil/empty = all clients). Scan-level filter, same rationale as
+    /// `hourlyReport`.
+    public static func agentsReport(year: String? = nil, clients: [String]? = nil) throws -> AgentsReport {
+        try unwrap(withYearAndClients(year, clients) { tb_agents_report($0, $1) })
     }
 
     /// Live trace buckets over the trailing `windowSecs`.

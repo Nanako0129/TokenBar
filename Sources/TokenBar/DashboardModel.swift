@@ -129,6 +129,15 @@ private struct DashboardSnapshot {
     @ObservationIgnored private var statsMemoSelected: Set<String>?
     @ObservationIgnored private var statsMemoValue: UsageStats?
 
+    // The client selection each lazy report was last fetched for. Hourly/agents
+    // buckets fold all clients into mixed totals, so the slice is now applied at
+    // the FFI (accurate per-client totals); these track it so a tab switch or a
+    // hide toggle refetches the right slice instead of serving another tab's.
+    // nil = never fetched. Set-valued so a reorder (same members) is not a
+    // refetch. Background refreshes (reload/pollGraph) reuse the stored slice.
+    @ObservationIgnored private var hourlyClients: Set<String>?
+    @ObservationIgnored private var agentsClients: Set<String>?
+
     /// UsageStats for a client slice, with hidden clients already removed from
     /// `selected`. Returns the precomputed full `stats` when the slice covers
     /// every present client (the common no-hidden case — no recompute); other-
@@ -214,15 +223,19 @@ private struct DashboardSnapshot {
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
         // hourly/agents could land after it and blank those lenses.
         guard self.year == year else { return }
-        // Re-fetch the lazy lenses that were already loaded.
+        // Re-fetch the lazy lenses that were already loaded, keeping the slice
+        // they were last fetched for (an ordered array of the stored Set — the
+        // FFI filter is membership-based, so order is irrelevant).
         if hourly != nil {
+            let clients = hourlyClients.map(Array.init)
             hourly = await Task.detached(priority: .userInitiated) {
-                try? TBCore.hourlyReport(year: year)
+                try? TBCore.hourlyReport(year: year, clients: clients)
             }.value
         }
         if agents != nil {
+            let clients = agentsClients.map(Array.init)
             agents = await Task.detached(priority: .userInitiated) {
-                try? TBCore.agentsReport(year: year)
+                try? TBCore.agentsReport(year: year, clients: clients)
             }.value
         }
     }
@@ -312,15 +325,18 @@ private struct DashboardSnapshot {
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
             guard self.year == year else { continue }
-            // Re-fetch the lazy lenses that were already loaded (mirrors reload).
+            // Re-fetch the lazy lenses that were already loaded (mirrors reload),
+            // keeping each one's last-fetched client slice.
             if hourly != nil {
+                let clients = hourlyClients.map(Array.init)
                 hourly = await Task.detached(priority: .utility) {
-                    try? TBCore.hourlyReport(year: year)
+                    try? TBCore.hourlyReport(year: year, clients: clients)
                 }.value
             }
             if agents != nil {
+                let clients = agentsClients.map(Array.init)
                 agents = await Task.detached(priority: .utility) {
-                    try? TBCore.agentsReport(year: year)
+                    try? TBCore.agentsReport(year: year, clients: clients)
                 }.value
             }
         }
@@ -367,21 +383,30 @@ private struct DashboardSnapshot {
     /// stale slice instead of stranding the previous year's report on the lens,
     /// and the keyed `.task` re-fires to fetch the new year while the report is
     /// still nil (reload()'s lazy re-fetch only covers an already-loaded lens).
-    func ensureData(for view: AppView) async {
+    /// `clients` is the active tab's slice (displayClients on Overview,
+    /// `[clientId]` on a client tab). It is threaded to the FFI so hourly/agents
+    /// totals are accurate for hours/agents shared across clients. Refetches
+    /// when the slice changes, not only when the report is nil — keyed on the
+    /// slice as a Set so a reorder does not refetch. The year stale-guard
+    /// mirrors reload()/pollGraph().
+    func ensureData(for view: AppView, clients: [String]) async {
         let year = self.year
+        let selection = Set(clients)
         switch view {
-        case .hourly where hourly == nil:
+        case .hourly where hourly == nil || hourlyClients != selection:
             let report = await Task.detached(priority: .userInitiated) {
-                try? TBCore.hourlyReport(year: year)
+                try? TBCore.hourlyReport(year: year, clients: clients)
             }.value
             guard self.year == year else { return }
             hourly = report
-        case .agents where agents == nil:
+            hourlyClients = selection
+        case .agents where agents == nil || agentsClients != selection:
             let report = await Task.detached(priority: .userInitiated) {
-                try? TBCore.agentsReport(year: year)
+                try? TBCore.agentsReport(year: year, clients: clients)
             }.value
             guard self.year == year else { return }
             agents = report
+            agentsClients = selection
         default:
             break
         }

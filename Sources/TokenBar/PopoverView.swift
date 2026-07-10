@@ -44,6 +44,14 @@ struct PopoverView: View {
         ClientRegistry.displayClients(present: model.stats?.presentClients ?? [])
     }
 
+    /// The active tab's client slice, mirroring `lensContent`'s `clientIds`:
+    /// the displayed (non-hidden) clients on Overview, or the single client on
+    /// a client tab. Threaded into `ensureData` so the Hourly/Agents FFI fetch
+    /// is scoped to the selection (accurate totals for shared hours/agents).
+    private var lensClientIds: [String] {
+        activeTab == "overview" ? displayClients : [activeTab]
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -79,13 +87,15 @@ struct PopoverView: View {
         .background(PopoverBackdrop().ignoresSafeArea())
         .overlay(alignment: .bottom) { resizeHandle }
         .task { await model.load() }
-        // Keyed on the year too: a year switch must re-fetch the active lazy
-        // lens (Hourly/Agents) for the new slice. Without the year in the key,
-        // switching years while parked on Hourly/Agents would keep showing the
-        // old year (reload()'s lazy re-fetch only refreshes an already-loaded
-        // lens, so a lens still nil from the reopen would never reload).
-        .task(id: "\(activeViewRaw)|\(model.year ?? "")") {
-            await model.ensureData(for: activeView.wrappedValue)
+        // Keyed on the year AND the client slice: a year switch, a tab switch,
+        // or a hide toggle must re-fetch the active lazy lens (Hourly/Agents)
+        // for the new slice. Without the year in the key, switching years while
+        // parked on Hourly/Agents would keep showing the old year (reload()'s
+        // lazy re-fetch only refreshes an already-loaded lens, so a lens still
+        // nil from the reopen would never reload); without the slice, switching
+        // client tabs would serve the previous tab's FFI-filtered totals.
+        .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lensClientIds.joined(separator: ","))") {
+            await model.ensureData(for: activeView.wrappedValue, clients: lensClientIds)
         }
         .task { await pollTokensPerMin() }
         .task { await model.pollAgentUsage() }
@@ -316,9 +326,7 @@ struct PopoverView: View {
             case .daily:
                 DailyView(payload: payload, clientIds: clientIds, colors: model.colors)
             case .hourly:
-                HourlyView(
-                    report: model.hourly, clientIds: clientIds,
-                    filtered: singleClient != nil)
+                HourlyView(report: model.hourly, clientIds: clientIds)
             case .stats:
                 StatsView(
                     payload: payload, clientIds: clientIds, stats: activeStats,

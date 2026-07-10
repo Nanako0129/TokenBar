@@ -37,12 +37,17 @@ struct AgentsReportData {
     total_messages: i32,
 }
 
-/// Build the per-agent report for `year` (empty string = all time).
-pub fn run(year: &str) -> Result<Value, String> {
+/// Build the per-agent report for `year` (empty string = all time), restricted
+/// to `clients` (None = every client). The client filter is applied in the
+/// streaming scan, so an agent bucket shared across clients carries only the
+/// selected clients' tokens/cost — a membership filter downstream cannot do
+/// this because each `AgentAccumulator` folds all clients into one mixed total.
+pub fn run(year: &str, clients: Option<Vec<String>>) -> Result<Value, String> {
     let year = normalize_year(year)?;
 
     let options = tokscale_core::ReportOptions {
         year,
+        clients,
         ..Default::default()
     };
 

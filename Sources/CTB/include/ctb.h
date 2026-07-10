@@ -27,10 +27,11 @@ char *tb_refresh_graph(const char *year);
 
 // Per-model report (ModelReport).
 char *tb_model_report(const char *year);
-// Per-hour report (HourlyReport).
-char *tb_hourly_report(const char *year);
-// Per-(sub-)agent report (AgentsReport).
-char *tb_agents_report(const char *year);
+// Per-hour report (HourlyReport). `clients` = comma-joined canonical ids to
+// restrict to, or NULL/empty for all clients (filtered in the streaming scan).
+char *tb_hourly_report(const char *year, const char *clients);
+// Per-(sub-)agent report (AgentsReport). `clients` as in tb_hourly_report.
+char *tb_agents_report(const char *year, const char *clients);
 
 // Live trace buckets over the trailing window (array of TraceBucket;
 // snake_case fields, e.g. tokens_per_min). Lazily re-parses at most every 10s.

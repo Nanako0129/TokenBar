@@ -35,12 +35,17 @@ struct HourlyReportData {
     total_cost: f64,
 }
 
-/// Build the per-hour report for `year` (empty string = all time).
-pub fn run(year: &str) -> Result<Value, String> {
+/// Build the per-hour report for `year` (empty string = all time), restricted
+/// to `clients` (None = every client). The client filter is applied in the
+/// streaming scan, so shared-hour buckets carry only the selected clients'
+/// tokens/cost — a membership filter downstream cannot do this because each
+/// `HourAggregator` folds all clients into one mixed total.
+pub fn run(year: &str, clients: Option<Vec<String>>) -> Result<Value, String> {
     let year = normalize_year(year)?;
 
     let options = tokscale_core::ReportOptions {
         year,
+        clients,
         ..Default::default()
     };
 
