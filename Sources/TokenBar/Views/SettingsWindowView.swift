@@ -83,7 +83,9 @@ struct SettingsWindowView: View {
             }
 
             section("Live session card") {
-                UsageTraceCard(buckets: model.trace, windowSecs: 600)
+                UsageTraceCard(
+                    buckets: model.trace, windowSecs: 600,
+                    clientIds: ClientRegistry.displayClients(present: model.stats?.presentClients ?? []))
             }
         }
     }
@@ -102,7 +104,7 @@ struct SettingsWindowView: View {
     private func pollTokensPerMin() async {
         while !Task.isCancelled {
             let rate = try? await Task.detached(priority: .utility) {
-                try TBCore.tokensPerMin()
+                try LiveRate.current()
             }.value
             if Task.isCancelled { break }
             tokensPerMin = rate

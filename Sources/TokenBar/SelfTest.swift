@@ -141,6 +141,17 @@ enum SelfTest {
             TraceBucket.collapseByClient([bucket("amp", "Main", "unknown", 5)]).first?.model == "unknown",
             "collapse keeps a lone unknown model")
 
+        // Live-rate total with hidden clients excluded (issue #35). Bucket
+        // tokens_per_min == tokens here (see `bucket`), so sums are exact.
+        let rateRows = [
+            bucket("claude-code", "Main", "claude-opus-4-8", 100),
+            bucket("claude-code", "Subagent", "unknown", 50),
+            bucket("codex-cli", "Main", "gpt-5.5", 400),
+        ]
+        expect(TraceBucket.totalRate(rateRows, hidden: []) == 550, "rate empty-hidden is the plain sum")
+        expect(TraceBucket.totalRate(rateRows, hidden: ["codex-cli"]) == 150, "rate hiding a client drops its rows")
+        expect(TraceBucket.totalRate(rateRows, hidden: ["claude-code", "codex-cli"]) == 0, "rate all-hidden is zero")
+
         // Quota resolver: auto picks the tightest window across agents,
         // erroring agents are skipped, explicit selections parse. The payload
         // builds via JSON (the snapshot types have no memberwise inits).
@@ -223,6 +234,57 @@ enum SelfTest {
         expect(
             ClientRegistry.parseIdSet("a,b,a") == Set(["a", "b"]),
             "parseIdSet splits and dedups")
+
+        // Tray totals with hidden clients excluded (issue #35). Fixture: two
+        // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
+        // tokens = input+output+cacheRead+cacheWrite+reasoning.
+        //   today  claude 150 tok $1.5 · codex 200 tok $2.0  (day totals 350/$3.5)
+        //   06-01  claude 300 tok $3.0 · codex 400 tok $4.0  (day totals 700/$7.0)
+        //   summary 1050 tok / $10.5
+        let trayJSON = """
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-06-01","end":"2026-07-01"}},
+         "summary":{"totalTokens":1050,"totalCost":10.5,"totalDays":2,"activeDays":2,
+                    "averagePerDay":5.25,"maxCostInSingleDay":7.0,"clients":["claude","codex"],"models":[]},
+         "years":[],
+         "contributions":[
+           {"date":"2026-06-01","totals":{"tokens":700,"cost":7.0,"messages":2},"intensity":2,
+            "tokenBreakdown":{"input":700,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+            "clients":[
+              {"client":"claude","modelId":"m","providerId":"p","cost":3.0,"messages":1,
+               "tokens":{"input":300,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}},
+              {"client":"codex","modelId":"m","providerId":"p","cost":4.0,"messages":1,
+               "tokens":{"input":400,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]},
+           {"date":"2026-07-01","totals":{"tokens":350,"cost":3.5,"messages":2},"intensity":1,
+            "tokenBreakdown":{"input":300,"output":50,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+            "clients":[
+              {"client":"claude","modelId":"m","providerId":"p","cost":1.5,"messages":1,
+               "tokens":{"input":100,"output":50,"cacheRead":0,"cacheWrite":0,"reasoning":0}},
+              {"client":"codex","modelId":"m","providerId":"p","cost":2.0,"messages":1,
+               "tokens":{"input":200,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
+         ]}
+        """
+        let trayPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(trayJSON.utf8))
+        let today = "2026-07-01"
+        // (a) Empty hidden set == unfiltered totals (byte-identical fast path).
+        let unfiltered = trayPayload.trayTotals(hidden: [], today: today)
+        expect(unfiltered.totalTokens == trayPayload.summary.totalTokens
+            && unfiltered.totalCost == trayPayload.summary.totalCost,
+            "tray empty-hidden totals equal summary")
+        expect(unfiltered.todayTokens == 350 && unfiltered.todayCost == 3.5,
+            "tray empty-hidden today equals contribution totals")
+        // (b) Hiding one client subtracts exactly that client's stripes.
+        let noCodex = trayPayload.trayTotals(hidden: ["codex"], today: today)
+        expect(noCodex.totalTokens == unfiltered.totalTokens - 600
+            && noCodex.totalCost == unfiltered.totalCost - 6.0,
+            "tray hiding a client drops its total stripes")
+        expect(noCodex.todayTokens == unfiltered.todayTokens - 200
+            && noCodex.todayCost == unfiltered.todayCost - 2.0,
+            "tray hiding a client drops its today stripes")
+        // (c) All clients hidden -> zeros.
+        let allHidden = trayPayload.trayTotals(hidden: ["claude", "codex"], today: today)
+        expect(allHidden.totalTokens == 0 && allHidden.totalCost == 0
+            && allHidden.todayTokens == 0 && allHidden.todayCost == 0,
+            "tray all-hidden totals are zero")
 
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {

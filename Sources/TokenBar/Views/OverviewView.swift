@@ -48,7 +48,7 @@ struct OverviewView: View {
                         clients: clientIds, trace: trace, agentUsage: agentUsage,
                         reorderable: true)
                 }
-                UsageTraceCard(buckets: trace, windowSecs: 600)
+                UsageTraceCard(buckets: trace, windowSecs: 600, clientIds: clientIds)
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors)
             }

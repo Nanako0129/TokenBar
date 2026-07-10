@@ -37,18 +37,6 @@ enum Format {
         return formatter.string(from: now)
     }
 
-    /// Total tokens recorded today in `graph` (0 when today has no entry).
-    static func todayTokens(in graph: UsagePayload) -> Int64 {
-        let today = todayKey()
-        // Contributions are date-sorted; today, if present, is at the tail.
-        return graph.contributions.last(where: { $0.date == today })?.totals.tokens ?? 0
-    }
-
-    /// Today's cost in `graph` (0 when today has no entry).
-    static func todayCost(in graph: UsagePayload) -> Double {
-        graph.contributions.last(where: { $0.date == todayKey() })?.totals.cost ?? 0
-    }
-
     private static let monthsShort = [
         "Jan", "Feb", "Mar", "Apr", "May", "Jun",
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",

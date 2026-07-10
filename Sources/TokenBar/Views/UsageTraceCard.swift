@@ -7,6 +7,9 @@ struct UsageTraceCard: View {
     let buckets: [TraceBucket]
     let windowSecs: Int
     var title = "Live session"
+    /// Restrict rows to these client ids (nil = every client). Callers pass
+    /// the displayed client set so hidden clients drop out of the total rate.
+    var clientIds: [String]?
 
     /// When true, rows split by (client, agent, model); off collapses per
     /// client. The settings panel edits the same key.
@@ -15,7 +18,11 @@ struct UsageTraceCard: View {
     private static let maxRows = 5
 
     var body: some View {
-        let rows = detailed ? buckets : TraceBucket.collapseByClient(buckets)
+        let visible = clientIds.map { ids in
+            let allowed = Set(ids)
+            return buckets.filter { allowed.contains($0.client) }
+        } ?? buckets
+        let rows = detailed ? visible : TraceBucket.collapseByClient(visible)
         let top = Array(rows.prefix(Self.maxRows))
         let maxRate = top.map(\.tokensPerMin).max() ?? 0
         let totalRate = rows.reduce(0) { $0 + $1.tokensPerMin }

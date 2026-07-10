@@ -137,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 if let graph { self.lastGraph = graph }
                 if mode == .tokensPerMin {
                     let rate = try? await Task.detached(priority: .utility) {
-                        try TBCore.tokensPerMin()
+                        try LiveRate.current()
                     }.value
                     if let rate { self.lastRate = rate }
                 }

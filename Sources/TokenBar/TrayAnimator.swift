@@ -256,7 +256,7 @@ final class TrayAnimator {
         loadTask = Task { [weak self] in
             while !Task.isCancelled {
                 let rate = try? await Task.detached(priority: .utility) {
-                    try TBCore.tokensPerMin()
+                    try LiveRate.current()
                 }.value
                 guard let self, !Task.isCancelled else { break }
                 if let rate {

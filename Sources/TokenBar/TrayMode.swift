@@ -40,15 +40,19 @@ enum TrayMode: String, CaseIterable {
             return "\(Int(min(100, max(0, quotaRemaining)).rounded()))%"
         }
         guard self != .hidden, let graph else { return "" }
+        // Hidden clients must not appear in any tray figure. An empty hidden
+        // set is byte-identical to the pre-hide summary/today totals.
+        let totals = graph.trayTotals(
+            hidden: ClientRegistry.hiddenClients(), today: Format.todayKey())
         switch self {
         case .todayTokens:
-            return Format.compactTokens(Format.todayTokens(in: graph))
+            return Format.compactTokens(totals.todayTokens)
         case .todayCost:
-            return Format.usd(Format.todayCost(in: graph))
+            return Format.usd(totals.todayCost)
         case .totalTokens:
-            return Format.compactTokens(graph.summary.totalTokens)
+            return Format.compactTokens(totals.totalTokens)
         case .totalCost:
-            return Format.usd(graph.summary.totalCost)
+            return Format.usd(totals.totalCost)
         case .tokensPerMin:
             guard let tokensPerMin else { return "—/m" }
             return "\(Format.compactTokens(Int64(max(0, tokensPerMin).rounded())))/m"

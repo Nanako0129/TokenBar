@@ -297,9 +297,16 @@ struct PopoverView: View {
         if let payload = model.payload, let stats = model.stats {
             let singleClient = activeTab == "overview" ? nil : activeTab
             let clientIds = singleClient.map { [$0] } ?? ClientRegistry.displayClients(present: stats.presentClients)
-            let activeStats = singleClient == nil
+            // Every displayed number must exclude hidden clients — including the
+            // Overview aggregates. Reuse the precomputed full `stats` only when
+            // the selected set is exactly all present clients (the common
+            // no-hidden Overview case); otherwise re-aggregate over the slice.
+            // This keeps the per-body recompute off the hot path while still
+            // dropping hidden clients from Overview/Stats totals and streaks.
+            let selected = Set(clientIds)
+            let activeStats = selected == Set(stats.presentClients)
                 ? stats
-                : UsageStats(payload: payload, selectedClients: Set(clientIds))
+                : UsageStats(payload: payload, selectedClients: selected)
             switch activeView.wrappedValue {
             case .overview:
                 OverviewView(
@@ -486,7 +493,7 @@ struct PopoverView: View {
     private func pollTokensPerMin() async {
         while !Task.isCancelled {
             let rate = try? await Task.detached(priority: .utility) {
-                try TBCore.tokensPerMin()
+                try LiveRate.current()
             }.value
             if Task.isCancelled { break }
             tokensPerMin = rate

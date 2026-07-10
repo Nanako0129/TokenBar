@@ -29,6 +29,15 @@ public struct TraceBucket: Decodable, Sendable {
         self.tokensPerMin = tokensPerMin
     }
 
+    /// Sum of live per-minute rates over `buckets`, excluding `hidden`
+    /// clients. Mirrors UsageTraceCard's total-rate reduction; used to derive
+    /// the menu-bar rate with hidden clients dropped (issue #35). Summing the
+    /// 600s trace rows' rates equals the FFI `rate_in_window(600)` for the
+    /// surviving clients, since every row's rate shares the same window divisor.
+    public static func totalRate(_ buckets: [TraceBucket], hidden: Set<String>) -> Double {
+        buckets.reduce(0) { $0 + (hidden.contains($1.client) ? 0 : $1.tokensPerMin) }
+    }
+
     /// Collapse (client, agent, model) buckets to one row per client, for the
     /// trace card's compact view. Agent/model strings join sorted; "unknown"
     /// models drop out when a client has named ones too. Rows sort by tokens.
