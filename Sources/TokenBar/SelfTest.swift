@@ -411,6 +411,30 @@ enum SelfTest {
             && visFiltered.dateRange.end == visAlone.dateRange.end,
             "filtered stats equal a payload without the hidden client")
 
+        // DayBars trailing window anchors to the passed range end, not the
+        // unfiltered payload range (issue #36 Fix, round 6): the caller passes
+        // the selection-derived stats.dateRange.end, so a hidden client active
+        // AFTER the visible client can't shift the window past the visible
+        // activity. Fixture: vis active 07-03, hidden active 07-05.
+        let chartPayload = rangeStatsPayload(end: "2026-07-05", days: [
+            daily("vis", "2026-07-03", 1), daily("hid", "2026-07-05", 1),
+        ])
+        let chartColors = ModelColorMap(report: nil)
+        let visBars = DayBars.build(
+            payload: chartPayload, clientIds: ["vis"], stackBy: .agent,
+            colors: chartColors, rangeEnd: "2026-07-03", endFallback: "2026-07-09")
+        expect(visBars.count == DayBars.window && visBars.last?.date == "2026-07-03",
+            "chart window anchors to the filtered range end")
+        expect((visBars.last?.totalTokens ?? 0) > 0,
+            "visible client's last active day is the last (in-window) bar")
+        // The old unfiltered anchor (meta.dateRange.end = the hidden client's
+        // later day) shifts the window forward, stranding an empty trailing bar.
+        let shiftedBars = DayBars.build(
+            payload: chartPayload, clientIds: ["vis"], stackBy: .agent,
+            colors: chartColors, rangeEnd: "2026-07-05", endFallback: "2026-07-09")
+        expect(shiftedBars.last?.date == "2026-07-05" && (shiftedBars.last?.totalTokens ?? 0) == 0,
+            "unfiltered anchor would shift the window past the visible activity")
+
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")

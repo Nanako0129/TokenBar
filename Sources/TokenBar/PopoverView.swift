@@ -30,6 +30,13 @@ struct PopoverView: View {
         CommandLine.arguments
             .first(where: { $0.hasPrefix("--tab=") })
             .map { String($0.dropFirst("--tab=".count)) } ?? "overview"
+    // Observe the tab hidden/order keys so the popover reacts LIVE to a hide or
+    // reorder made in the Settings window while it stays open — otherwise
+    // `displayClients` (which reads UserDefaults) would only pick up the change
+    // on the next reopen. Reading these raws in `displayClients` establishes the
+    // body dependency; the reactive overload does the parsing.
+    @AppStorage(ClientRegistry.tabHiddenKey) private var hiddenRaw = ""
+    @AppStorage(ClientRegistry.tabOrderKey) private var orderRaw = ""
 
     private var activeView: Binding<AppView> {
         Binding(
@@ -41,7 +48,8 @@ struct PopoverView: View {
     /// hidden set, in their saved order. Drives both the tab row and the
     /// fall-back-to-Overview guard (see `.onChange` below).
     private var displayClients: [String] {
-        ClientRegistry.displayClients(present: model.stats?.presentClients ?? [])
+        ClientRegistry.displayClients(
+            present: model.stats?.presentClients ?? [], hiddenRaw: hiddenRaw, orderRaw: orderRaw)
     }
 
     /// The active tab's client slice, mirroring `lensContent`'s `clientIds`:
@@ -113,28 +121,41 @@ struct PopoverView: View {
             }
         }
         .onDisappear { removeKeyMonitors() }
-        // Reset a stale persisted tab whenever the displayed client set changes —
-        // attached to the always-present root, not the tab row (which is hidden
-        // when only one client is present), so a saved client id that no longer
-        // exists (or that the user just hid from the top tabs) can't strand the
-        // dashboard on an empty slice with no visible tab row to return to
-        // Overview. `initial: true` also catches a tab persisted-then-hidden
-        // across a relaunch. Keyed on displayClients (not presentClients) so a
-        // hide toggle — which leaves the client in presentClients — still fires.
-        .onChange(of: model.stats?.presentClients, initial: true) { _, present in
-            // Keyed on presentClients (the load signal), NOT displayClients:
-            // when every client is hidden, displayClients stays [] across the
-            // nil->loaded transition, so an onChange on it would never fire and
-            // a persisted tab would strand on a hidden slice. presentClients
-            // still deltas on load. The `guard` skips the pre-load nil fire so a
-            // persisted tab isn't reset to Overview before data arrives
-            // (defeating tokenbar.activeTab's cross-launch memory). Membership is
-            // judged against displayClients so hiding the active tab — which
-            // leaves it in presentClients — still falls back to Overview.
-            guard present != nil else { return }
-            if activeTab != "overview", !displayClients.contains(activeTab) {
-                activeTab = "overview"
-            }
+        // Reset a stale persisted tab whenever the displayed client set changes,
+        // so a saved client id that no longer exists (or that the user just hid)
+        // can't strand the dashboard on an empty slice with no visible tab row
+        // to return to Overview. Attached to the always-present root, not the
+        // tab row (which is hidden when only one client is present). TWO signals
+        // are needed:
+        //   - presentClients (initial: true): the LOAD signal. When every client
+        //     is hidden, displayClients stays [] across the nil->loaded
+        //     transition, so a displayClients onChange would never fire — but
+        //     presentClients still deltas on load, catching a persisted-then-
+        //     hidden tab across a relaunch.
+        //   - displayClients: the LIVE-hide signal. Hiding the active tab in the
+        //     Settings window leaves it in presentClients (so the load onChange
+        //     does NOT fire), but now that hiddenRaw/orderRaw are observed,
+        //     displayClients is reactive state and deltas the instant the toggle
+        //     lands. Without this, a live hide would strand the slice until
+        //     reopen.
+        .onChange(of: model.stats?.presentClients, initial: true) { _, _ in
+            resetTabIfHidden()
+        }
+        .onChange(of: displayClients) { _, _ in
+            resetTabIfHidden()
+        }
+    }
+
+    /// Fall back to Overview if the active client tab is no longer displayed
+    /// (hidden or gone). The stats-nil guard skips the pre-load fire so a
+    /// persisted tab isn't reset before data arrives (defeating
+    /// tokenbar.activeTab's cross-launch memory). Membership is judged against
+    /// displayClients so hiding the active tab — which leaves it in
+    /// presentClients — still falls back.
+    private func resetTabIfHidden() {
+        guard model.stats?.presentClients != nil else { return }
+        if activeTab != "overview", !displayClients.contains(activeTab) {
+            activeTab = "overview"
         }
     }
 
@@ -306,7 +327,9 @@ struct PopoverView: View {
     @ViewBuilder private var lensContent: some View {
         if let payload = model.payload, let stats = model.stats {
             let singleClient = activeTab == "overview" ? nil : activeTab
-            let clientIds = singleClient.map { [$0] } ?? ClientRegistry.displayClients(present: stats.presentClients)
+            // Use the reactive `displayClients` (observes the hidden/order raws)
+            // so a live hide re-derives the Overview slice, matching the tab row.
+            let clientIds = singleClient.map { [$0] } ?? displayClients
             // Every displayed number must exclude hidden clients — including the
             // Overview aggregates. The model reuses the precomputed full `stats`
             // for the all-present slice and memoizes the hidden/single-client

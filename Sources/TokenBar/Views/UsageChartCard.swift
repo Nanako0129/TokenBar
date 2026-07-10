@@ -30,9 +30,12 @@ struct UsageChartCard: View {
     private var metric: ChartMetric { ChartMetric(rawValue: metricRaw) ?? .tokens }
 
     private var bars: [DayBar] {
+        // Anchor the trailing window to the filtered stats' range end (selection-
+        // derived; equals meta.dateRange.end when nothing is hidden) so a hidden
+        // client's later activity can't shift visible activity out of the chart.
         DayBars.build(
             payload: payload, clientIds: clientIds, stackBy: stackBy,
-            colors: colors, endFallback: Format.todayKey())
+            colors: colors, rangeEnd: stats.dateRange.end, endFallback: Format.todayKey())
     }
 
     private var is3D: Bool { chartViewRaw == "3d" }

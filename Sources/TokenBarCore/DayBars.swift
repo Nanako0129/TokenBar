@@ -35,13 +35,21 @@ public struct DayBar: Sendable {
 public enum DayBars {
     public static let window = 30
 
-    /// Build the trailing `window`-day series ending at the payload's range
-    /// end (today when absent). Days outside the data render as empty bars.
+    /// Build the trailing `window`-day series ending at `rangeEnd` (today, via
+    /// `endFallback`, when absent). Days outside the data render as empty bars.
+    ///
+    /// `rangeEnd` must be the SELECTED clients' range end (`stats.dateRange.end`,
+    /// selection-derived), NOT the unfiltered `payload.meta.dateRange.end`: a
+    /// hidden client whose activity extends past the visible clients' last day
+    /// would otherwise shift the trailing window forward and push visible
+    /// activity off the chart while the range-filtered headline stats disagree.
+    /// When nothing is hidden the two are equal, so the window is unchanged.
     public static func build(
         payload: UsagePayload,
         clientIds: [String],
         stackBy: StackBy,
         colors: ModelColorMap,
+        rangeEnd: String,
         endFallback: String
     ) -> [DayBar] {
         let allowed = Set(clientIds)
@@ -51,7 +59,7 @@ public enum DayBars {
             if day.totalTokens > 0 || day.totalCost > 0 { byDate[day.date] = day }
         }
 
-        let end = payload.meta.dateRange.end.isEmpty ? endFallback : payload.meta.dateRange.end
+        let end = rangeEnd.isEmpty ? endFallback : rangeEnd
         guard let endDay = ISODay(end) else { return [] }
         return (0..<window).map { i in
             let date = ISODay(number: endDay.number - (window - 1) + i).iso
