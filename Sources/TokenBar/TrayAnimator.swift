@@ -148,13 +148,24 @@ final class TrayAnimator {
     var quotaRemaining: Double? {
         let selection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
+        let excluded = ClientRegistry.quotaExcludedClients()
         if let value = QuotaResolver.resolve(
-            payload: quota, selection: selection,
-            excluding: ClientRegistry.quotaExcludedClients())?
+            payload: quota, selection: selection, excluding: excluded)?
             .window.remainingPercent
         {
             cachedQuotaRemaining = value
             return value
+        }
+        // resolve() returned nil. If that is ONLY because every auto candidate
+        // is hidden, suppress the cached reading — it was captured before the
+        // hide and belongs to a now-hidden client, so keep the tray in its
+        // no-quota state instead. A genuine nil (no payload / fetch failure /
+        // no healthy window) still falls back to the cache, unchanged. The
+        // persisted last-good value is left intact so unhide restores instantly.
+        if QuotaResolver.excludedAllCandidates(
+            payload: quota, selection: selection, excluding: excluded)
+        {
+            return nil
         }
         return cachedQuotaRemaining
     }

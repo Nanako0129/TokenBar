@@ -225,6 +225,28 @@ enum SelfTest {
             QuotaResolver.resolve(payload: quotaPayload, selection: "auto", excluding: [])?
                 .clientId == tightest?.clientId,
             "empty exclusion is byte-identical to the default auto pick")
+        // Exclusion vs no-data disambiguation (issue #36 R8): resolve returning
+        // nil because EVERY candidate is excluded is distinguishable from nil
+        // for no payload / no healthy window, so the tray suppresses a stale
+        // hidden cache only in the former.
+        expect(
+            QuotaResolver.excludedAllCandidates(
+                payload: quotaPayload, selection: "auto", excluding: ["codex", "claude"]),
+            "excludedAllCandidates true when the only healthy clients are all hidden")
+        expect(
+            !QuotaResolver.excludedAllCandidates(
+                payload: quotaPayload, selection: "auto", excluding: ["claude"]),
+            "excludedAllCandidates false while a visible candidate survives")
+        expect(
+            !QuotaResolver.excludedAllCandidates(payload: nil, selection: "auto", excluding: ["claude"]),
+            "excludedAllCandidates false with no payload (fetch-failure keeps the cache)")
+        expect(
+            !QuotaResolver.excludedAllCandidates(
+                payload: quotaPayload, selection: "claude|Session", excluding: ["claude"]),
+            "excludedAllCandidates false for an explicit selection")
+        expect(
+            !QuotaResolver.excludedAllCandidates(payload: quotaPayload, selection: "auto", excluding: []),
+            "excludedAllCandidates false for an empty exclusion")
 
         // Year picker visibility (issue #36): years in which only hidden clients
         // had activity drop from the picker. Fixture: vis active in 2025, hid
@@ -253,6 +275,14 @@ enum SelfTest {
             UsageStats.yearsWithVisibleActivity(contributions: yearPayload.contributions, hidden: [])
                 == ["2025", "2026"],
             "no hidden clients keeps every active year")
+        // Auto-clear a hidden-only scoped year (issue #36 R8): a year-scoped
+        // payload whose only stripe is a hidden client signals needs-clear; any
+        // visible stripe keeps it. (2026 in the fixture is hid-only.)
+        let scoped2026 = yearPayload.contributions.filter { $0.date.hasPrefix("2026") }
+        expect(!UsageStats.hasVisibleActivity(contributions: scoped2026, hidden: ["hid"]),
+            "hidden-only scoped year has no visible activity (auto-clear)")
+        expect(UsageStats.hasVisibleActivity(contributions: scoped2026, hidden: []),
+            "a visible stripe keeps the scoped year")
 
         // Limits-card drag reorder: direction-aware insert (down → after the
         // target, up → before it) so single-step moves both work.

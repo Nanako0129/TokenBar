@@ -207,6 +207,23 @@ private struct DashboardSnapshot {
         await reload(force: false)
     }
 
+    /// Auto-clear a year filter scoped to a year that only hidden clients used.
+    /// The best-effort year picker can't drop such a year while it is the active
+    /// selection (the payload is year-scoped then), so a dashboard already
+    /// stranded on it — or one where the user just hid the year's only client —
+    /// would show an empty slice. When the CURRENT year-scoped payload has no
+    /// visible (non-hidden) stripe, fall back to All years via `setYear(nil)`,
+    /// which reuses the existing year-clear discipline (persist + reload with
+    /// the stale-year guards). No-op on All-years, before data loads, or when
+    /// any visible activity exists. Reactive: PopoverView calls this on a hide
+    /// toggle and on payload load.
+    func clearYearIfHiddenOnly(hidden: Set<String>) async {
+        guard year != nil, let payload, !refreshing else { return }
+        if !UsageStats.hasVisibleActivity(contributions: payload.contributions, hidden: hidden) {
+            await setYear(nil)
+        }
+    }
+
     private func reload(force: Bool) async {
         let year = self.year
         async let payloadTask = Task.detached(priority: .userInitiated) {

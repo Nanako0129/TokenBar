@@ -137,6 +137,12 @@ public struct UsageStats: Sendable {
 }
 
 extension UsageStats {
+    /// A contribution stripe is "visible activity" when its client isn't hidden
+    /// and it carries tokens or cost.
+    private static func isVisible(_ cc: ContributionClient, hidden: Set<String>) -> Bool {
+        !hidden.contains(cc.client) && (cc.tokens.total > 0 || cc.cost > 0)
+    }
+
     /// The set of `YYYY` years in which at least one NON-hidden client had
     /// activity (tokens or cost), derived from a payload's contributions. Used
     /// to drop from the year picker years that only hidden clients used. Only
@@ -150,13 +156,23 @@ extension UsageStats {
         for c in contributions {
             let year = String(c.date.prefix(4))
             if years.contains(year) { continue }
-            if c.clients.contains(where: {
-                !hidden.contains($0.client) && ($0.tokens.total > 0 || $0.cost > 0)
-            }) {
+            if c.clients.contains(where: { isVisible($0, hidden: hidden) }) {
                 years.insert(year)
             }
         }
         return years
+    }
+
+    /// Whether ANY non-hidden client had activity in `contributions`. Used to
+    /// auto-clear a year filter scoped to a year only hidden clients used: the
+    /// year-scoped payload still carries the (hidden) activity, so this returns
+    /// false exactly when the visible dashboard would be empty.
+    public static func hasVisibleActivity(
+        contributions: [Contribution], hidden: Set<String>
+    ) -> Bool {
+        contributions.contains { c in
+            c.clients.contains { isVisible($0, hidden: hidden) }
+        }
     }
 }
 

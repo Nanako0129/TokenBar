@@ -121,6 +121,13 @@ struct PopoverView: View {
         .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lensClientIds.joined(separator: ","))") {
             await model.ensureData(for: activeView.wrappedValue, clients: lensClientIds)
         }
+        // Auto-clear a year filter scoped to a year only hidden clients used —
+        // re-checked on a live hide toggle (hiddenRaw) and on each payload load
+        // (generatedAt). The model no-ops unless the scoped payload has no
+        // visible activity, and clears to All years via setYear.
+        .task(id: "\(hiddenRaw)|\(model.payload?.meta.generatedAt ?? "")") {
+            await model.clearYearIfHiddenOnly(hidden: ClientRegistry.parseIdSet(hiddenRaw))
+        }
         // Keyed on the hidden raw so a hide toggle restarts the loop and
         // re-fetches the filtered rate immediately (badge would otherwise lag
         // ≤10s). The loop fetches first, then sleeps.

@@ -181,11 +181,21 @@ private struct MenuBarMock: View {
     /// first, then the persisted last-good reading. Excludes the tab- and
     /// limits-hidden clients from the auto pick, same as the real tray.
     private var quotaRemaining: Double? {
-        QuotaResolver.resolve(
-            payload: agentUsage, selection: quotaSource,
-            excluding: ClientRegistry.quotaExcludedClients())?
+        let excluded = ClientRegistry.quotaExcludedClients()
+        if let value = QuotaResolver.resolve(
+            payload: agentUsage, selection: quotaSource, excluding: excluded)?
             .window.remainingPercent
-            ?? UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
+        {
+            return value
+        }
+        // Same disambiguation as the real tray: don't fall back to the persisted
+        // last-good reading when the nil is caused purely by the exclusion.
+        if QuotaResolver.excludedAllCandidates(
+            payload: agentUsage, selection: quotaSource, excluding: excluded)
+        {
+            return nil
+        }
+        return UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
     }
 
     @ViewBuilder

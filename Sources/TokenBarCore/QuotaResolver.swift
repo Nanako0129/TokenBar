@@ -39,4 +39,20 @@ public enum QuotaResolver {
         else { return nil }
         return (agent.clientId, window)
     }
+
+    /// True when `resolve` returned nil ONLY because the exclusion removed every
+    /// otherwise-resolvable auto candidate (there IS a healthy window, but all
+    /// of them belong to excluded clients). Lets a caller distinguish "all
+    /// candidates hidden" from "no payload / fetch failed / no healthy window":
+    /// in the former it must suppress a stale cache fallback (the hidden
+    /// client's last reading) rather than keep showing it. Only meaningful for
+    /// the auto/empty selection — an explicit pick ignores the exclusion, so
+    /// this returns false for it (and for an empty exclusion or no payload).
+    public static func excludedAllCandidates(
+        payload: AgentUsagePayload?, selection: String, excluding: Set<String>
+    ) -> Bool {
+        guard selection.isEmpty || selection == Self.auto, !excluding.isEmpty else { return false }
+        return resolve(payload: payload, selection: selection, excluding: []) != nil
+            && resolve(payload: payload, selection: selection, excluding: excluding) == nil
+    }
 }
