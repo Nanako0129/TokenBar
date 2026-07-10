@@ -320,6 +320,22 @@ enum SelfTest {
         expect(emptyStats.totalTokens == 0 && emptyStats.totalCost == 0 && emptyStats.activeDays == 0,
             "empty selection zeros the stats aggregate")
 
+        // Saturating token folds (issue #36 Fix 4): corrupt Antigravity lanes
+        // can be Int64.max-clamped by the Rust side; the Swift re-sums must
+        // saturate, not trap, and stay byte-identical for normal values.
+        expect(Int64.max.saturatingAdding(Int64.max) == .max, "saturating add clamps at Int64.max")
+        expect(Int64.max.saturatingAdding(1) == .max, "saturating add caps a small overflow")
+        expect(Int64.min.saturatingAdding(-1) == .min, "saturating add clamps at Int64.min")
+        expect((100 as Int64).saturatingAdding(50) == 150, "saturating add is exact without overflow")
+        let maxLanes = try! JSONDecoder().decode(
+            TokenBreakdown.self,
+            from: Data(#"{"input":9223372036854775807,"output":9223372036854775807,"cacheRead":0,"cacheWrite":0,"reasoning":0}"#.utf8))
+        expect(maxLanes.total == .max, "TokenBreakdown.total saturates two Int64.max lanes")
+        let normalLanes = try! JSONDecoder().decode(
+            TokenBreakdown.self,
+            from: Data(#"{"input":100,"output":50,"cacheRead":10,"cacheWrite":5,"reasoning":2}"#.utf8))
+        expect(normalLanes.total == 167, "TokenBreakdown.total is exact for normal lanes")
+
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")

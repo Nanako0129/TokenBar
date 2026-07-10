@@ -225,18 +225,24 @@ private struct DashboardSnapshot {
         guard self.year == year else { return }
         // Re-fetch the lazy lenses that were already loaded, keeping the slice
         // they were last fetched for (an ordered array of the stored Set — the
-        // FFI filter is membership-based, so order is irrelevant).
+        // FFI filter is membership-based, so order is irrelevant). Re-check the
+        // stored slice AFTER the await: a tab switch during the fetch commits a
+        // new slice via ensureData, and the slice-keyed `.task` won't refetch
+        // (its key already records the new tab), so a stale overwrite here would
+        // strand the wrong slice on the lens.
         if hourly != nil {
-            let clients = hourlyClients.map(Array.init)
-            hourly = await Task.detached(priority: .userInitiated) {
-                try? TBCore.hourlyReport(year: year, clients: clients)
+            let captured = hourlyClients
+            let report = await Task.detached(priority: .userInitiated) {
+                try? TBCore.hourlyReport(year: year, clients: captured.map(Array.init))
             }.value
+            if self.year == year, self.hourlyClients == captured { hourly = report }
         }
         if agents != nil {
-            let clients = agentsClients.map(Array.init)
-            agents = await Task.detached(priority: .userInitiated) {
-                try? TBCore.agentsReport(year: year, clients: clients)
+            let captured = agentsClients
+            let report = await Task.detached(priority: .userInitiated) {
+                try? TBCore.agentsReport(year: year, clients: captured.map(Array.init))
             }.value
+            if self.year == year, self.agentsClients == captured { agents = report }
         }
     }
 
@@ -327,17 +333,22 @@ private struct DashboardSnapshot {
             guard self.year == year else { continue }
             // Re-fetch the lazy lenses that were already loaded (mirrors reload),
             // keeping each one's last-fetched client slice.
+            // Re-check the stored slice after the await (see reload()): a tab
+            // switch mid-fetch must not let this background refresh overwrite
+            // the fresh slice with the stale one.
             if hourly != nil {
-                let clients = hourlyClients.map(Array.init)
-                hourly = await Task.detached(priority: .utility) {
-                    try? TBCore.hourlyReport(year: year, clients: clients)
+                let captured = hourlyClients
+                let report = await Task.detached(priority: .utility) {
+                    try? TBCore.hourlyReport(year: year, clients: captured.map(Array.init))
                 }.value
+                if self.year == year, self.hourlyClients == captured { hourly = report }
             }
             if agents != nil {
-                let clients = agentsClients.map(Array.init)
-                agents = await Task.detached(priority: .utility) {
-                    try? TBCore.agentsReport(year: year, clients: clients)
+                let captured = agentsClients
+                let report = await Task.detached(priority: .utility) {
+                    try? TBCore.agentsReport(year: year, clients: captured.map(Array.init))
                 }.value
+                if self.year == year, self.agentsClients == captured { agents = report }
             }
         }
     }
@@ -397,14 +408,20 @@ private struct DashboardSnapshot {
             let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.hourlyReport(year: year, clients: clients)
             }.value
-            guard self.year == year else { return }
+            // The detached FFI outlives this `.task(id:)`'s cancellation, so a
+            // tab switch or year change during the await must not let this
+            // superseded fetch commit: PopoverView cancels the task on an
+            // activeTab/year change, so isCancelled captures the slice switch
+            // (the model has no "desired selection" to compare against the way
+            // it does for year).
+            guard self.year == year, !Task.isCancelled else { return }
             hourly = report
             hourlyClients = selection
         case .agents where agents == nil || agentsClients != selection:
             let report = await Task.detached(priority: .userInitiated) {
                 try? TBCore.agentsReport(year: year, clients: clients)
             }.value
-            guard self.year == year else { return }
+            guard self.year == year, !Task.isCancelled else { return }
             agents = report
             agentsClients = selection
         default:

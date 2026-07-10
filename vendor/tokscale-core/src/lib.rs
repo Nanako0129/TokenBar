@@ -1696,6 +1696,61 @@ fn resolve_report_clients(options: &ReportOptions) -> Vec<String> {
     })
 }
 
+/// Two-level client filter for the streaming hourly/agents reports (TokenBar
+/// local patch). `scan_messages_streaming` selects scanner LANES from the
+/// client list, but some visible client ids are not lanes of their own: a
+/// `cc-mirror/<variant>` id is produced *during Claude-lane parsing* (#659), so
+/// requesting it alone would enable no lane (`ClientId::from_str` returns None)
+/// and the report would come back empty for a client that Daily/Models still
+/// show. Split the request into:
+/// - the lanes to scan — each `cc-mirror/*` maps to its producing `claude`
+///   lane (the Claude scanner discovers `.cc-mirror/*/config/projects`), every
+///   other id maps to itself; and
+/// - an optional EXACT client-id set the aggregation keeps. Unlike the scan's
+///   built-in `retain_for_requested_clients`, requesting `claude` here does NOT
+///   sweep in the distinct `cc-mirror/*` variants: the graph/model/daily
+///   payloads fold by `msg.client`, surfacing each variant as its own client
+///   id, so the hourly/agents slices must match that exact-id grouping. The
+///   `synthetic` special-case is preserved (synthetic is a model/provider match,
+///   not a literal client id). `None` = no client filter (every message),
+///   preserving the all-clients behavior.
+fn split_report_client_filter(options: &ReportOptions) -> (Vec<String>, Option<HashSet<String>>) {
+    let Some(requested) = options.clients.as_ref() else {
+        return (resolve_report_clients(options), None);
+    };
+    let mut lanes: Vec<String> = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for id in requested {
+        let lane = if id.starts_with("cc-mirror/") {
+            "claude".to_string()
+        } else {
+            id.clone()
+        };
+        if seen.insert(lane.clone()) {
+            lanes.push(lane);
+        }
+    }
+    (lanes, Some(requested.iter().cloned().collect()))
+}
+
+/// Exact per-message client gate for `split_report_client_filter`'s aggregation
+/// half: keep a message iff its exact client id was requested, or it is a
+/// synthetic match when `synthetic` was requested. `None` keeps every message.
+fn report_message_client_passes(exact: &Option<HashSet<String>>, m: &UnifiedMessage) -> bool {
+    match exact {
+        None => true,
+        Some(req) => {
+            req.contains(m.client.as_str())
+                || (req.contains("synthetic")
+                    && sessions::synthetic::matches_synthetic_filter(
+                        &m.client,
+                        &m.model_id,
+                        &m.provider_id,
+                    ))
+        }
+    }
+}
+
 /// Returns `true` when the message should pass the cross-file dedup gate for
 /// lanes that track per-client seen keys.
 ///
@@ -1913,13 +1968,16 @@ pub async fn get_agents_report(options: ReportOptions) -> Result<AgentReport, St
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
-    let clients = resolve_report_clients(&options);
+    // Two-level filter: scan the producing lanes (cc-mirror variants ride the
+    // claude lane), then keep only the exact requested client ids at fold time.
+    let (clients, exact) = split_report_client_filter(&options);
 
     let pricing = load_pricing_for_local_parse().await;
     let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
+        if !report_message_client_passes(&exact, m) { return false; }
         if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
         if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
         if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
@@ -2011,13 +2069,16 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     let start = Instant::now();
 
     let home_dir = get_home_dir_string(&options.home_dir)?;
-    let clients = resolve_report_clients(&options);
+    // Two-level filter: scan the producing lanes (cc-mirror variants ride the
+    // claude lane), then keep only the exact requested client ids at fold time.
+    let (clients, exact) = split_report_client_filter(&options);
 
     let pricing = load_pricing_for_local_parse().await;
     let year_prefix = options.year.as_ref().map(|y| format!("{}-", y));
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
+        if !report_message_client_passes(&exact, m) { return false; }
         if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
         if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
         if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
@@ -4982,6 +5043,96 @@ mod tests {
             assert_eq!(filtered.entries[0].output, 80);
             assert_eq!(filtered.entries[0].clients, vec!["codebuff".to_string()]);
             assert_eq!(filtered.total_messages, 1, "kimi's message is gone");
+        }
+
+        match original_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+        std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY");
+    }
+
+    // Issue #36 (round 3): a cc-mirror variant id (`cc-mirror/kimi-code`) is
+    // produced during CLAUDE-lane parsing, not by a scanner lane of its own —
+    // `ClientId::from_str("cc-mirror/kimi-code")` is None. The two-level split
+    // must (a) map the variant to its producing `claude` lane so the scan finds
+    // it, and (b) keep ONLY the exact requested ids at fold time so requesting
+    // the variant returns just the variant, and requesting `claude` returns
+    // plain claude WITHOUT the variant (which the graph/daily/models surface as
+    // its own client id). RED against the old lane-only filter: requesting the
+    // variant returned empty, and requesting claude swept the variant in.
+    #[test]
+    #[serial_test::serial]
+    fn test_agents_report_cc_mirror_variant_slice_issue36() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", cache_home.path());
+        std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
+
+        {
+            // Plain claude session (client "claude"): 100 in / 50 out.
+            let claude_dir = source_home.path().join(".claude/projects/myproject");
+            std::fs::create_dir_all(&claude_dir).unwrap();
+            std::fs::write(
+                claude_dir.join("conversation.jsonl"),
+                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","requestId":"req_plain","message":{"id":"msg_plain","model":"claude-3-5-sonnet","usage":{"input_tokens":100,"output_tokens":50}}}"#,
+            )
+            .unwrap();
+            // cc-mirror variant (client "cc-mirror/kimi-code"): 300 in / 70 out.
+            let variant_dir = source_home.path().join(".cc-mirror/kimi-code");
+            let config_dir = variant_dir.join("config");
+            let project_dir = config_dir.join("projects/proj");
+            std::fs::create_dir_all(&project_dir).unwrap();
+            std::fs::write(
+                variant_dir.join("variant.json"),
+                format!(
+                    r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                    config_dir.display()
+                ),
+            )
+            .unwrap();
+            std::fs::write(
+                project_dir.join("session.jsonl"),
+                r#"{"type":"assistant","timestamp":"2024-12-01T11:00:00.000Z","requestId":"req_variant","message":{"id":"msg_variant","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":70}}}"#,
+            )
+            .unwrap();
+
+            let home = source_home.path().to_str().unwrap().to_string();
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let run = |clients: Option<Vec<String>>| {
+                let report = rt
+                    .block_on(get_agents_report(ReportOptions {
+                        home_dir: Some(home.clone()),
+                        use_env_roots: false,
+                        clients,
+                        ..Default::default()
+                    }))
+                    .unwrap();
+                let input: i64 = report.entries.iter().map(|e| e.input).sum();
+                (report.total_messages, input)
+            };
+
+            // All clients: both messages fold into "Main".
+            assert_eq!(run(None), (2, 400), "all: plain(100) + variant(300)");
+
+            // Variant slice: the claude lane is scanned (so the variant is
+            // found), then narrowed to exactly the variant id.
+            assert_eq!(
+                run(Some(vec!["cc-mirror/kimi-code".to_string()])),
+                (1, 300),
+                "variant slice = just the variant (300), not empty"
+            );
+
+            // Claude slice: plain claude ONLY — the distinct variant is excluded.
+            assert_eq!(
+                run(Some(vec!["claude".to_string()])),
+                (1, 100),
+                "claude slice = plain claude (100), not the mixed 400"
+            );
         }
 
         match original_home {

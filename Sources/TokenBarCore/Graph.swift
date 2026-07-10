@@ -3,6 +3,21 @@ import Foundation
 // Contribution-graph payload (`UsagePayload` in the Tauri frontend's
 // src/lib/types.ts). Keys match the Rust serde camelCase serialization exactly.
 
+extension Int64 {
+    /// Addition that clamps to `Int64.max`/`.min` instead of trapping on
+    /// overflow. The Rust side clamps corrupt Antigravity token varints to
+    /// `Int64.max` (M6 #766) and saturates its fold arithmetic (#822/#823), so
+    /// a legitimately-clamped lane can carry `Int64.max`; the Swift-side re-sums
+    /// (TokenBreakdown.total, the tray totals) run on the always-on menu bar and
+    /// must not crash the app on such data. Normal (non-overflowing) values are
+    /// byte-identical to `+`.
+    public func saturatingAdding(_ other: Int64) -> Int64 {
+        let (result, overflow) = addingReportingOverflow(other)
+        guard overflow else { return result }
+        return other > 0 ? .max : .min
+    }
+}
+
 public struct TokenBreakdown: Decodable, Sendable {
     public let input: Int64
     public let output: Int64
@@ -11,8 +26,16 @@ public struct TokenBreakdown: Decodable, Sendable {
     public let reasoning: Int64
 
     /// Sum of every token lane — the single definition shared by the tray
-    /// totals, DayBars, and UsageStats aggregations.
-    public var total: Int64 { input + output + cacheRead + cacheWrite + reasoning }
+    /// totals, DayBars, and UsageStats aggregations. Saturating so an
+    /// `Int64.max`-clamped corrupt lane can't trap the always-on menu bar
+    /// (matches the Rust-side saturation; see `Int64.saturatingAdding`).
+    public var total: Int64 {
+        input
+            .saturatingAdding(output)
+            .saturatingAdding(cacheRead)
+            .saturatingAdding(cacheWrite)
+            .saturatingAdding(reasoning)
+    }
 }
 
 public struct ContributionClient: Decodable, Sendable {
@@ -123,10 +146,10 @@ extension UsagePayload {
             let isToday = c.date == today
             for cc in c.clients where !hidden.contains(cc.client) {
                 let sum = cc.tokens.total
-                totalTokens += sum
+                totalTokens = totalTokens.saturatingAdding(sum)
                 totalCost += cc.cost
                 if isToday {
-                    todayTokens += sum
+                    todayTokens = todayTokens.saturatingAdding(sum)
                     todayCost += cc.cost
                 }
             }
