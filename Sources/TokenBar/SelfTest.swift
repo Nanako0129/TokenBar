@@ -362,6 +362,55 @@ enum SelfTest {
         expect(satSmall.totalTokens == 150 && satSmall.perDayMap["2026-07-01"]?.tokens == 150,
             "UsageStats is exact for normal stripes")
 
+        // Filtered stats derive their range from the SELECTED clients (issue
+        // #36 Fix, round 5): a hidden client active AFTER the visible client's
+        // last day must not reset/shorten the visible streak. Fixture: "vis"
+        // active 07-01..07-03, hidden "hid" active 07-05 → meta.dateRange
+        // spans 07-01..07-05. Without the fix, streaks for {vis} walk to 07-05
+        // and current resets to 0 on the empty 07-04/07-05 tail; with the fix
+        // the range is 07-01..07-03 so current == longest == 3.
+        func daily(_ client: String, _ date: String, _ cost: Double) -> String {
+            """
+            {"date":"\(date)","totals":{"tokens":10,"cost":\(cost),"messages":1},"intensity":1,
+             "tokenBreakdown":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
+             "clients":[{"client":"\(client)","modelId":"m","providerId":"p","cost":\(cost),"messages":1,
+              "tokens":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
+            """
+        }
+        func rangeStatsPayload(end: String, days: [String]) -> UsagePayload {
+            let json = """
+            {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"\(end)"}},
+             "summary":{"totalTokens":0,"totalCost":0,"totalDays":0,"activeDays":0,"averagePerDay":0,
+                        "maxCostInSingleDay":0,"clients":["vis","hid"],"models":[]},
+             "years":[],
+             "contributions":[\(days.joined(separator: ","))]}
+            """
+            return try! JSONDecoder().decode(UsagePayload.self, from: Data(json.utf8))
+        }
+        // With the hidden client extending the range to 07-05.
+        let withHidden = rangeStatsPayload(end: "2026-07-05", days: [
+            daily("vis", "2026-07-01", 1), daily("vis", "2026-07-02", 1),
+            daily("vis", "2026-07-03", 1), daily("hid", "2026-07-05", 1),
+        ])
+        let visFiltered = UsageStats(payload: withHidden, selectedClients: ["vis"])
+        expect(visFiltered.streaks.current == 3 && visFiltered.streaks.longest == 3,
+            "filtered streak ignores a hidden client's later activity")
+        expect(visFiltered.dateRange.end == "2026-07-03",
+            "filtered range ends at the selected clients' last active day")
+        expect(visFiltered.averagePerDay == 1,
+            "filtered averagePerDay divides by selected active days, not the hidden-extended span")
+        // Equivalence: same numbers as a payload where the hidden client never
+        // existed (range naturally 07-01..07-03, {vis} is all present).
+        let noHidden = rangeStatsPayload(end: "2026-07-03", days: [
+            daily("vis", "2026-07-01", 1), daily("vis", "2026-07-02", 1),
+            daily("vis", "2026-07-03", 1),
+        ])
+        let visAlone = UsageStats(payload: noHidden, selectedClients: ["vis"])
+        expect(visFiltered.streaks.current == visAlone.streaks.current
+            && visFiltered.streaks.longest == visAlone.streaks.longest
+            && visFiltered.dateRange.end == visAlone.dateRange.end,
+            "filtered stats equal a payload without the hidden client")
+
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")

@@ -109,11 +109,28 @@ public struct UsageStats: Sendable {
         activeDays = perDay.count
         self.bestDay = bestDay
         averagePerDay = perDay.isEmpty ? 0 : totalCost / Double(perDay.count)
-        dateRange = payload.meta.dateRange
+        // `payload.meta.dateRange` is the activity span across ALL clients in the
+        // payload (aggregator min/max contribution date). When some present
+        // client is filtered out (hidden), copying that unfiltered range lets a
+        // hidden client whose activity extends past the visible clients' last
+        // active day inject trailing empty days that reset/shorten the streaks.
+        // Derive the effective range from the SELECTED clients' own activity in
+        // that case, matching a payload in which the hidden clients never
+        // existed. The all-present (nothing hidden) and empty (nothing active)
+        // cases keep `meta.dateRange` — byte-identical to before.
+        let filtering = !present.isSubset(of: selectedClients)
+        let selectedDates = perDay.map(\.date)
+        let effectiveRange: DateRange
+        if filtering, let start = selectedDates.min(), let end = selectedDates.max() {
+            effectiveRange = DateRange(start: start, end: end)
+        } else {
+            effectiveRange = payload.meta.dateRange
+        }
+        dateRange = effectiveRange
         self.perDay = perDay
         self.perDayMap = perDayMap
         streaks = Streaks.compute(
-            perDayMap: perDayMap, rangeStart: dateRange.start, rangeEnd: dateRange.end)
+            perDayMap: perDayMap, rangeStart: effectiveRange.start, rangeEnd: effectiveRange.end)
         presentClients = present.sorted()
         self.maxTokens = maxTokens
     }
