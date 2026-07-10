@@ -34,7 +34,7 @@ struct HourlyView: View {
     }
 
     private func allowed(_ e: HourlyReportEntry, _ allow: Set<String>) -> Bool {
-        allow.isEmpty || e.clients.contains { allow.contains($0) }
+        e.clients.contains { allow.contains($0) }
     }
 
     /// Profile: fold every slot into a 24-hour-of-day rhythm.

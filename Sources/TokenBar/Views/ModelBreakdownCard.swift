@@ -38,7 +38,7 @@ struct ModelBreakdownCard: View {
     var body: some View {
         let allow = Set(clientIds)
         let rows = (report?.entries ?? [])
-            .filter { allow.isEmpty || allow.contains($0.client) }
+            .filter { allow.contains($0.client) }
             .sorted { $0.cost != $1.cost ? $0.cost > $1.cost : $0.total > $1.total }
         let totalCost = rows.reduce(0) { $0 + $1.cost }
 

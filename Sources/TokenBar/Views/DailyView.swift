@@ -41,7 +41,7 @@ struct DailyView: View {
             var cost = 0.0
             var messages = 0
             for cc in c.clients {
-                if !allow.isEmpty && !allow.contains(cc.client) { continue }
+                if !allow.contains(cc.client) { continue }
                 tokens += Self.tokenTotal(cc.tokens)
                 cost += cc.cost
                 messages += cc.messages

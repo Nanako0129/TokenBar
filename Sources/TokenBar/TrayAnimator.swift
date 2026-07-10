@@ -249,6 +249,16 @@ final class TrayAnimator {
     /// tray title can display it without its own FFI call.
     private(set) var tokensPerMinRate: Double?
 
+    /// Apply a freshly-fetched live rate to the spin speed and cached rate, and
+    /// re-render the title. Shared by the 30s poll and the immediate refresh
+    /// AppDelegate kicks when the hidden-tabs set changes (so the filtered rate
+    /// updates without waiting for the next poll tick).
+    func applyRate(_ rate: Double) {
+        load = min(rate / 10_000.0, 100.0)
+        tokensPerMinRate = rate
+        onQuotaUpdated?()
+    }
+
     /// Poll the live rate to feed the spin speed. 30s cadence balances
     /// animation responsiveness against the rayon wakeup cost of each FFI
     /// call (the staticlib's mtime check wakes the entire rayon pool).
@@ -259,11 +269,7 @@ final class TrayAnimator {
                     try LiveRate.current()
                 }.value
                 guard let self, !Task.isCancelled else { break }
-                if let rate {
-                    self.load = min(rate / 10_000.0, 100.0)
-                    self.tokensPerMinRate = rate
-                    self.onQuotaUpdated?()
-                }
+                if let rate { self.applyRate(rate) }
                 try? await Task.sleep(for: .seconds(30))
             }
         }

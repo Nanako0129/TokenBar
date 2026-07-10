@@ -21,7 +21,9 @@ struct UsageTraceCard: View {
     private static let maxRows = 5
 
     var body: some View {
-        let visible = buckets.filter { !hidden.contains($0.client) }
+        // Rows carry raw tail ids; the hidden set is canonical short ids — so
+        // normalize before the membership test (matches TraceBucket.totalRate).
+        let visible = buckets.filter { !hidden.contains(ClientRegistry.canonicalClient($0.client)) }
         let rows = detailed ? visible : TraceBucket.collapseByClient(visible)
         let top = Array(rows.prefix(Self.maxRows))
         let maxRate = top.map(\.tokensPerMin).max() ?? 0

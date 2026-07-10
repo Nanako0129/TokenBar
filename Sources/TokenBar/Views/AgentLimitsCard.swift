@@ -482,12 +482,9 @@ struct AgentLimitsCard: View {
     }
 
     /// The live tail reports raw client ids; quota snapshots use short ids.
+    /// Thin wrapper over the hoisted `ClientRegistry.canonicalClient` so the
+    /// trace deny-filters and this card share one mapping.
     static func normalizeTraceClient(_ id: String) -> String {
-        switch id {
-        case "claude-code": return "claude"
-        case "codex-cli": return "codex"
-        case "gemini-cli": return "gemini"
-        default: return id.hasSuffix("-cli") ? String(id.dropLast(4)) : id
-        }
+        ClientRegistry.canonicalClient(id)
     }
 }

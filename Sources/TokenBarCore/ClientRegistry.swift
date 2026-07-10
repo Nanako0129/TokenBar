@@ -81,6 +81,21 @@ public enum ClientRegistry {
     /// Added for accounts whose plan has no OAuth quota (e.g. Claude Console).
     public static let limitsHiddenKey = "tokenbar.limits.hidden"
 
+    /// Canonicalize a live-tail client id to the registry's short id. The
+    /// usage trace reports raw ids (`claude-code`, `codex-cli`, `gemini-cli`)
+    /// while the hidden set, quota snapshots, and registry all key on short ids
+    /// (`claude`, `codex`, `gemini`). Explicit cases first, then a generic
+    /// `-cli` suffix strip. Single source shared by the trace deny-filters and
+    /// `AgentLimitsCard.normalizeTraceClient`.
+    public static func canonicalClient(_ id: String) -> String {
+        switch id {
+        case "claude-code": return "claude"
+        case "codex-cli": return "codex"
+        case "gemini-cli": return "gemini"
+        default: return id.hasSuffix("-cli") ? String(id.dropLast(4)) : id
+        }
+    }
+
     /// Parses the comma-separated id form persisted by the tab order/hidden
     /// defaults into a set, tolerating an empty string. Single source of the
     /// CSV split so callers (and the reactive views, which pass their observed

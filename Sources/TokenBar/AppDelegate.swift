@@ -24,6 +24,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // observer compares against it so the loop is restarted only when the
     // interval actually changes, not on every unrelated UserDefaults write.
     private var refreshIntervalMin = AppDelegate.readIntervalMin()
+    // Snapshot of the tab-hidden raw string. The defaults observer compares
+    // against it so a visibility change fires ONE off-main filtered-rate fetch
+    // (updating the tokens/min title + animated-icon speed at once) and only
+    // then — never on the flood of unrelated writes. Same value-gating
+    // discipline as refreshIntervalMin, to avoid the CPU-regression storm.
+    private var lastHiddenRaw = UserDefaults.standard.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
 
     private static func readIntervalMin() -> Int {
         max(1, UserDefaults.standard.object(forKey: intervalKey).flatMap { $0 as? Int } ?? 30)
@@ -69,6 +75,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     self.titleRefreshTask?.cancel()
                     self.startTitleRefresh()
                 }
+                // A visibility change alters the FILTERED live rate, which
+                // applyTitle above can't recompute (it reuses the cached rate).
+                // Value-gate on the hidden set and refetch once when it changes.
+                let hiddenRaw = UserDefaults.standard.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
+                if hiddenRaw != self.lastHiddenRaw {
+                    self.lastHiddenRaw = hiddenRaw
+                    self.refreshFilteredRate()
+                }
             }
         }
 
@@ -111,6 +125,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController?.updateTitle(
             mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),
             color: mode.titleColor(quotaRemaining: quotaRemaining))
+    }
+
+    /// The hidden-tabs set changed: fetch the filtered live rate once, off the
+    /// main actor, and push it into the animator (spin speed + cached rate),
+    /// which re-renders the title via onQuotaUpdated. No loop restart, no graph
+    /// refetch — mirrors the 30s poll's delivery so the tokens/min mode and the
+    /// animated-icon speed react to a visibility toggle immediately.
+    private func refreshFilteredRate() {
+        Task { [weak self] in
+            let rate = try? await Task.detached(priority: .utility) {
+                try LiveRate.current()
+            }.value
+            guard let self, let rate else { return }
+            self.lastRate = rate
+            self.trayAnimator?.applyRate(rate)
+        }
     }
 
     /// Background graph refresh: serves the graph-based title modes (today's

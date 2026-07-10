@@ -142,15 +142,32 @@ enum SelfTest {
             "collapse keeps a lone unknown model")
 
         // Live-rate total with hidden clients excluded (issue #35). Bucket
-        // tokens_per_min == tokens here (see `bucket`), so sums are exact.
+        // tokens_per_min == tokens here (see `bucket`), so sums are exact. The
+        // rows carry RAW tail ids (claude-code/codex-cli); the hidden set holds
+        // CANONICAL short ids (claude/codex) — totalRate normalizes each row
+        // before the membership test, so hiding "claude" must drop claude-code.
         let rateRows = [
             bucket("claude-code", "Main", "claude-opus-4-8", 100),
             bucket("claude-code", "Subagent", "unknown", 50),
             bucket("codex-cli", "Main", "gpt-5.5", 400),
         ]
         expect(TraceBucket.totalRate(rateRows, hidden: []) == 550, "rate empty-hidden is the plain sum")
-        expect(TraceBucket.totalRate(rateRows, hidden: ["codex-cli"]) == 150, "rate hiding a client drops its rows")
-        expect(TraceBucket.totalRate(rateRows, hidden: ["claude-code", "codex-cli"]) == 0, "rate all-hidden is zero")
+        expect(TraceBucket.totalRate(rateRows, hidden: ["codex"]) == 150, "rate hiding canonical codex drops codex-cli rows")
+        expect(TraceBucket.totalRate(rateRows, hidden: ["claude"]) == 400, "rate hiding canonical claude drops claude-code rows")
+        expect(TraceBucket.totalRate(rateRows, hidden: ["claude", "codex"]) == 0, "rate all-hidden is zero")
+
+        // Trace id canonicalization (issue #36): raw tail ids fold to the
+        // registry's short ids; a mixed set drops only the hidden client, the
+        // generic "-cli" suffix strips, and already-canonical ids pass through.
+        let mixedRows = [
+            bucket("claude-code", "Main", "m", 100),
+            bucket("codex-cli", "Main", "m", 50),
+            bucket("cursor", "Main", "m", 30),
+        ]
+        expect(TraceBucket.totalRate(mixedRows, hidden: ["claude"]) == 80, "canonical hide drops only claude-code rows")
+        expect(ClientRegistry.canonicalClient("gemini-cli") == "gemini", "canonical explicit gemini-cli")
+        expect(ClientRegistry.canonicalClient("droid-cli") == "droid", "canonical generic -cli strip")
+        expect(ClientRegistry.canonicalClient("claude") == "claude", "canonical short id passes through")
 
         // Quota resolver: auto picks the tightest window across agents,
         // erroring agents are skipped, explicit selections parse. The payload
@@ -285,6 +302,13 @@ enum SelfTest {
         expect(allHidden.totalTokens == 0 && allHidden.totalCost == 0
             && allHidden.todayTokens == 0 && allHidden.todayCost == 0,
             "tray all-hidden totals are zero")
+        // Empty selection zeros the stats aggregate too (issue #36 Fix 2): the
+        // lens views now filter strictly, so an all-hidden slice (clientIds=[])
+        // shows nothing everywhere instead of leaking through an empty-allowlist
+        // "show all" — consistent with DayBars/UsageStats' strict membership.
+        let emptyStats = UsageStats(payload: trayPayload, selectedClients: [])
+        expect(emptyStats.totalTokens == 0 && emptyStats.totalCost == 0 && emptyStats.activeDays == 0,
+            "empty selection zeros the stats aggregate")
 
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {

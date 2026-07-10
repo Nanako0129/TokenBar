@@ -34,8 +34,14 @@ public struct TraceBucket: Decodable, Sendable {
     /// the menu-bar rate with hidden clients dropped (issue #35). Summing the
     /// 600s trace rows' rates equals the FFI `rate_in_window(600)` for the
     /// surviving clients, since every row's rate shares the same window divisor.
+    ///
+    /// Rows carry raw live-tail ids (`claude-code`); `hidden` holds canonical
+    /// short ids (`claude`), so each row is normalized before the membership
+    /// test — otherwise hiding a client would leave its live rows in the rate.
     public static func totalRate(_ buckets: [TraceBucket], hidden: Set<String>) -> Double {
-        buckets.reduce(0) { $0 + (hidden.contains($1.client) ? 0 : $1.tokensPerMin) }
+        buckets.reduce(0) {
+            $0 + (hidden.contains(ClientRegistry.canonicalClient($1.client)) ? 0 : $1.tokensPerMin)
+        }
     }
 
     /// Collapse (client, agent, model) buckets to one row per client, for the
