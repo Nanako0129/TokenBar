@@ -102,7 +102,11 @@ pub fn aggregate_by_session(messages: Vec<UnifiedMessage>) -> Vec<SessionContrib
 
 /// Calculate summary statistics
 pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
-    let total_tokens: i64 = contributions.iter().map(|c| c.totals.tokens).sum();
+    // saturating_add: a day's tokens can already be saturated to i64::MAX by
+    // TokenBreakdown::total, so this cross-day sum can overflow the same way.
+    let total_tokens: i64 = contributions
+        .iter()
+        .fold(0i64, |acc, c| acc.saturating_add(c.totals.tokens));
     let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
     let active_days = contributions
         .iter()
@@ -1242,6 +1246,49 @@ mod tests {
         let years = calculate_years(&contributions);
         assert_eq!(years.len(), 1);
         assert_eq!(years[0].total_tokens, i64::MAX);
+    }
+
+    #[test]
+    fn test_calculate_summary_saturates_overflowing_token_fold() {
+        // External-review catch after the calculate_years sibling sweep: the
+        // cross-day `total_tokens` sum in calculate_summary has the same
+        // overflow class — a day's tokens can already be saturated to
+        // i64::MAX by TokenBreakdown::total. Also exercises the full
+        // generate_graph_result path (summary + years) in one pass.
+        let contributions = vec![
+            DailyContribution {
+                date: "2024-01-01".to_string(),
+                totals: DailyTotals {
+                    tokens: i64::MAX,
+                    cost: 0.0,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-02".to_string(),
+                totals: DailyTotals {
+                    tokens: i64::MAX,
+                    cost: 0.0,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+        ];
+
+        let summary = calculate_summary(&contributions);
+        assert_eq!(summary.total_tokens, i64::MAX);
+
+        let result = generate_graph_result(contributions, 0);
+        assert_eq!(result.summary.total_tokens, i64::MAX);
+        assert_eq!(result.years.len(), 1);
+        assert_eq!(result.years[0].total_tokens, i64::MAX);
     }
 
     #[test]
