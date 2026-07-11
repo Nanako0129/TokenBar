@@ -1943,17 +1943,19 @@ struct AgentAccumulator {
 }
 
 impl AgentAccumulator {
-    // Plain `+=` (not saturating_add) folds tokens EXACTLY like the model
-    // report's `aggregate_model_usage_entries`; the per-client parity those two
+    // Folds tokens like the model report's `aggregate_model_usage_entries`
+    // (saturating_add — see that fn for why): the per-client parity those two
     // reports must hold depends on identical arithmetic. `message_count.max(0)`
     // matches the model/monthly aggregators (not the sessionizer's `.max(1)`).
     fn add(&mut self, msg: &UnifiedMessage) {
         self.clients.insert(msg.client.clone());
-        self.input += msg.tokens.input;
-        self.output += msg.tokens.output;
-        self.cache_read += msg.tokens.cache_read;
-        self.cache_write += msg.tokens.cache_write;
-        self.reasoning += msg.tokens.reasoning;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold.
+        self.input = self.input.saturating_add(msg.tokens.input);
+        self.output = self.output.saturating_add(msg.tokens.output);
+        self.cache_read = self.cache_read.saturating_add(msg.tokens.cache_read);
+        self.cache_write = self.cache_write.saturating_add(msg.tokens.cache_write);
+        self.reasoning = self.reasoning.saturating_add(msg.tokens.reasoning);
         self.cost += msg.cost;
         self.messages += msg.message_count.max(0);
     }
@@ -5292,6 +5294,40 @@ mod tests {
         assert!((acc.cost - 1.0).abs() < 1e-9);
         assert_eq!(acc.messages, 2, "message_count.max(0): 2 + 0");
         assert!(acc.clients.contains("codebuff"));
+    }
+
+    #[test]
+    fn agent_accumulator_saturates_overflowing_token_folds() {
+        // Vendor-local sibling sweep alongside #823: AgentAccumulator::add is
+        // its own per-field CROSS-MESSAGE fold (agents streaming report), not
+        // one of the 6 sites #823 covers. An antigravity-cli row can carry an
+        // i64::MAX bucket after the untrusted-varint clamp, so two such rows
+        // folded into one agent bucket with plain `+=` overflow (debug panic /
+        // release wrap) before any saturating grand total runs.
+        let make = || {
+            UnifiedMessage::new(
+                "antigravity-cli",
+                "gemini-3-pro",
+                "antigravity",
+                "session-overflow",
+                1_733_011_200_000,
+                TokenBreakdown {
+                    input: i64::MAX,
+                    output: 0,
+                    cache_read: i64::MAX,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )
+        };
+
+        let mut acc = AgentAccumulator::default();
+        acc.add(&make());
+        acc.add(&make());
+
+        assert_eq!(acc.input, i64::MAX);
+        assert_eq!(acc.cache_read, i64::MAX);
     }
 
     #[test]

@@ -162,7 +162,10 @@ pub fn calculate_years(contributions: &[DailyContribution]) -> Vec<YearSummary> 
         }
         let year = &c.date[0..4];
         let entry = years_map.entry(year.to_string()).or_default();
-        entry.tokens += c.totals.tokens;
+        // saturating_add: a contribution's total can already be saturated to
+        // i64::MAX by TokenBreakdown::total, so this scalar fold can overflow
+        // the same way.
+        entry.tokens = entry.tokens.saturating_add(c.totals.tokens);
         entry.cost += c.totals.cost;
 
         if entry.start.is_empty() || c.date < entry.start {
@@ -1200,6 +1203,45 @@ mod tests {
 
         let years = calculate_years(&contributions);
         assert_eq!(years.len(), 0); // Should skip invalid dates
+    }
+
+    #[test]
+    fn test_calculate_years_saturates_overflowing_token_fold() {
+        // Vendor-local sibling sweep alongside #823: a DailyContribution's
+        // `totals.tokens` can already be saturated to i64::MAX (via
+        // TokenBreakdown::total on a corrupt/clamped source), so folding two
+        // such days into one YearAccumulator with plain `+=` overflows (debug
+        // panic / release wrap).
+        let contributions = vec![
+            DailyContribution {
+                date: "2024-01-01".to_string(),
+                totals: DailyTotals {
+                    tokens: i64::MAX,
+                    cost: 0.0,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+            DailyContribution {
+                date: "2024-01-02".to_string(),
+                totals: DailyTotals {
+                    tokens: i64::MAX,
+                    cost: 0.0,
+                    messages: 1,
+                },
+                intensity: 0,
+                token_breakdown: TokenBreakdown::default(),
+                clients: Vec::new(),
+                active_time_ms: None,
+            },
+        ];
+
+        let years = calculate_years(&contributions);
+        assert_eq!(years.len(), 1);
+        assert_eq!(years[0].total_tokens, i64::MAX);
     }
 
     #[test]
