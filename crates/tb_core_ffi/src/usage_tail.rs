@@ -32,7 +32,14 @@ pub struct UsageEvent {
 
 impl UsageEvent {
     fn total(&self) -> i64 {
-        self.input + self.output + self.cache_read + self.cache_write
+        // saturating_add so #766's i64::MAX-clamped buckets (corrupt
+        // Antigravity DB) can't overflow this always-on live-rate total in
+        // debug/release (see agents_report.rs's map_report for the same
+        // pattern).
+        self.input
+            .saturating_add(self.output)
+            .saturating_add(self.cache_read)
+            .saturating_add(self.cache_write)
     }
 }
 
@@ -143,11 +150,13 @@ impl UsageTailer {
         // saturating so a pathological `secs` can't overflow the cutoff.
         let cutoff = now_ms().saturating_sub(secs.saturating_mul(1000));
         let events = self.events.lock();
+        // saturating_add: each event's total() is already saturated, but the
+        // cross-event fold over a window can still overflow the same way.
         events
             .iter()
             .filter(|e| e.ts_ms >= cutoff)
             .map(|e| e.total())
-            .sum()
+            .fold(0i64, |acc, t| acc.saturating_add(t))
     }
 
     /// Per-(client, agent, model) breakdown over `window_secs`. Frontend
@@ -170,7 +179,8 @@ impl UsageTailer {
             }
             let key = (e.client.clone(), e.agent.clone(), e.model.clone());
             let slot = groups.entry(key).or_insert((0, 0));
-            slot.0 += e.total();
+            // saturating_add: same cross-event overflow class as window_total.
+            slot.0 = slot.0.saturating_add(e.total());
             slot.1 += 1;
         }
         let window_min = (window_secs as f32 / 60.0).max(1.0 / 60.0);
@@ -195,4 +205,63 @@ fn now_ms() -> i64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as i64)
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// #766 clamps corrupt Antigravity varints to `i64::MAX` per bucket. Two
+    /// such events in the same window must saturate `window_total` /
+    /// `rate_in_window` and the per-bucket `trace` fold, not overflow them (a
+    /// plain `+`/`.sum()`/`+=` panics in debug / wraps in release).
+    fn overlarge_event(ts_ms: i64, client: &str) -> UsageEvent {
+        UsageEvent {
+            ts_ms,
+            client: client.to_string(),
+            agent: "Main".to_string(),
+            model: "gemini-3-pro".to_string(),
+            input: i64::MAX,
+            output: 0,
+            cache_read: i64::MAX,
+            cache_write: 0,
+        }
+    }
+
+    #[test]
+    fn usage_event_total_saturates_on_overlarge_buckets() {
+        let e = overlarge_event(0, "antigravity-cli");
+        assert_eq!(e.total(), i64::MAX);
+    }
+
+    #[test]
+    fn window_total_saturates_across_overlarge_events() {
+        let tailer = UsageTailer::new();
+        let now = now_ms();
+        *tailer.events.lock() = vec![
+            overlarge_event(now, "antigravity-cli"),
+            overlarge_event(now, "antigravity-cli"),
+        ];
+
+        let total = tailer.window_total(3600);
+        assert_eq!(total, i64::MAX);
+
+        let rate = tailer.rate_in_window(3600);
+        assert!(rate.is_finite(), "rate_in_window must not produce NaN/inf");
+    }
+
+    #[test]
+    fn trace_saturates_across_overlarge_events_in_same_bucket() {
+        let tailer = UsageTailer::new();
+        let now = now_ms();
+        *tailer.events.lock() = vec![
+            overlarge_event(now, "antigravity-cli"),
+            overlarge_event(now, "antigravity-cli"),
+        ];
+
+        let buckets = tailer.trace(3600);
+        assert_eq!(buckets.len(), 1);
+        assert_eq!(buckets[0].tokens, i64::MAX);
+        assert_eq!(buckets[0].messages, 2);
+    }
 }
