@@ -90,11 +90,13 @@ pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionI
         let mut message_count: i32 = 0;
 
         for msg in &msgs {
-            tokens.input += msg.tokens.input;
-            tokens.output += msg.tokens.output;
-            tokens.cache_read += msg.tokens.cache_read;
-            tokens.cache_write += msg.tokens.cache_write;
-            tokens.reasoning += msg.tokens.reasoning;
+            // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+            // can't overflow the fold.
+            tokens.input = tokens.input.saturating_add(msg.tokens.input);
+            tokens.output = tokens.output.saturating_add(msg.tokens.output);
+            tokens.cache_read = tokens.cache_read.saturating_add(msg.tokens.cache_read);
+            tokens.cache_write = tokens.cache_write.saturating_add(msg.tokens.cache_write);
+            tokens.reasoning = tokens.reasoning.saturating_add(msg.tokens.reasoning);
             cost += msg.cost;
             message_count += msg.message_count.max(1);
         }
@@ -373,11 +375,13 @@ impl SessionizeAccumulator {
             message_count: 0,
         });
         acc.timestamps.push(msg.timestamp);
-        acc.tokens.input += msg.tokens.input;
-        acc.tokens.output += msg.tokens.output;
-        acc.tokens.cache_read += msg.tokens.cache_read;
-        acc.tokens.cache_write += msg.tokens.cache_write;
-        acc.tokens.reasoning += msg.tokens.reasoning;
+        // saturating_add so clamped (i64::MAX) buckets from a corrupt source
+        // can't overflow the fold.
+        acc.tokens.input = acc.tokens.input.saturating_add(msg.tokens.input);
+        acc.tokens.output = acc.tokens.output.saturating_add(msg.tokens.output);
+        acc.tokens.cache_read = acc.tokens.cache_read.saturating_add(msg.tokens.cache_read);
+        acc.tokens.cache_write = acc.tokens.cache_write.saturating_add(msg.tokens.cache_write);
+        acc.tokens.reasoning = acc.tokens.reasoning.saturating_add(msg.tokens.reasoning);
         acc.cost += msg.cost;
         acc.message_count += msg.message_count.max(1);
     }
@@ -867,5 +871,37 @@ mod tests {
         assert_eq!(reference[0].message_count, result[0].message_count, "message_count");
     }
 
+    #[test]
+    fn test_sessionize_saturates_overflowing_token_fold() {
+        // A parser can clamp an untrusted token count to i64::MAX (e.g.
+        // antigravity_cli). Two such messages in one (client, session_id) block
+        // within the idle gap fold into the same session; a plain `+=` fold
+        // would overflow (debug panic / release wrap) before it is serialized
+        // into SessionInterval.tokens. Covers both fold sites: the free
+        // `sessionize()` function and `SessionizeAccumulator::feed`.
+        let overlarge = |ts: i64| {
+            let mut message = make_msg("antigravity-cli", "ses1", ts);
+            message.tokens = TokenBreakdown {
+                input: i64::MAX,
+                output: 0,
+                cache_read: i64::MAX,
+                cache_write: 0,
+                reasoning: 0,
+            };
+            message
+        };
+        let msgs = vec![overlarge(1_000_000), overlarge(1_001_000)];
 
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].tokens.input, i64::MAX);
+        assert_eq!(result[0].tokens.cache_read, i64::MAX);
+
+        let mut acc = SessionizeAccumulator::new();
+        for m in &msgs { acc.feed(m); }
+        let acc_result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+        assert_eq!(acc_result.len(), 1);
+        assert_eq!(acc_result[0].tokens.input, i64::MAX);
+        assert_eq!(acc_result[0].tokens.cache_read, i64::MAX);
+    }
 }
