@@ -1282,9 +1282,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    // gjc: non-cached so the authoritative embedded cost is never repriced by
-    // the source cache. Reprice only when usage.cost.total was absent (A1
-    // guard); message-level dedup collapses depth-1/depth-2 replays.
+    // gjc: non-cached. Every message enters the shared pricing policy, which
+    // preserves provider-reported totals and estimates only unknown costs;
+    // message-level dedup collapses depth-1/depth-2 replays.
     let mut gjc_seen: HashSet<String> = HashSet::new();
     let gjc_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Gjc)
@@ -1293,9 +1293,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             sessions::gjc::parse_gjc_file(path)
                 .into_iter()
                 .map(|mut msg| {
-                    if msg.cost <= 0.0 {
-                        apply_pricing_if_available(&mut msg, pricing);
-                    }
+                    apply_pricing_if_available(&mut msg, pricing);
                     msg
                 })
                 .collect::<Vec<_>>()
@@ -2577,17 +2575,14 @@ where
         }
     }
 
-    // ---- gjc (gajae-code) JSONL, authoritative embedded cost (A1 guard) ----
-    // gjc embeds `usage.cost.total` (USD). Reprice ONLY when it was absent
-    // (cost <= 0.0); routing through the cached/simple_lane path would reprice
-    // unconditionally and overwrite the authoritative cost.
+    // ---- gjc (gajae-code) JSONL with cost provenance ----
+    // Route every message through the shared pricing policy. Provider-reported
+    // totals return unchanged; unknown totals receive an estimate when possible.
     {
         let mut gjc_seen: HashSet<String> = HashSet::new();
         for path in scan_result.get(ClientId::Gjc) {
             for mut m in sessions::gjc::parse_gjc_file(path) {
-                if m.cost <= 0.0 {
-                    apply_pricing_if_available(&mut m, pricing);
-                }
+                apply_pricing_if_available(&mut m, pricing);
                 if !passes_client(&m) { continue; }
                 let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut gjc_seen));
                 if keep && filter(&m) { sink(&m); }
@@ -2872,6 +2867,10 @@ fn apply_pricing_if_available(
     message: &mut UnifiedMessage,
     pricing: Option<&pricing::PricingService>,
 ) {
+    if message.has_authoritative_cost() {
+        return;
+    }
+
     let Some(pricing) = pricing else {
         return;
     };
@@ -2884,6 +2883,7 @@ fn apply_pricing_if_available(
 
     if calculated_cost > 0.0 {
         message.cost = calculated_cost;
+        message.mark_estimated_cost();
     }
 }
 
@@ -3813,12 +3813,13 @@ mod tests {
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
         dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_model_report,
         message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
+        parse_local_unified_messages, parsed_to_unified, pricing,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
         select_local_parse_pricing,
         unified_to_parsed,
-        AgentAccumulator, ClientId, GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        AgentAccumulator, ClientId, CostSource, GroupBy, LocalParseOptions, ReportOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
@@ -6934,6 +6935,139 @@ mod tests {
         apply_pricing_if_available(&mut msg, Some(&pricing));
 
         assert_eq!(msg.cost, 0.02);
+        assert_eq!(msg.cost_source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn test_apply_pricing_if_available_preserves_provider_reported_cost() {
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "gpt-4o".into(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let mut msg = UnifiedMessage::new(
+            "opencode",
+            "gpt-4o",
+            "openai",
+            "session-1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.42,
+        );
+        msg.mark_provider_reported_cost();
+
+        apply_pricing_if_available(&mut msg, Some(&pricing));
+
+        assert_eq!(msg.cost, 0.42);
+        assert_eq!(msg.cost_source, CostSource::ProviderReported);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_cost_provenance_matches_materialized_and_streaming_lanes() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let original_home = std::env::var_os("HOME");
+        unsafe { std::env::set_var("HOME", cache_home.path()) };
+
+        let opencode_dir = source_home
+            .path()
+            .join(".local/share/opencode/storage/message/project-1");
+        std::fs::create_dir_all(&opencode_dir).unwrap();
+        std::fs::write(
+            opencode_dir.join("reported.json"),
+            r#"{"id":"oc-reported","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.05,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            opencode_dir.join("zero.json"),
+            r#"{"id":"oc-zero","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011201000}}"#,
+        )
+        .unwrap();
+
+        let gjc_dir = source_home.path().join(".gjc/agent/sessions/project-1");
+        std::fs::create_dir_all(&gjc_dir).unwrap();
+        std::fs::write(
+            gjc_dir.join("session.jsonl"),
+            r#"{"type":"session","id":"gjc-session","cwd":"/work/project-1"}
+{"type":"message","id":"gjc-zero","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1733011202000,"usage":{"input":10,"output":5,"cost":{"total":0.0}}}}
+{"type":"message","id":"gjc-missing","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1733011203000,"usage":{"input":10,"output":5}}}"#,
+        )
+        .unwrap();
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "openai/gpt-4o".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let clients = vec!["opencode".to_string(), "gjc".to_string()];
+        let materialized = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            Some(&pricing),
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+
+        let summarize = |messages: Vec<UnifiedMessage>| {
+            let mut rows: Vec<(String, f64, CostSource)> = messages
+                .into_iter()
+                .map(|message| {
+                    (
+                        message.dedup_key.unwrap_or_default(),
+                        message.cost,
+                        message.cost_source,
+                    )
+                })
+                .collect();
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows
+        };
+        let materialized = summarize(materialized);
+        let streamed = summarize(streamed);
+        assert_eq!(materialized, streamed);
+        assert_eq!(
+            materialized,
+            vec![
+                ("gjc-session:gjc-missing".to_string(), 0.2, CostSource::Estimated),
+                ("gjc-session:gjc-zero".to_string(), 0.0, CostSource::ProviderReported),
+                ("oc-reported".to_string(), 0.05, CostSource::ProviderReported),
+                ("oc-zero".to_string(), 0.2, CostSource::Estimated),
+            ]
+        );
+
+        unsafe {
+            match original_home {
+                Some(home) => std::env::set_var("HOME", home),
+                None => std::env::remove_var("HOME"),
+            }
+        }
     }
 
     #[test]
