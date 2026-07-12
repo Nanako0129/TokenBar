@@ -364,16 +364,22 @@ impl PricingLookup {
         //
         // Normalize the terminal independently: the outer alias pass cannot
         // see aliases such as `cx/k2p6`, and the terminal suffix pass must use
-        // the same alias/reasoning-tier guards as a direct lookup. The custom
-        // callback is deliberately tried before built-in terminal candidates,
-        // but only after the full-path suffix pass above.
+        // the same alias/reasoning-tier guards as a direct lookup. Preserve raw
+        // custom-key semantics before trying the alias-normalized custom key;
+        // built-in lookup proceeds with the normalized candidate. All of this
+        // happens only after the full-path suffix pass above.
         if let Some(terminal) = strip_generic_provider_prefix(lower_ref) {
             let terminal_lookup = |candidate: &str| {
-                let candidate = normalize_terminal_candidate(candidate)?;
-                if let Some(result) = terminal_custom(&candidate) {
+                let normalized = normalize_terminal_candidate(candidate)?;
+                if let Some(result) = terminal_custom(candidate) {
                     return Some(result);
                 }
-                guarded_lookup(&candidate)
+                if normalized.as_str() != candidate {
+                    if let Some(result) = terminal_custom(&normalized) {
+                        return Some(result);
+                    }
+                }
+                guarded_lookup(&normalized)
             };
 
             if let Some(result) = terminal_lookup(terminal) {

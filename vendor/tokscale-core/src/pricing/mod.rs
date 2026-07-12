@@ -772,6 +772,34 @@ mod tests {
     }
 
     #[test]
+    fn custom_terminal_raw_alias_key_matches_direct_and_forced_custom() {
+        let mut custom = HashMap::new();
+        custom.insert("k2p6".into(), model_pricing(0.000002, 0.000008));
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+
+        for force_source in [None, Some("custom")] {
+            let result = service.lookup_with_source("cx/k2p6", force_source).unwrap();
+            assert_eq!(result.source, "Custom");
+            assert_eq!(result.matched_key, "k2p6");
+            assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
+        }
+    }
+
+    #[test]
+    fn custom_terminal_canonical_alias_key_matches_direct_and_forced_custom() {
+        let mut custom = HashMap::new();
+        custom.insert("kimi-k2.6".into(), model_pricing(0.000003, 0.000012));
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+
+        for force_source in [None, Some("custom")] {
+            let result = service.lookup_with_source("cx/k2p6", force_source).unwrap();
+            assert_eq!(result.source, "Custom");
+            assert_eq!(result.matched_key, "kimi-k2.6");
+            assert_eq!(result.pricing.input_cost_per_token, Some(0.000003));
+        }
+    }
+
+    #[test]
     fn custom_terminal_override_does_not_steal_full_id_exact() {
         let mut custom = HashMap::new();
         custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
