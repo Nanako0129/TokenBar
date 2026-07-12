@@ -39,7 +39,11 @@ use std::time::UNIX_EPOCH;
 // (Our own schema counter; do not mirror upstream's number.)
 // 24 (M8-B1: cost provenance contract): UnifiedMessage now serializes
 // cost_source, so schema-23 bincode entries must be rebuilt with the new field.
-const CACHE_SCHEMA_VERSION: u32 = 24;
+// 25 (M10-B: Jcode journal corrections that only replace a snapshotted message
+// are now turn-neutral, so a following brand-new journal turn is no longer robbed
+// of its is_turn_start; schema-24 caches carry the under-counted turn flags, so
+// invalidate them.)
+const CACHE_SCHEMA_VERSION: u32 = 25;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1504,31 +1508,34 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_schema_23_cache_is_stale_and_rebuilt_as_schema_24() {
+    fn test_schema_24_cache_is_stale_and_rebuilt_as_schema_25() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
         {
             let source = write_temp_file(b"schema-migration\n");
+            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let mut stale_message = UnifiedMessage::new(
+                "client",
+                "model",
+                "provider",
+                "stale-session",
+                1,
+                TokenBreakdown::default(),
+                0.0,
+            );
+            stale_message.is_turn_start = true;
             let stale_entry = CachedSourceEntry::new(
                 source.path(),
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "model",
-                    "provider",
-                    "stale-session",
-                    1,
-                    TokenBreakdown::default(),
-                    0.0,
-                )],
+                source_fingerprint.clone(),
+                vec![stale_message],
                 Vec::new(),
                 None,
             );
             let cache_file = cache_path().unwrap();
             ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
             let stale_store = CachedSourceStore {
-                schema_version: 23,
+                schema_version: 24,
                 entries: vec![stale_entry],
             };
 
@@ -1538,35 +1545,42 @@ mod tests {
                 .unwrap();
 
             let mut loaded = SourceMessageCache::load();
-            assert!(loaded.entries.is_empty(), "schema-23 entries must be stale");
+            assert!(loaded.entries.is_empty(), "schema-24 entries must be stale");
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                source_fingerprint,
+                "the stale cache entry and rebuilt parse have the same source fingerprint"
+            );
 
+            let rebuilt_message = UnifiedMessage::new(
+                "client",
+                "model",
+                "provider",
+                "rebuilt-session",
+                2,
+                TokenBreakdown::default(),
+                0.0,
+            );
             loaded.insert(CachedSourceEntry::new(
                 source.path(),
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "model",
-                    "provider",
-                    "rebuilt-session",
-                    2,
-                    TokenBreakdown::default(),
-                    0.0,
-                )],
+                source_fingerprint,
+                vec![rebuilt_message],
                 Vec::new(),
                 None,
             ));
             loaded.save_if_dirty();
 
             let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, 24);
+            assert_eq!(rebuilt.schema_version, 25);
             assert_eq!(rebuilt.entries.len(), 1);
             assert_eq!(
                 rebuilt.entries[0].messages[0].cost_source,
                 crate::sessions::CostSource::Unknown
             );
-            assert_eq!(
-                rebuilt.entries[0].messages[0].session_id,
-                "rebuilt-session"
+            assert_eq!(rebuilt.entries[0].messages[0].session_id, "rebuilt-session");
+            assert!(
+                !rebuilt.entries[0].messages[0].is_turn_start,
+                "stale schema-24 turn flags must not survive the rebuild"
             );
         }
 
