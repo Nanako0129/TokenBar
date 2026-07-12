@@ -1833,7 +1833,10 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let (total_input, total_output, total_cache_read, total_cache_write) =
         model_report_token_totals(&entries);
     let total_messages: i32 = entries.iter().map(|e| e.message_count).sum();
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(ModelReport {
         entries,
@@ -1919,7 +1922,10 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 
     entries.sort_by(|a, b| a.month.cmp(&b.month));
 
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(MonthlyReport {
         entries,
@@ -2078,7 +2084,10 @@ pub async fn get_agents_report(options: ReportOptions) -> Result<AgentReport, St
             .then(b_total.cmp(&a_total))
     });
 
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
     let total_messages: i32 = entries.iter().map(|e| e.messages).sum();
 
     Ok(AgentReport {
@@ -2193,7 +2202,10 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
 
     entries.sort_by(|a, b| a.hour.cmp(&b.hour));
 
-    let total_cost: f64 = entries.iter().map(|e| e.cost).sum();
+    // f64's Sum identity is -0.0, so an empty report would serialize as
+    // "totalCost": -0.0; adding +0.0 normalizes the sign without changing
+    // any non-zero total.
+    let total_cost: f64 = entries.iter().map(|e| e.cost).sum::<f64>() + 0.0;
 
     Ok(HourlyReport {
         entries,
@@ -3811,20 +3823,76 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
-        dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_model_report,
-        message_cache, normalize_model_for_grouping, parse_all_messages_with_pricing,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
-        parse_local_unified_messages, parsed_to_unified, pricing,
+        dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
+        get_model_report, get_monthly_report, message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
-        select_local_parse_pricing,
-        unified_to_parsed,
-        AgentAccumulator, ClientId, CostSource, GroupBy, LocalParseOptions, ReportOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        select_local_parse_pricing, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
+        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
+
+    #[test]
+    #[serial_test::serial]
+    fn test_empty_reports_normalize_total_cost_to_positive_zero() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        let previous_cache_only = std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY");
+        unsafe {
+            std::env::set_var("HOME", cache_home.path());
+            std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
+        }
+
+        let options = ReportOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["opencode".to_string()]),
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let totals = [
+            runtime
+                .block_on(get_model_report(options.clone()))
+                .unwrap()
+                .total_cost,
+            runtime
+                .block_on(get_monthly_report(options.clone()))
+                .unwrap()
+                .total_cost,
+            runtime
+                .block_on(get_hourly_report(options.clone()))
+                .unwrap()
+                .total_cost,
+            runtime
+                .block_on(get_agents_report(options))
+                .unwrap()
+                .total_cost,
+        ];
+
+        for total in totals {
+            assert_eq!(total.to_bits(), 0.0f64.to_bits());
+        }
+
+        unsafe {
+            match previous_home {
+                Some(value) => std::env::set_var("HOME", value),
+                None => std::env::remove_var("HOME"),
+            }
+            match previous_cache_only {
+                Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
+                None => std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY"),
+            }
+        }
+    }
 
     fn make_workspace_message(
         client: &str,
@@ -7055,9 +7123,21 @@ mod tests {
         assert_eq!(
             materialized,
             vec![
-                ("gjc-session:gjc-missing".to_string(), 0.2, CostSource::Estimated),
-                ("gjc-session:gjc-zero".to_string(), 0.0, CostSource::ProviderReported),
-                ("oc-reported".to_string(), 0.05, CostSource::ProviderReported),
+                (
+                    "gjc-session:gjc-missing".to_string(),
+                    0.2,
+                    CostSource::Estimated,
+                ),
+                (
+                    "gjc-session:gjc-zero".to_string(),
+                    0.0,
+                    CostSource::ProviderReported,
+                ),
+                (
+                    "oc-reported".to_string(),
+                    0.05,
+                    CostSource::ProviderReported,
+                ),
                 ("oc-zero".to_string(), 0.2, CostSource::Estimated),
             ]
         );
