@@ -333,6 +333,9 @@ impl PricingLookup {
             if let Some(result) = guarded_lookup(terminal) {
                 return Some(result);
             }
+            if let Some(result) = try_strip_unknown_suffix(terminal, guarded_lookup) {
+                return Some(result);
+            }
         }
 
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
@@ -3758,7 +3761,8 @@ mod tests {
 
     /// The generic fallback must reuse the local guarded pipeline, including
     /// provider-hint source selection and cache-rate backfill, rather than
-    /// bypassing those local adaptations for the terminal model id.
+    /// bypassing those local adaptations when composing a terminal suffix
+    /// fallback.
     #[test]
     fn test_generic_prefix_fallback_keeps_provider_selection_and_cache_backfill() {
         let pricing = |input: f64, output: f64| ModelPricing {
@@ -3785,10 +3789,10 @@ mod tests {
 
         let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
         let direct = lookup
-            .lookup_with_provider("alpha-model", Some("anthropic"))
+            .lookup_with_provider("alpha-model-high", Some("anthropic"))
             .unwrap();
         let prefixed = lookup
-            .lookup_with_provider("cx/alpha-model", Some("anthropic"))
+            .lookup_with_provider("cx/alpha-model-high", Some("anthropic"))
             .unwrap();
 
         for result in [&direct, &prefixed] {
@@ -3802,6 +3806,40 @@ mod tests {
                 Some(0.0000008)
             );
         }
+    }
+
+    /// Regression: an existing suffixed pricing fixture must resolve through
+    /// the terminal segment before the older bounded prefix fallback runs.
+    #[test]
+    fn test_generic_prefix_fallback_composes_suffixed_pricing_fixture() {
+        let lookup = create_lookup();
+        let direct = lookup.lookup("gpt-5-codex-max").unwrap();
+        let routed = lookup.lookup("cx-router-edge/gpt-5-codex-max").unwrap();
+
+        assert_eq!(routed.matched_key, direct.matched_key);
+        assert_eq!(routed.source, direct.source);
+        assert_eq!(
+            routed.pricing.input_cost_per_token,
+            direct.pricing.input_cost_per_token
+        );
+        assert_eq!(
+            routed.pricing.output_cost_per_token,
+            direct.pricing.output_cost_per_token
+        );
+        assert_eq!(
+            routed.pricing.cache_read_input_token_cost,
+            direct.pricing.cache_read_input_token_cost
+        );
+        assert_eq!(
+            routed.pricing.cache_creation_input_token_cost,
+            direct.pricing.cache_creation_input_token_cost
+        );
+    }
+
+    #[test]
+    fn test_generic_prefix_fallback_unknown_terminal_suffix_stays_none() {
+        let lookup = create_lookup();
+        assert!(lookup.lookup("cx/nonexistent-model-high").is_none());
     }
 
     #[test]
