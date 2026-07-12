@@ -38,6 +38,15 @@ pub mod zed;
 
 use crate::TokenBreakdown;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CostSource {
+    #[default]
+    Unknown,
+    ProviderReported,
+    Estimated,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct UnifiedMessage {
     pub client: String,
@@ -50,6 +59,8 @@ pub struct UnifiedMessage {
     pub date: String,
     pub tokens: TokenBreakdown,
     pub cost: f64,
+    #[serde(default)]
+    pub cost_source: CostSource,
     #[serde(default)]
     pub duration_ms: Option<i64>,
     #[serde(default = "default_message_count")]
@@ -330,6 +341,7 @@ impl UnifiedMessage {
             date,
             tokens,
             cost,
+            cost_source: CostSource::Unknown,
             duration_ms: None,
             message_count: default_message_count(),
             agent,
@@ -354,6 +366,18 @@ impl UnifiedMessage {
     pub(crate) fn set_timestamp(&mut self, timestamp: i64) {
         self.timestamp = timestamp;
         self.refresh_derived_fields();
+    }
+
+    pub fn mark_provider_reported_cost(&mut self) {
+        self.cost_source = CostSource::ProviderReported;
+    }
+
+    pub(crate) fn mark_estimated_cost(&mut self) {
+        self.cost_source = CostSource::Estimated;
+    }
+
+    pub(crate) fn has_authoritative_cost(&self) -> bool {
+        self.cost_source == CostSource::ProviderReported
     }
 }
 
@@ -535,6 +559,37 @@ mod tests {
         assert_eq!(msg.agent, None);
         assert_eq!(msg.workspace_key, None);
         assert_eq!(msg.workspace_label, None);
+        assert_eq!(msg.cost_source, CostSource::Unknown);
+        assert!(!msg.has_authoritative_cost());
+    }
+
+    #[test]
+    fn test_cost_source_serde_and_authoritative_marker() {
+        let mut msg = UnifiedMessage::new(
+            "client",
+            "model",
+            "provider",
+            "session",
+            1,
+            TokenBreakdown::default(),
+            1.25,
+        );
+
+        msg.mark_provider_reported_cost();
+        assert!(msg.has_authoritative_cost());
+        assert_eq!(msg.cost_source, CostSource::ProviderReported);
+
+        let mut value = serde_json::to_value(&msg).unwrap();
+        assert_eq!(value["cost_source"], "providerReported");
+        value.as_object_mut().unwrap().remove("cost_source");
+
+        let decoded: UnifiedMessage = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.cost_source, CostSource::Unknown);
+        assert!(!decoded.has_authoritative_cost());
+
+        msg.mark_estimated_cost();
+        assert_eq!(msg.cost_source, CostSource::Estimated);
+        assert!(!msg.has_authoritative_cost());
     }
 
     #[test]

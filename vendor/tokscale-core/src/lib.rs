@@ -21,7 +21,7 @@ pub use sessionize::{
     compute_daily_active_time, compute_time_metrics, sessionize, SessionizeAccumulator,
     SessionInterval, TimeMetrics, DEFAULT_IDLE_GAP_MS,
 };
-pub use sessions::UnifiedMessage;
+pub use sessions::{CostSource, UnifiedMessage};
 
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -3798,6 +3798,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
             reasoning: msg.reasoning,
         },
         cost,
+        cost_source: CostSource::Unknown,
         duration_ms: msg.duration_ms,
         message_count: msg.message_count,
         agent: msg.agent.clone(),
@@ -9146,6 +9147,7 @@ mod tests {
                 reasoning: 0,
             },
             cost,
+            cost_source: crate::CostSource::Unknown,
             duration_ms: None,
             message_count: 1,
             agent: None,

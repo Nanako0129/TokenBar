@@ -37,7 +37,9 @@ use std::time::UNIX_EPOCH;
 // fabricated by Claude Code, zero-token, no real cost), so a session cached
 // before this change still carries the phantom zero-token row until reparsed.
 // (Our own schema counter; do not mirror upstream's number.)
-const CACHE_SCHEMA_VERSION: u32 = 23;
+// 24 (M8-B1: cost provenance contract): UnifiedMessage now serializes
+// cost_source, so schema-23 bincode entries must be rebuilt with the new field.
+const CACHE_SCHEMA_VERSION: u32 = 24;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1502,27 +1504,73 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_load_ignores_stale_schema_version() {
+    fn test_schema_23_cache_is_stale_and_rebuilt_as_schema_24() {
         let temp_home = TempDir::new().unwrap();
-        let original_home = std::env::var("HOME").ok();
-        restore_env_var("HOME", Some(temp_home.path()));
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         {
+            let source = write_temp_file(b"schema-migration\n");
+            let stale_entry = CachedSourceEntry::new(
+                source.path(),
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                vec![UnifiedMessage::new(
+                    "client",
+                    "model",
+                    "provider",
+                    "stale-session",
+                    1,
+                    TokenBreakdown::default(),
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            );
             let cache_file = cache_path().unwrap();
             ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let store = CachedSourceStore {
-                schema_version: CACHE_SCHEMA_VERSION - 1,
-                entries: Vec::new(),
+            let stale_store = CachedSourceStore {
+                schema_version: 23,
+                entries: vec![stale_entry],
             };
 
             let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options().serialize_into(writer, &store).unwrap();
+            bincode::options()
+                .serialize_into(writer, &stale_store)
+                .unwrap();
 
-            let loaded = SourceMessageCache::load();
-            assert!(loaded.entries.is_empty());
+            let mut loaded = SourceMessageCache::load();
+            assert!(loaded.entries.is_empty(), "schema-23 entries must be stale");
+
+            loaded.insert(CachedSourceEntry::new(
+                source.path(),
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                vec![UnifiedMessage::new(
+                    "client",
+                    "model",
+                    "provider",
+                    "rebuilt-session",
+                    2,
+                    TokenBreakdown::default(),
+                    0.0,
+                )],
+                Vec::new(),
+                None,
+            ));
+            loaded.save_if_dirty();
+
+            let rebuilt = read_store_from_path(&cache_file).unwrap();
+            assert_eq!(rebuilt.schema_version, 24);
+            assert_eq!(rebuilt.entries.len(), 1);
+            assert_eq!(
+                rebuilt.entries[0].messages[0].cost_source,
+                crate::sessions::CostSource::Unknown
+            );
+            assert_eq!(
+                rebuilt.entries[0].messages[0].session_id,
+                "rebuilt-session"
+            );
         }
 
-        restore_env_var("HOME", original_home);
+        restore_cache_env(prev_env);
     }
 
     #[test]

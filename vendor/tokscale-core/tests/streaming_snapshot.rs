@@ -8,7 +8,7 @@
 // fold pass is in flight) MUST NOT affect the fold result.  This models the Arc
 // snapshot semantics of the STORE_MEMO driver.
 
-use tokscale_core::{StreamingAggregator, TokenBreakdown, UnifiedMessage};
+use tokscale_core::{CostSource, StreamingAggregator, TokenBreakdown, UnifiedMessage};
 
 #[allow(clippy::too_many_arguments)]
 fn snapshot_msg(
@@ -39,6 +39,7 @@ fn snapshot_msg(
             reasoning: 0,
         },
         cost,
+        cost_source: CostSource::Unknown,
         duration_ms: None,
         message_count: 1,
         agent: None,
