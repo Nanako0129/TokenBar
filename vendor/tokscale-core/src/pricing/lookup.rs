@@ -319,6 +319,22 @@ impl PricingLookup {
             do_lookup(candidate).filter(|result| !unsafe_claude_resolution(result))
         };
 
+        // 1.5. Generic provider-routing prefix fallback: ids coming from a
+        // router/proxy (e.g. `cx/gpt-5.5` via an `omniroute` provider) carry a
+        // prefix outside the curated `PROVIDER_PREFIXES` list, so the
+        // known-prefix stripping inside `lookup_auto` never fires for them.
+        // The direct exact lookup above already had first crack at the full
+        // id, so a dataset key that legitimately keeps its prefix (e.g.
+        // `anthropic/claude-fable-5`) resolves there and never reaches this
+        // fallback. Only the terminal path segment is retried here, matching
+        // the `/`-scoped fallbacks already used by the Cursor/Sakana exact
+        // matchers.
+        if let Some(terminal) = strip_generic_provider_prefix(lower_ref) {
+            if let Some(result) = guarded_lookup(terminal) {
+                return Some(result);
+            }
+        }
+
         // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
         if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup) {
             return Some(result);
@@ -1315,6 +1331,26 @@ fn strip_known_provider_prefix(model_id: &str) -> Option<&str> {
         }
     }
     None
+}
+
+/// Generic routing-prefix fallback for ids whose leading segment is not one
+/// of the curated `PROVIDER_PREFIXES` (e.g. `cx/gpt-5.5` routed through an
+/// `omniroute` proxy, or any other CLI/router-assigned alias). Returns the
+/// terminal path segment — the part after the last `/` — when the id actually
+/// contains a `/`, so `cx/gpt-5.5` resolves to `gpt-5.5`.
+///
+/// This is intentionally unconditional (unlike `strip_known_provider_prefix`,
+/// which only recognizes canonical LLM provider names): the caller only
+/// invokes it as a fallback AFTER the exact/direct lookup on the full id has
+/// already failed, so dataset keys that legitimately keep their prefix (e.g.
+/// `anthropic/claude-fable-5`) are resolved by their own exact key first and
+/// never reach this fallback.
+fn strip_generic_provider_prefix(model_id: &str) -> Option<&str> {
+    let terminal = model_id.rsplit('/').next()?;
+    if terminal.is_empty() || terminal == model_id {
+        return None;
+    }
+    Some(terminal)
 }
 
 fn is_valid_price_value(value: f64) -> bool {
@@ -3678,6 +3714,102 @@ mod tests {
     fn test_nonexistent_model() {
         let lookup = create_lookup();
         assert!(lookup.lookup("nonexistent-model-xyz").is_none());
+    }
+
+    /// Regression (#831): router/proxy-assigned ids like `cx/gpt-5.5` (seen
+    /// from OpenCode's `omniroute` provider) carry a prefix outside the
+    /// curated `PROVIDER_PREFIXES` list, so the pricing lookup used to return
+    /// `None` instead of pricing the underlying `gpt-5.5` model.
+    #[test]
+    fn test_unknown_prefixed_model_id_strips_to_underlying_model() {
+        let lookup = create_lookup();
+        let direct = lookup.lookup("gpt-5.5").unwrap();
+        let prefixed = lookup.lookup("cx/gpt-5.5").unwrap();
+        assert_eq!(prefixed.matched_key, direct.matched_key);
+        assert_eq!(prefixed.source, direct.source);
+        assert_eq!(
+            prefixed.pricing.input_cost_per_token,
+            direct.pricing.input_cost_per_token
+        );
+        assert_eq!(
+            prefixed.pricing.output_cost_per_token,
+            direct.pricing.output_cost_per_token
+        );
+    }
+
+    /// Regression (#831): a dataset key that legitimately keeps its own
+    /// provider prefix (e.g. `anthropic/claude-fable-5`) must still resolve
+    /// through the exact/direct lookup before the generic fallback runs.
+    #[test]
+    fn test_known_prefixed_dataset_key_still_resolves_exactly() {
+        let lookup = claude_family_fixture();
+        let result = lookup.lookup("anthropic/claude-fable-5").unwrap();
+        assert_eq!(result.matched_key, "anthropic/claude-fable-5");
+    }
+
+    /// Regression (#831): an unrecognized prefix and an unrecognized
+    /// underlying model must still return `None` rather than fuzzy-matching an
+    /// unrelated pricing key.
+    #[test]
+    fn test_unknown_prefixed_unknown_model_stays_none() {
+        let lookup = create_lookup();
+        assert!(lookup.lookup("unknown/nonexistent").is_none());
+    }
+
+    /// The generic fallback must reuse the local guarded pipeline, including
+    /// provider-hint source selection and cache-rate backfill, rather than
+    /// bypassing those local adaptations for the terminal model id.
+    #[test]
+    fn test_generic_prefix_fallback_keeps_provider_selection_and_cache_backfill() {
+        let pricing = |input: f64, output: f64| ModelPricing {
+            input_cost_per_token: Some(input),
+            output_cost_per_token: Some(output),
+            ..Default::default()
+        };
+
+        let mut litellm = HashMap::new();
+        litellm.insert("alpha-model".into(), pricing(0.000001, 0.000002));
+        litellm.insert("anthropic/alpha-model".into(), pricing(0.000003, 0.000004));
+
+        let mut openrouter = HashMap::new();
+        openrouter.insert(
+            "anthropic/alpha-model".into(),
+            ModelPricing {
+                input_cost_per_token: Some(0.000005),
+                output_cost_per_token: Some(0.000006),
+                cache_read_input_token_cost: Some(0.0000007),
+                cache_creation_input_token_cost: Some(0.0000008),
+                ..Default::default()
+            },
+        );
+
+        let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+        let direct = lookup
+            .lookup_with_provider("alpha-model", Some("anthropic"))
+            .unwrap();
+        let prefixed = lookup
+            .lookup_with_provider("cx/alpha-model", Some("anthropic"))
+            .unwrap();
+
+        for result in [&direct, &prefixed] {
+            assert_eq!(result.matched_key, "anthropic/alpha-model");
+            assert_eq!(result.source, "LiteLLM");
+            assert_eq!(result.pricing.input_cost_per_token, Some(0.000003));
+            assert_eq!(result.pricing.output_cost_per_token, Some(0.000004));
+            assert_eq!(result.pricing.cache_read_input_token_cost, Some(0.0000007));
+            assert_eq!(
+                result.pricing.cache_creation_input_token_cost,
+                Some(0.0000008)
+            );
+        }
+    }
+
+    #[test]
+    fn test_generic_prefix_helper_uses_terminal_segment() {
+        assert_eq!(strip_generic_provider_prefix("cx/gpt-5.5"), Some("gpt-5.5"));
+        assert_eq!(strip_generic_provider_prefix("a/b/c"), Some("c"));
+        assert_eq!(strip_generic_provider_prefix("gpt-5.5"), None);
+        assert_eq!(strip_generic_provider_prefix("cx/"), None);
     }
 
     #[test]
