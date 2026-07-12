@@ -219,19 +219,7 @@ impl PricingService {
         model_id: &str,
         force_source: Option<&str>,
     ) -> Option<LookupResult> {
-        match force_source {
-            Some(source) if source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
-            }
-            None => {
-                if let Some(result) = self.lookup_custom(model_id) {
-                    return Some(result);
-                }
-            }
-            Some(_) => {}
-        }
-
-        self.lookup.lookup_with_source(model_id, force_source)
+        self.lookup_with_source_and_provider(model_id, force_source, None)
     }
 
     pub fn lookup_with_source_and_provider(
@@ -240,18 +228,48 @@ impl PricingService {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
-        match force_source {
-            Some(source) if source.eq_ignore_ascii_case("custom") => {
-                return self.lookup_custom(model_id);
+        let force_custom = force_source.is_some_and(|source| source.eq_ignore_ascii_case("custom"));
+
+        // Preserve the existing full-id custom precedence. A custom terminal
+        // candidate is considered only after the built-in full-id and
+        // full-path suffix stages have both missed.
+        if force_custom || force_source.is_none() {
+            if let Some(result) = self.lookup_custom(model_id) {
+                return Some(result);
             }
-            None => {
-                if let Some(result) = self.lookup_custom(model_id) {
-                    return Some(result);
-                }
-            }
-            Some(_) => {}
         }
 
+        if force_custom {
+            // `PricingLookup` has no custom dataset of its own. Keep forced
+            // custom lookups fail-closed, while still allowing the internal
+            // terminal hook to resolve a routed custom model.
+            if self.custom.is_empty() {
+                return None;
+            }
+            return self
+                .lookup
+                .lookup_with_source_and_provider_and_terminal_custom(
+                    model_id,
+                    Some("custom"),
+                    provider_id,
+                    |candidate| self.lookup_custom(candidate),
+                );
+        }
+
+        if force_source.is_none() && !self.custom.is_empty() {
+            return self
+                .lookup
+                .lookup_with_source_and_provider_and_terminal_custom(
+                    model_id,
+                    None,
+                    provider_id,
+                    |candidate| self.lookup_custom(candidate),
+                );
+        }
+
+        // With no custom data, keep the normal cached PricingLookup path. For
+        // forced upstream sources, never allow a custom terminal callback to
+        // participate.
         self.lookup
             .lookup_with_source_and_provider(model_id, force_source, provider_id)
     }
@@ -281,19 +299,24 @@ impl PricingService {
         provider_id: Option<&str>,
         usage: &TokenBreakdown,
     ) -> f64 {
-        if let Some(result) = self.custom.lookup_with_key(model_id) {
-            return compute_cost(
-                result.pricing,
-                usage.input,
-                usage.output,
-                usage.cache_read,
-                usage.cache_write,
-                usage.reasoning,
-            );
+        if self.custom.is_empty() {
+            return self
+                .lookup
+                .calculate_cost_with_provider(model_id, provider_id, usage);
         }
 
-        self.lookup
-            .calculate_cost_with_provider(model_id, provider_id, usage)
+        let Some(result) = self.lookup_with_source_and_provider(model_id, None, provider_id) else {
+            return 0.0;
+        };
+
+        compute_cost(
+            &result.pricing,
+            usage.input,
+            usage.output,
+            usage.cache_read,
+            usage.cache_write,
+            usage.reasoning,
+        )
     }
 
     fn lookup_custom(&self, model_id: &str) -> Option<LookupResult> {
@@ -734,6 +757,111 @@ mod tests {
     }
 
     #[test]
+    fn custom_override_wins_over_built_in_terminal_for_routed_id() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.5".into(), model_pricing(0.00001, 0.00003));
+
+        let service = custom_service(custom, litellm, HashMap::new());
+        let result = service.lookup_with_source("cx/gpt-5.5", None).unwrap();
+
+        assert_eq!(result.source, "Custom");
+        assert_eq!(result.matched_key, "gpt-5.5");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.000002));
+    }
+
+    #[test]
+    fn custom_terminal_override_does_not_steal_full_id_exact() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert("cx/gpt-5.5".into(), model_pricing(0.00001, 0.00003));
+
+        let service = custom_service(custom, litellm, HashMap::new());
+        let result = service.lookup_with_source("cx/gpt-5.5", None).unwrap();
+
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "cx/gpt-5.5");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.00001));
+    }
+
+    #[test]
+    fn custom_terminal_override_does_not_steal_full_path_suffix_exact() {
+        let mut custom = HashMap::new();
+        custom.insert("grok-code-fast-1".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "azure_ai/grok-code-fast-1".into(),
+            model_pricing(0.00001, 0.00003),
+        );
+
+        let service = custom_service(custom, litellm, HashMap::new());
+        let result = service
+            .lookup_with_source("azure_ai/grok-code-fast-1-high", None)
+            .unwrap();
+
+        assert_eq!(result.source, "LiteLLM");
+        assert_eq!(result.matched_key, "azure_ai/grok-code-fast-1");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.00001));
+    }
+
+    #[test]
+    fn custom_terminal_override_respects_forced_sources() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.5".into(), model_pricing(0.00001, 0.00003));
+        let mut openrouter = HashMap::new();
+        openrouter.insert("gpt-5.5".into(), model_pricing(0.000003, 0.000012));
+
+        let service = custom_service(custom, litellm, openrouter);
+
+        let litellm_result = service
+            .lookup_with_source("cx/gpt-5.5", Some("litellm"))
+            .unwrap();
+        assert_eq!(litellm_result.source, "LiteLLM");
+        assert_eq!(litellm_result.pricing.input_cost_per_token, Some(0.00001));
+
+        let openrouter_result = service
+            .lookup_with_source("cx/gpt-5.5", Some("openrouter"))
+            .unwrap();
+        assert_eq!(openrouter_result.source, "OpenRouter");
+        assert_eq!(
+            openrouter_result.pricing.input_cost_per_token,
+            Some(0.000003)
+        );
+
+        let custom_result = service
+            .lookup_with_source("cx/gpt-5.5", Some("custom"))
+            .unwrap();
+        assert_eq!(custom_result.source, "Custom");
+        assert_eq!(custom_result.pricing.input_cost_per_token, Some(0.000002));
+    }
+
+    #[test]
+    fn custom_terminal_override_does_not_bypass_provider_scoped_fail_closed() {
+        let mut custom = HashMap::new();
+        custom.insert("deepseek-v4-pro".into(), model_pricing(0.000002, 0.000008));
+
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+        assert!(service
+            .lookup_with_source("accounts/fireworks/routers/deepseek-v4-pro", None)
+            .is_none());
+    }
+
+    #[test]
+    fn custom_terminal_override_unknown_stays_none() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+
+        let service = custom_service(custom, HashMap::new(), HashMap::new());
+        assert!(service
+            .lookup_with_source("cx/not-a-real-model-high", None)
+            .is_none());
+    }
+
+    #[test]
     fn custom_override_respects_force_source() {
         let mut custom = HashMap::new();
         custom.insert("gpt-4o".into(), model_pricing(0.000002, 0.000008));
@@ -885,6 +1013,20 @@ mod tests {
             0,
             0,
         );
+
+        let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
+        assert!((cost - expected).abs() < 1e-10);
+    }
+
+    #[test]
+    fn custom_calculate_cost_uses_terminal_override() {
+        let mut custom = HashMap::new();
+        custom.insert("gpt-5.5".into(), model_pricing(0.000002, 0.000008));
+        let mut litellm = HashMap::new();
+        litellm.insert("gpt-5.5".into(), model_pricing(0.00001, 0.00003));
+
+        let service = custom_service(custom, litellm, HashMap::new());
+        let cost = service.calculate_cost("cx/gpt-5.5", 1_000_000, 100_000, 0, 0, 0);
 
         let expected = 1_000_000.0 * 0.000002 + 100_000.0 * 0.000008;
         assert!((cost - expected).abs() < 1e-10);

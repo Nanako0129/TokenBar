@@ -256,6 +256,29 @@ impl PricingLookup {
         force_source: Option<&str>,
         provider_id: Option<&str>,
     ) -> Option<LookupResult> {
+        self.lookup_with_source_and_provider_and_terminal_custom(
+            model_id,
+            force_source,
+            provider_id,
+            |_| None,
+        )
+    }
+
+    /// Resolve a model through the normal built-in pipeline while allowing the
+    /// owning service to add a custom candidate only at the generic terminal
+    /// fallback stage. This deliberately bypasses `lookup_cache`: the cache is
+    /// owned by the built-in datasets and must never retain a result supplied by
+    /// an unrelated custom-pricing closure.
+    pub(crate) fn lookup_with_source_and_provider_and_terminal_custom<F>(
+        &self,
+        model_id: &str,
+        force_source: Option<&str>,
+        provider_id: Option<&str>,
+        terminal_custom: F,
+    ) -> Option<LookupResult>
+    where
+        F: Fn(&str) -> Option<LookupResult>,
+    {
         let provider_id = normalize_provider_hint(provider_id);
         let canonical = aliases::resolve_alias(model_id).unwrap_or(model_id);
         let lower = canonical.to_lowercase();
@@ -283,10 +306,11 @@ impl PricingLookup {
 
         let lower_ref: &str = normalized_owned.as_deref().unwrap_or(&lower);
 
-        // Helper to perform lookup with the given source constraint
+        // Helper to perform lookup with the given source constraint.
         let do_lookup = |id: &str| match force_source {
             Some("litellm") => self.lookup_litellm_only(id, provider_id),
             Some("openrouter") => self.lookup_openrouter_only(id, provider_id),
+            Some("custom") => None,
             _ => self.lookup_auto(id, provider_id),
         };
         let requested_family = claude_family(lower_ref);
@@ -303,7 +327,8 @@ impl PricingLookup {
             )
         };
 
-        // 1. Try direct lookup
+        // 1. Full-id direct lookup always wins. This preserves exact built-in
+        // keys even when their terminal segment also has a custom price.
         if let Some(result) = do_lookup(lower_ref) {
             if unsafe_claude_resolution(&result) {
                 return None;
@@ -311,6 +336,9 @@ impl PricingLookup {
             return Some(result);
         }
 
+        // Provider-scoped paths are intentionally fail-closed after their
+        // provider-aware direct lookup. Never route them through a generic
+        // terminal or custom fallback.
         if parse_provider_scoped_model_path(lower_ref).is_some() {
             return None;
         }
@@ -318,34 +346,47 @@ impl PricingLookup {
         let guarded_lookup = |candidate: &str| {
             do_lookup(candidate).filter(|result| !unsafe_claude_resolution(result))
         };
+        let guarded_lookup_ref = &guarded_lookup;
 
-        // 1.5. Generic provider-routing prefix fallback: ids coming from a
-        // router/proxy (e.g. `cx/gpt-5.5` via an `omniroute` provider) carry a
-        // prefix outside the curated `PROVIDER_PREFIXES` list, so the
-        // known-prefix stripping inside `lookup_auto` never fires for them.
-        // The direct exact lookup above already had first crack at the full
-        // id, so a dataset key that legitimately keeps its prefix (e.g.
-        // `anthropic/claude-fable-5`) resolves there and never reaches this
-        // fallback. Only the terminal path segment is retried here, matching
-        // the `/`-scoped fallbacks already used by the Cursor/Sakana exact
-        // matchers.
-        if let Some(terminal) = strip_generic_provider_prefix(lower_ref) {
-            if let Some(result) = guarded_lookup(terminal) {
-                return Some(result);
-            }
-            if let Some(result) = try_strip_unknown_suffix(terminal, guarded_lookup) {
-                return Some(result);
-            }
-        }
-
-        // 2. Try stripping unknown suffixes (e.g., -thinking, -high, -codex)
-        if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup) {
+        // 2. Preserve the original full-path suffix pass before any generic
+        // terminal fallback. For example, `azure_ai/grok-code-fast-1-high`
+        // must first try the full-path candidate
+        // `azure_ai/grok-code-fast-1`, rather than allowing a terminal fuzzy
+        // match to choose another provider's `xai/...` entry.
+        if let Some(result) = try_strip_unknown_suffix(lower_ref, guarded_lookup_ref) {
             return Some(result);
         }
 
-        // 3. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
-        //    For each prefix candidate, also try suffix stripping
-        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup) {
+        // 3. Generic provider-routing prefix fallback: ids coming from a
+        // router/proxy (e.g. `cx/gpt-5.5` via an `omniroute` provider) carry a
+        // prefix outside the curated `PROVIDER_PREFIXES` list, so the known
+        // prefix stripping inside `lookup_auto` never fires for them.
+        //
+        // Normalize the terminal independently: the outer alias pass cannot
+        // see aliases such as `cx/k2p6`, and the terminal suffix pass must use
+        // the same alias/reasoning-tier guards as a direct lookup. The custom
+        // callback is deliberately tried before built-in terminal candidates,
+        // but only after the full-path suffix pass above.
+        if let Some(terminal) = strip_generic_provider_prefix(lower_ref) {
+            let terminal_lookup = |candidate: &str| {
+                let candidate = normalize_terminal_candidate(candidate)?;
+                if let Some(result) = terminal_custom(&candidate) {
+                    return Some(result);
+                }
+                guarded_lookup(&candidate)
+            };
+
+            if let Some(result) = terminal_lookup(terminal) {
+                return Some(result);
+            }
+            if let Some(result) = try_strip_unknown_suffix(terminal, terminal_lookup) {
+                return Some(result);
+            }
+        }
+
+        // 4. Try stripping unknown prefixes (e.g., antigravity-, myplugin-)
+        //    For each prefix candidate, also try suffix stripping.
+        if let Some(result) = try_strip_unknown_prefix(lower_ref, guarded_lookup_ref) {
             return Some(result);
         }
 
@@ -1356,6 +1397,29 @@ fn strip_generic_provider_prefix(model_id: &str) -> Option<&str> {
     Some(terminal)
 }
 
+/// Apply the same bounded reasoning-tier and static-alias normalization used
+/// by the outer lookup to a generic terminal candidate. Returning `None` for
+/// an invalid parenthesized tier keeps terminal fallback fail-closed instead of
+/// peeling the fragment through the dash-suffix helper.
+fn normalize_terminal_candidate(candidate: &str) -> Option<String> {
+    let normalized_owned = strip_parenthesized_reasoning_tier(candidate).map(str::to_owned);
+    if normalized_owned.is_none()
+        && candidate
+            .strip_suffix(')')
+            .and_then(|inner| inner.rsplit_once('('))
+            .is_some()
+    {
+        return None;
+    }
+
+    let normalized = normalized_owned.as_deref().unwrap_or(candidate);
+    Some(
+        aliases::resolve_alias(normalized)
+            .unwrap_or(normalized)
+            .to_string(),
+    )
+}
+
 fn is_valid_price_value(value: f64) -> bool {
     value.is_finite() && value >= 0.0
 }
@@ -1890,10 +1954,13 @@ fn backfill_cache_costs(mut winner: LookupResult, donor: &ModelPricing) -> Looku
                 donor.cache_read_input_token_cost_above_272k_tokens;
         }
     }
-    if p.cache_creation_input_token_cost.is_none() && donor.cache_creation_input_token_cost.is_some()
+    if p.cache_creation_input_token_cost.is_none()
+        && donor.cache_creation_input_token_cost.is_some()
     {
         p.cache_creation_input_token_cost = donor.cache_creation_input_token_cost;
-        if p.cache_creation_input_token_cost_above_200k_tokens.is_none() {
+        if p.cache_creation_input_token_cost_above_200k_tokens
+            .is_none()
+        {
             p.cache_creation_input_token_cost_above_200k_tokens =
                 donor.cache_creation_input_token_cost_above_200k_tokens;
         }
@@ -3840,6 +3907,51 @@ mod tests {
     fn test_generic_prefix_fallback_unknown_terminal_suffix_stays_none() {
         let lookup = create_lookup();
         assert!(lookup.lookup("cx/nonexistent-model-high").is_none());
+    }
+
+    #[test]
+    fn test_generic_prefix_fallback_preserves_full_path_suffix_precedence() {
+        let pricing = |input: f64| ModelPricing {
+            input_cost_per_token: Some(input),
+            ..Default::default()
+        };
+        let mut litellm = HashMap::new();
+        litellm.insert("azure_ai/grok-code-fast-1".into(), pricing(0.0035));
+        litellm.insert("xai/grok-code-fast-1-0825".into(), pricing(0.0000002));
+
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+        let result = lookup.lookup("azure_ai/grok-code-fast-1-high").unwrap();
+
+        assert_eq!(result.matched_key, "azure_ai/grok-code-fast-1");
+        assert_eq!(result.pricing.input_cost_per_token, Some(0.0035));
+    }
+
+    #[test]
+    fn test_generic_prefix_fallback_resolves_terminal_alias_like_direct_lookup() {
+        let lookup = create_lookup();
+        let direct = lookup.lookup("k2p6").unwrap();
+        let routed = lookup.lookup("cx/k2p6").unwrap();
+
+        assert_eq!(routed.matched_key, direct.matched_key);
+        assert_eq!(routed.source, direct.source);
+        assert_eq!(
+            routed.pricing.input_cost_per_token,
+            direct.pricing.input_cost_per_token
+        );
+        assert_eq!(
+            routed.pricing.output_cost_per_token,
+            direct.pricing.output_cost_per_token
+        );
+    }
+
+    #[test]
+    fn test_generic_prefix_fallback_applies_terminal_reasoning_tier_guard() {
+        let lookup = create_lookup();
+        let direct = lookup.lookup("cx/k2p6").unwrap();
+        let tiered = lookup.lookup("cx/k2p6(high)").unwrap();
+
+        assert_eq!(tiered.matched_key, direct.matched_key);
+        assert!(lookup.lookup("cx/k2p6(invalid)").is_none());
     }
 
     #[test]
