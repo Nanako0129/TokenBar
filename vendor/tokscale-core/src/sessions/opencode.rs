@@ -138,6 +138,22 @@ fn opencode_duration_ms(time: &OpenCodeTime) -> Option<i64> {
     }
 }
 
+fn embedded_cost(cost: Option<f64>) -> f64 {
+    match cost {
+        Some(cost) if cost.is_finite() && cost >= 0.0 => cost,
+        _ => 0.0,
+    }
+}
+
+/// OpenCode computes per-message cost at request time from its own pricing
+/// data, so a positive embedded cost is authoritative. Zero usually means
+/// OpenCode had no pricing for the model and must remain eligible for estimation.
+fn mark_opencode_cost_source(unified: &mut UnifiedMessage) {
+    if unified.cost > 0.0 {
+        unified.mark_provider_reported_cost();
+    }
+}
+
 pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
     let data = read_file_or_none(path)?;
     let mut bytes = data;
@@ -169,6 +185,7 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 
     let provider_id = msg.provider_id.unwrap_or_else(|| "unknown".to_string());
     let provider_id = provider_identity::canonical_provider(&provider_id).unwrap_or(provider_id);
+    let cost = embedded_cost(msg.cost);
 
     let mut unified = UnifiedMessage::new_with_agent(
         "opencode",
@@ -183,12 +200,13 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
             cache_write: tokens.cache.write.max(0),
             reasoning: tokens.reasoning.unwrap_or(0).max(0),
         },
-        msg.cost.unwrap_or(0.0).max(0.0),
+        cost,
         agent,
     );
     unified.duration_ms = opencode_duration_ms(&msg.time);
     unified.dedup_key = dedup_key;
     set_workspace_from_root(&mut unified, workspace_root.as_deref());
+    mark_opencode_cost_source(&mut unified);
     Some(unified)
 }
 
@@ -280,7 +298,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         let reasoning = tokens.reasoning.unwrap_or(0).max(0);
         let cache_read = tokens.cache.read.max(0);
         let cache_write = tokens.cache.write.max(0);
-        let cost = msg.cost.unwrap_or(0.0).max(0.0);
+        let cost = embedded_cost(msg.cost);
         let dedup_key = message_id.clone().unwrap_or(row_id);
         let fingerprint = OpenCodeSqliteFingerprint {
             created_bits: msg.time.created.to_bits(),
@@ -318,6 +336,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .as_deref()
             .or(embedded_workspace_root.as_deref());
         set_workspace_from_root(&mut unified, workspace_root);
+        mark_opencode_cost_source(&mut unified);
 
         if let Some(index) = fingerprint_indices.get(&fingerprint).copied() {
             let dedup_state = &mut dedup_states[index];
@@ -745,6 +764,87 @@ mod tests {
         );
         assert_eq!(messages[0].model_id, "claude-sonnet-4");
         assert_eq!(messages[0].tokens.input, 1000);
+    }
+
+    #[test]
+    fn test_embedded_cost_rejects_invalid_values() {
+        assert_eq!(embedded_cost(Some(0.25)), 0.25);
+        assert_eq!(embedded_cost(Some(0.0)), 0.0);
+        assert_eq!(embedded_cost(None), 0.0);
+        assert_eq!(embedded_cost(Some(-1.0)), 0.0);
+        assert_eq!(embedded_cost(Some(f64::NAN)), 0.0);
+        assert_eq!(embedded_cost(Some(f64::INFINITY)), 0.0);
+        assert_eq!(embedded_cost(Some(f64::NEG_INFINITY)), 0.0);
+    }
+
+    #[test]
+    fn test_parse_opencode_file_marks_only_positive_cost_provider_reported() {
+        let parse = |name: &str, cost_field: &str| {
+            let json = format!(
+                r#"{{
+                    "id": "{name}",
+                    "sessionID": "ses_cost",
+                    "role": "assistant",
+                    "modelID": "gpt-4o",
+                    "providerID": "openai",
+                    {cost_field}
+                    "tokens": {{
+                        "input": 10,
+                        "output": 5,
+                        "reasoning": 0,
+                        "cache": {{ "read": 0, "write": 0 }}
+                    }},
+                    "time": {{ "created": 1700000000000.0 }}
+                }}"#
+            );
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join(format!("{name}.json"));
+            std::fs::write(&path, json).unwrap();
+            parse_opencode_file(&path).unwrap()
+        };
+
+        let positive = parse("positive", "\"cost\": 0.05,");
+        let zero = parse("zero", "\"cost\": 0.0,");
+        let missing = parse("missing", "");
+        let negative = parse("negative", "\"cost\": -0.05,");
+
+        assert_eq!(positive.cost, 0.05);
+        assert_eq!(positive.cost_source, crate::CostSource::ProviderReported);
+        for message in [zero, missing, negative] {
+            assert_eq!(message.cost, 0.0);
+            assert_eq!(message.cost_source, crate::CostSource::Unknown);
+        }
+    }
+
+    #[test]
+    fn test_parse_opencode_sqlite_marks_positive_cost_provider_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("test_opencode_cost.db");
+        let conn = create_opencode_sqlite_db(&db_path);
+        let data = r#"{
+            "role": "assistant",
+            "modelID": "gpt-4o",
+            "providerID": "openai",
+            "cost": 0.05,
+            "tokens": {
+                "input": 10,
+                "output": 5,
+                "reasoning": 0,
+                "cache": { "read": 0, "write": 0 }
+            },
+            "time": { "created": 1700000000000.0 }
+        }"#;
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["msg_cost", "ses_cost", data],
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_opencode_sqlite(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.05);
+        assert_eq!(messages[0].cost_source, crate::CostSource::ProviderReported);
     }
 
     #[test]
