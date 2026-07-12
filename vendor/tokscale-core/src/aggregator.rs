@@ -108,6 +108,7 @@ pub fn calculate_summary(contributions: &[DailyContribution]) -> DataSummary {
         .iter()
         .fold(0i64, |acc, c| acc.saturating_add(c.totals.tokens));
     let total_cost: f64 = contributions.iter().map(|c| c.totals.cost).sum();
+    let total_cost = if total_cost == 0.0 { 0.0 } else { total_cost };
     let active_days = contributions
         .iter()
         .filter(|c| c.totals.tokens > 0 || c.totals.cost > 0.0 || c.totals.messages > 0)
@@ -998,7 +999,7 @@ mod tests {
         let summary = calculate_summary(&contributions);
 
         assert_eq!(summary.total_tokens, 0);
-        assert_eq!(summary.total_cost, 0.0);
+        assert_eq!(summary.total_cost.to_bits(), 0.0f64.to_bits());
         assert_eq!(summary.total_days, 0);
         assert_eq!(summary.active_days, 0);
         assert_eq!(summary.average_per_day, 0.0);

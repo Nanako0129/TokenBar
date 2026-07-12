@@ -856,52 +856,47 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     let include_all = clients.is_empty();
     let include_synthetic = include_all || clients.iter().any(|c| c == "synthetic");
 
-    // Parse OpenCode: prefer SQLite, collapse forked SQLite history there, then
-    // suppress legacy JSON overlap by message identity.
-    let mut opencode_seen: HashSet<String> = HashSet::new();
-
-    for db_path in &scan_result.opencode_dbs {
-        let CachedParseOutcome {
-            messages,
-            cache_entry,
-            ..
-        } = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::opencode::parse_opencode_sqlite(path)
-        });
-
-        // Dedup across channel-suffixed dbs: the same session can end up in
-        // both `opencode.db` and `opencode-<channel>.db` if the user
-        // switches channels mid-session. `discover_opencode_dbs` returns
-        // paths in sorted order, so the first-seen copy is deterministic.
-        all_messages.extend(messages.into_iter().filter(|message| {
-            message
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
-        }));
-
-        if let Some(entry) = cache_entry {
-            source_cache.insert(entry);
-        }
-    }
-
-    let opencode_outcomes: Vec<CachedParseOutcome> = scan_result
+    // Parse OpenCode from both stores before merging so a provider-reported
+    // duplicate wins even when it appears after an estimated copy.
+    let opencode_sqlite_outcomes: Vec<CachedParseOutcome> = scan_result
+        .opencode_dbs
+        .iter()
+        .map(|db_path| {
+            load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+                sessions::opencode::parse_opencode_sqlite(path)
+            })
+        })
+        .collect();
+    let opencode_json_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::OpenCode)
         .par_iter()
-        .filter_map(|path| {
-            Some(load_or_parse_source(path, &source_cache, pricing, |path| {
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
                 sessions::opencode::parse_opencode_file(path)
                     .into_iter()
                     .collect()
-            }))
+            })
         })
         .collect();
-    for outcome in opencode_outcomes {
+    let opencode_authoritative: HashSet<String> = opencode_sqlite_outcomes
+        .iter()
+        .chain(opencode_json_outcomes.iter())
+        .flat_map(|outcome| outcome.messages.iter())
+        .filter(|message| message.cost_source == CostSource::ProviderReported)
+        .filter_map(|message| message.dedup_key.clone())
+        .collect();
+    let mut opencode_seen: HashSet<String> = HashSet::new();
+
+    for outcome in opencode_sqlite_outcomes
+        .into_iter()
+        .chain(opencode_json_outcomes)
+    {
         all_messages.extend(outcome.messages.into_iter().filter(|message| {
-            message
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| opencode_seen.insert(key.clone()))
+            message.dedup_key.as_ref().is_none_or(|key| {
+                (!opencode_authoritative.contains(key)
+                    || message.cost_source == CostSource::ProviderReported)
+                    && opencode_seen.insert(key.clone())
+            })
         }));
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -1806,6 +1801,94 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
+/// Applies one OpenCode source-priority snapshot without requiring sink
+/// retraction. Only estimated SQLite messages hidden by that snapshot are
+/// retained as fallbacks; JSON messages remain fully streaming.
+struct OpenCodeStreamingSelection {
+    authoritative_snapshot: HashSet<String>,
+    seen: HashSet<String>,
+    deferred_sqlite: Vec<Option<UnifiedMessage>>,
+    deferred_by_key: HashMap<String, usize>,
+}
+
+impl OpenCodeStreamingSelection {
+    fn new(authoritative_snapshot: HashSet<String>) -> Self {
+        Self {
+            authoritative_snapshot,
+            seen: HashSet::new(),
+            deferred_sqlite: Vec::new(),
+            deferred_by_key: HashMap::new(),
+        }
+    }
+
+    fn select_sqlite(&mut self, message: UnifiedMessage) -> Option<UnifiedMessage> {
+        let Some(key) = message.dedup_key.as_deref() else {
+            return Some(message);
+        };
+        if self.seen.contains(key) {
+            return None;
+        }
+        if let Some(&index) = self.deferred_by_key.get(key) {
+            if message.cost_source != CostSource::ProviderReported {
+                return None;
+            }
+            self.deferred_by_key.remove(key);
+            self.deferred_sqlite[index] = None;
+            self.seen.insert(key.to_owned());
+            return Some(message);
+        }
+        if self.authoritative_snapshot.contains(key)
+            && message.cost_source != CostSource::ProviderReported
+        {
+            let index = self.deferred_sqlite.len();
+            self.deferred_by_key.insert(key.to_owned(), index);
+            self.deferred_sqlite.push(Some(message));
+            return None;
+        }
+        self.seen.insert(key.to_owned());
+        Some(message)
+    }
+
+    fn select_json(
+        &mut self,
+        message: UnifiedMessage,
+        will_emit: bool,
+    ) -> Option<UnifiedMessage> {
+        let Some(key) = message.dedup_key.as_deref() else {
+            return will_emit.then_some(message);
+        };
+        if self.seen.contains(key) {
+            return None;
+        }
+        if self.authoritative_snapshot.contains(key) {
+            if message.cost_source != CostSource::ProviderReported || !will_emit {
+                return None;
+            }
+            self.seen.insert(key.to_owned());
+            if let Some(index) = self.deferred_by_key.remove(key) {
+                self.deferred_sqlite[index] = None;
+            }
+            return Some(message);
+        }
+        self.seen.insert(key.to_owned());
+        will_emit.then_some(message)
+    }
+
+    fn finish(self) -> impl Iterator<Item = UnifiedMessage> {
+        let Self {
+            mut seen,
+            deferred_sqlite,
+            ..
+        } = self;
+        deferred_sqlite.into_iter().flatten().filter(move |message| {
+            message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| seen.insert(key.clone()))
+        })
+    }
+}
+
 pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, String> {
     let start = Instant::now();
 
@@ -2272,27 +2355,46 @@ where
     // Trae keep-latest buffer — flushed after all other lanes.
     let mut trae_latest: HashMap<String, UnifiedMessage> = HashMap::new();
 
-    // ---- OpenCode SQLite ----
-    let mut opencode_seen: HashSet<String> = HashSet::new();
-    for db_path in &scan_result.opencode_dbs {
-        for mut m in sessions::opencode::parse_opencode_sqlite(db_path) {
-            apply_pricing_if_available(&mut m, pricing);
-            let keep = m.dedup_key.as_ref().is_none_or(|k| dedup_gate_passes(k, &mut opencode_seen));
-            if keep && passes_client(&m) && filter(&m) { sink(&m); }
-        }
-    }
-    // OpenCode JSON legacy
-    let opencode_parsed: Vec<Vec<UnifiedMessage>> = scan_result
+    // ---- OpenCode SQLite + legacy JSON ----
+    // The sink cannot retract an estimated duplicate, so pre-scan only the
+    // authoritative identities before streaming the lane in its existing order.
+    // Legacy JSON is parsed again below so this pass never retains message bodies.
+    let mut opencode_authoritative: HashSet<String> = scan_result
         .get(ClientId::OpenCode)
         .par_iter()
-        .map(|path| sessions::opencode::parse_opencode_file(path).into_iter().collect::<Vec<_>>())
+        .filter_map(|path| sessions::opencode::parse_opencode_file(path))
+        .filter(|message| message.cost_source == CostSource::ProviderReported)
+        .filter_map(|message| message.dedup_key)
         .collect();
-    for msgs in opencode_parsed {
-        for mut m in msgs {
-            apply_pricing_if_available(&mut m, pricing);
-            let keep = m.dedup_key.as_ref().is_none_or(|k| dedup_gate_passes(k, &mut opencode_seen));
-            if keep && passes_client(&m) && filter(&m) { sink(&m); }
+    for db_path in &scan_result.opencode_dbs {
+        opencode_authoritative.extend(
+            sessions::opencode::parse_opencode_sqlite(db_path)
+                .into_iter()
+                .filter(|message| message.cost_source == CostSource::ProviderReported)
+                .filter_map(|message| message.dedup_key),
+        );
+    }
+
+    let mut opencode_selection = OpenCodeStreamingSelection::new(opencode_authoritative);
+    for db_path in &scan_result.opencode_dbs {
+        for mut message in sessions::opencode::parse_opencode_sqlite(db_path) {
+            apply_pricing_if_available(&mut message, pricing);
+            if let Some(message) = opencode_selection.select_sqlite(message) {
+                if passes_client(&message) && filter(&message) { sink(&message); }
+            }
         }
+    }
+    for path in scan_result.get(ClientId::OpenCode) {
+        if let Some(mut message) = sessions::opencode::parse_opencode_file(path) {
+            apply_pricing_if_available(&mut message, pricing);
+            let will_emit = passes_client(&message) && filter(&message);
+            if let Some(message) = opencode_selection.select_json(message, will_emit) {
+                sink(&message);
+            }
+        }
+    }
+    for message in opencode_selection.finish() {
+        if passes_client(&message) && filter(&message) { sink(&message); }
     }
 
     // ---- Claude Code JSONL (cache-aware, reference-iterate on hit) ----
@@ -3829,25 +3931,110 @@ mod tests {
         parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
         select_local_parse_pricing, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
-        GroupBy, LocalParseOptions, ReportOptions, TokenBreakdown, UnifiedMessage,
-        UNKNOWN_WORKSPACE_LABEL,
+        GroupBy, LocalParseOptions, OpenCodeStreamingSelection, ReportOptions, TokenBreakdown,
+        UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::str::FromStr;
     use std::sync::Arc;
 
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+
+        fn set(vars: &[(&'static str, &std::ffi::OsStr)]) -> Self {
+            let keys: Vec<_> = vars.iter().map(|(key, _)| *key).collect();
+            let guard = Self::capture(&keys);
+            unsafe {
+                for (key, value) in vars {
+                    std::env::set_var(key, value);
+                }
+            }
+            guard
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_env_guard_restores_some_and_none_after_panic() {
+        const KEYS: [&str; 2] = ["HOME", "TOKSCALE_PRICING_CACHE_ONLY"];
+        let _original = EnvGuard::capture(&KEYS);
+
+        unsafe {
+            std::env::set_var("HOME", "/tmp/tokscale-env-guard-home-before");
+            std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY");
+        }
+        let first = std::panic::catch_unwind(|| {
+            let _guard = EnvGuard::set(&[
+                (
+                    "HOME",
+                    std::ffi::OsStr::new("/tmp/tokscale-env-guard-home-during"),
+                ),
+                ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+            ]);
+            panic!("exercise EnvGuard unwinding");
+        });
+        assert!(first.is_err());
+        assert_eq!(
+            std::env::var_os("HOME"),
+            Some(std::ffi::OsString::from(
+                "/tmp/tokscale-env-guard-home-before"
+            ))
+        );
+        assert_eq!(std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY"), None);
+
+        unsafe {
+            std::env::remove_var("HOME");
+            std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "before");
+        }
+        let second = std::panic::catch_unwind(|| {
+            let _guard = EnvGuard::set(&[
+                (
+                    "HOME",
+                    std::ffi::OsStr::new("/tmp/tokscale-env-guard-home-during"),
+                ),
+                ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+            ]);
+            panic!("exercise inverse EnvGuard unwinding");
+        });
+        assert!(second.is_err());
+        assert_eq!(std::env::var_os("HOME"), None);
+        assert_eq!(
+            std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY"),
+            Some(std::ffi::OsString::from("before"))
+        );
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_empty_reports_normalize_total_cost_to_positive_zero() {
         let source_home = tempfile::TempDir::new().unwrap();
         let cache_home = tempfile::TempDir::new().unwrap();
-        let previous_home = std::env::var_os("HOME");
-        let previous_cache_only = std::env::var_os("TOKSCALE_PRICING_CACHE_ONLY");
-        unsafe {
-            std::env::set_var("HOME", cache_home.path());
-            std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", "1");
-        }
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
 
         let options = ReportOptions {
             home_dir: Some(source_home.path().to_string_lossy().into_owned()),
@@ -3881,17 +4068,144 @@ mod tests {
         for total in totals {
             assert_eq!(total.to_bits(), 0.0f64.to_bits());
         }
+    }
 
-        unsafe {
-            match previous_home {
-                Some(value) => std::env::set_var("HOME", value),
-                None => std::env::remove_var("HOME"),
-            }
-            match previous_cache_only {
-                Some(value) => std::env::set_var("TOKSCALE_PRICING_CACHE_ONLY", value),
-                None => std::env::remove_var("TOKSCALE_PRICING_CACHE_ONLY"),
-            }
+    fn make_opencode_selection_message(key: &str, cost: f64, source: CostSource) -> UnifiedMessage {
+        let mut message = UnifiedMessage::new_with_dedup(
+            "opencode", "gpt-4o", "openai", "oc-session", 1_733_011_200_000,
+            TokenBreakdown { input: 10, output: 5, cache_read: 0, cache_write: 0, reasoning: 0 },
+            cost, Some(key.to_string()),
+        );
+        match source {
+            CostSource::ProviderReported => message.mark_provider_reported_cost(),
+            CostSource::Estimated => message.mark_estimated_cost(),
+            CostSource::Unknown => {}
         }
+        message
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_flushes_snapshot_fallback_on_json_drift() {
+        // A missing file and an invalid file both produce no second-pass message;
+        // a downgraded file produces an estimated message. All must flush SQLite.
+        for second_pass in [None, None, Some(CostSource::Estimated)] {
+            let key = "snapshot-authoritative";
+            let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+            assert!(selection.select_sqlite(make_opencode_selection_message(
+                key, 0.25, CostSource::Estimated,
+            )).is_none());
+            if let Some(source) = second_pass {
+                assert!(selection.select_json(make_opencode_selection_message(
+                    key, 0.0, source,
+                ), true).is_none());
+            }
+            let selected: Vec<_> = selection.finish().collect();
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].cost, 0.25);
+            assert_eq!(selected[0].cost_source, CostSource::Estimated);
+        }
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_replaces_deferred_sqlite_estimate() {
+        let key = "sqlite-authoritative-replacement";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.25, CostSource::Estimated,
+            ))
+            .is_none());
+
+        let selected = selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.50, CostSource::ProviderReported,
+            ))
+            .expect("a later authoritative SQLite message must replace the fallback");
+        assert_eq!(selected.cost, 0.50);
+        assert_eq!(selected.cost_source, CostSource::ProviderReported);
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_keeps_first_sqlite_estimate() {
+        let key = "sqlite-estimated-first-wins";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.25, CostSource::Estimated,
+            ))
+            .is_none());
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.50, CostSource::Estimated,
+            ))
+            .is_none());
+
+        let selected: Vec<_> = selection.finish().collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].cost, 0.25);
+        assert_eq!(selected[0].cost_source, CostSource::Estimated);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_keeps_first_sqlite_authority() {
+        let key = "sqlite-authoritative-first-wins";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let first = selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.50, CostSource::ProviderReported,
+            ))
+            .expect("the first authoritative SQLite message must be selected");
+        assert_eq!(first.cost, 0.50);
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key, 0.75, CostSource::ProviderReported,
+            ))
+            .is_none());
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_keeps_fallback_until_json_is_emitted() {
+        let key = "filtered-authoritative";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        assert!(selection.select_sqlite(make_opencode_selection_message(
+            key, 0.25, CostSource::Estimated,
+        )).is_none());
+        assert!(selection.select_json(make_opencode_selection_message(
+            key, 0.50, CostSource::ProviderReported,
+        ), false).is_none());
+        let selected: Vec<_> = selection.finish().collect();
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].cost, 0.25);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_does_not_double_count_new_authority() {
+        let key = "newly-authoritative";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::new());
+        assert!(selection.select_sqlite(make_opencode_selection_message(
+            key, 0.25, CostSource::Estimated,
+        )).is_some());
+        assert!(selection.select_json(make_opencode_selection_message(
+            key, 0.50, CostSource::ProviderReported,
+        ), true).is_none());
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_prefers_snapshot_authority() {
+        let key = "stable-authoritative";
+        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        assert!(selection.select_sqlite(make_opencode_selection_message(
+            key, 0.25, CostSource::Estimated,
+        )).is_none());
+        let json = selection.select_json(make_opencode_selection_message(
+            key, 0.50, CostSource::ProviderReported,
+        ), true).unwrap();
+        assert_eq!(json.cost, 0.50);
+        assert_eq!(json.cost_source, CostSource::ProviderReported);
+        assert_eq!(selection.finish().count(), 0);
     }
 
     fn make_workspace_message(
@@ -7046,33 +7360,64 @@ mod tests {
     fn test_cost_provenance_matches_materialized_and_streaming_lanes() {
         let cache_home = tempfile::TempDir::new().unwrap();
         let source_home = tempfile::TempDir::new().unwrap();
-        let original_home = std::env::var_os("HOME");
-        unsafe { std::env::set_var("HOME", cache_home.path()) };
+        let _env = EnvGuard::set(&[("HOME", cache_home.path().as_os_str())]);
 
-        let opencode_dir = source_home
-            .path()
-            .join(".local/share/opencode/storage/message/project-1");
+        let opencode_data_dir = source_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&opencode_data_dir).unwrap();
+        let opencode_db =
+            rusqlite::Connection::open(opencode_data_dir.join("opencode.db")).unwrap();
+        opencode_db.execute_batch("CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, data TEXT NOT NULL);").unwrap();
+        let sqlite_rows = [
+            (
+                "sqlite-a",
+                r#"{"id":"json-authoritative","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":20,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+            ),
+            (
+                "sqlite-b",
+                r#"{"id":"sqlite-authoritative","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.06,"tokens":{"input":20,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011201000}}"#,
+            ),
+            (
+                "sqlite-c",
+                r#"{"id":"both-authoritative","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.07,"tokens":{"input":20,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011202000}}"#,
+            ),
+            (
+                "sqlite-d",
+                r#"{"id":"both-estimated","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":40,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011203000}}"#,
+            ),
+        ];
+        for (row_id, data) in sqlite_rows {
+            opencode_db
+                .execute(
+                    "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+                    rusqlite::params![row_id, "oc-session", data],
+                )
+                .unwrap();
+        }
+        drop(opencode_db);
+
+        let opencode_dir = opencode_data_dir.join("storage/message/project-1");
         std::fs::create_dir_all(&opencode_dir).unwrap();
-        std::fs::write(
-            opencode_dir.join("reported.json"),
-            r#"{"id":"oc-reported","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.05,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
-        )
-        .unwrap();
-        std::fs::write(
-            opencode_dir.join("zero.json"),
-            r#"{"id":"oc-zero","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011201000}}"#,
-        )
-        .unwrap();
-
-        let gjc_dir = source_home.path().join(".gjc/agent/sessions/project-1");
-        std::fs::create_dir_all(&gjc_dir).unwrap();
-        std::fs::write(
-            gjc_dir.join("session.jsonl"),
-            r#"{"type":"session","id":"gjc-session","cwd":"/work/project-1"}
-{"type":"message","id":"gjc-zero","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1733011202000,"usage":{"input":10,"output":5,"cost":{"total":0.0}}}}
-{"type":"message","id":"gjc-missing","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1733011203000,"usage":{"input":10,"output":5}}}"#,
-        )
-        .unwrap();
+        let json_rows = [
+            (
+                "a-json-authoritative.json",
+                r#"{"id":"json-authoritative","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.05,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011200000}}"#,
+            ),
+            (
+                "b-json-estimated.json",
+                r#"{"id":"sqlite-authoritative","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011201000}}"#,
+            ),
+            (
+                "c-json-authoritative.json",
+                r#"{"id":"both-authoritative","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.08,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011202000}}"#,
+            ),
+            (
+                "d-json-estimated.json",
+                r#"{"id":"both-estimated","sessionID":"oc-session","role":"assistant","modelID":"gpt-4o","providerID":"openai","cost":0.0,"tokens":{"input":10,"output":5,"reasoning":0,"cache":{"read":0,"write":0}},"time":{"created":1733011203000}}"#,
+            ),
+        ];
+        for (name, data) in json_rows {
+            std::fs::write(opencode_dir.join(name), data).unwrap();
+        }
 
         let mut litellm = HashMap::new();
         litellm.insert(
@@ -7084,7 +7429,7 @@ mod tests {
             },
         );
         let pricing = pricing::PricingService::new(litellm, HashMap::new());
-        let clients = vec!["opencode".to_string(), "gjc".to_string()];
+        let clients = vec!["opencode".to_string()];
         let materialized = parse_all_messages_with_pricing_with_env_strategy(
             source_home.path().to_str().unwrap(),
             &clients,
@@ -7124,30 +7469,23 @@ mod tests {
             materialized,
             vec![
                 (
-                    "gjc-session:gjc-missing".to_string(),
-                    0.2,
-                    CostSource::Estimated,
+                    "both-authoritative".to_string(),
+                    0.07,
+                    CostSource::ProviderReported
                 ),
+                ("both-estimated".to_string(), 0.5, CostSource::Estimated),
                 (
-                    "gjc-session:gjc-zero".to_string(),
-                    0.0,
-                    CostSource::ProviderReported,
-                ),
-                (
-                    "oc-reported".to_string(),
+                    "json-authoritative".to_string(),
                     0.05,
-                    CostSource::ProviderReported,
+                    CostSource::ProviderReported
                 ),
-                ("oc-zero".to_string(), 0.2, CostSource::Estimated),
+                (
+                    "sqlite-authoritative".to_string(),
+                    0.06,
+                    CostSource::ProviderReported
+                ),
             ]
         );
-
-        unsafe {
-            match original_home {
-                Some(home) => std::env::set_var("HOME", home),
-                None => std::env::remove_var("HOME"),
-            }
-        }
     }
 
     #[test]
