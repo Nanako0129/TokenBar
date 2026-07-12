@@ -12,16 +12,16 @@
 //!   object that includes an authoritative `usage.cost` (USD) breakdown.
 //!
 //! Cost policy (A1): the embedded `usage.cost.total` (USD) is reused verbatim
-//! when present, finite, and non-negative. Otherwise cost is left at `0.0` so
-//! the lib.rs dispatch Hermes guard can reprice from tokens.
+//! and marked provider-reported when present, finite, and non-negative. Otherwise
+//! cost stays unknown at `0.0` so the shared pricing policy can estimate it.
 //!
 //! Dedup (codebuff-style): a stable `dedup_key` of `<session id>:<message id>`
-//! is preferred; when ids are absent a deterministic fallback derived from the
-//! session, timestamp, model and token breakdown keeps structurally identical
-//! replays (depth-1 vs depth-2 files) collapsed to one message.
+//! is preferred; when ids are absent a deterministic fallback includes a SHA-256
+//! digest of the raw line so replayed messages remain stable across ordinal shifts
+//! while distinct same-shape messages do not collide.
 
 use super::utils::file_modified_timestamp_ms;
-use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use super::{normalize_workspace_key, workspace_label_from_key, CostSource, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
 use crate::TokenBreakdown;
 use serde::Deserialize;
@@ -73,11 +73,11 @@ struct GjcCost {
 }
 
 /// Reuse the embedded `usage.cost.total` (USD) only when present, finite, and
-/// non-negative. Otherwise return `0.0` so the dispatch Hermes guard reprices.
-fn embedded_cost(usage: &GjcUsage) -> f64 {
+/// non-negative. Otherwise return `0.0` so the dispatch pricing policy reprices.
+fn embedded_cost(usage: &GjcUsage) -> (f64, CostSource) {
     match usage.cost.as_ref().and_then(|c| c.total) {
-        Some(total) if total.is_finite() && total >= 0.0 => total,
-        _ => 0.0,
+        Some(total) if total.is_finite() && total >= 0.0 => (total, CostSource::ProviderReported),
+        _ => (0.0, CostSource::Unknown),
     }
 }
 
@@ -88,13 +88,21 @@ fn derive_dedup_key(
     session_id: &str,
     ts: i64,
     model: &str,
+    provider: &str,
     tokens: &TokenBreakdown,
-    ordinal: usize,
+    line: &str,
 ) -> String {
+    use sha2::{Digest, Sha256};
+
+    let line_hash = Sha256::digest(line.as_bytes());
+
     format!(
-        "gjc:{session_id}:{ts}:{model}:{i}-{o}:{ordinal}",
+        "gjc:{session_id}:{ts}:{model}:{provider}:{i}-{o}-{cr}-{cw}-{r}:{line_hash:x}",
         i = tokens.input,
         o = tokens.output,
+        cr = tokens.cache_read,
+        cw = tokens.cache_write,
+        r = tokens.reasoning,
     )
 }
 
@@ -118,7 +126,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
     let mut workspace_key: Option<String> = None;
     let mut workspace_label: Option<String> = None;
 
-    for (ordinal, line) in reader.lines().enumerate() {
+    for line in reader.lines() {
         let line = match line {
             Ok(l) => l,
             Err(_) => continue,
@@ -199,7 +207,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             reasoning: 0,
         };
 
-        let cost = embedded_cost(&usage);
+        let (cost, cost_source) = embedded_cost(&usage);
 
         // No `{"type":"session",...}` header in this file: fall back to the file
         // name rather than a shared `"unknown"`, so two independent header-less
@@ -219,7 +227,7 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
         });
         let dedup_key = match entry.id.filter(|s| !s.is_empty()) {
             Some(msg_id) => format!("{session}:{msg_id}"),
-            None => derive_dedup_key(&session, timestamp, &model, &tokens, ordinal),
+            None => derive_dedup_key(&session, timestamp, &model, &provider, &tokens, trimmed),
         };
 
         let mut unified = UnifiedMessage::new_with_dedup(
@@ -232,6 +240,9 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             cost,
             Some(dedup_key),
         );
+        if cost_source == CostSource::ProviderReported {
+            unified.mark_provider_reported_cost();
+        }
         unified.set_workspace(workspace_key.clone(), workspace_label.clone());
         messages.push(unified);
     }
@@ -372,7 +383,7 @@ not valid json at all
         assert_eq!(messages.len(), 1);
         let key = messages[0].dedup_key.clone().unwrap();
         assert!(
-            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:10-5:"),
+            key.starts_with("gjc:gjc_ses_006:1767225601000:gpt-4o:openai:10-5-0-0-0:"),
             "key={key}"
         );
     }
@@ -385,6 +396,56 @@ not valid json at all
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].cost, 1.25);
+        assert_eq!(messages[0].cost_source, CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn test_embedded_cost_provenance_variants() {
+        let usage = |total: Option<f64>| GjcUsage {
+            input: None,
+            output: None,
+            cache_read: None,
+            cache_write: None,
+            total_tokens: None,
+            cost: total.map(|total| GjcCost { total: Some(total) }),
+        };
+
+        assert_eq!(
+            embedded_cost(&usage(Some(1.25))),
+            (1.25, CostSource::ProviderReported)
+        );
+        assert_eq!(
+            embedded_cost(&usage(Some(0.0))),
+            (0.0, CostSource::ProviderReported)
+        );
+        assert_eq!(embedded_cost(&usage(None)), (0.0, CostSource::Unknown));
+        assert_eq!(
+            embedded_cost(&usage(Some(-1.0))),
+            (0.0, CostSource::Unknown)
+        );
+        assert_eq!(
+            embedded_cost(&usage(Some(f64::NAN))),
+            (0.0, CostSource::Unknown)
+        );
+        assert_eq!(
+            embedded_cost(&usage(Some(f64::INFINITY))),
+            (0.0, CostSource::Unknown)
+        );
+        assert_eq!(
+            embedded_cost(&usage(Some(f64::NEG_INFINITY))),
+            (0.0, CostSource::Unknown)
+        );
+    }
+
+    #[test]
+    fn test_parse_gjc_explicit_zero_is_provider_reported() {
+        let content = r#"{"type":"session","id":"gjc_ses_zero","cwd":"/tmp"}
+{"type":"message","id":"msg_zero","message":{"role":"assistant","model":"some-model","provider":"anthropic","timestamp":1767225601000,"usage":{"input":10,"output":5,"cost":{"total":0.0}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(messages[0].cost_source, CostSource::ProviderReported);
     }
 
     #[test]
@@ -395,6 +456,36 @@ not valid json at all
         let messages = parse_gjc_file(file.path());
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].cost, 0.0);
+        assert_eq!(messages[0].cost_source, CostSource::Unknown);
+    }
+
+    #[test]
+    fn test_idless_dedup_key_is_replay_stable_and_line_sensitive() {
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 2,
+            cache_write: 1,
+            reasoning: 0,
+        };
+        let line = r#"{"type":"message","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1767225601000,"usage":{"input":10,"output":5}}}"#;
+        let changed_line = r#"{"type":"message","message":{"role":"assistant","model":"gpt-4o","provider":"openai","timestamp":1767225601000,"usage":{"input":10,"output":5},"metadata":"distinct"}}"#;
+
+        let before_shift =
+            derive_dedup_key("session", 1767225601000, "gpt-4o", "openai", &tokens, line);
+        let after_shift =
+            derive_dedup_key("session", 1767225601000, "gpt-4o", "openai", &tokens, line);
+        let distinct = derive_dedup_key(
+            "session",
+            1767225601000,
+            "gpt-4o",
+            "openai",
+            &tokens,
+            changed_line,
+        );
+
+        assert_eq!(before_shift, after_shift);
+        assert_ne!(before_shift, distinct);
     }
     // ── Adversarial / red-team tests ────────────────────────────────────────
 
