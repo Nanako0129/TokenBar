@@ -52,7 +52,12 @@ use std::time::UNIX_EPOCH;
 // replay usage-shaped workflow journals or stale/generic deep Tier-2 agent
 // attribution, so invalidate them. The #856 parser_version/shard-cache
 // architecture remains excluded.)
-const CACHE_SCHEMA_VERSION: u32 = 27;
+// 28 (M10-E: Copilot trace fallback now resolves the first root invoke_agent
+// span by walking the parentSpanId hierarchy, so nested sub-agent invokes
+// exported first no longer become the trace default. Schema-27 caches can carry
+// the wrong nested fallback and must be rebuilt. The final #834 resolver covers
+// #821's reversed-export-order semantic.)
+const CACHE_SCHEMA_VERSION: u32 = 28;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1877,6 +1882,166 @@ mod tests {
                     .agent
                     .as_deref(),
                 Some("Code Reviewer")
+            );
+        }
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_27_copilot_cache_is_stale_and_rebuilt_with_root_agent() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        {
+            // The nested invoke_agent is exported before the root invoke_agent,
+            // while the agentless chat turn is covered by the root span.
+            let source = write_temp_file(
+                br#"{"type":"span","traceId":"trace-nested","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
+{"type":"span","traceId":"trace-nested","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-nested","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"execute_tool","gen_ai.tool.name":"task"}}
+{"type":"span","traceId":"trace-nested","spanId":"invoke-root","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-nested","spanId":"chat-plain","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
+            );
+            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let parsed_messages = crate::sessions::copilot::parse_copilot_file(source.path());
+            assert_eq!(parsed_messages.len(), 2);
+            assert_eq!(
+                parsed_messages
+                    .iter()
+                    .find(|message| message.model_id == "gpt-5.4-mini")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.default")
+            );
+            assert_eq!(
+                parsed_messages
+                    .iter()
+                    .find(|message| message.model_id == "claude-sonnet-4.6")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.subagent")
+            );
+
+            // Reproduce a schema-27 entry produced by the first-invoke resolver:
+            // the agentless turn incorrectly inherits the nested sub-agent.
+            let mut stale_messages = parsed_messages.clone();
+            let stale_plain = stale_messages
+                .iter_mut()
+                .find(|message| message.model_id == "gpt-5.4-mini")
+                .unwrap();
+            stale_plain.agent = Some("github.copilot.subagent".to_string());
+            assert_eq!(
+                stale_plain.agent.as_deref(),
+                Some("github.copilot.subagent")
+            );
+            let stale_entry = CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint.clone(),
+                stale_messages,
+                Vec::new(),
+                None,
+            );
+            let cache_file = cache_path().unwrap();
+            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
+            let stale_store = CachedSourceStore {
+                schema_version: 27,
+                entries: vec![stale_entry],
+            };
+
+            let writer = BufWriter::new(File::create(&cache_file).unwrap());
+            bincode::options()
+                .serialize_into(writer, &stale_store)
+                .unwrap();
+
+            let mut loaded = SourceMessageCache::load();
+            assert!(
+                loaded.entries.is_empty(),
+                "schema-27 Copilot entries must be stale"
+            );
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                source_fingerprint,
+                "the stale cache entry and rebuilt parse have the same source fingerprint"
+            );
+
+            let rebuilt_messages = crate::sessions::copilot::parse_copilot_file(source.path());
+            let rebuilt_plain = rebuilt_messages
+                .iter()
+                .find(|message| message.model_id == "gpt-5.4-mini")
+                .unwrap();
+            assert_eq!(
+                rebuilt_plain.agent.as_deref(),
+                Some("github.copilot.default"),
+                "reparse must use the root invoke_agent for the agentless turn"
+            );
+            let rebuilt_sub = rebuilt_messages
+                .iter()
+                .find(|message| message.model_id == "claude-sonnet-4.6")
+                .unwrap();
+            assert_eq!(
+                rebuilt_sub.agent.as_deref(),
+                Some("github.copilot.subagent"),
+                "per-record nested attribution must remain unchanged"
+            );
+            loaded.insert(CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint,
+                rebuilt_messages,
+                Vec::new(),
+                None,
+            ));
+            loaded.save_if_dirty();
+
+            let rebuilt = read_store_from_path(&cache_file).unwrap();
+            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
+            assert_eq!(rebuilt.entries.len(), 1);
+            let rebuilt_entry = &rebuilt.entries[0];
+            assert_eq!(
+                rebuilt_entry
+                    .messages
+                    .iter()
+                    .find(|message| message.model_id == "gpt-5.4-mini")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.default")
+            );
+            assert_eq!(
+                rebuilt_entry
+                    .messages
+                    .iter()
+                    .find(|message| message.model_id == "claude-sonnet-4.6")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.subagent")
+            );
+
+            let reloaded = SourceMessageCache::load();
+            let reloaded_entry = reloaded.get(source.path()).unwrap();
+            assert_eq!(
+                reloaded_entry
+                    .messages
+                    .iter()
+                    .find(|message| message.model_id == "gpt-5.4-mini")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.default")
+            );
+            assert_eq!(
+                reloaded_entry
+                    .messages
+                    .iter()
+                    .find(|message| message.model_id == "claude-sonnet-4.6")
+                    .unwrap()
+                    .agent
+                    .as_deref(),
+                Some("github.copilot.subagent")
             );
         }
 
