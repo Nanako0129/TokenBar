@@ -279,6 +279,13 @@ impl SourceFingerprint {
         {
             related.push(("cc-mirror/variant.json".to_string(), variant_path));
         }
+        for (index, parent_path) in
+            crate::sessions::claudecode::parent_session_paths_for_cache(path)
+                .into_iter()
+                .enumerate()
+        {
+            related.push((format!("parent-session-{index}.jsonl"), parent_path));
+        }
 
         Self::from_path_with_related(path, related)
     }
@@ -1252,6 +1259,76 @@ mod tests {
         std::fs::write(&shm_path, b"shm-1").unwrap();
         let with_shm = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_eq!(before_shm, with_shm);
+    }
+
+    #[test]
+    fn test_claude_sidechain_fingerprint_tracks_nested_parent_session_changes() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join("projects/project-one");
+        let sidechain_path = project_dir
+            .join("parent-session/subagents")
+            .join("agent-child.jsonl");
+        std::fs::create_dir_all(sidechain_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &sidechain_path,
+            concat!(
+                r#"{"type":"assistant","isSidechain":true,"sessionId":"parent-session","agentId":"child","timestamp":"2026-01-01T00:00:00Z","requestId":"req-1","message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let parent_path =
+            crate::sessions::claudecode::parent_session_paths_for_cache(&sidechain_path)
+                .into_iter()
+                .next()
+                .unwrap();
+        assert_eq!(parent_path, project_dir.join("parent-session.jsonl"));
+        let base =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+
+        std::fs::write(&parent_path, b"parent transcript 1\n").unwrap();
+        let with_parent =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+        assert_ne!(base, with_parent);
+
+        std::fs::write(&parent_path, b"parent transcript 2\n").unwrap();
+        let updated_parent =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+        assert_ne!(with_parent, updated_parent);
+    }
+
+    #[test]
+    fn test_claude_sidechain_fingerprint_tracks_flat_parent_session_changes() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join("projects/project-one");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let sidechain_path = project_dir.join("agent-child.jsonl");
+        let mut sidechain = format!("{}\n", "x".repeat(4096)).repeat(65);
+        sidechain.push_str(concat!(
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"flat-parent","agentId":"child","timestamp":"2026-01-01T00:00:00Z","requestId":"req-1","message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n"
+        ));
+        std::fs::write(&sidechain_path, sidechain).unwrap();
+
+        let parent_path =
+            crate::sessions::claudecode::parent_session_paths_for_cache(&sidechain_path)
+                .into_iter()
+                .next()
+                .unwrap();
+        assert_eq!(parent_path, project_dir.join("flat-parent.jsonl"));
+        let base =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+
+        std::fs::write(&parent_path, b"flat parent 1\n").unwrap();
+        let with_parent =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+        assert_ne!(base, with_parent);
+
+        std::fs::write(&parent_path, b"flat parent 2\n").unwrap();
+        let updated_parent =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+        assert_ne!(with_parent, updated_parent);
     }
 
     #[test]
