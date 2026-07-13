@@ -43,7 +43,11 @@ use std::time::UNIX_EPOCH;
 // are now turn-neutral, so a following brand-new journal turn is no longer robbed
 // of its is_turn_start; schema-24 caches carry the under-counted turn flags, so
 // invalidate them.)
-const CACHE_SCHEMA_VERSION: u32 = 25;
+// 26 (M10-C: Pi session_info now supplies subagent attribution. Non-empty
+// schema-25 caches replay Pi messages with no agent metadata, so invalidate them.
+// This is TokenBar's own counter, replacing upstream #856's per-client
+// parser_version rather than importing it.)
+const CACHE_SCHEMA_VERSION: u32 = 26;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1571,7 +1575,7 @@ mod tests {
             loaded.save_if_dirty();
 
             let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, 25);
+            assert_eq!(rebuilt.schema_version, 26);
             assert_eq!(rebuilt.entries.len(), 1);
             assert_eq!(
                 rebuilt.entries[0].messages[0].cost_source,
@@ -1581,6 +1585,90 @@ mod tests {
             assert!(
                 !rebuilt.entries[0].messages[0].is_turn_start,
                 "stale schema-24 turn flags must not survive the rebuild"
+            );
+        }
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_25_pi_cache_is_stale_and_rebuilt_with_agent() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let source = write_temp_file(b"pi-schema-migration\n");
+            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let stale_message = UnifiedMessage::new(
+                "pi",
+                "gpt-5",
+                "openai",
+                "pi-session",
+                1,
+                TokenBreakdown::default(),
+                0.0,
+            );
+            let stale_entry = CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            );
+            let cache_file = cache_path().unwrap();
+            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
+            let stale_store = CachedSourceStore {
+                schema_version: 25,
+                entries: vec![stale_entry],
+            };
+
+            let writer = BufWriter::new(File::create(&cache_file).unwrap());
+            bincode::options()
+                .serialize_into(writer, &stale_store)
+                .unwrap();
+
+            let mut loaded = SourceMessageCache::load();
+            assert!(
+                loaded.entries.is_empty(),
+                "schema-25 Pi entries must be stale"
+            );
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                source_fingerprint,
+                "the stale cache entry and rebuilt parse have the same source fingerprint"
+            );
+
+            let rebuilt_message = UnifiedMessage::new_with_agent(
+                "pi",
+                "gpt-5",
+                "openai",
+                "pi-session",
+                2,
+                TokenBreakdown::default(),
+                0.0,
+                Some("go-reviewer".to_string()),
+            );
+            loaded.insert(CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint,
+                vec![rebuilt_message],
+                Vec::new(),
+                None,
+            ));
+            loaded.save_if_dirty();
+
+            let rebuilt = read_store_from_path(&cache_file).unwrap();
+            assert_eq!(rebuilt.schema_version, 26);
+            assert_eq!(rebuilt.entries.len(), 1);
+
+            let reloaded = SourceMessageCache::load();
+            assert_eq!(reloaded.entries.len(), 1);
+            assert_eq!(
+                reloaded.entries.values().next().unwrap().messages[0]
+                    .agent
+                    .as_deref(),
+                Some("go-reviewer")
             );
         }
 
