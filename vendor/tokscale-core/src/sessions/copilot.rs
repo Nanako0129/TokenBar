@@ -202,16 +202,19 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
         let Some(trace_id) = trace_id_from_record(record) else {
             continue;
         };
-        let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
-            continue;
-        };
-
+        // Parent links are structural span data, not attributes. Collect them
+        // before the attributes gate so attribute-less intermediate task/tool
+        // spans still connect nested invoke_agent spans to the root.
         let span_id = span_id_from_record(record);
         if let Some(span_id) = span_id {
             if let Some(parent_span_id) = parent_span_id_from_record(record) {
                 parent_of.insert(span_id, parent_span_id);
             }
         }
+
+        let Some(attributes) = record.get("attributes").and_then(Value::as_object) else {
+            continue;
+        };
 
         let agent_id = first_non_empty_attr(attributes, &["gen_ai.agent.id"]);
 
@@ -1062,14 +1065,17 @@ mod tests {
     fn test_parse_copilot_cli_trace_agent_prefers_root_invoke_agent_over_nested() {
         // A trace can contain several invoke_agent spans: the top-level agent
         // invocation plus a NESTED invoke_agent when the main agent launches a
-        // task/sub-agent via a tool call. The nested invoke's parent chain runs
-        // execute_tool -> root invoke_agent, so it must NOT become the trace
-        // fallback. The nested invoke and its sub-agent chat are exported BEFORE
-        // the root invoke_agent (OTel export order is not guaranteed), which is
-        // exactly the case a first-invoke-wins lock would mis-attribute.
+        // task/sub-agent via a tool call. The intermediate task span deliberately
+        // has no attributes. Before parent links moved ahead of the attributes
+        // gate, its tool-task -> invoke-root edge was dropped, so both invokes
+        // looked like roots and the first nested invoke became the fallback.
+        // With the complete edge, the nested invoke's parent chain runs
+        // execute_tool -> root invoke_agent, so it must NOT become the fallback.
+        // The nested invoke and its sub-agent chat are exported BEFORE the root
+        // invoke_agent (OTel export order is not guaranteed).
         let content = r#"{"type":"span","traceId":"trace-nested","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
 {"type":"span","traceId":"trace-nested","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
-{"type":"span","traceId":"trace-nested","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task","endTime":[1775934263,0],"attributes":{"gen_ai.operation.name":"execute_tool","gen_ai.tool.name":"task"}}
+{"type":"span","traceId":"trace-nested","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task","endTime":[1775934263,0]}
 {"type":"span","traceId":"trace-nested","spanId":"invoke-root","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
 {"type":"span","traceId":"trace-nested","spanId":"chat-plain","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
         let file = create_test_file(content);
