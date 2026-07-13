@@ -3,6 +3,7 @@ target/
 .swiftpm/
 .DS_Store
 *.profraw
-CLAUDE.md
-AGENTS.md
+# Keep agent guidance tracked; use this private overlay for machine-local instructions.
+.agent-local/
 dist/
+.omo/

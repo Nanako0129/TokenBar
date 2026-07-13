@@ -86,6 +86,8 @@ make        # cargo build --release, then swift build
 make run    # build + run the smoke binary
 ```
 
+For maintainers and coding agents, the [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, vendor boundary, release chain, and maintenance state.
+
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
 
