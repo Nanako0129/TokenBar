@@ -187,11 +187,13 @@ fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
 /// has no invoke_agent span, fall back to the first non-empty gen_ai.agent.id
 /// seen in the trace (input order).
 fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
-    // spanId -> parentSpanId across every span that declares both. OTel span
-    // ids are globally unique, so a single flat map is safe across traces.
-    let mut parent_of: HashMap<&str, &str> = HashMap::new();
-    // Span ids of every invoke_agent span, used to detect a nested invoke.
-    let mut invoke_agent_span_ids: HashSet<&str> = HashSet::new();
+    // (traceId, spanId) -> parentSpanId across every span that declares both.
+    // OTel span ids are only unique within their trace, so hierarchy state must
+    // stay trace-scoped rather than using a flat span-id map.
+    let mut parent_of: HashMap<(&str, &str), &str> = HashMap::new();
+    // (traceId, spanId) for every invoke_agent span, used to detect a nested
+    // invoke without letting another trace's reused span id affect this trace.
+    let mut invoke_agent_span_ids: HashSet<(&str, &str)> = HashSet::new();
     // Per trace: invoke_agent spans in input order, each with its agent id.
     let mut trace_invoke_agents: HashMap<&str, Vec<(&str, Option<&str>)>> = HashMap::new();
     // Per trace: first non-empty agent id seen on any record (ultimate fallback
@@ -208,7 +210,7 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
         let span_id = span_id_from_record(record);
         if let Some(span_id) = span_id {
             if let Some(parent_span_id) = parent_span_id_from_record(record) {
-                parent_of.insert(span_id, parent_span_id);
+                parent_of.insert((trace_id, span_id), parent_span_id);
             }
         }
 
@@ -220,7 +222,7 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
 
         if is_agent_summary_span_record(record, attributes) {
             if let Some(span_id) = span_id {
-                invoke_agent_span_ids.insert(span_id);
+                invoke_agent_span_ids.insert((trace_id, span_id));
                 trace_invoke_agents
                     .entry(trace_id)
                     .or_default()
@@ -243,7 +245,7 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
         let resolved = invokes
             .iter()
             .filter(|(span_id, _)| {
-                is_root_invoke_agent(span_id, &parent_of, &invoke_agent_span_ids)
+                is_root_invoke_agent(trace_id, span_id, &parent_of, &invoke_agent_span_ids)
             })
             .find_map(|(_, agent_id)| *agent_id)
             .or_else(|| invokes.iter().find_map(|(_, agent_id)| *agent_id));
@@ -266,21 +268,22 @@ fn resolve_trace_fallback_agents(records: &[Value]) -> HashMap<String, String> {
 /// An invoke_agent span is a ROOT when no span in its parent chain is itself an
 /// invoke_agent span. Nested task/sub-agent invokes therefore resolve to false.
 fn is_root_invoke_agent(
+    trace_id: &str,
     span_id: &str,
-    parent_of: &HashMap<&str, &str>,
-    invoke_agent_span_ids: &HashSet<&str>,
+    parent_of: &HashMap<(&str, &str), &str>,
+    invoke_agent_span_ids: &HashSet<(&str, &str)>,
 ) -> bool {
-    let mut current = parent_of.get(span_id).copied();
+    let mut current = parent_of.get(&(trace_id, span_id)).copied();
     let mut visited: HashSet<&str> = HashSet::new();
     while let Some(parent) = current {
-        if invoke_agent_span_ids.contains(parent) {
+        if invoke_agent_span_ids.contains(&(trace_id, parent)) {
             return false;
         }
         if !visited.insert(parent) {
             // Guard against malformed/cyclic parent references.
             break;
         }
-        current = parent_of.get(parent).copied();
+        current = parent_of.get(&(trace_id, parent)).copied();
     }
     true
 }
@@ -1095,6 +1098,48 @@ mod tests {
             .find(|message| message.model_id == "gpt-5.4-mini")
             .unwrap();
         assert_eq!(plain.agent.as_deref(), Some("github.copilot.default"));
+    }
+
+    #[test]
+    fn test_parse_copilot_cli_trace_hierarchy_scopes_reused_span_ids() {
+        // OTel span ids are only unique within a trace. Trace A deliberately
+        // uses `root-shared` for its root invoke_agent, while trace B reuses
+        // that span id for an attribute-less tool span whose parent is B's
+        // invoke_agent. The old flat parent map overwrote A's root edge with
+        // B's edge, and the flat invoke set then made A's root look nested;
+        // A's first-exported nested invoke became the fallback. The
+        // trace-scoped maps must keep A's root and B's root independent.
+        let content = r#"{"type":"span","traceId":"trace-A","spanId":"invoke-sub","parentSpanId":"tool-a","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
+{"type":"span","traceId":"trace-A","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-a-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
+{"type":"span","traceId":"trace-A","spanId":"tool-a","parentSpanId":"root-shared","name":"execute_tool task","endTime":[1775934263,0]}
+{"type":"span","traceId":"trace-A","spanId":"a-wrapper","name":"server request","endTime":[1775934259,0]}
+{"type":"span","traceId":"trace-A","spanId":"root-shared","parentSpanId":"a-wrapper","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.agent.id":"github.copilot.default"}}
+{"type":"span","traceId":"trace-B","spanId":"b-invoke","parentSpanId":"b-wrapper","name":"invoke_agent","endTime":[1775934264,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-4.1","gen_ai.agent.id":"github.copilot.other"}}
+{"type":"span","traceId":"trace-B","spanId":"root-shared","parentSpanId":"b-invoke","name":"execute_tool task","endTime":[1775934265,0]}
+{"type":"span","traceId":"trace-B","spanId":"chat-b-plain","parentSpanId":"b-invoke","name":"chat gpt-4.1","endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-4.1","gen_ai.response.model":"gpt-4.1","gen_ai.response.id":"resp-b-plain","gen_ai.usage.input_tokens":80,"gen_ai.usage.output_tokens":8}}
+{"type":"span","traceId":"trace-A","spanId":"chat-a-plain","parentSpanId":"root-shared","name":"chat gpt-5.4-mini","endTime":[1775934267,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-a-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 3);
+        let a_sub = messages
+            .iter()
+            .find(|message| message.model_id == "claude-sonnet-4.6")
+            .unwrap();
+        assert_eq!(a_sub.agent.as_deref(), Some("github.copilot.subagent"));
+
+        let a_plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-5.4-mini")
+            .unwrap();
+        assert_eq!(a_plain.agent.as_deref(), Some("github.copilot.default"));
+
+        let b_plain = messages
+            .iter()
+            .find(|message| message.model_id == "gpt-4.1")
+            .unwrap();
+        assert_eq!(b_plain.agent.as_deref(), Some("github.copilot.other"));
     }
 
     #[test]
