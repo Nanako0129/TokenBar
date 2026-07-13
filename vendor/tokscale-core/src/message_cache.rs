@@ -47,7 +47,12 @@ use std::time::UNIX_EPOCH;
 // schema-25 caches replay Pi messages with no agent metadata, so invalidate them.
 // This is TokenBar's own counter, replacing upstream #856's per-client
 // parser_version rather than importing it.)
-const CACHE_SCHEMA_VERSION: u32 = 26;
+// 27 (M10-D: Claude workflow journals are now excluded, and deep nested workflow
+// transcripts recover Tier-2 parent-session attribution. Schema-26 caches may
+// replay usage-shaped workflow journals or stale/generic deep Tier-2 agent
+// attribution, so invalidate them. The #856 parser_version/shard-cache
+// architecture remains excluded.)
+const CACHE_SCHEMA_VERSION: u32 = 27;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -1589,7 +1594,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_schema_24_cache_is_stale_and_rebuilt_as_schema_25() {
+    fn test_schema_24_cache_is_stale_and_rebuilt_as_current_schema() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
 
@@ -1652,7 +1657,7 @@ mod tests {
             loaded.save_if_dirty();
 
             let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, 26);
+            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
             assert_eq!(rebuilt.entries.len(), 1);
             assert_eq!(
                 rebuilt.entries[0].messages[0].cost_source,
@@ -1736,7 +1741,7 @@ mod tests {
             loaded.save_if_dirty();
 
             let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, 26);
+            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
             assert_eq!(rebuilt.entries.len(), 1);
 
             let reloaded = SourceMessageCache::load();
@@ -1746,6 +1751,132 @@ mod tests {
                     .agent
                     .as_deref(),
                 Some("go-reviewer")
+            );
+        }
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_26_claude_workflow_cache_is_stale_and_rebuilt_with_parent_agent() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let project_dir = temp_home.path().join(".claude/projects/project-one");
+            let parent_session_id = "claude-schema-parent";
+            let parent_path = project_dir.join(format!("{parent_session_id}.jsonl"));
+            let workflow_dir = project_dir
+                .join(parent_session_id)
+                .join("subagents")
+                .join("workflows")
+                .join("wf_schema");
+            let sidechain_path = workflow_dir.join("agent-deepagent1.jsonl");
+            std::fs::create_dir_all(&workflow_dir).unwrap();
+
+            std::fs::write(
+                &parent_path,
+                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_parent","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_schema","name":"Agent","input":{"subagent_type":"code-reviewer","prompt":"review"}}],"usage":{"input_tokens":80,"output_tokens":40}}}
+{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_schema","type":"tool_result","content":[{"type":"text","text":"agentId: deepagent1 (use SendMessage)"}]}]}}"#,
+            )
+            .unwrap();
+            std::fs::write(
+                &sidechain_path,
+                r#"{"type":"user","isSidechain":true,"sessionId":"claude-schema-parent","agentId":"deepagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
+{"type":"assistant","isSidechain":true,"sessionId":"claude-schema-parent","agentId":"deepagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_schema","message":{"id":"msg_schema","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#,
+            )
+            .unwrap();
+
+            let source_fingerprint = SourceFingerprint::from_claude_code_path_with_home(
+                &sidechain_path,
+                Some(temp_home.path()),
+            )
+            .unwrap();
+            let stale_message = UnifiedMessage::new(
+                "claude",
+                "claude-sonnet-4",
+                "anthropic",
+                parent_session_id,
+                1,
+                TokenBreakdown {
+                    input: 300,
+                    output: 120,
+                    cache_read: 0,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            );
+            assert!(stale_message.agent.is_none());
+            let stale_entry = CachedSourceEntry::new(
+                &sidechain_path,
+                source_fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            );
+            let cache_file = cache_path().unwrap();
+            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
+            let stale_store = CachedSourceStore {
+                schema_version: 26,
+                entries: vec![stale_entry],
+            };
+
+            let writer = BufWriter::new(File::create(&cache_file).unwrap());
+            bincode::options()
+                .serialize_into(writer, &stale_store)
+                .unwrap();
+
+            let mut loaded = SourceMessageCache::load();
+            assert!(
+                loaded.entries.is_empty(),
+                "schema-26 Claude workflow entries must be stale"
+            );
+            assert_eq!(
+                SourceFingerprint::from_claude_code_path_with_home(
+                    &sidechain_path,
+                    Some(temp_home.path())
+                )
+                .unwrap(),
+                source_fingerprint,
+                "the stale cache entry and rebuilt parse have the same source fingerprint"
+            );
+
+            let rebuilt_messages = crate::sessions::claudecode::parse_claude_file_with_home(
+                &sidechain_path,
+                Some(temp_home.path()),
+            );
+            assert_eq!(rebuilt_messages.len(), 1);
+            assert_eq!(
+                rebuilt_messages[0].agent.as_deref(),
+                Some("Code Reviewer"),
+                "rebuilding must recover Tier-2 attribution from the parent session"
+            );
+            loaded.insert(CachedSourceEntry::new(
+                &sidechain_path,
+                source_fingerprint,
+                rebuilt_messages,
+                Vec::new(),
+                None,
+            ));
+            loaded.save_if_dirty();
+
+            let rebuilt = read_store_from_path(&cache_file).unwrap();
+            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
+            assert_eq!(rebuilt.entries.len(), 1);
+            assert_eq!(
+                rebuilt.entries[0].messages[0].agent.as_deref(),
+                Some("Code Reviewer")
+            );
+
+            let reloaded = SourceMessageCache::load();
+            assert_eq!(reloaded.entries.len(), 1);
+            assert_eq!(
+                reloaded.entries.values().next().unwrap().messages[0]
+                    .agent
+                    .as_deref(),
+                Some("Code Reviewer")
             );
         }
 
