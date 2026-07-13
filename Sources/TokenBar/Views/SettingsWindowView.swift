@@ -107,9 +107,7 @@ struct SettingsWindowView: View {
     /// every 10s. Feeds the rate tray mode and the preview's spin speed.
     private func pollTokensPerMin() async {
         while !Task.isCancelled {
-            let rate = try? await Task.detached(priority: .utility) {
-                try LiveRate.current()
-            }.value
+            let rate = await model.tokensPerMin()
             if Task.isCancelled { break }
             tokensPerMin = rate
             try? await Task.sleep(for: .seconds(10))
@@ -178,12 +176,19 @@ private struct MenuBarMock: View {
     }
 
     /// Mirrors TrayAnimator.quotaRemaining minus the write-back: live resolve
-    /// first, then the persisted last-good reading. Excludes the tab- and
-    /// limits-hidden clients from the auto pick, same as the real tray.
+    /// first, then the persisted last-good reading when this source permits it.
+    /// Excludes the tab- and limits-hidden clients from the auto pick, same as
+    /// the real tray.
     private var quotaRemaining: Double? {
+        let source = UsageDataSources.current
         let excluded = ClientRegistry.quotaExcludedClients()
+        let selection = QuotaSelectionPolicy.effectiveSelection(
+            payload: agentUsage,
+            persistedSelection: quotaSource,
+            excluding: excluded,
+            fallbackUnknownExplicit: source.fallsBackUnknownQuotaSelectionToAuto)
         if let value = QuotaResolver.resolve(
-            payload: agentUsage, selection: quotaSource, excluding: excluded)?
+            payload: agentUsage, selection: selection, excluding: excluded)?
             .window.remainingPercent
         {
             return value
@@ -191,10 +196,11 @@ private struct MenuBarMock: View {
         // Same disambiguation as the real tray: don't fall back to the persisted
         // last-good reading when the nil is caused purely by the exclusion.
         if QuotaResolver.excludedAllCandidates(
-            payload: agentUsage, selection: quotaSource, excluding: excluded)
+            payload: agentUsage, selection: selection, excluding: excluded)
         {
             return nil
         }
+        guard source.allowsQuotaCachePersistence else { return nil }
         return UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
     }
 

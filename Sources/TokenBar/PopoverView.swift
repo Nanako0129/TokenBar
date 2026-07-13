@@ -551,9 +551,7 @@ struct PopoverView: View {
     /// `.task` cancels this loop when the popover closes.
     private func pollTokensPerMin() async {
         while !Task.isCancelled {
-            let rate = try? await Task.detached(priority: .utility) {
-                try LiveRate.current()
-            }.value
+            let rate = await model.tokensPerMin()
             if Task.isCancelled { break }
             tokensPerMin = rate
             try? await Task.sleep(for: .seconds(10))

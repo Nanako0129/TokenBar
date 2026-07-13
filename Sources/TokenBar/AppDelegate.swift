@@ -8,6 +8,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static let defaultRefreshSecs = 300
     private static let intervalKey = "tokenbar.refresh.intervalMin"
 
+    private let usageSource: any UsageDataSource = UsageDataSources.current
     private var statusController: StatusItemController?
     private var trayAnimator: TrayAnimator?
     private var titleRefreshTask: Task<Void, Never>?
@@ -48,7 +49,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let controller = StatusItemController()
         statusController = controller
-        let animator = TrayAnimator(controller: controller)
+        let animator = TrayAnimator(controller: controller, source: usageSource)
         trayAnimator = animator
         controller.quotaPayloadProvider = { [weak animator] in animator?.quota }
         // A fresh quota or rate fetch re-renders the title right away.
@@ -137,10 +138,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // poll fetch still in flight (which carries an older generation).
         guard let generation = trayAnimator?.nextRateGeneration() else { return }
         Task { [weak self] in
-            let rate = try? await Task.detached(priority: .utility) {
-                try LiveRate.current()
-            }.value
-            guard let self, let rate else { return }
+            guard let self else { return }
+            let rate = try? await LiveRate.current(source: self.usageSource)
+            guard let rate else { return }
             self.lastRate = rate
             self.trayAnimator?.applyRate(rate, generation: generation)
         }
@@ -161,17 +161,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 let mode = TrayMode.current
                 let intervalMin = self.refreshIntervalMin
                 let forceRefresh = Date().timeIntervalSince(self.lastFullRefresh) >= Double(intervalMin) * 60
-                let graph = try? await Task.detached(priority: .utility) {
-                    forceRefresh ? try TBCore.refreshGraph() : try TBCore.graph()
-                }.value
+                let graph: UsagePayload?
+                if forceRefresh {
+                    graph = try? await self.usageSource.refreshGraph(
+                        year: nil, priority: .utility)
+                } else {
+                    graph = try? await self.usageSource.graph(
+                        year: nil, priority: .utility)
+                }
                 if forceRefresh && graph != nil { self.lastFullRefresh = Date() }
                 // Failed refreshes keep the last good numbers — the title
                 // must never blank/zero out on a transient error.
                 if let graph { self.lastGraph = graph }
                 if mode == .tokensPerMin {
-                    let rate = try? await Task.detached(priority: .utility) {
-                        try LiveRate.current()
-                    }.value
+                    let rate = try? await LiveRate.current(source: self.usageSource)
                     if let rate { self.lastRate = rate }
                 }
                 guard !Task.isCancelled else { break }

@@ -14,6 +14,7 @@ final class TrayAnimator {
     static let quotaSourceKey = "tokenbar.quota.source"
 
     private weak var controller: StatusItemController?
+    private let source: any UsageDataSource
     /// Frame sets keyed by "<style>|<dark|light>".
     private let frames: [String: [NSImage]]
     private var animationTask: Task<Void, Never>?
@@ -27,8 +28,15 @@ final class TrayAnimator {
     /// Fired after every successful quota fetch (title refresh hook).
     var onQuotaUpdated: (() -> Void)?
 
-    init(controller: StatusItemController) {
+    init(
+        controller: StatusItemController,
+        source: any UsageDataSource = UsageDataSources.current
+    ) {
         self.controller = controller
+        self.source = source
+        self.cachedQuotaRemaining = source.allowsQuotaCachePersistence
+            ? UserDefaults.standard.object(forKey: Self.lastRemainingKey) as? Double
+            : nil
         var sets: [String: [NSImage]] = [:]
         for (style, dir) in [("cat", "anim-cat2"), ("parrot", "anim-parrot")] {
             sets["\(style)|dark"] = Self.loadFrames(directory: dir)
@@ -141,10 +149,9 @@ final class TrayAnimator {
 
     /// Last successfully resolved remaining percent — a transient fetch
     /// failure (or a provider erroring) must never zero/blank the display.
-    /// Persisted so a relaunch shows the last reading immediately instead of
-    /// a blank gauge while the first (network) fetch runs.
-    private var cachedQuotaRemaining: Double? =
-        UserDefaults.standard.object(forKey: lastRemainingKey) as? Double
+    /// Live mode seeds this from UserDefaults; demo mode starts nil and keeps
+    /// only the process-local synthetic value.
+    private var cachedQuotaRemaining: Double?
 
     /// The selected quota window's remaining percent, holding the last good
     /// value across failed refreshes (nil only before any data ever arrived).
@@ -154,9 +161,14 @@ final class TrayAnimator {
     /// didChangeNotification and re-entered the observers. `persistRemaining()`
     /// is called explicitly when fresh quota data arrives instead.
     var quotaRemaining: Double? {
-        let selection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
+        let persistedSelection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
         let excluded = ClientRegistry.quotaExcludedClients()
+        let selection = QuotaSelectionPolicy.effectiveSelection(
+            payload: quota,
+            persistedSelection: persistedSelection,
+            excluding: excluded,
+            fallbackUnknownExplicit: source.fallsBackUnknownQuotaSelectionToAuto)
         if let value = QuotaResolver.resolve(
             payload: quota, selection: selection, excluding: excluded)?
             .window.remainingPercent
@@ -178,12 +190,14 @@ final class TrayAnimator {
         return cachedQuotaRemaining
     }
 
-    /// Persist the last good remaining percent so a relaunch shows it
-    /// immediately. Called at quota-arrival points, not from the getter.
-    /// Reads `quotaRemaining` (not `cachedQuotaRemaining`) so it resolves the
-    /// fresh value even for cat/parrot styles, where `renderGaugeIcon()`
-    /// returns early without touching the cache.
+    /// Persist the last good remaining percent so a live-mode relaunch shows it
+    /// immediately. Demo mode is deliberately process-local and returns before
+    /// touching UserDefaults. Called at quota-arrival points, not from the
+    /// getter. Reads `quotaRemaining` (not `cachedQuotaRemaining`) so it
+    /// resolves the fresh value even for cat/parrot styles, where
+    /// `renderGaugeIcon()` returns early without touching the cache.
     private func persistRemaining() {
+        guard source.allowsQuotaCachePersistence else { return }
         if let value = quotaRemaining {
             UserDefaults.standard.set(value, forKey: Self.lastRemainingKey)
         }
@@ -251,9 +265,8 @@ final class TrayAnimator {
     private func startQuotaPolling() {
         quotaTask = Task { [weak self] in
             while !Task.isCancelled {
-                let payload = try? await Task.detached(priority: .utility) {
-                    try TBCore.agentUsage()
-                }.value
+                guard let source = self?.source else { break }
+                let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 if let payload {
                     self.quota = payload
@@ -305,10 +318,8 @@ final class TrayAnimator {
     private func startLoadPolling() {
         loadTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let gen = self?.nextRateGeneration() else { break }
-                let rate = try? await Task.detached(priority: .utility) {
-                    try LiveRate.current()
-                }.value
+                guard let gen = self?.nextRateGeneration(), let source = self?.source else { break }
+                let rate = try? await LiveRate.current(source: source)
                 guard let self, !Task.isCancelled else { break }
                 if let rate { self.applyRate(rate, generation: gen) }
                 try? await Task.sleep(for: .seconds(30))

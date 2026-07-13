@@ -47,6 +47,10 @@ public enum ClientRegistry {
         "grok": ("Grok Build", "#1f2937"),
     ]
 
+    /// Every registered client id, sorted. Demo fixtures use this canonical
+    /// universe so every usage surface renders the same client set.
+    public static var allIds: [String] { entries.keys.sorted() }
+
     public static func style(_ id: String) -> ClientStyle {
         if let entry = entries[id] {
             return ClientStyle(id: id, displayName: entry.displayName, color: entry.color)

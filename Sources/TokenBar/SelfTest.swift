@@ -5,6 +5,10 @@ import TokenBarCore
 // Plain assertions instead of swift-testing/XCTest because the dev machine has
 // Command Line Tools only (no testing modules); CI runs this the same way.
 
+private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
+    var result: Result<Value, Error>?
+}
+
 enum SelfTest {
     static func run() -> Never {
         var failures = 0
@@ -15,6 +19,23 @@ enum SelfTest {
                 failures += 1
                 print("FAIL \(label)")
             }
+        }
+
+        func awaitValue<Value: Sendable>(
+            _ operation: @escaping @Sendable () async throws -> Value
+        ) -> Value? {
+            let semaphore = DispatchSemaphore(value: 0)
+            let box = AsyncResultBox<Value>()
+            Task.detached(priority: .userInitiated) {
+                defer { semaphore.signal() }
+                do {
+                    box.result = .success(try await operation())
+                } catch {
+                    box.result = .failure(error)
+                }
+            }
+            semaphore.wait()
+            return try? box.result?.get()
         }
 
         // ModelColors: provider inference + shade math.
@@ -508,6 +529,217 @@ enum SelfTest {
             colors: chartColors, rangeEnd: "2026-07-05", endFallback: "2026-07-09")
         expect(shiftedBars.last?.date == "2026-07-05" && (shiftedBars.last?.totalTokens ?? 0) == 0,
             "unfiltered anchor would shift the window past the visible activity")
+
+        // Synthetic --demo source: one fixture must drive every usage lens,
+        // quota card, trace row, tray rate, and year selection without a live
+        // FFI call. The fixture itself is the only data definition here.
+        let demoSource = UsageDataSources.make(arguments: ["TokenBar", "--demo"])
+        let liveSource = UsageDataSources.make(arguments: ["TokenBar"])
+        expect(demoSource is DemoUsageDataSource, "usage source factory selects demo mode")
+        expect(liveSource is LiveUsageDataSource, "usage source factory selects live mode")
+        expect(!demoSource.allowsQuotaCachePersistence, "demo source disables quota cache persistence")
+        expect(liveSource.allowsQuotaCachePersistence, "live source allows quota cache persistence")
+
+        let demoPayload = DemoData.payload
+        let demoDates = demoPayload.contributions.map(\.date)
+        let demoDayNumbers = demoDates.compactMap { ISODay($0)?.number }
+        let consecutive = zip(demoDayNumbers, demoDayNumbers.dropFirst())
+            .allSatisfy { $1 == $0 + 1 }
+        expect(
+            demoDates.count == 14 && demoDates == demoDates.sorted() && consecutive,
+            "demo graph has 14 sorted consecutive days")
+        expect(
+            demoPayload.contributions.allSatisfy { $0.clients.count == ClientRegistry.allIds.count },
+            "demo graph carries every registered client on every day")
+
+        let contributionTokens = demoPayload.contributions.reduce(Int64(0)) {
+            $0.saturatingAdding($1.totals.tokens)
+        }
+        let contributionCost = demoPayload.contributions.reduce(0.0) { $0 + $1.totals.cost }
+        expect(
+            contributionTokens == demoPayload.summary.totalTokens
+                && abs(contributionCost - demoPayload.summary.totalCost) < 0.000_000_001,
+            "demo summary totals equal contribution totals")
+
+        let summaryClients = Set(demoPayload.summary.clients)
+        let contributionClients = Set(
+            demoPayload.contributions.flatMap { $0.clients.map(\.client) })
+        let quota = DemoData.agentUsage
+        let quotaClients = Set(quota.agents.map(\.clientId))
+        let registryClients = Set(ClientRegistry.allIds)
+        expect(
+            summaryClients == registryClients && contributionClients == registryClients
+                && quotaClients == registryClients,
+            "demo summary contributions and quota share the client set")
+        let dynamicLabelSelection = "\(ClientRegistry.allIds.first ?? "claude")|Sonnet"
+        let demoQuotaSelection = QuotaSelectionPolicy.effectiveSelection(
+            payload: quota,
+            persistedSelection: dynamicLabelSelection,
+            excluding: [],
+            fallbackUnknownExplicit: demoSource.fallsBackUnknownQuotaSelectionToAuto)
+        let liveQuotaSelection = QuotaSelectionPolicy.effectiveSelection(
+            payload: quota,
+            persistedSelection: dynamicLabelSelection,
+            excluding: [],
+            fallbackUnknownExplicit: liveSource.fallsBackUnknownQuotaSelectionToAuto)
+        expect(
+            demoQuotaSelection == QuotaResolver.auto && liveQuotaSelection == dynamicLabelSelection
+                && QuotaSelectionPolicy.resolve(
+                    payload: quota,
+                    persistedSelection: dynamicLabelSelection,
+                    excluding: [],
+                    fallbackUnknownExplicit: true) != nil
+                && QuotaSelectionPolicy.resolve(
+                    payload: quota,
+                    persistedSelection: dynamicLabelSelection,
+                    excluding: [],
+                    fallbackUnknownExplicit: false) == nil,
+            "demo unknown quota labels fall back locally while live stays exact")
+
+        let modelReport = DemoData.modelReport
+        let hourlyReport = DemoData.hourlyReport
+        let agentsReport = DemoData.agentsReport
+        let trace = DemoData.trace(windowSecs: 600)
+        let modelClients = Set(modelReport.entries.map(\.client))
+        let hourlyClients = Set(hourlyReport.entries.flatMap(\.clients))
+        let agentClients = Set(agentsReport.entries.flatMap(\.clients))
+        let traceClients = Set(trace.map(\.client))
+        let hourlyKeys = hourlyReport.entries.map(\.hour)
+        expect(
+            Set(hourlyKeys).count == hourlyKeys.count && hourlyKeys == hourlyKeys.sorted()
+                && hourlyReport.entries.allSatisfy {
+                    $0.clients == $0.clients.sorted() && $0.models == $0.models.sorted()
+                },
+            "demo hourly buckets are unique and sorted")
+        expect(
+            !modelReport.entries.isEmpty && !hourlyReport.entries.isEmpty
+                && !agentsReport.entries.isEmpty && !trace.isEmpty,
+            "demo reports and trace are non-empty")
+        expect(
+            modelClients == registryClients && hourlyClients == registryClients
+                && agentClients == registryClients && traceClients == registryClients,
+            "demo report and trace ids are registered clients")
+
+        let selectedClient = ClientRegistry.allIds.first ?? ""
+        var graphInput: Int64 = 0
+        var graphOutput: Int64 = 0
+        var graphCacheRead: Int64 = 0
+        var graphCacheWrite: Int64 = 0
+        var graphReasoning: Int64 = 0
+        var graphMessages = 0
+        var graphCost = 0.0
+        for contribution in demoPayload.contributions {
+            for client in contribution.clients where client.client == selectedClient {
+                graphInput += client.tokens.input
+                graphOutput += client.tokens.output
+                graphCacheRead += client.tokens.cacheRead
+                graphCacheWrite += client.tokens.cacheWrite
+                graphReasoning += client.tokens.reasoning
+                graphMessages += client.messages
+                graphCost += client.cost
+            }
+        }
+        let selectedHourly = DemoData.hourlyReport(for: nil, clients: [selectedClient])
+        let hourlyInput = selectedHourly.entries.reduce(Int64(0)) { $0 + $1.input }
+        let hourlyOutput = selectedHourly.entries.reduce(Int64(0)) { $0 + $1.output }
+        let hourlyCacheRead = selectedHourly.entries.reduce(Int64(0)) { $0 + $1.cacheRead }
+        let hourlyCacheWrite = selectedHourly.entries.reduce(Int64(0)) { $0 + $1.cacheWrite }
+        let hourlyReasoning = selectedHourly.entries.reduce(Int64(0)) { $0 + $1.reasoning }
+        let hourlyMessages = selectedHourly.entries.reduce(0) { $0 + $1.messageCount }
+        let hourlyCost = selectedHourly.entries.reduce(0.0) { $0 + $1.cost }
+        expect(
+            graphInput == hourlyInput && graphOutput == hourlyOutput
+                && graphCacheRead == hourlyCacheRead && graphCacheWrite == hourlyCacheWrite
+                && graphReasoning == hourlyReasoning && graphMessages == hourlyMessages
+                && abs(graphCost - hourlyCost) < 0.000_000_001,
+            "selected demo hourly totals equal graph client rows")
+
+        expect(
+            quota.agents.allSatisfy { agent in
+                !agent.windows.isEmpty && agent.windows.allSatisfy {
+                    $0.windowMinutes ?? 0 > 0
+                        && $0.usedPercent >= 0 && $0.remainingPercent > 0
+                        && abs($0.usedPercent + $0.remainingPercent - 100) < 0.000_001
+                }
+            },
+            "demo quota windows have valid labels and used-plus-remaining totals")
+        let rawDemoRate = DemoData.tokensPerMin
+        let traceRate = trace.reduce(0.0) { $0 + $1.tokensPerMin }
+        let selectedTraceRate = trace.first { $0.client == selectedClient }?.tokensPerMin ?? 0
+        let hiddenTraceRate = TraceBucket.totalRate(trace, hidden: [selectedClient])
+        let allHiddenTraceRate = TraceBucket.totalRate(trace, hidden: registryClients)
+        expect(
+            rawDemoRate > 0 && trace.allSatisfy { $0.tokensPerMin > 0 }
+                && abs(rawDemoRate - traceRate) < 0.000_001
+                && abs(hiddenTraceRate - (rawDemoRate - selectedTraceRate)) < 0.000_001
+                && allHiddenTraceRate == 0,
+            "demo raw rate equals trace and hidden-client reductions")
+
+        let currentYear = String(Format.todayKey().prefix(4))
+        let currentPayload = DemoData.payload(for: currentYear)
+        let otherYear = String((Int(currentYear) ?? 2000) - 1)
+        let otherPayload = DemoData.payload(for: otherYear)
+        expect(
+            demoPayload.contributions.last?.date == Format.todayKey()
+                && currentPayload.contributions.last?.date == Format.todayKey(),
+            "demo nil and current-year windows end today")
+        expect(
+            otherPayload.contributions.count == 14
+                && otherPayload.contributions.allSatisfy { $0.date.hasPrefix(otherYear) }
+                && otherPayload.years.contains { $0.year == otherYear },
+            "demo non-current year stays within the selected year")
+
+        let demoJan1 = DemoData.dates(for: "2024", today: "2024-01-01")
+        let demoJan13 = DemoData.dates(for: "2024", today: "2024-01-13")
+        let demoJan14 = DemoData.dates(for: "2024", today: "2024-01-14")
+        let rollingJan1 = DemoData.dates(for: nil, today: "2024-01-01")
+        let leapDay = DemoData.dates(for: "2024", today: "2024-02-29")
+        let priorYear = DemoData.dates(for: "2023", today: "2024-02-29")
+        let invalidYear = DemoData.dates(for: "not-a-year", today: "2024-02-29")
+        expect(
+            demoJan1.count == 1 && demoJan1.last == "2024-01-01"
+                && demoJan13.count == 13 && demoJan13.last == "2024-01-13"
+                && demoJan14.count == 14 && demoJan14.last == "2024-01-14",
+            "demo current-year dates clamp at January 1")
+        expect(
+            rollingJan1.count == 14 && rollingJan1.last == "2024-01-01"
+                && rollingJan1.first?.hasPrefix("2023-") == true,
+            "demo all-years dates retain the rolling cross-year window")
+        expect(
+            leapDay.count == 14 && leapDay.contains("2024-02-29")
+                && priorYear.count == 14 && priorYear.allSatisfy { $0.hasPrefix("2023-") }
+                && invalidYear.count == 14 && invalidYear.last == "2024-02-29",
+            "demo date helper handles leap and invalid years")
+
+        let sourcedPayload = awaitValue {
+            try await demoSource.graph(year: nil, priority: .userInitiated)
+        }
+        let sourcedRefresh = awaitValue {
+            try await demoSource.refreshGraph(year: nil, priority: .userInitiated)
+        }
+        let sourcedModels = awaitValue {
+            try await demoSource.modelReport(year: nil, priority: .userInitiated)
+        }
+        let sourcedHourly = awaitValue {
+            try await demoSource.hourlyReport(
+                year: nil, clients: nil, priority: .userInitiated)
+        }
+        let sourcedAgents = awaitValue {
+            try await demoSource.agentsReport(
+                year: nil, clients: nil, priority: .userInitiated)
+        }
+        let sourcedQuota = awaitValue { try await demoSource.agentUsage() }
+        let sourcedTrace = awaitValue { try await demoSource.usageTrace(windowSecs: 600) }
+        let sourcedRate = awaitValue { try await demoSource.tokensPerMin() }
+        expect(
+            sourcedPayload?.summary.totalTokens == demoPayload.summary.totalTokens
+                && sourcedRefresh?.summary.totalCost == demoPayload.summary.totalCost,
+            "demo source graph and refresh read synthetic data")
+        expect(
+            sourcedModels?.entries.isEmpty == false && sourcedHourly?.entries.isEmpty == false
+                && sourcedAgents?.entries.isEmpty == false && sourcedQuota?.agents.isEmpty == false
+                && sourcedTrace?.isEmpty == false && (sourcedRate ?? 0) > 0,
+            "demo source serves every usage API")
 
         // FFI envelope/error contract (hermetic; no FFI allocation or live data).
         for (label, passed) in TBCore.envelopeContractChecks() {
