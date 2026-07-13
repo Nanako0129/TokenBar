@@ -9,6 +9,10 @@ on:
     paths:
       - 'landing/**'
       - '.github/workflows/pages.yml'
+  pull_request:
+    paths:
+      - 'landing/**'
+      - '.github/workflows/pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -17,7 +21,7 @@ permissions:
   id-token: write
 
 concurrency:
-  group: pages
+  group: pages-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -25,6 +29,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+      - name: Validate knowledge contracts
+        run: python3 scripts/check_knowledge.py
       - uses: actions/setup-node@v6
         with:
           node-version: 22
@@ -38,12 +44,15 @@ jobs:
         working-directory: landing
         env:
           PUBLIC_SITE_URL: ${{ vars.PUBLIC_SITE_URL || 'https://tokenbar.nyanako.com' }}
-      - uses: actions/configure-pages@v5
-      - uses: actions/upload-pages-artifact@v3
+      - if: github.event_name != 'pull_request'
+        uses: actions/configure-pages@v5
+      - if: github.event_name != 'pull_request'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: landing/dist
 
   deploy:
+    if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
     environment:

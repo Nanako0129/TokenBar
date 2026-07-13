@@ -1,7 +1,10 @@
 # Build order matters: the Rust staticlib must exist before swift build links.
 # Run everything from the repo root (the -L path in Package.swift is relative).
 
-.PHONY: all rust build run clean
+.PHONY: all rust build run clean check-docs
+
+check-docs:
+	python3 scripts/check_knowledge.py
 
 all: build
 
