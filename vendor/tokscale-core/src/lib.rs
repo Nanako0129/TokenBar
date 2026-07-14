@@ -6293,6 +6293,196 @@ mod tests {
         }
     }
 
+    /// Regression fixture for Codex sessions that are live-only, archive-only,
+    /// or briefly present in both roots while the CLI moves a transcript.
+    fn write_codex_sessions_and_archived_sessions_fixture(source_home: &std::path::Path) {
+        let sessions_dir = source_home.join(".codex/sessions");
+        let archived_dir = source_home.join(".codex/archived_sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        std::fs::create_dir_all(&archived_dir).unwrap();
+
+        std::fs::write(
+            sessions_dir.join("live-only.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-25T10:00:00Z","type":"session_meta","payload":{"id":"33333333-3333-7333-8333-333333333333","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-25T10:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-25T10:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55},"last_token_usage":{"input_tokens":50,"output_tokens":5,"total_tokens":55}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        std::fs::write(
+            archived_dir.join("archived-only.jsonl"),
+            concat!(
+                r#"{"timestamp":"2026-06-20T09:00:00Z","type":"session_meta","payload":{"id":"44444444-4444-7444-8444-444444444444","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-20T09:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+                "\n",
+                r#"{"timestamp":"2026-06-20T09:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":70,"output_tokens":7,"total_tokens":77},"last_token_usage":{"input_tokens":70,"output_tokens":7,"total_tokens":77}}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let shared_content = concat!(
+            r#"{"timestamp":"2026-06-22T08:00:00Z","type":"session_meta","payload":{"id":"55555555-5555-7555-8555-555555555555","source":"interactive","model_provider":"openai","cwd":"/repo"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-22T08:00:01Z","type":"turn_context","payload":{"model":"gpt-5.5"}}"#,
+            "\n",
+            r#"{"timestamp":"2026-06-22T08:00:02Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33},"last_token_usage":{"input_tokens":30,"output_tokens":3,"total_tokens":33}}}}"#,
+            "\n"
+        );
+        std::fs::write(
+            sessions_dir.join("shared-in-sessions.jsonl"),
+            shared_content,
+        )
+        .unwrap();
+        std::fs::write(
+            archived_dir.join("shared-in-archived.jsonl"),
+            shared_content,
+        )
+        .unwrap();
+    }
+
+    fn with_isolated_tokscale_cache<T>(
+        cache_home: &std::path::Path,
+        action: impl FnOnce() -> T,
+    ) -> T {
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        action()
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_codex_archive_roots_are_exact_once_across_all_consumers() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let count_cache = tempfile::TempDir::new().unwrap();
+
+        write_codex_sessions_and_archived_sessions_fixture(source_home.path());
+
+        let home = source_home.path().to_str().unwrap().to_string();
+        let clients = vec!["codex".to_string()];
+        let materialized = with_isolated_tokscale_cache(materialized_cache.path(), || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                &home,
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        });
+
+        assert_eq!(materialized.len(), 3);
+        let session_ids: HashSet<_> = materialized
+            .iter()
+            .map(|message| message.session_id.as_str())
+            .collect();
+        assert!(session_ids.contains("live-only"));
+        assert!(session_ids.contains("archived-only"));
+        assert_eq!(
+            materialized
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            150,
+        );
+        assert_eq!(
+            materialized
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            15,
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report_options = || ReportOptions {
+            home_dir: Some(home.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        };
+        let streaming_cold = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            runtime
+                .block_on(get_model_report(report_options()))
+                .unwrap()
+        });
+
+        // Codex's cold streaming lane does not populate SourceMessageCache, so
+        // seed the same isolated cache through the public materialized path
+        // before exercising the streaming cache-hit branch.
+        let cache_seed = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                &home,
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        });
+        assert_eq!(cache_seed.len(), 3);
+        assert!(
+            streaming_cache
+                .path()
+                .join("cache/source-message-cache.bin")
+                .is_file(),
+            "materialized seed must persist the cache used by the warm pass",
+        );
+        let streaming_warm = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            runtime
+                .block_on(get_model_report(report_options()))
+                .unwrap()
+        });
+        for (phase, streaming) in [("cold", &streaming_cold), ("warm", &streaming_warm)] {
+            assert_eq!(streaming.total_messages, 3, "{phase} streaming messages");
+            assert_eq!(streaming.total_input, 150, "{phase} streaming input");
+            assert_eq!(streaming.total_output, 15, "{phase} streaming output");
+        }
+
+        let counted = with_isolated_tokscale_cache(count_cache.path(), || {
+            parse_local_clients(LocalParseOptions {
+                home_dir: Some(home),
+                use_env_roots: false,
+                clients: Some(clients),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
+            })
+            .unwrap()
+        });
+        assert_eq!(counted.counts.get(ClientId::Codex), 3);
+        assert_eq!(counted.messages.len(), 3);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            150,
+        );
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.output)
+                .sum::<i64>(),
+            15,
+        );
+    }
+
     fn write_codex_forked_history_fixture(source_home: &std::path::Path) {
         let codex_dir = source_home.join(".codex/sessions");
         std::fs::create_dir_all(&codex_dir).unwrap();
