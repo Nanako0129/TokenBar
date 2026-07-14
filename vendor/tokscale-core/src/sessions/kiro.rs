@@ -16,7 +16,7 @@ use rusqlite::Connection;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
@@ -93,6 +93,11 @@ struct KiroMessageContent {
     prompt_timestamp_ms: Option<i64>,
 }
 
+/// Return the same-stem message sidecar consumed by a Kiro CLI session header.
+pub(crate) fn kiro_related_messages_path(session_path: &Path) -> Option<PathBuf> {
+    Some(session_path.with_extension("jsonl"))
+}
+
 pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
 
@@ -133,7 +138,9 @@ pub fn parse_kiro_file(path: &Path) -> Vec<UnifiedMessage> {
         .and_then(|metadata| metadata.user_turn_metadatas)
         .unwrap_or_default();
 
-    let jsonl_path = path.with_extension("jsonl");
+    let Some(jsonl_path) = kiro_related_messages_path(path) else {
+        return Vec::new();
+    };
     let mut content_by_message_id: HashMap<String, KiroMessageContent> = HashMap::new();
 
     if let Ok(jsonl_file) = std::fs::File::open(&jsonl_path) {
@@ -481,6 +488,14 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::TempDir;
+
+    #[test]
+    fn test_kiro_related_messages_path_uses_cli_same_stem() {
+        assert_eq!(
+            kiro_related_messages_path(Path::new("root/session.json")),
+            Some(PathBuf::from("root/session.jsonl"))
+        );
+    }
 
     fn create_session_files(
         dir: &TempDir,

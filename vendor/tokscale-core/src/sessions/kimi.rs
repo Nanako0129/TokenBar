@@ -9,7 +9,7 @@ use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Top-level wire.jsonl line: either metadata or a timestamped message
 #[derive(Debug, Deserialize)]
@@ -46,23 +46,20 @@ struct TokenUsage {
 const DEFAULT_MODEL: &str = "kimi-for-coding";
 const DEFAULT_PROVIDER: &str = "moonshot";
 
+/// Locate the legacy Kimi CLI config consumed by `parse_kimi_file`.
+pub(crate) fn kimi_config_path(wire_path: &Path) -> Option<PathBuf> {
+    let sessions_dir = wire_path.parent()?.parent()?.parent()?;
+    Some(sessions_dir.parent()?.join("config.json"))
+}
+
 /// Read model name from ~/.kimi/config.json if available
 fn read_model_from_config(wire_path: &Path) -> String {
-    // Navigate from wire.jsonl up to ~/.kimi/config.json
-    // wire.jsonl is at ~/.kimi/sessions/GROUP/UUID/wire.jsonl
-    if let Some(sessions_dir) = wire_path
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
-    {
-        if let Some(kimi_dir) = sessions_dir.parent() {
-            let config_path = kimi_dir.join("config.json");
-            if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(bytes) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(model) = bytes.get("model").and_then(|v| v.as_str()) {
-                        if !model.is_empty() {
-                            return model.to_string();
-                        }
+    if let Some(config_path) = kimi_config_path(wire_path) {
+        if let Ok(content) = std::fs::read_to_string(&config_path) {
+            if let Ok(bytes) = serde_json::from_str::<serde_json::Value>(&content) {
+                if let Some(model) = bytes.get("model").and_then(|v| v.as_str()) {
+                    if !model.is_empty() {
+                        return model.to_string();
                     }
                 }
             }
@@ -219,6 +216,16 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    #[test]
+    fn test_kimi_config_path_requires_legacy_session_depth() {
+        let wire = Path::new("root/.kimi/sessions/group/session/wire.jsonl");
+        assert_eq!(
+            kimi_config_path(wire),
+            Some(PathBuf::from("root/.kimi/config.json"))
+        );
+        assert_eq!(kimi_config_path(Path::new("wire.jsonl")), None);
+    }
 
     fn create_test_file(content: &str) -> NamedTempFile {
         let mut file = NamedTempFile::new().unwrap();

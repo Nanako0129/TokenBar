@@ -1076,9 +1076,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Droid)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::droid::parse_droid_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_droid_path,
+                sessions::droid::parse_droid_file,
+            )
         })
         .collect();
     for outcome in droid_outcomes {
@@ -1124,9 +1128,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Kimi)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kimi::parse_kimi_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_kimi_path,
+                sessions::kimi::parse_kimi_file,
+            )
         })
         .collect();
     for outcome in kimi_outcomes {
@@ -1387,9 +1395,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .get(ClientId::Kiro)
         .par_iter()
         .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::kiro::parse_kiro_file(path)
-            })
+            load_or_parse_source_with_fingerprint(
+                path,
+                &source_cache,
+                pricing,
+                message_cache::SourceFingerprint::from_kiro_path,
+                sessions::kiro::parse_kiro_file,
+            )
         })
         .collect();
     for outcome in kiro_outcomes {
@@ -2539,10 +2551,18 @@ where
     simple_lane!(ClientId::Warp,      sessions::warp::parse_warp_file);
     simple_lane!(ClientId::Amp,       sessions::amp::parse_amp_file);
     simple_lane!(ClientId::Codebuff,  sessions::codebuff::parse_codebuff_file);
-    simple_lane!(ClientId::Droid,     sessions::droid::parse_droid_file);
+    simple_lane!(
+        ClientId::Droid,
+        sessions::droid::parse_droid_file,
+        message_cache::SourceFingerprint::from_droid_path
+    );
     simple_lane!(ClientId::OpenClaw,  sessions::openclaw::parse_openclaw_transcript);
     simple_lane!(ClientId::Pi,        sessions::pi::parse_pi_file);
-    simple_lane!(ClientId::Kimi,      sessions::kimi::parse_kimi_file);
+    simple_lane!(
+        ClientId::Kimi,
+        sessions::kimi::parse_kimi_file,
+        message_cache::SourceFingerprint::from_kimi_path
+    );
     simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
     // roo family: fingerprint via from_roo_path so a history-only rewrite of the
     // sibling api_conversation_history.json (which parse_roo_kilo_file reads for
@@ -2592,7 +2612,11 @@ where
         true
     );
     simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
-    simple_lane!(ClientId::Kiro,      sessions::kiro::parse_kiro_file);
+    simple_lane!(
+        ClientId::Kiro,
+        sessions::kiro::parse_kiro_file,
+        message_cache::SourceFingerprint::from_kiro_path
+    );
 
     // ---- Gemini (cache-aware with invalidate_cache semantics) ----
     // Uses load_or_parse_source_with_fingerprint_and_policy equivalent:
@@ -3173,6 +3197,19 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
             latest = latest.max(roo_source_mtime_ms(ui_messages).unwrap_or(0));
         }
     }
+    // These file-backed parsers consult secondary sources whose writes do not
+    // update the scanned primary: Droid's fallback transcript, legacy Kimi's
+    // shared config, and Kiro CLI's same-stem message log. Probe each dependency
+    // so a sibling-only change reaches the specialized cache fingerprint.
+    for settings in scan_result.get(ClientId::Droid) {
+        latest = latest.max(droid_source_mtime_ms(settings).unwrap_or(0));
+    }
+    for wire in scan_result.get(ClientId::Kimi) {
+        latest = latest.max(kimi_source_mtime_ms(wire).unwrap_or(0));
+    }
+    for session in scan_result.get(ClientId::Kiro) {
+        latest = latest.max(kiro_source_mtime_ms(session).unwrap_or(0));
+    }
     Ok(latest)
 }
 
@@ -3214,6 +3251,24 @@ fn roo_source_mtime_ms(ui_messages_path: &Path) -> Option<u64> {
     )
 }
 
+fn droid_source_mtime_ms(settings_path: &Path) -> Option<u64> {
+    source_with_related_mtime_ms(
+        settings_path,
+        sessions::droid::droid_jsonl_path(settings_path),
+    )
+}
+
+fn kimi_source_mtime_ms(wire_path: &Path) -> Option<u64> {
+    source_with_related_mtime_ms(wire_path, sessions::kimi::kimi_config_path(wire_path))
+}
+
+fn kiro_source_mtime_ms(session_path: &Path) -> Option<u64> {
+    source_with_related_mtime_ms(
+        session_path,
+        sessions::kiro::kiro_related_messages_path(session_path),
+    )
+}
+
 /// Newest mtime for a Grok session's scanned updates file and every metadata
 /// sibling the parser reads (`signals.json` / `summary.json` / `events.jsonl` —
 /// kept in lockstep with the fingerprint via `GROK_METADATA_SIBLINGS`). `None`
@@ -3239,8 +3294,9 @@ fn grok_source_mtime_ms(updates_path: &Path) -> Option<u64> {
 /// touching it: the Hermes/Zed/Antigravity-CLI/micode lanes hold SQLite dbs
 /// (WAL writes may not bump the main `.db` mtime), while the jcode lane holds a
 /// `session_*.json` snapshot whose sibling `.journal.jsonl` is appended between
-/// snapshot rewrites. Those lanes remain exempt. Roo-family and Grok sources can
-/// still be bounded by folding every parser dependency into their newest mtime.
+/// snapshot rewrites. Those lanes remain exempt. Roo-family, Droid, legacy Kimi,
+/// Kiro CLI, and Grok sources can still be bounded by folding every parser
+/// dependency into their newest mtime.
 /// Any stat failure keeps the file — over-parsing is safe, silently skipping is
 /// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
@@ -3266,6 +3322,24 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
         if roo_lanes.contains(&lane) {
             files
                 .retain(|path| roo_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms));
+            continue;
+        }
+        if lane == ClientId::Droid as usize {
+            files.retain(|path| {
+                droid_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+            });
+            continue;
+        }
+        if lane == ClientId::Kimi as usize {
+            files.retain(|path| {
+                kimi_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+            });
+            continue;
+        }
+        if lane == ClientId::Kiro as usize {
+            files.retain(|path| {
+                kiro_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+            });
             continue;
         }
         if lane == ClientId::Grok as usize {
@@ -9437,6 +9511,391 @@ mod tests {
             scan_result.get(ClientId::RooCode),
             std::slice::from_ref(&ui_messages),
             "an unreadable history sibling must fail open during pruning"
+        );
+    }
+
+    struct M13RelatedFixture {
+        droid_source: PathBuf,
+        droid_related: PathBuf,
+        kimi_source: PathBuf,
+        kimi_related: PathBuf,
+        kiro_source: PathBuf,
+        kiro_related: PathBuf,
+    }
+
+    fn write_m13_primary_fixtures(home: &Path) -> M13RelatedFixture {
+        let droid_dir = home.join(".factory/sessions");
+        std::fs::create_dir_all(&droid_dir).unwrap();
+        let droid_source = droid_dir.join("droid-session.settings.json");
+        std::fs::write(
+            &droid_source,
+            r#"{"providerLock":"anthropic","providerLockTimestamp":"2026-01-01T00:00:00Z","tokenUsage":{"inputTokens":100,"outputTokens":20,"cacheCreationTokens":5,"cacheReadTokens":10,"thinkingTokens":2}}"#,
+        )
+        .unwrap();
+        let droid_related = droid_dir.join("droid-session.jsonl");
+
+        let kimi_session_dir = home.join(".kimi/sessions/group-1/kimi-session");
+        std::fs::create_dir_all(&kimi_session_dir).unwrap();
+        let kimi_source = kimi_session_dir.join("wire.jsonl");
+        std::fs::write(
+            &kimi_source,
+            r#"{"timestamp":1767225600.0,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":50,"output":5,"input_cache_read":3,"input_cache_creation":2},"message_id":"kimi-turn"}}}"#,
+        )
+        .unwrap();
+        let kimi_related = home.join(".kimi/config.json");
+
+        let kiro_dir = home.join(".kiro/sessions/cli");
+        std::fs::create_dir_all(&kiro_dir).unwrap();
+        let kiro_source = kiro_dir.join("kiro-session.json");
+        std::fs::write(
+            &kiro_source,
+            r#"{"session_id":"kiro-session","cwd":"/tmp/m13-project","session_state":{"rts_model_state":{"model_info":{"model_id":"kiro-model","context_window_tokens":1000}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"end_timestamp":1767225601,"total_request_count":1,"message_ids":["kiro-turn"],"context_usage_percentage":10.0}]}}}"#,
+        )
+        .unwrap();
+        let kiro_related = kiro_source.with_extension("jsonl");
+
+        M13RelatedFixture {
+            droid_source,
+            droid_related,
+            kimi_source,
+            kimi_related,
+            kiro_source,
+            kiro_related,
+        }
+    }
+
+    fn write_m13_related_fixtures(paths: &M13RelatedFixture) {
+        std::fs::write(
+            &paths.droid_related,
+            r#"{"message":"Model: Claude-Opus-4.5-[Anthropic]"}"#,
+        )
+        .unwrap();
+        std::fs::write(&paths.kimi_related, r#"{"model":"kimi-new-model"}"#).unwrap();
+        std::fs::write(
+            &paths.kiro_related,
+            concat!(
+                r#"{"version":"v1","kind":"Prompt","data":{"message_id":"kiro-prompt","content":[{"kind":"text","data":"prompt body"}],"meta":{"timestamp":1767225600.0}}}"#,
+                "\n",
+                r#"{"version":"v1","kind":"AssistantMessage","data":{"message_id":"kiro-turn","content":[{"kind":"text","data":"abcdefghijklmnop"}]}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn set_m13_fixture_mtimes(
+        paths: &M13RelatedFixture,
+        primary_time: std::time::SystemTime,
+        related_time: std::time::SystemTime,
+    ) -> bool {
+        for path in [&paths.droid_source, &paths.kimi_source, &paths.kiro_source] {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            if file.set_modified(primary_time).is_err() {
+                return false;
+            }
+        }
+        for path in [
+            &paths.droid_related,
+            &paths.kimi_related,
+            &paths.kiro_related,
+        ] {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            if file.set_modified(related_time).is_err() {
+                return false;
+            }
+        }
+        true
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_m13_related_sources_refresh_materialized_and_streaming_caches() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let paths = write_m13_primary_fixtures(source_home.path());
+        let clients = vec!["droid".to_string(), "kimi".to_string(), "kiro".to_string()];
+
+        let mut litellm = HashMap::new();
+        for (model, input_rate, output_rate) in [
+            ("claude-unknown", 0.001, 0.002),
+            ("claude-opus-4-5", 0.01, 0.02),
+            ("kimi-for-coding", 0.001, 0.002),
+            ("kimi-new-model", 0.01, 0.02),
+            ("kiro-model", 0.003, 0.004),
+        ] {
+            litellm.insert(
+                model.to_string(),
+                pricing::ModelPricing {
+                    input_cost_per_token: Some(input_rate),
+                    output_cost_per_token: Some(output_rate),
+                    ..Default::default()
+                },
+            );
+        }
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let home = source_home.path().to_str().unwrap().to_string();
+        let run_materialized = || {
+            with_isolated_tokscale_cache(materialized_cache.path(), || {
+                parse_all_messages_with_pricing_with_env_strategy(
+                    &home,
+                    &clients,
+                    Some(&pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                )
+            })
+        };
+        let run_streaming = || {
+            with_isolated_tokscale_cache(streaming_cache.path(), || {
+                let mut messages = Vec::new();
+                scan_messages_streaming(
+                    &home,
+                    &clients,
+                    Some(&pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                    &|_: &UnifiedMessage| true,
+                    &mut |message: &UnifiedMessage| messages.push(message.clone()),
+                );
+                messages
+            })
+        };
+
+        let materialized_before = run_materialized();
+        let streaming_before = run_streaming();
+        assert_eq!(materialized_before.len(), 3);
+        assert_eq!(streaming_before.len(), 3);
+        for (client, model) in [
+            ("droid", "claude-unknown"),
+            ("kimi", "kimi-for-coding"),
+            ("kiro", "kiro-model"),
+        ] {
+            assert_eq!(
+                materialized_before
+                    .iter()
+                    .find(|message| message.client == client)
+                    .unwrap()
+                    .model_id,
+                model
+            );
+            assert_eq!(
+                streaming_before
+                    .iter()
+                    .find(|message| message.client == client)
+                    .unwrap()
+                    .model_id,
+                model
+            );
+        }
+
+        write_m13_related_fixtures(&paths);
+
+        let materialized_after = run_materialized();
+        let streaming_after = run_streaming();
+        assert_eq!(materialized_after.len(), 3);
+        assert_eq!(streaming_after.len(), 3);
+        for client in ["droid", "kimi", "kiro"] {
+            let before = materialized_before
+                .iter()
+                .find(|message| message.client == client)
+                .unwrap();
+            let materialized = materialized_after
+                .iter()
+                .find(|message| message.client == client)
+                .unwrap();
+            let streaming = streaming_after
+                .iter()
+                .find(|message| message.client == client)
+                .unwrap();
+
+            let expected_model = match client {
+                "droid" => "claude-opus-4-5",
+                "kimi" => "kimi-new-model",
+                "kiro" => "kiro-model",
+                _ => unreachable!(),
+            };
+            assert_eq!(materialized.model_id, expected_model);
+            assert!(
+                materialized.cost > before.cost,
+                "{client} related-source creation must refresh derived cost"
+            );
+            if client == "kiro" {
+                assert_eq!(before.tokens.output, 0);
+                assert_eq!(materialized.tokens.output, 4);
+                assert_eq!(materialized.timestamp, 1_767_225_600_000);
+                assert_eq!(materialized.duration_ms, Some(1_000));
+            }
+
+            assert_eq!(streaming.client, materialized.client);
+            assert_eq!(streaming.session_id, materialized.session_id);
+            assert_eq!(streaming.model_id, materialized.model_id);
+            assert_eq!(streaming.provider_id, materialized.provider_id);
+            assert_eq!(streaming.workspace_key, materialized.workspace_key);
+            assert_eq!(streaming.workspace_label, materialized.workspace_label);
+            assert_eq!(streaming.timestamp, materialized.timestamp);
+            assert_eq!(streaming.duration_ms, materialized.duration_ms);
+            assert_eq!(streaming.message_count, materialized.message_count);
+            assert_eq!(streaming.tokens.input, materialized.tokens.input);
+            assert_eq!(streaming.tokens.output, materialized.tokens.output);
+            assert_eq!(streaming.tokens.cache_read, materialized.tokens.cache_read);
+            assert_eq!(
+                streaming.tokens.cache_write,
+                materialized.tokens.cache_write
+            );
+            assert_eq!(streaming.tokens.reasoning, materialized.tokens.reasoning);
+            assert!((streaming.cost - materialized.cost).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn test_latest_source_mtime_ms_probes_m13_related_sources() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let paths = write_m13_primary_fixtures(source_home.path());
+        write_m13_related_fixtures(&paths);
+        let stale_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let fresh_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        if !set_m13_fixture_mtimes(&paths, stale_time, fresh_time) {
+            return;
+        }
+
+        for client in [ClientId::Droid, ClientId::Kimi, ClientId::Kiro] {
+            let token = latest_source_mtime_ms(&LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec![client.as_str().to_string()]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
+            })
+            .unwrap();
+            assert_eq!(
+                token,
+                1_700_086_400_000,
+                "{} change token must include its parser dependency",
+                client.as_str()
+            );
+        }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_modified_after_keeps_m13_sources_with_fresh_dependencies() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let paths = write_m13_primary_fixtures(source_home.path());
+        write_m13_related_fixtures(&paths);
+        let stale_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let fresh_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        if !set_m13_fixture_mtimes(&paths, stale_time, fresh_time) {
+            return;
+        }
+
+        let parsed = with_isolated_tokscale_cache(cache_home.path(), || {
+            parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(vec![
+                    "droid".to_string(),
+                    "kimi".to_string(),
+                    "kiro".to_string(),
+                ]),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: Some(1_700_043_200_000),
+            })
+            .unwrap()
+        });
+
+        assert_eq!(parsed.messages.len(), 3);
+        assert_eq!(parsed.counts.get(ClientId::Droid), 1);
+        assert_eq!(parsed.counts.get(ClientId::Kimi), 1);
+        assert_eq!(parsed.counts.get(ClientId::Kiro), 1);
+        assert!(parsed
+            .messages
+            .iter()
+            .any(|message| { message.client == "droid" && message.model_id == "claude-opus-4-5" }));
+        assert!(parsed
+            .messages
+            .iter()
+            .any(|message| { message.client == "kimi" && message.model_id == "kimi-new-model" }));
+        assert!(parsed.messages.iter().any(|message| {
+            message.client == "kiro" && message.output == 4 && message.duration_ms == Some(1_000)
+        }));
+    }
+
+    #[test]
+    fn test_modified_after_prunes_stale_m13_sources_without_dependencies() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let paths = write_m13_primary_fixtures(source_home.path());
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::Droid)
+            .push(paths.droid_source);
+        scan_result.get_mut(ClientId::Kimi).push(paths.kimi_source);
+        scan_result.get_mut(ClientId::Kiro).push(paths.kiro_source);
+
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert!(scan_result.get(ClientId::Droid).is_empty());
+        assert!(scan_result.get(ClientId::Kimi).is_empty());
+        assert!(scan_result.get(ClientId::Kiro).is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_modified_after_m13_dependency_stat_failures_keep_sources() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let paths = write_m13_primary_fixtures(source_home.path());
+        for related in [
+            &paths.droid_related,
+            &paths.kimi_related,
+            &paths.kiro_related,
+        ] {
+            std::os::unix::fs::symlink(related.file_name().unwrap(), related).unwrap();
+        }
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::Droid)
+            .push(paths.droid_source.clone());
+        scan_result
+            .get_mut(ClientId::Kimi)
+            .push(paths.kimi_source.clone());
+        scan_result
+            .get_mut(ClientId::Kiro)
+            .push(paths.kiro_source.clone());
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert_eq!(
+            scan_result.get(ClientId::Droid),
+            std::slice::from_ref(&paths.droid_source)
+        );
+        assert_eq!(
+            scan_result.get(ClientId::Kimi),
+            std::slice::from_ref(&paths.kimi_source)
+        );
+        assert_eq!(
+            scan_result.get(ClientId::Kiro),
+            std::slice::from_ref(&paths.kiro_source)
         );
     }
 
