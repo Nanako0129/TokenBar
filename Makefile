@@ -3,10 +3,10 @@
 
 .PHONY: all rust build run clean check-docs
 
+all: build
+
 check-docs:
 	python3 scripts/check_knowledge.py
-
-all: build
 
 rust:
 	cargo build --release

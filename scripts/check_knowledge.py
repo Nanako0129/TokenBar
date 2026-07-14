@@ -16,7 +16,7 @@ TREATMENTS = {'migrated','adapted','linked','deferred','retired','excluded','ver
 ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]*$')
 LEDGER_IDS = {f'SRC-{n:03d}' for n in range(1, 59)}
 LINK = re.compile(r'!?\[[^]]*\]\(([^)]+)\)')
-SKIP = {'.git','.build','target','.swiftpm','node_modules','dist'}
+SKIP = {'.agent-local','.git','.build','target','.swiftpm','node_modules','dist'}
 MACHINE = [
     re.compile(r'/Users/[^\s`"\']+'),
     re.compile(r'/home/[^\s`"\']+'),
@@ -102,7 +102,7 @@ def relative_links(root,p,text):
 
 def validate(root):
     root=Path(root).resolve(); errors=[]
-    files=sorted(p for p in root.rglob('*.md') if not (set(p.parts)&SKIP))
+    files=sorted(p for p in root.rglob('*.md') if not (set(p.relative_to(root).parts)&SKIP))
     required_adapters = [root/'AGENTS.md', root/'CLAUDE.md', root/'vendor'/'AGENTS.md', root/'landing'/'AGENTS.md']
     for p in required_adapters:
         label=p.relative_to(root)
@@ -267,8 +267,10 @@ def check_ledger(root,path,meta,errors):
 
 def self_test():
     class T(unittest.TestCase):
-        def root(self,bad=False):
-            r=Path(tempfile.mkdtemp()); (r/'AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'CLAUDE.md').write_text('See AGENTS.md'); (r/'vendor').mkdir(); (r/'landing').mkdir(); (r/'README.md').write_text('[Knowledge](docs/knowledge/README.md)'); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)'); (r/'vendor/AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'landing/AGENTS.md').write_text('See docs/knowledge/README.md'); k=r/'docs/knowledge'; k.mkdir(parents=True)
+        def root(self,bad=False,parent=None):
+            r=Path(tempfile.mkdtemp())
+            if parent: r=r/parent/'repo'; r.mkdir(parents=True)
+            (r/'AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'CLAUDE.md').write_text('See AGENTS.md'); (r/'vendor').mkdir(); (r/'landing').mkdir(); (r/'README.md').write_text('[Knowledge](docs/knowledge/README.md)'); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)'); (r/'vendor/AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'landing/AGENTS.md').write_text('See docs/knowledge/README.md'); k=r/'docs/knowledge'; k.mkdir(parents=True)
             rows='\n'.join(f'| `SRC-{i:03d}` | {"local" if i==58 else "plan" if i==57 else "memory"} | topic-{i:03d} | active | public | migrated | doc-{i:03d} | checked |' for i in range(1,59))
             head='---\nid: ledger\nkind: ledger\nstatus: active\nscope: repository\nread_when: migration\nlast_verified: 2026-07-14\nsources: [internal]\nsource_total: 58\nboundary_counts: {memory: 56, plan: 1, local: 1}\n---\n# Ledger\n| source | kind | topic | status | privacy | treatment | destination | verification |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n'
             (k/'ledger.md').write_text(head+rows+'\n\n| verification | result |\n| --- | --- |\n| no-gaps | pass |\n'); (k/'vendor-tokscale.md').write_text('---\nid: vendor\nkind: canonical\nstatus: active\nscope: repo\nread_when: vendor\nlast_verified: 2026-07-14\nsources: [internal]\n---\n# Vendor\n[vendor](../../vendor/README.md)'); (k/'README.md').write_text('---\nid: index\nkind: index\nstatus: active\nscope: repo\nread_when: lookup\nlast_verified: 2026-07-14\nsources: [internal]\n---\n# Index\n[vendor](vendor-tokscale.md)\n[ledger](ledger.md#ledger)')
@@ -277,6 +279,11 @@ def self_test():
         def test_good(self): self.assertEqual(validate(self.root()),[])
         def test_bad(self):
             s='\n'.join(map(str,validate(self.root(True)))); self.assertIn('duplicate id',s); self.assertIn('missing link target',s); self.assertIn('secret value',s); self.assertIn('invalid scope',s)
+        def test_agent_local_overlay_is_ignored(self):
+            r=self.root(); overlay=r/'.agent-local'; overlay.mkdir(); (overlay/'AGENTS.md').write_text('secret = sk-live-1\n/Users/alice/private-notes.md\n[missing](nope.md)')
+            self.assertEqual(validate(r),[])
+        def test_skip_named_parent_does_not_hide_repo(self):
+            result='\n'.join(map(str,validate(self.root(True,'target')))); self.assertIn('invalid scope',result); self.assertNotIn('knowledge tree is missing',result)
         def test_root_adapter_contract(self):
             r=self.root(); (r/'CLAUDE.md').write_text('[missing](nope.md) /Users/local/file')
             s='\n'.join(map(str,validate(r))); self.assertIn('missing adapter link target',s); self.assertIn('machine-local path',s); self.assertIn('root CLAUDE.md must route',s)
