@@ -57,7 +57,11 @@ use std::time::UNIX_EPOCH;
 // exported first no longer become the trace default. Schema-27 caches can carry
 // the wrong nested fallback and must be rebuilt. The final #834 resolver covers
 // #821's reversed-export-order semantic.)
-const CACHE_SCHEMA_VERSION: u32 = 28;
+// 29 (M14: Codex token durations now advance from the last accepted token
+// snapshot instead of repeatedly measuring from the turn start. Schema-28
+// caches can replay overlapping duration_ms values or resume an incremental
+// parse without the new cursor, so unchanged sources must be rebuilt.)
+const CACHE_SCHEMA_VERSION: u32 = 29;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
@@ -2176,6 +2180,120 @@ mod tests {
                     .as_deref(),
                 Some("github.copilot.subagent")
             );
+        }
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_28_codex_cache_is_stale_and_rebuilt_with_non_overlapping_durations() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+
+        {
+            let source = write_temp_file(include_bytes!(
+                "../tests/fixtures/codex_duration_timing.jsonl"
+            ));
+            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+            let parsed = crate::sessions::codex::parse_codex_file_incremental(
+                source.path(),
+                0,
+                CodexParseState::default(),
+            );
+            assert!(parsed.parse_succeeded);
+            assert_eq!(
+                parsed
+                    .messages
+                    .iter()
+                    .map(|message| message.duration_ms)
+                    .collect::<Vec<_>>(),
+                vec![Some(1_000), Some(4_000), Some(2_000)]
+            );
+
+            let mut stale_messages = parsed.messages.clone();
+            stale_messages[1].duration_ms = Some(5_000);
+            let stale_incremental =
+                build_codex_incremental_cache(source.path(), parsed.consumed_offset, parsed.state)
+                    .unwrap();
+            let stale_entry = CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint.clone(),
+                stale_messages,
+                Vec::new(),
+                Some(stale_incremental),
+            );
+            let cache_file = cache_path().unwrap();
+            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
+            let stale_store = CachedSourceStore {
+                schema_version: 28,
+                entries: vec![stale_entry],
+            };
+
+            let writer = BufWriter::new(File::create(&cache_file).unwrap());
+            bincode::options()
+                .serialize_into(writer, &stale_store)
+                .unwrap();
+
+            let mut loaded = SourceMessageCache::load();
+            assert!(
+                loaded.entries.is_empty(),
+                "schema-28 Codex durations and incremental state must be stale"
+            );
+            assert_eq!(
+                SourceFingerprint::from_path(source.path()).unwrap(),
+                source_fingerprint,
+                "the stale entry and rebuilt parse have the same source fingerprint"
+            );
+
+            let rebuilt = crate::sessions::codex::parse_codex_file_incremental(
+                source.path(),
+                0,
+                CodexParseState::default(),
+            );
+            assert!(rebuilt.parse_succeeded);
+            assert_eq!(
+                rebuilt
+                    .messages
+                    .iter()
+                    .map(|message| message.duration_ms)
+                    .collect::<Vec<_>>(),
+                vec![Some(1_000), Some(4_000), Some(2_000)]
+            );
+            assert!(rebuilt.state.last_accepted_token_timestamp_ms.is_some());
+            let rebuilt_incremental = build_codex_incremental_cache(
+                source.path(),
+                rebuilt.consumed_offset,
+                rebuilt.state,
+            )
+            .unwrap();
+            loaded.insert(CachedSourceEntry::new(
+                source.path(),
+                source_fingerprint,
+                rebuilt.messages,
+                rebuilt.fallback_timestamp_indices,
+                Some(rebuilt_incremental),
+            ));
+            loaded.save_if_dirty();
+
+            let persisted = read_store_from_path(&cache_file).unwrap();
+            assert_eq!(persisted.schema_version, CACHE_SCHEMA_VERSION);
+            assert_eq!(persisted.entries.len(), 1);
+            assert_eq!(
+                persisted.entries[0]
+                    .messages
+                    .iter()
+                    .map(|message| message.duration_ms)
+                    .collect::<Vec<_>>(),
+                vec![Some(1_000), Some(4_000), Some(2_000)]
+            );
+            assert!(persisted.entries[0]
+                .codex_incremental
+                .as_ref()
+                .unwrap()
+                .state
+                .last_accepted_token_timestamp_ms
+                .is_some());
         }
 
         restore_cache_env(prev_env);

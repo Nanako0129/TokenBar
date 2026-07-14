@@ -6484,6 +6484,123 @@ mod tests {
         action()
     }
 
+    fn write_codex_duration_prefix_fixture(
+        source_home: &std::path::Path,
+    ) -> (std::path::PathBuf, String) {
+        let lines = include_str!("../tests/fixtures/codex_duration_timing.jsonl")
+            .lines()
+            .collect::<Vec<_>>();
+        let sessions_dir = source_home.join(".codex/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source = sessions_dir.join("codex-duration-timing.jsonl");
+        std::fs::write(&source, format!("{}\n", lines[..5].join("\n"))).unwrap();
+        (source, format!("{}\n", lines[5..].join("\n")))
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_codex_non_overlapping_durations_survive_incremental_and_streaming_caches() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let (source, suffix) = write_codex_duration_prefix_fixture(source_home.path());
+
+        let home = source_home.path().to_str().unwrap().to_string();
+        let clients = vec!["codex".to_string()];
+        let parse_materialized = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                &home,
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+
+        let prefix = with_isolated_tokscale_cache(materialized_cache.path(), parse_materialized);
+        assert_eq!(prefix.len(), 1);
+        assert_eq!(prefix[0].duration_ms, Some(1_000));
+
+        let mut source_file = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&source)
+            .unwrap();
+        source_file.write_all(suffix.as_bytes()).unwrap();
+        source_file.flush().unwrap();
+        drop(source_file);
+
+        let materialized_incremental =
+            with_isolated_tokscale_cache(materialized_cache.path(), parse_materialized);
+        let materialized_warm =
+            with_isolated_tokscale_cache(materialized_cache.path(), parse_materialized);
+        for (phase, messages) in [
+            ("incremental", &materialized_incremental),
+            ("warm", &materialized_warm),
+        ] {
+            assert_eq!(messages.len(), 3, "{phase} materialized messages");
+            assert_eq!(
+                messages
+                    .iter()
+                    .map(|message| message.duration_ms)
+                    .collect::<Vec<_>>(),
+                vec![Some(1_000), Some(4_000), Some(2_000)],
+                "{phase} materialized durations"
+            );
+        }
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report_options = || ReportOptions {
+            home_dir: Some(home.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        };
+        let streaming_cold = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            runtime
+                .block_on(get_model_report(report_options()))
+                .unwrap()
+        });
+
+        // The cold Codex streaming lane does not persist SourceMessageCache.
+        // Seed this isolated cache through the public materialized path so the
+        // second report exercises the shipping cache-hit branch.
+        let cache_seed = with_isolated_tokscale_cache(streaming_cache.path(), parse_materialized);
+        assert_eq!(cache_seed.len(), 3);
+        assert!(
+            streaming_cache
+                .path()
+                .join("cache/source-message-cache.bin")
+                .is_file(),
+            "materialized seed must persist the cache used by the warm report"
+        );
+        let streaming_warm = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            runtime
+                .block_on(get_model_report(report_options()))
+                .unwrap()
+        });
+
+        for (phase, report) in [("cold", &streaming_cold), ("warm", &streaming_warm)] {
+            assert_eq!(report.total_messages, 3, "{phase} streaming messages");
+            assert_eq!(report.entries.len(), 1, "{phase} model groups");
+            let performance = &report.entries[0].performance;
+            assert_eq!(
+                performance.total_duration_ms, 7_000,
+                "{phase} total duration"
+            );
+            assert_eq!(performance.timed_tokens, 170, "{phase} timed tokens");
+            assert_eq!(performance.sample_count, 3, "{phase} samples");
+            assert_eq!(performance.token_coverage, 1.0, "{phase} coverage");
+            let expected_ms_per_1k = 7_000.0 * 1_000.0 / 170.0;
+            assert!(
+                (performance.ms_per_1k_tokens.unwrap() - expected_ms_per_1k).abs() < f64::EPSILON,
+                "{phase} milliseconds per 1K tokens"
+            );
+        }
+    }
+
     #[test]
     #[serial_test::serial]
     fn test_codex_archive_roots_are_exact_once_across_all_consumers() {

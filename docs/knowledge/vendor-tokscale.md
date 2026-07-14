@@ -70,7 +70,7 @@ flowchart TD
 
 ## Schema and parser output
 
-The vendor owns its cache-schema counter. It is currently schema 28 after selective parser and attribution changes. Do not mirror an upstream schema number merely because the same upstream commit is being ported. Bump the local schema when serialized message fields, parser output, dedup keys, or attribution changes make old cached values semantically stale; do not bump for report-time-only arithmetic changes.
+The vendor owns its cache-schema counter. It is currently schema 29 after the Codex non-overlapping-duration parser change and incremental cursor addition. Do not mirror an upstream schema number merely because the same upstream commit is being ported. Bump the local schema when serialized message fields, parser output, dedup keys, attribution, or parser-resume state changes make old cached values semantically stale; do not bump for report-time-only arithmetic changes.
 
 A parser-output change must include a same-fingerprint stale-cache regression. A test that only parses a fresh source does not prove that existing users receive the correction.
 

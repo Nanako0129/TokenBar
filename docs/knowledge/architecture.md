@@ -66,7 +66,7 @@ The local streaming path is a cache-aware, per-file pass. Each client lane parse
 | Source identity | Fingerprint the source and relevant siblings | A metadata-only rewrite must invalidate a cached parse |
 | Change probe | Compare the latest source mtime, including SQLite WAL or parser-specific siblings | A cache hit must not hide a live-tail write |
 | Mtime pruning | Keep append-only and SQLite-backed lanes according to their source semantics | Main-file mtime is not sufficient for WAL or sibling updates |
-| Message cache | Rebuild when serialized parser output changes | Cache schema 28 is local to this vendor and must not mirror upstream numbers |
+| Message cache | Rebuild when serialized parser output or resume state changes | Cache schema 29 is local to this vendor and must not mirror upstream numbers |
 | Report fold | Feed filtered, deduped, priced messages into report-specific sinks | All report consumers need a documented arithmetic and client-set contract |
 
 A parser that reads a secondary file must update all four related seams together: fingerprint, active lane, latest-mtime probe, and mtime pruning. SQLite lanes also probe the WAL. This is the sibling rule captured in [`verification.md`](verification.md) and [`vendor-tokscale.md`](vendor-tokscale.md).
