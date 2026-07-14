@@ -3120,8 +3120,8 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
         &scan_result.kiro_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
-    // Hermes/Zed dbs may also be discovered via user-provided extra scan
-    // roots (the `files` lanes) — use the plural helpers so every db gets
+    // Hermes/Zed dbs may also be auto-discovered or supplied through extra
+    // scan roots (the `files` lanes) — use the plural helpers so every db gets
     // its `-wal` sidecar probed, not just the default-path single.
     dbs.extend(scan_result.hermes_db_paths());
     dbs.extend(scan_result.zed_db_paths());
@@ -8555,7 +8555,7 @@ mod tests {
     #[test]
     fn test_parse_local_clients_honors_scanner_extra_scan_paths_for_hermes_profile_db() {
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+        let profile_dir = temp_dir.path().join("external-hermes/director_planning");
         std::fs::create_dir_all(&profile_dir).unwrap();
         let profile_db = profile_dir.join("state.db");
         let conn = create_hermes_sqlite_db(&profile_db);
@@ -8618,13 +8618,94 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
+    fn test_auto_discovered_hermes_profile_reaches_all_consumers() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let count_cache = tempfile::TempDir::new().unwrap();
+        let profile_dir = source_home.path().join(".hermes/profiles/research");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        let conn = create_hermes_sqlite_db(&profile_db);
+        insert_hermes_session(
+            &conn,
+            "hermes-auto-profile",
+            "claude-sonnet-4",
+            2,
+            100,
+            25,
+            0.07,
+        );
+        drop(conn);
+
+        let home = source_home.path().to_str().unwrap().to_string();
+        let clients = vec!["hermes".to_string()];
+        let materialized = with_isolated_tokscale_cache(materialized_cache.path(), || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                &home,
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        });
+        assert_eq!(materialized.len(), 1);
+        assert_eq!(materialized[0].session_id, "hermes-auto-profile");
+        assert_eq!(materialized[0].tokens.input, 100);
+        assert_eq!(materialized[0].tokens.output, 25);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let streaming = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            runtime
+                .block_on(get_model_report(ReportOptions {
+                    home_dir: Some(home.clone()),
+                    use_env_roots: false,
+                    clients: Some(clients.clone()),
+                    ..Default::default()
+                }))
+                .unwrap()
+        });
+        assert_eq!(streaming.total_messages, 2);
+        assert_eq!(streaming.total_input, 100);
+        assert_eq!(streaming.total_output, 25);
+
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        let counted = with_isolated_tokscale_cache(count_cache.path(), || {
+            parse_local_clients(LocalParseOptions {
+                home_dir: Some(home),
+                use_env_roots: false,
+                clients: Some(clients),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: Some(future_ms),
+            })
+            .unwrap()
+        });
+        assert_eq!(counted.counts.get(ClientId::Hermes), 2);
+        assert_eq!(counted.messages.len(), 1);
+        assert_eq!(counted.messages[0].session_id, "hermes-auto-profile");
+        assert_eq!(counted.messages[0].input, 100);
+        assert_eq!(counted.messages[0].output, 25);
+    }
+
+    #[test]
     fn test_modified_after_never_prunes_hermes_dbs_from_extra_scan_paths() {
         // SQLite WAL writes may leave the main db file's mtime untouched, so
         // `modified_after` must not prune Hermes/Zed dbs even when they come
         // from user scan roots (the `files` lanes) rather than the default
         // single-db path. A threshold in the future would prune any mtime.
         let temp_dir = tempfile::TempDir::new().unwrap();
-        let profile_dir = temp_dir.path().join(".hermes/profiles/director_planning");
+        let profile_dir = temp_dir.path().join("external-hermes/director_planning");
         std::fs::create_dir_all(&profile_dir).unwrap();
         let profile_db = profile_dir.join("state.db");
         let conn = create_hermes_sqlite_db(&profile_db);
@@ -9289,6 +9370,49 @@ mod tests {
         latest_source_mtime_ms_probes_grok_sibling("events.jsonl");
     }
 
+    #[test]
+    fn test_latest_source_mtime_ms_probes_auto_discovered_hermes_profile_wal() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let profile_dir = source_home.path().join(".hermes/profiles/research");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+        let db = profile_dir.join("state.db");
+        let wal = profile_dir.join("state.db-wal");
+        std::fs::File::create(&db).unwrap();
+        std::fs::File::create(&wal).unwrap();
+
+        let db_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let wal_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        let db_file = std::fs::OpenOptions::new().write(true).open(&db).unwrap();
+        let Ok(()) = db_file.set_modified(db_time) else {
+            return;
+        };
+        drop(db_file);
+        let wal_file = std::fs::OpenOptions::new().write(true).open(&wal).unwrap();
+        let Ok(()) = wal_file.set_modified(wal_time) else {
+            return;
+        };
+        drop(wal_file);
+
+        let options = LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec!["hermes".to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
+        };
+        let token = crate::latest_source_mtime_ms(&options).unwrap();
+
+        assert_eq!(
+            token, 1_700_086_400_000,
+            "the change token must include an auto-discovered profile WAL"
+        );
+    }
+
     // The live-tail change token must move when jcode appends to the sibling
     // `.journal.jsonl` even though the snapshot mtime is unchanged; otherwise
     // UsageTail short-circuits and never reflects the new turn.
@@ -9463,7 +9587,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_local_clients_dedups_hermes_sessions_across_default_and_extra_dbs() {
+    fn test_parse_local_clients_dedups_default_and_auto_discovered_hermes_profile() {
         let temp_dir = tempfile::TempDir::new().unwrap();
 
         let default_dir = temp_dir.path().join(".hermes");
@@ -9494,10 +9618,17 @@ mod tests {
             999,
             9.99,
         );
+        insert_hermes_session(
+            &profile_conn,
+            "profile-only-session",
+            "claude-sonnet-4",
+            1,
+            30,
+            3,
+            0.02,
+        );
         drop(profile_conn);
 
-        let mut extra_scan_paths = std::collections::BTreeMap::new();
-        extra_scan_paths.insert("hermes".to_string(), vec![profile_db]);
         let parsed = parse_local_clients(LocalParseOptions {
             home_dir: Some(temp_dir.path().to_str().unwrap().to_string()),
             use_env_roots: false,
@@ -9505,19 +9636,24 @@ mod tests {
             since: None,
             until: None,
             year: None,
-            scanner_settings: scanner::ScannerSettings {
-                extra_scan_paths,
-                ..Default::default()
-            },
+            scanner_settings: scanner::ScannerSettings::default(),
             modified_after: None,
         })
         .unwrap();
 
-        assert_eq!(parsed.counts.get(ClientId::Hermes), 2);
-        assert_eq!(parsed.messages.len(), 1);
-        assert_eq!(parsed.messages[0].session_id, "shared-hermes-session");
-        assert_eq!(parsed.messages[0].input, 100);
-        assert_eq!(parsed.messages[0].output, 25);
+        assert_eq!(parsed.counts.get(ClientId::Hermes), 3);
+        assert_eq!(parsed.messages.len(), 2);
+        let shared = parsed
+            .messages
+            .iter()
+            .find(|message| message.session_id == "shared-hermes-session")
+            .unwrap();
+        assert_eq!(shared.input, 100);
+        assert_eq!(shared.output, 25);
+        assert!(parsed
+            .messages
+            .iter()
+            .any(|message| message.session_id == "profile-only-session"));
     }
 
     #[test]

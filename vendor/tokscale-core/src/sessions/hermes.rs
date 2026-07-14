@@ -2,6 +2,7 @@
 //!
 //! Parses aggregated session rows from Hermes Agent's SQLite state database:
 //! - `~/.hermes/state.db`
+//! - `~/.hermes/profiles/<profile>/state.db`
 //! - `$HERMES_HOME/state.db`
 
 use super::UnifiedMessage;
