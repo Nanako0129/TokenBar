@@ -3165,6 +3165,14 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
             }
         }
     }
+    // Roo-family task parsers read model and agent identity from the sibling
+    // api_conversation_history.json. Probe it alongside ui_messages.json so a
+    // history-only rewrite reaches the cache fingerprint and active lane.
+    for client in [ClientId::RooCode, ClientId::KiloCode, ClientId::Cline] {
+        for ui_messages in scan_result.get(client) {
+            latest = latest.max(roo_source_mtime_ms(ui_messages).unwrap_or(0));
+        }
+    }
     Ok(latest)
 }
 
@@ -3173,6 +3181,37 @@ fn file_mtime_ms(path: &Path) -> Option<u64> {
     let modified = std::fs::metadata(path).ok()?.modified().ok()?;
     let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
     Some(duration.as_millis() as u64)
+}
+
+/// Newest mtime for a primary source and every related path its parser reads.
+/// Missing optional paths are ignored. Any other metadata failure returns
+/// `None`, allowing pruning callers to fail open rather than silently dropping
+/// a source whose freshness cannot be established.
+fn source_with_related_mtime_ms(
+    source: &Path,
+    related_paths: impl IntoIterator<Item = PathBuf>,
+) -> Option<u64> {
+    let mut latest = file_mtime_ms(source)?;
+    for related in related_paths {
+        let metadata = match std::fs::metadata(&related) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(_) => return None,
+        };
+        let modified = metadata.modified().ok()?;
+        let duration = modified.duration_since(std::time::UNIX_EPOCH).ok()?;
+        latest = latest.max(duration.as_millis() as u64);
+    }
+    Some(latest)
+}
+
+fn roo_source_mtime_ms(ui_messages_path: &Path) -> Option<u64> {
+    source_with_related_mtime_ms(
+        ui_messages_path,
+        std::iter::once(sessions::roocode::history_path_for_ui_messages(
+            ui_messages_path,
+        )),
+    )
 }
 
 /// Newest mtime for a Grok session's scanned updates file and every metadata
@@ -3200,10 +3239,10 @@ fn grok_source_mtime_ms(updates_path: &Path) -> Option<u64> {
 /// touching it: the Hermes/Zed/Antigravity-CLI/micode lanes hold SQLite dbs
 /// (WAL writes may not bump the main `.db` mtime), while the jcode lane holds a
 /// `session_*.json` snapshot whose sibling `.journal.jsonl` is appended between
-/// snapshot rewrites. Those lanes remain exempt. Grok can still be bounded by
-/// pruning against the newest mtime of `updates.jsonl` and every metadata sibling
-/// the parser reads (`signals.json` / `summary.json` / `events.jsonl`). Any stat
-/// failure keeps the file — over-parsing is safe, silently skipping is not.
+/// snapshot rewrites. Those lanes remain exempt. Roo-family and Grok sources can
+/// still be bounded by folding every parser dependency into their newest mtime.
+/// Any stat failure keeps the file — over-parsing is safe, silently skipping is
+/// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
     // Lanes whose scanned file's mtime does not reflect a sibling write
     // (SQLite `-wal` or jcode's `.journal.jsonl`); kept in lockstep with the
@@ -3215,8 +3254,18 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
         ClientId::MiMoCode as usize,
         ClientId::Jcode as usize,
     ];
+    let roo_lanes = [
+        ClientId::RooCode as usize,
+        ClientId::KiloCode as usize,
+        ClientId::Cline as usize,
+    ];
     for (lane, files) in scan_result.files.iter_mut().enumerate() {
         if db_lanes.contains(&lane) {
+            continue;
+        }
+        if roo_lanes.contains(&lane) {
+            files
+                .retain(|path| roo_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms));
             continue;
         }
         if lane == ClientId::Grok as usize {
@@ -3926,16 +3975,18 @@ mod tests {
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
         dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
-        get_model_report, get_monthly_report, message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
+        get_model_report, get_monthly_report, latest_source_mtime_ms, message_cache,
+        normalize_model_for_grouping, parse_all_messages_with_pricing,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
+        parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
-        select_local_parse_pricing, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
-        GroupBy, LocalParseOptions, OpenCodeStreamingSelection, ReportOptions, TokenBreakdown,
-        UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
+        CostSource, GroupBy, LocalParseOptions, OpenCodeStreamingSelection, ReportOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
+    use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::Arc;
 
@@ -9060,6 +9111,332 @@ mod tests {
             (absent.cost - recomputed).abs() < 1e-9,
             "a missing embedded cost must still be priced, got {}",
             absent.cost
+        );
+    }
+
+    fn roo_task_root(home: &Path, client: ClientId) -> PathBuf {
+        let relative = match client {
+            ClientId::RooCode => ".config/Code/User/globalStorage/rooveterinaryinc.roo-cline/tasks",
+            ClientId::KiloCode => ".config/Code/User/globalStorage/kilocode.kilo-code/tasks",
+            ClientId::Cline => ".config/Code/User/globalStorage/saoudrizwan.claude-dev/tasks",
+            _ => panic!("not a Roo-family client: {client:?}"),
+        };
+        home.join(relative)
+    }
+
+    fn write_roo_history_fixture(history: &Path, model: &str, agent: &str) {
+        std::fs::write(
+            history,
+            format!(
+                "<environment_details><model>{model}</model><slug>{agent}</slug></environment_details>"
+            ),
+        )
+        .unwrap();
+    }
+
+    fn write_roo_task_fixture(
+        home: &Path,
+        client: ClientId,
+        task_id: &str,
+        model: &str,
+        agent: &str,
+    ) -> (PathBuf, PathBuf) {
+        let task_dir = roo_task_root(home, client).join(task_id);
+        std::fs::create_dir_all(&task_dir).unwrap();
+        let ui_messages = task_dir.join("ui_messages.json");
+        std::fs::write(
+            &ui_messages,
+            r#"[{"type":"say","say":"api_req_started","ts":"2026-06-25T10:00:00Z","text":"{\"cost\":0.125,\"tokensIn\":100,\"tokensOut\":25,\"cacheReads\":10,\"cacheWrites\":5,\"apiProtocol\":\"anthropic\"}"}]"#,
+        )
+        .unwrap();
+        let history = sessions::roocode::history_path_for_ui_messages(&ui_messages);
+        write_roo_history_fixture(&history, model, agent);
+        (ui_messages, history)
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_roo_family_history_rewrite_refreshes_materialized_and_streaming_caches() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let family = [ClientId::RooCode, ClientId::KiloCode, ClientId::Cline];
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "old-model".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        litellm.insert(
+            "new-model-with-longer-id".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.01),
+                output_cost_per_token: Some(0.02),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let mut histories = Vec::new();
+        for client in family {
+            let task_id = format!("{}-task", client.as_str());
+            let (_, history) = write_roo_task_fixture(
+                source_home.path(),
+                client,
+                &task_id,
+                "old-model",
+                "old-agent",
+            );
+            histories.push(history);
+        }
+
+        let home = source_home.path().to_str().unwrap().to_string();
+        let clients: Vec<String> = family
+            .into_iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        let run_materialized = || {
+            with_isolated_tokscale_cache(materialized_cache.path(), || {
+                parse_all_messages_with_pricing_with_env_strategy(
+                    &home,
+                    &clients,
+                    Some(&pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                )
+            })
+        };
+        let run_streaming = || {
+            with_isolated_tokscale_cache(streaming_cache.path(), || {
+                let mut messages = Vec::new();
+                scan_messages_streaming(
+                    &home,
+                    &clients,
+                    Some(&pricing),
+                    false,
+                    &scanner::ScannerSettings::default(),
+                    &|_: &UnifiedMessage| true,
+                    &mut |message: &UnifiedMessage| messages.push(message.clone()),
+                );
+                messages
+            })
+        };
+
+        let materialized_before = run_materialized();
+        let streaming_before = run_streaming();
+        for (lane, messages) in [
+            ("materialized", &materialized_before),
+            ("streaming", &streaming_before),
+        ] {
+            assert_eq!(messages.len(), 3, "{lane} seed message count");
+            assert!(messages.iter().all(|message| {
+                message.model_id == "old-model" && message.agent.as_deref() == Some("old-agent")
+            }));
+        }
+
+        for history in &histories {
+            write_roo_history_fixture(history, "new-model-with-longer-id", "new-agent");
+        }
+
+        let materialized_after = run_materialized();
+        let streaming_after = run_streaming();
+        assert_eq!(materialized_after.len(), 3);
+        assert_eq!(streaming_after.len(), 3);
+        for client in family {
+            let client_name = client.as_str();
+            let materialized = materialized_after
+                .iter()
+                .find(|message| message.client == client_name)
+                .unwrap();
+            let streaming = streaming_after
+                .iter()
+                .find(|message| message.client == client_name)
+                .unwrap();
+            let materialized_before = materialized_before
+                .iter()
+                .find(|message| message.client == client_name)
+                .unwrap();
+
+            assert_eq!(materialized.session_id, format!("{client_name}-task"));
+            assert_eq!(materialized.model_id, "new-model-with-longer-id");
+            assert_eq!(materialized.agent.as_deref(), Some("new-agent"));
+            assert_eq!(materialized.tokens.input, 100);
+            assert_eq!(materialized.tokens.output, 25);
+            assert_eq!(materialized.tokens.cache_read, 10);
+            assert_eq!(materialized.tokens.cache_write, 5);
+            assert!(
+                materialized.cost > materialized_before.cost,
+                "{client_name} history model rewrite must refresh derived pricing"
+            );
+
+            assert_eq!(streaming.client, materialized.client);
+            assert_eq!(streaming.session_id, materialized.session_id);
+            assert_eq!(streaming.model_id, materialized.model_id);
+            assert_eq!(streaming.agent, materialized.agent);
+            assert_eq!(streaming.tokens.input, materialized.tokens.input);
+            assert_eq!(streaming.tokens.output, materialized.tokens.output);
+            assert_eq!(streaming.tokens.cache_read, materialized.tokens.cache_read);
+            assert_eq!(
+                streaming.tokens.cache_write,
+                materialized.tokens.cache_write
+            );
+            assert!((streaming.cost - materialized.cost).abs() < 1e-9);
+        }
+    }
+
+    fn latest_source_mtime_probes_roo_history(client: ClientId) {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let (ui_messages, history) = write_roo_task_fixture(
+            source_home.path(),
+            client,
+            "mtime-task",
+            "test-model",
+            "test-agent",
+        );
+        let stale_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let fresh_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        for (path, time) in [(&ui_messages, stale_time), (&history, fresh_time)] {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let Ok(()) = file.set_modified(time) else {
+                return;
+            };
+        }
+
+        let token = latest_source_mtime_ms(&LocalParseOptions {
+            home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+            use_env_roots: false,
+            clients: Some(vec![client.as_str().to_string()]),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner::ScannerSettings::default(),
+            modified_after: None,
+        })
+        .unwrap();
+
+        assert_eq!(
+            token,
+            1_700_086_400_000,
+            "{} change token must include the history sibling",
+            client.as_str()
+        );
+    }
+
+    #[test]
+    fn test_latest_source_mtime_ms_probes_roocode_history() {
+        latest_source_mtime_probes_roo_history(ClientId::RooCode);
+    }
+
+    #[test]
+    fn test_latest_source_mtime_ms_probes_kilocode_history() {
+        latest_source_mtime_probes_roo_history(ClientId::KiloCode);
+    }
+
+    #[test]
+    fn test_latest_source_mtime_ms_probes_cline_history() {
+        latest_source_mtime_probes_roo_history(ClientId::Cline);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_modified_after_keeps_roo_family_with_fresh_history() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let family = [ClientId::RooCode, ClientId::KiloCode, ClientId::Cline];
+        let stale_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let fresh_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+
+        for client in family {
+            let stale_id = format!("{}-stale", client.as_str());
+            let active_id = format!("{}-active", client.as_str());
+            let (stale_ui, stale_history) = write_roo_task_fixture(
+                source_home.path(),
+                client,
+                &stale_id,
+                "stale-model",
+                "stale-agent",
+            );
+            let (active_ui, active_history) = write_roo_task_fixture(
+                source_home.path(),
+                client,
+                &active_id,
+                "active-model",
+                "active-agent",
+            );
+            for path in [&stale_ui, &stale_history, &active_ui, &active_history] {
+                let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+                let Ok(()) = file.set_modified(stale_time) else {
+                    return;
+                };
+            }
+            let file = std::fs::OpenOptions::new()
+                .write(true)
+                .open(&active_history)
+                .unwrap();
+            let Ok(()) = file.set_modified(fresh_time) else {
+                return;
+            };
+        }
+
+        let clients: Vec<String> = family
+            .into_iter()
+            .map(|client| client.as_str().to_string())
+            .collect();
+        let parsed = with_isolated_tokscale_cache(cache_home.path(), || {
+            parse_local_clients(LocalParseOptions {
+                home_dir: Some(source_home.path().to_str().unwrap().to_string()),
+                use_env_roots: false,
+                clients: Some(clients),
+                since: None,
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: Some(1_700_043_200_000),
+            })
+            .unwrap()
+        });
+
+        assert_eq!(parsed.messages.len(), 3);
+        for client in family {
+            assert_eq!(parsed.counts.get(client), 1);
+            assert!(parsed.messages.iter().any(|message| {
+                message.client == client.as_str()
+                    && message.session_id == format!("{}-active", client.as_str())
+                    && message.model_id == "active-model"
+            }));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_modified_after_roo_history_stat_failure_keeps_source() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let ui_messages = temp_dir.path().join("ui_messages.json");
+        std::fs::write(&ui_messages, b"[]").unwrap();
+        let history = sessions::roocode::history_path_for_ui_messages(&ui_messages);
+        std::os::unix::fs::symlink("api_conversation_history.json", &history).unwrap();
+
+        let mut scan_result = scanner::ScanResult::default();
+        scan_result
+            .get_mut(ClientId::RooCode)
+            .push(ui_messages.clone());
+        let future_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+            + 3_600_000;
+        prune_scan_result_by_mtime(&mut scan_result, future_ms);
+
+        assert_eq!(
+            scan_result.get(ClientId::RooCode),
+            std::slice::from_ref(&ui_messages),
+            "an unreadable history sibling must fail open during pruning"
         );
     }
 

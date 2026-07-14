@@ -263,10 +263,7 @@ impl SourceFingerprint {
     /// unchanged) must still invalidate the cache or reports keep stale
     /// model/agent/pricing.
     pub(crate) fn from_roo_path(path: &Path) -> Option<Self> {
-        let history = path
-            .parent()
-            .unwrap_or_else(|| Path::new("."))
-            .join("api_conversation_history.json");
+        let history = crate::sessions::roocode::history_path_for_ui_messages(path);
         let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
         Self::from_path_with_related(path, related_paths)
     }
@@ -1087,6 +1084,26 @@ mod tests {
         assert_eq!(
             plain_before, plain_after,
             "from_path ignores the history sibling (control)"
+        );
+    }
+
+    #[test]
+    fn from_roo_path_invalidates_when_history_appears() {
+        let dir = TempDir::new().unwrap();
+        let ui = dir.path().join("ui_messages.json");
+        std::fs::write(&ui, b"[]").unwrap();
+
+        let before = SourceFingerprint::from_roo_path(&ui).unwrap();
+        std::fs::write(
+            crate::sessions::roocode::history_path_for_ui_messages(&ui),
+            b"<environment_details><model>gpt-5</model></environment_details>",
+        )
+        .unwrap();
+        let after = SourceFingerprint::from_roo_path(&ui).unwrap();
+
+        assert_ne!(
+            before, after,
+            "creating the optional history sibling must invalidate the roo fingerprint"
         );
     }
 

@@ -94,7 +94,7 @@ fn extract_session_id(path: &Path) -> String {
 }
 
 fn read_task_metadata(ui_messages_path: &Path) -> (String, Option<String>) {
-    let history_path = sibling_history_path(ui_messages_path);
+    let history_path = history_path_for_ui_messages(ui_messages_path);
     let content = match std::fs::read_to_string(&history_path) {
         Ok(c) => c,
         Err(_) => return ("unknown".to_string(), None),
@@ -103,7 +103,7 @@ fn read_task_metadata(ui_messages_path: &Path) -> (String, Option<String>) {
     extract_model_and_agent(&content)
 }
 
-fn sibling_history_path(ui_messages_path: &Path) -> PathBuf {
+pub(crate) fn history_path_for_ui_messages(ui_messages_path: &Path) -> PathBuf {
     ui_messages_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
