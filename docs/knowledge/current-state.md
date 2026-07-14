@@ -57,7 +57,7 @@ Setup-token quota fallback is shipped: when profile usage is unavailable, provid
 
 | Workstream | Status | Public surface |
 |---|---|---|
-| Copilot upstream follow-up | Open upstream report for hierarchy and cache-version hardening; vendor bookkeeping points to the current issue and PR | [issue #879](https://github.com/junhoyeo/tokscale/issues/879), [PR #880](https://github.com/junhoyeo/tokscale/pull/880) |
+| Copilot upstream follow-up | Upstream issue #879 is closed and PR #880 is merged; assess whether the merged fix is already equivalent to the local hardening or needs selective bookkeeping, rather than waiting on upstream | [issue #879](https://github.com/junhoyeo/tokscale/issues/879), [PR #880](https://github.com/junhoyeo/tokscale/pull/880) |
 | Rolling tokscale alignment | Active inventory and decision process; work is selective, not wholesale | [issue #45](https://github.com/Nanako0129/TokenBar/issues/45), [`plans/tokscale-alignment.md`](plans/tokscale-alignment.md) |
 | Day-bar empty-today behavior | Parked, because changing the right edge changes the visible chart and needs a focused fixture plus UI verification | No public commitment beyond the maintenance note |
 | Liquid Glass parity | Parked; current glass recipe remains the shipped status quo | [`history/liquid-glass-experiments.md`](history/liquid-glass-experiments.md) |

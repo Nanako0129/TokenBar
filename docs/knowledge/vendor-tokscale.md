@@ -91,7 +91,7 @@ This rule applies to JSONL journals, Roo-family history, SQLite WAL files, Claud
 
 The public rolling inventory is tracked in [issue #45](https://github.com/Nanako0129/TokenBar/issues/45). It is an inventory and decision surface, not a promise to clear every deferred capability. Correctness work is prioritized over new client breadth during maintenance. Every selected item must be re-evaluated against the current upstream head and current vendor tree before implementation.
 
-The Copilot nested-agent bookkeeping in `vendor/README.md` now points to upstream issue [#879](https://github.com/junhoyeo/tokscale/issues/879) and pull request [#880](https://github.com/junhoyeo/tokscale/pull/880). Do not resurrect the superseded intermediate report when describing that status.
+The Copilot nested-agent bookkeeping in `vendor/README.md` records upstream issue [#879](https://github.com/junhoyeo/tokscale/issues/879) as closed and pull request [#880](https://github.com/junhoyeo/tokscale/pull/880) as merged (upstream commit `20d9096a68a40d4a4e83581b0e0dd308aadc5ab7`; GitHub PR merge commit `b7277d49a14ae905c17195be214d632e365b3ca6`). The local M10-E hardening predates that upstream merge and already has equivalent trace-scoped hierarchy and cache-version behavior; verify the exact merged diff before deciding whether selective bookkeeping is needed. This is no longer an external-upstream wait state. Do not resurrect the superseded intermediate report when describing that status.
 
 ## Handoff checklist
 

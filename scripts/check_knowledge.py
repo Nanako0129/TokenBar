@@ -16,7 +16,7 @@ TREATMENTS = {'migrated','adapted','linked','deferred','retired','excluded','ver
 ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]*$')
 LEDGER_IDS = {f'SRC-{n:03d}' for n in range(1, 59)}
 LINK = re.compile(r'!?\[[^]]*\]\(([^)]+)\)')
-SKIP = {'.agent-local','.git','.build','target','.swiftpm','node_modules','dist'}
+SKIP = {'.agent-local','.omo','.git','.build','target','.swiftpm','node_modules','dist'}
 MACHINE = [
     re.compile(r'/Users/[^\s`"\']+'),
     re.compile(r'/home/[^\s`"\']+'),
@@ -279,9 +279,13 @@ def self_test():
         def test_good(self): self.assertEqual(validate(self.root()),[])
         def test_bad(self):
             s='\n'.join(map(str,validate(self.root(True)))); self.assertIn('duplicate id',s); self.assertIn('missing link target',s); self.assertIn('secret value',s); self.assertIn('invalid scope',s)
-        def test_agent_local_overlay_is_ignored(self):
-            r=self.root(); overlay=r/'.agent-local'; overlay.mkdir(); (overlay/'AGENTS.md').write_text('secret = sk-live-1\n/Users/alice/private-notes.md\n[missing](nope.md)')
-            self.assertEqual(validate(r),[])
+        def test_ignored_overlay_is_ignored(self):
+            for name in ('.agent-local', '.omo'):
+                with self.subTest(name=name):
+                    r=self.root(); overlay=r/name; nested=overlay/'nested'; nested.mkdir(parents=True)
+                    payload='secret = sk-live-1\n/Users/alice/private-notes.md\n[missing](nope.md)'
+                    (overlay/'AGENTS.md').write_text(payload); (overlay/'CLAUDE.md').write_text(payload); (nested/'notes.md').write_text(payload)
+                    self.assertEqual(validate(r),[])
         def test_skip_named_parent_does_not_hide_repo(self):
             result='\n'.join(map(str,validate(self.root(True,'target')))); self.assertIn('invalid scope',result); self.assertNotIn('knowledge tree is missing',result)
         def test_root_adapter_contract(self):

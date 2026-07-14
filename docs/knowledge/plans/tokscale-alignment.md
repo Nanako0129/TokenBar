@@ -20,7 +20,7 @@ TokenBar follows upstream `tokscale` as a rolling source and selects correctness
 |---|---|---|
 | Public inventory | active | Keep issue #45 current; inventory does not imply an implementation commitment |
 | Vendored correctness | priority | Prefer user-reported wrong/missing data, cache invalidation, and cross-language contract fixes |
-| Copilot upstream follow-up | external pending | Track issue #879 and PR #880; keep vendor bookkeeping explicit until upstream status changes |
+| Copilot upstream follow-up | merged upstream; local assessment pending | Issue #879 is closed and PR #880 is merged; compare the merged fix with the local hardening and record only any selective bookkeeping still needed |
 | New client breadth | deferred | Requires an explicit product decision and a complete streaming/cache/FFI adaptation |
 | Pricing pipeline expansion | deferred | Do not port a partial routed-pricing behavior without a complete precedence and safety model |
 
