@@ -82,14 +82,19 @@ Swift as a C-ABI staticlib (`crates/tb_core_ffi`). Swift owns the rest: SwiftUI
 views, the `NSStatusItem` shell, Sparkle updates.
 
 ```sh
-make        # cargo build --release, then swift build
-make run    # build + run the smoke binary
+make                        # cargo build --release, then swift build
+make run                    # build + launch TokenBar
+swift run TokenBar --smoke  # run the FFI smoke test
 ```
 
-For maintainers and coding agents, the [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, vendor boundary, release chain, and maintenance state.
+The [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, vendor boundary, release chain, and maintenance state.
 
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, change-specific guardrails, verification, and pull-request requirements.
 
 ## Credits
 

@@ -154,7 +154,7 @@ def validate(root):
                     if slug(anchor) not in aset: errors.append(Issue(rel,number,f'missing heading anchor #{anchor} in {target.relative_to(root)}'))
         errors += scan_text(rel,text)
     # Adapters are part of the same contract, not just knowledge documents.
-    adapter_paths.update(p for p in files if p.name in ('AGENTS.md','CLAUDE.md'))
+    adapter_paths.update(p for p in files if p.name in ('AGENTS.md','CLAUDE.md','CONTRIBUTING.md'))
     for p in sorted(adapter_paths): errors += check_adapter(root,p)
     claude=root/'CLAUDE.md'
     if claude.exists() and not claude.is_symlink() and not re.search(r'(?:AGENTS\.md|docs/knowledge(?:/README\.md)?)',claude.read_text(encoding='utf-8'),re.I):
@@ -291,6 +291,9 @@ def self_test():
         def test_root_adapter_contract(self):
             r=self.root(); (r/'CLAUDE.md').write_text('[missing](nope.md) /Users/local/file')
             s='\n'.join(map(str,validate(r))); self.assertIn('missing adapter link target',s); self.assertIn('machine-local path',s); self.assertIn('root CLAUDE.md must route',s)
+        def test_contributing_adapter_contract(self):
+            r=self.root(); (r/'CONTRIBUTING.md').write_text('[Knowledge](docs/knowledge/README.md) [missing](nope.md) /Users/local/file')
+            s='\n'.join(map(str,validate(r))); self.assertIn('CONTRIBUTING.md:1: missing adapter link target',s); self.assertIn('CONTRIBUTING.md:1: machine-local path',s)
         def test_linux_home_path(self):
             r=self.root(); (r/'CLAUDE.md').write_text('See AGENTS.md /home/alice/workspace/file')
             self.assertIn('machine-local path','\n'.join(map(str,validate(r))))
