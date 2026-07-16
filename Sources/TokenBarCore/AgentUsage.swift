@@ -8,6 +8,30 @@ public struct AgentIdentity: Decodable, Sendable {
     public let plan: String?
 }
 
+/// A backend-owned historical projection for one quota window.
+///
+/// The values are produced together by the Rust evaluator. Swift may use the
+/// expected usage to classify the current pace, but must preserve the backend's
+/// projection (ETA, lasts-to-reset decision, and optional risk) as one result.
+public struct HistoricalPace: Decodable, Sendable {
+    public let expectedUsedPercent: Double
+    public let etaSeconds: Double?
+    public let willLastToReset: Bool
+    public let runOutProbability: Double?
+
+    public init(
+        expectedUsedPercent: Double,
+        etaSeconds: Double? = nil,
+        willLastToReset: Bool,
+        runOutProbability: Double? = nil
+    ) {
+        self.expectedUsedPercent = expectedUsedPercent
+        self.etaSeconds = etaSeconds
+        self.willLastToReset = willLastToReset
+        self.runOutProbability = runOutProbability
+    }
+}
+
 public struct UsageWindow: Decodable, Sendable {
     public let label: String
     public let usedPercent: Double
@@ -16,18 +40,15 @@ public struct UsageWindow: Decodable, Sendable {
     public let resetText: String?
     /// Total window length in minutes; enables pace (expected vs actual).
     public let windowMinutes: Int64?
-    /// Expected used-percent now from *historical* weekly samples (Codex weekly
-    /// only, once enough past weeks accrued). Absent → fall back to linear pace.
-    public let historicalExpectedPercent: Double?
-    /// 0..1 chance the window empties before reset at the historical burn rate.
-    public let runOutProbability: Double?
+    /// Backend-owned historical projection, present only when enough complete
+    /// weeks exist. Missing or null means Swift uses its linear calculation.
+    public let historicalPace: HistoricalPace?
 
     // Memberwise init so --selftest can build fixture windows.
     public init(
         label: String, usedPercent: Double, remainingPercent: Double,
         resetsAt: String? = nil, resetText: String? = nil,
-        windowMinutes: Int64? = nil, historicalExpectedPercent: Double? = nil,
-        runOutProbability: Double? = nil
+        windowMinutes: Int64? = nil, historicalPace: HistoricalPace? = nil
     ) {
         self.label = label
         self.usedPercent = usedPercent
@@ -35,8 +56,7 @@ public struct UsageWindow: Decodable, Sendable {
         self.resetsAt = resetsAt
         self.resetText = resetText
         self.windowMinutes = windowMinutes
-        self.historicalExpectedPercent = historicalExpectedPercent
-        self.runOutProbability = runOutProbability
+        self.historicalPace = historicalPace
     }
 }
 

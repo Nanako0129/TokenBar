@@ -5,7 +5,7 @@ kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
 last_verified: 2026-07-16
-sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
+sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/codex-historical-pace-v2.md", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 
 # Verification contract
@@ -49,6 +49,7 @@ sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bund
 | Sibling-only write | 預設 fingerprint 不失效；完整 fingerprint、mtime probe、prune 都失效 |
 | Provider cost | 缺失成本可估算；明確 provider-reported 成本不可被 stale pricing 覆蓋 |
 | Hidden client | non-empty partial selection 在 Rust fold 前排除未選 client；`nil`／empty clients 依 C ABI contract 代表 all clients；all-hidden 由 Swift lens strict membership 阻擋 |
+| Quota history | Reset jitter、floating zero、partial／future-reset weeks、account isolation、corrupt recovery 與 current-actual shift 都以 temporary v2 store 驗證；live provider refresh 只作 smoke |
 | Overflow input | old arithmetic fails or wraps in the targeted site；new saturating path remains bounded |
 | Cache schema | 舊版本 cache 不被當成新 layout 靜默接受；新 layout 可重建並 reload |
 
@@ -146,6 +147,7 @@ A source reader that consumes secondary files must be verified as one unit. The 
 | Client filter | Non-empty selected IDs reach Rust before mixed buckets are folded; `nil`／empty client lists mean all clients per `ctb.h`; the Swift lens strict-membership check blocks all-hidden views |
 | Arithmetic | Rust report totals, FFI mappers, Swift models, and live-rate consumers use bounded arithmetic where required |
 | Stale-data policy | A failed refresh retains the last good value instead of blanking a working card |
+| Historical pace | Rust 的 optional nested result 同時擁有 expected、ETA、will-last 與 risk；Swift 只能導出 stage／文字，result 缺席時才使用 Linear |
 | Lifecycle | Closing a popover or settings window cancels its tasks and stops background rendering |
 
 ## Cross-port fixture cross-check
@@ -160,6 +162,8 @@ Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/Token
 | 執行時機 | `Sources/TokenBarCore` 邏輯或 `Format` 語意變更後；Windows repo 每次 re-sync 或 delta 移植後 |
 
 > 首輪實績（2026-07-16）：首跑 115 案例抓到 4 條 printf 捨入 seam 的真實漂移——C# 側以 `Math.Round` 預捨入模擬 `%.nf` 會把非 midpoint 的近半值重新量化；printf 對二進位真值做正確捨入。教訓：**模擬 printf 的中介捨入層一律可疑**。修正與後續 comparator 強化（整數精確比對、bool 嚴格比對、Int64 邊界案例——fixture 現為 116 案）都記錄在 Windows repo。
+
+> Historical pace v2 checkpoint（2026-07-16）：116-case legacy baseline 已重跑，非 historical cases 全數一致。27 個 field differences 只分布在 9 個使用舊 top-level historical scalars 的 cases：`historical-expected-clamped`、`historical-runout-exact-half`、`historical-runout-high-keeps-eta`、`historical-runout-low-forces-lasts`、`historical-with-expected`、`runout-risk-certain`、`runout-risk-clamped-above-one`、`runout-risk-half-percent-rounds-up`、`runout-risk-thirty`。這些是 nested contract 取代 scalar contract 的 intended mismatch；Windows 新增 nested fixture／DTO 並完成 semantic port 前，不得宣稱 historical parity。
 
 ## Documentation checks
 

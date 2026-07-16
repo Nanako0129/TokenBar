@@ -62,6 +62,17 @@ pub struct AgentIdentity {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct HistoricalPacePayload {
+    pub(crate) expected_used_percent: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) eta_seconds: Option<f64>,
+    pub(crate) will_last_to_reset: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) run_out_probability: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct UsageWindow {
     label: String,
     used_percent: f64,
@@ -71,16 +82,10 @@ pub struct UsageWindow {
     /// Total length of this rate-limit window in minutes. Lets the frontend
     /// derive a usage *pace* (expected vs actual at this point in the window).
     window_minutes: Option<i64>,
-    /// Expected used-percent at this point in the window derived from *historical*
-    /// usage samples (not the naive linear elapsed/duration). Only Codex weekly
-    /// carries this once enough completed weeks have accrued; everything else is
-    /// `None` and the frontend falls back to linear pace.
+    /// Rust-owned coherent historical expected/ETA/lasts/risk projection.
+    /// Missing means the frontend must use its linear fallback.
     #[serde(skip_serializing_if = "Option::is_none")]
-    historical_expected_percent: Option<f64>,
-    /// Probability (0..1) the window empties before its reset at the historical
-    /// burn rate. Companion to `historical_expected_percent`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    run_out_probability: Option<f64>,
+    historical_pace: Option<HistoricalPacePayload>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -126,8 +131,7 @@ impl UsageWindow {
             resets_at: resets_at.map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true)),
             reset_text: resets_at.map(|d| reset_text(d, now)),
             window_minutes,
-            historical_expected_percent: None,
-            run_out_probability: None,
+            historical_pace: None,
         }
     }
 
@@ -617,7 +621,7 @@ async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
         now,
     );
     let account_key = codex_account_key(&credentials, identity.as_ref());
-    enrich_codex_weekly_history(&mut windows, &account_key, now);
+    enrich_codex_weekly_history(&mut windows, account_key.as_deref(), now);
     if windows.is_empty() && usage.credits.as_ref().and_then(|c| c.balance).is_none() {
         return Err("Codex usage API returned no rate-limit windows.".to_string());
     }
@@ -1598,19 +1602,38 @@ fn save_codex_credentials(credentials: &CodexCredentials) -> Result<(), String> 
 
 /// Stable per-account key for scoping historical samples, so switching ChatGPT
 /// accounts doesn't mix usage curves. Prefer the account id, fall back to email.
-fn codex_account_key(credentials: &CodexCredentials, identity: Option<&AgentIdentity>) -> String {
+/// Unknown owners are intentionally rejected rather than sharing one default
+/// bucket across logins.
+fn codex_account_key(
+    credentials: &CodexCredentials,
+    identity: Option<&AgentIdentity>,
+) -> Option<String> {
     credentials
         .account_id
-        .clone()
+        .as_deref()
+        .map(str::trim)
         .filter(|id| !id.is_empty())
-        .or_else(|| identity.and_then(|i| i.email.clone()))
-        .unwrap_or_else(|| "default".to_string())
+        .map(str::to_string)
+        .or_else(|| {
+            identity
+                .and_then(|i| i.email.as_deref())
+                .map(str::trim)
+                .filter(|email| !email.is_empty())
+                .map(str::to_string)
+        })
 }
 
 /// Record the live Codex weekly reading and, once enough past weeks exist, fill
-/// the window's `historical_expected_percent` / `run_out_probability` so the
-/// frontend can offer a history-based pace alongside the linear one.
-fn enrich_codex_weekly_history(windows: &mut [UsageWindow], account_key: &str, now: DateTime<Utc>) {
+/// the window's nested historical projection so the frontend can use one
+/// backend-owned expected/ETA/lasts/risk result alongside the linear fallback.
+fn enrich_codex_weekly_history(
+    windows: &mut [UsageWindow],
+    account_key: Option<&str>,
+    now: DateTime<Utc>,
+) {
+    let Some(account_key) = account_key.filter(|key| !key.trim().is_empty()) else {
+        return;
+    };
     for window in windows.iter_mut() {
         if !window.label.eq_ignore_ascii_case("Weekly") {
             continue;
@@ -1630,8 +1653,12 @@ fn enrich_codex_weekly_history(windows: &mut [UsageWindow], account_key: &str, n
             window.used_percent,
             now.timestamp(),
         ) {
-            window.historical_expected_percent = Some(pace.expected_percent);
-            window.run_out_probability = pace.run_out_probability;
+            window.historical_pace = Some(HistoricalPacePayload {
+                expected_used_percent: pace.expected_percent,
+                eta_seconds: pace.eta_seconds,
+                will_last_to_reset: pace.will_last_to_reset,
+                run_out_probability: pace.run_out_probability,
+            });
         }
     }
 }
@@ -1757,8 +1784,7 @@ fn map_claude_window(
         resets_at: resets_at.map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true)),
         reset_text: resets_at.map(|date| reset_text(date, now)),
         window_minutes: claude_window_minutes(label),
-        historical_expected_percent: None,
-        run_out_probability: None,
+        historical_pace: None,
     })
 }
 
@@ -1819,8 +1845,7 @@ fn unified_ratelimit_window(
         resets_at: resets_at.map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true)),
         reset_text: resets_at.map(|date| reset_text(date, now)),
         window_minutes: claude_window_minutes(label),
-        historical_expected_percent: None,
-        run_out_probability: None,
+        historical_pace: None,
     })
 }
 
@@ -1853,8 +1878,7 @@ fn claude_extra_usage_window(extra: Option<&ClaudeExtraUsage>) -> Option<UsageWi
         resets_at: None,
         reset_text,
         window_minutes: None,
-        historical_expected_percent: None,
-        run_out_probability: None,
+        historical_pace: None,
     })
 }
 
@@ -1938,8 +1962,7 @@ fn map_window(label: &str, window: CodexWindow, now: DateTime<Utc>) -> UsageWind
         resets_at: resets_at.map(|date| date.to_rfc3339_opts(SecondsFormat::Millis, true)),
         reset_text: resets_at.map(|date| reset_text(date, now)),
         window_minutes: (window.limit_window_seconds > 0).then_some(window.limit_window_seconds / 60),
-        historical_expected_percent: None,
-        run_out_probability: None,
+        historical_pace: None,
     }
 }
 
@@ -2201,8 +2224,7 @@ mod tests {
                 resets_at: None,
                 reset_text: None,
                 window_minutes: Some(300),
-                historical_expected_percent: None,
-                run_out_probability: None,
+                historical_pace: None,
             }],
             credits: None,
             error: None,
@@ -2240,6 +2262,68 @@ mod tests {
         assert_eq!(windows[0].remaining_percent, 92.0);
         assert_eq!(windows[1].label, "Weekly");
         assert_eq!(windows[1].remaining_percent, 65.0);
+    }
+
+    #[test]
+    fn serializes_nested_historical_pace_without_legacy_scalars() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let mut window = UsageWindow::from_used_percent(
+            "Weekly".to_string(),
+            60.0,
+            Some(now + chrono::Duration::hours(12)),
+            now,
+            Some(10_080),
+        );
+        window.historical_pace = Some(HistoricalPacePayload {
+            expected_used_percent: 55.0,
+            eta_seconds: Some(3_600.0),
+            will_last_to_reset: false,
+            run_out_probability: Some(0.8),
+        });
+
+        let value = serde_json::to_value(&window).unwrap();
+        assert!(value.get("historicalPace").is_some());
+        assert!(value.get("historicalExpectedPercent").is_none());
+        assert!(value.get("runOutProbability").is_none());
+        let historical = value.get("historicalPace").unwrap();
+        assert_eq!(historical["expectedUsedPercent"], 55.0);
+        assert_eq!(historical["etaSeconds"], 3_600.0);
+        assert_eq!(historical["willLastToReset"], false);
+        assert_eq!(historical["runOutProbability"], 0.8);
+    }
+
+    #[test]
+    fn codex_history_account_key_is_identified_and_prefers_account_id() {
+        let credentials = CodexCredentials {
+            access_token: String::new(),
+            refresh_token: None,
+            id_token: None,
+            account_id: Some("acct-id".to_string()),
+            last_refresh: None,
+            auth_path: PathBuf::new(),
+            raw_json: Value::Null,
+        };
+        let identity = AgentIdentity {
+            email: Some("user@example.com".to_string()),
+            plan: None,
+        };
+        assert_eq!(
+            codex_account_key(&credentials, Some(&identity)).as_deref(),
+            Some("acct-id")
+        );
+
+        let mut email_only = credentials.clone();
+        email_only.account_id = None;
+        assert_eq!(
+            codex_account_key(&email_only, Some(&identity)).as_deref(),
+            Some("user@example.com")
+        );
+        let unknown = AgentIdentity {
+            email: None,
+            plan: None,
+        };
+        assert!(codex_account_key(&email_only, Some(&unknown)).is_none());
+        assert!(codex_account_key(&email_only, None).is_none());
     }
 
     #[test]

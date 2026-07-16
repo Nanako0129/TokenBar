@@ -9,8 +9,16 @@
 // Envelope: every entry point except tb_probe returns
 //   {"ok":true,"data":<payload>}   on success
 //   {"ok":false,"err":"..."}       on failure
-// The data shapes mirror the Tauri frontend contract (TokenBar-tokcat
-// src/lib/types.ts and src/lib/agentUsage.ts) field-for-field.
+// Payload fields use the Tauri frontend's camelCase contract. In particular,
+// AgentUsagePayload is `{generatedAt, agents, opencodeSubscriptions}` (the
+// subscription array is omitted when empty) and each quota window uses
+// `{label, usedPercent, remainingPercent, resetsAt,
+// resetText, windowMinutes, historicalPace}`. When historicalPace is present,
+// it is one nested result with `{expectedUsedPercent, etaSeconds,
+// willLastToReset, runOutProbability}`; missing/null historicalPace means the
+// Swift presentation layer uses its linear pace fallback. The nested result is
+// optional and its ETA/risk fields may be omitted or null. Other report
+// payloads retain their existing camelCase shapes from the Tauri contract.
 // tb_probe keeps its Phase 0 shape: {"ok":true,"messages":N} / {"ok":false,...}.
 //
 // `year` parameters may be NULL or "" for the all-time view, otherwise a

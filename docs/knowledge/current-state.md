@@ -4,8 +4,8 @@ id: kb-current-state
 kind: canonical
 scope: repository
 read_when: starting work, triaging an issue, or deciding whether an upstream item is urgent
-last_verified: 2026-07-15
-sources: ["public GitHub main history", "public issue #45", "vendor/README.md", "docs/knowledge/history/README.md", "docs/knowledge/plans/tokscale-alignment.md"]
+last_verified: 2026-07-16
+sources: ["public GitHub main history", "public issue #45", "vendor/README.md", "docs/knowledge/history/README.md", "docs/knowledge/plans/tokscale-alignment.md", "docs/knowledge/plans/codex-historical-pace-v2.md"]
 ---
 
 # Current state
@@ -57,6 +57,7 @@ Setup-token quota fallback is shipped: when profile usage is unavailable, provid
 
 | Workstream | Status | Public surface |
 |---|---|---|
+| Codex historical pace v2 | Native implementation complete: clean v2 history leaves v1 untouched, Rust owns one coherent expected／ETA／will-last／risk result, and Swift falls back to Linear while learning; Windows nested DTO parity remains a downstream handoff | [`plans/codex-historical-pace-v2.md`](plans/codex-historical-pace-v2.md) |
 | Copilot upstream follow-up | Assessment complete: merged PR #880 is equivalent to the local M10-E trace-scoped hierarchy and cache invalidation; no additional code or schema port is needed | [issue #879](https://github.com/junhoyeo/tokscale/issues/879), [PR #880](https://github.com/junhoyeo/tokscale/pull/880) |
 | Rolling tokscale alignment | The current correctness batch is integrated through M14; the inventory remains active and future work stays selective, not wholesale | [issue #45](https://github.com/Nanako0129/TokenBar/issues/45), [`plans/tokscale-alignment.md`](plans/tokscale-alignment.md) |
 | Day-bar empty-today behavior | Parked, because changing the right edge changes the visible chart and needs a focused fixture plus UI verification | No public commitment beyond the maintenance note |

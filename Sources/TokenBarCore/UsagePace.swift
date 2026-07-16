@@ -3,11 +3,10 @@ import Foundation
 // Usage pace — port of the Tauri app's src/lib/usagePace.ts (itself ported
 // from codexbar's UsagePace).
 //
-// Given a rate-limit window's length and reset time, work out how much you'd
-// be *expected* to have used if you paced evenly, compare it to actual usage,
-// and classify the gap. Positive delta = ahead of pace ("in deficit", burning
-// fast); negative = behind pace ("in reserve"). Also projects when the window
-// empties at the current burn rate.
+// Linear mode derives expected usage and run-out time from elapsed duration.
+// Historical mode consumes one coherent Rust projection instead. Both compare
+// expected with actual usage to classify the gap: positive delta = ahead of
+// pace ("in deficit", burning fast); negative = behind ("in reserve").
 
 /// How the pace marker is derived (`PaceMode` in settings.ts).
 public enum PaceMode: String, CaseIterable, Sendable {
@@ -33,7 +32,8 @@ public struct UsagePace: Sendable {
     public let deltaPercent: Double
     public let expectedUsedPercent: Double
     public let actualUsedPercent: Double
-    /// Seconds until the window empties at the current rate, if before reset.
+    /// Seconds until the window empties, if before reset. Historical mode uses
+    /// the backend evaluator's value; linear mode derives it locally.
     public let etaSeconds: Double?
     /// True if the current rate lasts past the reset (won't run out).
     public let willLastToReset: Bool
@@ -66,6 +66,15 @@ public struct UsagePace: Sendable {
     }
 }
 
+/// UI-free projection text assembled from one pace result and its optional
+/// historical risk. A non-zero visible risk takes precedence over the generic
+/// "Lasts until reset" phrase when the backend says the window will last; this
+/// keeps the two historical signals from rendering as contradictory claims.
+public struct UsagePacePresentation: Sendable, Equatable {
+    public let etaText: String?
+    public let riskText: String?
+}
+
 private func clamp(_ v: Double, _ lo: Double, _ hi: Double) -> Double {
     min(hi, max(lo, v))
 }
@@ -90,58 +99,59 @@ func parseRFC3339(_ s: String) -> Date? {
 extension UsagePace {
     /// Compute *linear* pace for a window, or nil if it can't be derived yet.
     public static func compute(window: UsageWindow, now: Date = Date()) -> UsagePace? {
-        computeCore(window: window, now: now, expectedOverride: nil)
+        computeCore(window: window, now: now)
     }
 
     /// Compute pace under the user's chosen mode:
     /// - `off`        → nil (no pace marker).
-    /// - `historical` → use the backend's historical expected-percent if
-    ///                  present, otherwise transparently fall back to linear.
+    /// - `historical` → use the backend's nested result if present, otherwise
+    ///                  transparently fall back to linear.
     /// - `linear`     → naive elapsed/duration pace.
     public static func compute(
         window: UsageWindow, mode: PaceMode, now: Date = Date()
     ) -> UsagePace? {
         if mode == .off { return nil }
-        let override: Double? =
-            mode == .historical
-            ? window.historicalExpectedPercent.map { clamp($0, 0, 100) }
-            : nil
-        guard let pace = computeCore(window: window, now: now, expectedOverride: override)
-        else { return nil }
-        // In historical mode the run-out *probability* (share of past weeks
-        // that hit the cap) is a better lasts/empty signal than the naive
-        // linear burn rate — otherwise the card could read "in reserve ·
-        // Projected empty" at once. If most past weeks lasted, project "Lasts
-        // until reset"; codexbar does the same.
-        if override != nil, let probability = window.runOutProbability {
-            let lasts = probability < 0.5
-            return UsagePace(
-                stage: pace.stage, deltaPercent: pace.deltaPercent,
-                expectedUsedPercent: pace.expectedUsedPercent,
-                actualUsedPercent: pace.actualUsedPercent,
-                etaSeconds: lasts ? nil : pace.etaSeconds,
-                willLastToReset: lasts)
+        if mode == .historical, let historical = window.historicalPace {
+            return computeHistorical(window: window, historical: historical, now: now)
         }
-        return pace
+        // A missing historical result is the learning-period fallback. Linear
+        // mode intentionally ignores a nested result too.
+        return computeCore(window: window, now: now)
     }
 
-    private static func computeCore(
-        window: UsageWindow, now: Date, expectedOverride: Double?
+    /// Assemble display-only projection strings. Historical ETA and
+    /// lasts-to-reset values are already carried by `pace`; this helper only
+    /// decides whether a visible risk should suppress the generic lasts text.
+    public static func presentation(
+        window: UsageWindow, mode: PaceMode, pace: UsagePace
+    ) -> UsagePacePresentation {
+        let risk = mode == .historical ? runOutRiskLabel(window: window) : nil
+        let eta = pace.willLastToReset && risk != nil ? nil : pace.etaText
+        return UsagePacePresentation(etaText: eta, riskText: risk)
+    }
+
+    private static func computeHistorical(
+        window: UsageWindow, historical: HistoricalPace, now: Date
     ) -> UsagePace? {
-        guard let resetsAtRaw = window.resetsAt,
-              let windowMinutes = window.windowMinutes, windowMinutes > 0,
-              let resetsAt = parseRFC3339(resetsAtRaw)
-        else { return nil }
+        // Keep the same window validity gates as linear pace. Historical data
+        // supplies the projection values, but a quota card still needs a
+        // current reset boundary before showing a pace marker.
+        guard let timing = timing(for: window, now: now) else { return nil }
+        let actual = clamp(window.usedPercent, 0, 100)
+        if timing.elapsed == 0 && actual > 0 { return nil }
+        let expected = clamp(historical.expectedUsedPercent, 0, 100)
+        let delta = actual - expected
+        return UsagePace(
+            stage: stageFor(delta), deltaPercent: delta,
+            expectedUsedPercent: expected, actualUsedPercent: actual,
+            etaSeconds: historical.etaSeconds,
+            willLastToReset: historical.willLastToReset)
+    }
 
-        let duration = Double(windowMinutes) * 60
-        let timeUntilReset = resetsAt.timeIntervalSince(now)
-        if timeUntilReset <= 0 || timeUntilReset > duration { return nil }
-
-        let elapsed = clamp(duration - timeUntilReset, 0, duration)
-        // Expected used-percent: historical override when available, else the
-        // naive linear elapsed/duration. The rest (delta/stage/ETA) is
-        // identical either way.
-        let expected = expectedOverride ?? clamp(elapsed / duration * 100, 0, 100)
+    private static func computeCore(window: UsageWindow, now: Date) -> UsagePace? {
+        guard let timing = timing(for: window, now: now) else { return nil }
+        let elapsed = timing.elapsed
+        let expected = clamp(elapsed / timing.duration * 100, 0, 100)
         let actual = clamp(window.usedPercent, 0, 100)
         if elapsed == 0 && actual > 0 { return nil }
 
@@ -154,7 +164,7 @@ extension UsagePace {
             if rate > 0 {
                 let remaining = max(0, 100 - actual)
                 let candidate = remaining / rate
-                if candidate >= timeUntilReset {
+                if candidate >= timing.timeUntilReset {
                     willLastToReset = true
                 } else {
                     etaSeconds = candidate
@@ -169,11 +179,32 @@ extension UsagePace {
             expectedUsedPercent: expected, actualUsedPercent: actual,
             etaSeconds: etaSeconds, willLastToReset: willLastToReset)
     }
+
+    private struct WindowTiming {
+        let duration: Double
+        let timeUntilReset: Double
+        let elapsed: Double
+    }
+
+    private static func timing(for window: UsageWindow, now: Date) -> WindowTiming? {
+        guard let resetsAtRaw = window.resetsAt,
+              let windowMinutes = window.windowMinutes, windowMinutes > 0,
+              let resetsAt = parseRFC3339(resetsAtRaw)
+        else { return nil }
+
+        let duration = Double(windowMinutes) * 60
+        let timeUntilReset = resetsAt.timeIntervalSince(now)
+        if timeUntilReset <= 0 || timeUntilReset > duration { return nil }
+        return WindowTiming(
+            duration: duration,
+            timeUntilReset: timeUntilReset,
+            elapsed: clamp(duration - timeUntilReset, 0, duration))
+    }
 }
 
 /// codexbar-style historical run-out risk, e.g. "≈ 30% run-out risk", or nil.
 public func runOutRiskLabel(window: UsageWindow) -> String? {
-    guard let probability = window.runOutProbability else { return nil }
+    guard let probability = window.historicalPace?.runOutProbability else { return nil }
     let pct = Int((clamp(probability, 0, 1) * 100).rounded())
     if pct <= 0 { return nil }
     return "≈ \(pct)% run-out risk"

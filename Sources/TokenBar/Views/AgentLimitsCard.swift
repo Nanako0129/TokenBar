@@ -425,10 +425,13 @@ struct AgentLimitsCard: View {
                         .foregroundStyle(.secondary)
                     Spacer()
                     if let pace {
-                        // Historical run-out risk only pairs with the historical pace.
-                        let risk = paceMode == .historical ? runOutRiskLabel(window: window) : nil
+                        // Historical ETA/lasts and risk are composed together so
+                        // a visible risk suppresses the generic "Lasts until
+                        // reset" phrase when the backend reports both.
+                        let projection = UsagePace.presentation(
+                            window: window, mode: paceMode, pace: pace)
                         Text(
-                            [pace.label, pace.etaText, risk]
+                            [pace.label, projection.etaText, projection.riskText]
                                 .compactMap(\.self).joined(separator: " · ")
                         )
                         .font(.caption2)
