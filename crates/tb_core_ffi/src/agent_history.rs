@@ -623,8 +623,7 @@ fn evaluate_samples(
             .collect::<Vec<_>>();
         let historical_median = weighted_median(&historical_values, &weights);
         let linear_baseline = 100.0 * (index as f64 / denominator);
-        *value = (lambda * historical_median + (1.0 - lambda) * linear_baseline)
-            .clamp(0.0, linear_baseline);
+        *value = (lambda * historical_median + (1.0 - lambda) * linear_baseline).clamp(0.0, 100.0);
     }
     let mut expected_max: f64 = 0.0;
     for value in &mut expected_curve {
@@ -1064,6 +1063,40 @@ mod tests {
             .run_out_probability
             .is_some_and(|probability| (0.0..=1.0).contains(&probability)));
         assert_eq!(mature.eta_seconds.is_none(), mature.will_last_to_reset);
+    }
+
+    #[test]
+    fn front_loaded_history_can_set_expectation_above_linear_pace() {
+        let current_reset = 100 * WEEK_SECS;
+        let now = current_reset - (9 * WEEK_SECS / 10);
+        let fractions = [0.01, 0.1, 0.3, 0.5, 0.7, 0.99];
+        let used_values = [5.0, 60.0, 65.0, 70.0, 75.0, 80.0];
+        let mut samples = Vec::new();
+
+        for offset in 1..=MIN_HISTORICAL_WEEKS {
+            let reset = current_reset - offset as i64 * WEEK_SECS;
+            let start = reset - WEEK_SECS;
+            samples.extend(fractions.into_iter().zip(used_values).enumerate().map(
+                |(index, (fraction, used))| {
+                    sample(
+                        "acct",
+                        reset,
+                        used,
+                        start + (fraction * WEEK_SECS as f64) as i64 + index as i64,
+                    )
+                },
+            ));
+        }
+
+        let pace =
+            evaluate_samples(&samples, "acct", current_reset, WEEK_MINUTES, now, 50.0).unwrap();
+
+        // At 10% elapsed, the linear baseline is 10%. A front-loaded but
+        // quota-safe personal history must still be able to raise the blended
+        // expectation above that baseline; risk and run-out remain separate.
+        assert!(pace.expected_percent > 10.0);
+        assert!(pace.expected_percent < 50.0);
+        assert!(pace.will_last_to_reset);
     }
 
     #[test]
