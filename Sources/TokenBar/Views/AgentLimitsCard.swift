@@ -419,28 +419,69 @@ struct AgentLimitsCard: View {
                         return min(100, max(0, left))
                     },
                     paceIsDeficit: pace?.stage.isDeficit ?? false)
-                HStack {
-                    Text(leftLabel)
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Spacer()
-                    if let pace {
-                        // Historical ETA/lasts and risk are composed together so
-                        // a visible risk suppresses the generic "Lasts until
-                        // reset" phrase when the backend reports both.
-                        let projection = UsagePace.presentation(
-                            window: window, mode: paceMode, pace: pace)
-                        Text(
-                            [pace.label, projection.etaText, projection.riskText]
-                                .compactMap(\.self).joined(separator: " · ")
-                        )
-                        .font(.caption2)
-                        .foregroundStyle(pace.stage.isDeficit ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
-                        .lineLimit(1)
+                paceFooter(window: window, leftLabel: leftLabel, pace: pace)
+            }
+        }
+    }
+
+    @ViewBuilder private func paceFooter(
+        window: UsageWindow, leftLabel: String, pace: UsagePace?
+    ) -> some View {
+        if let pace {
+            // Historical ETA/lasts and risk are composed together so a visible
+            // risk suppresses the generic "Lasts until reset" phrase when the
+            // backend reports both.
+            let projection = UsagePace.presentation(
+                window: window, mode: paceMode, pace: pace)
+            let projectionText = [projection.etaText, projection.riskText]
+                .compactMap(\.self).joined(separator: " · ")
+
+            if projectionText.isEmpty {
+                HStack(spacing: 8) {
+                    paceLeftLabel(leftLabel)
+                    Spacer(minLength: 8)
+                    paceText(pace.label, pace: pace)
+                }
+            } else {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 8) {
+                        paceLeftLabel(leftLabel)
+                            .fixedSize(horizontal: true, vertical: false)
+                        Spacer(minLength: 8)
+                        paceText("\(pace.label) · \(projectionText)", pace: pace)
+                            .lineLimit(1)
+                            .fixedSize(horizontal: true, vertical: false)
+                    }
+
+                    VStack(alignment: .trailing, spacing: 1) {
+                        HStack(spacing: 8) {
+                            paceLeftLabel(leftLabel)
+                            Spacer(minLength: 8)
+                            paceText(pace.label, pace: pace)
+                        }
+                        paceText(projectionText, pace: pace)
+                            .multilineTextAlignment(.trailing)
+                            .frame(maxWidth: .infinity, alignment: .trailing)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
+        } else {
+            paceLeftLabel(leftLabel)
         }
+    }
+
+    private func paceLeftLabel(_ text: String) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+
+    private func paceText(_ text: String, pace: UsagePace) -> some View {
+        Text(text)
+            .font(.caption2)
+            .foregroundStyle(
+                pace.stage.isDeficit ? AnyShapeStyle(.orange) : AnyShapeStyle(.tertiary))
     }
 
     private func placeholderRow(_ label: String, brand: String) -> some View {
