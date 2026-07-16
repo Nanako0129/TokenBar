@@ -101,7 +101,7 @@ Floating-zero fixture 的最低要求是：當 `usedPercent == 0` 且 reset hori
 | Recency | `weight = exp(-ageWeeks / 3)`；`nEff = sum(weight)^2 / sum(weight^2)`；`lambda = clamp((nEff - 2) / 6, 0, 1)` |
 | Expected curve | 每格取 recency-weighted median，再算 `lambda * historical + (1 - lambda) * linear`；結果 clamp 到 `0...100` 後 monotonicize，不以 linear baseline 作上限 |
 | Capped demand | 歷史 curve 第一次到 100% 後，以 `slope = valueAtCap / uAtCap` 延伸其未截斷 demand，再進行 current shift 與 crossing search |
-| Current shift | 每週以 `shift = actual - curve(uNow)` 對齊當週已發生用量；shifted end 未 clamp，`>= 100` 計為 run-out |
+| Current shift | 每週以 `shift = actual - curve(uNow)` 對齊當週已發生用量；shifted curve 與 shifted end 在 crossing interpolation 前不 clamp，`>= 100` 計為 run-out，只有 bounded output 才 clamp |
 | Risk | `smoothed = clamp((weightedRunOutMass + 0.5) / (totalWeight + 1), 0, 1)`；一般情況只有 5+ 週輸出，3–4 週維持 `nil` |
 | ETA and lasts | `willLastToReset = smoothed < 0.5`；需要 crossing 時，以 first-crossing 線性插值後取 recency-weighted median ETA |
 | Exhausted override | 已有 historical result 且 current actual `>= 100` 時，強制 `etaSeconds = 0`、`willLastToReset = false`、`runOutProbability = 1`，覆蓋 5-week risk threshold；少於 3 週仍走 Linear fallback |

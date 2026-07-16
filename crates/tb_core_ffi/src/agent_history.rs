@@ -713,7 +713,7 @@ fn first_crossing(u_now: f64, curve: &[f64], shift: f64, actual_at_now: f64) -> 
         if u <= u_now + EPSILON {
             continue;
         }
-        let value = (*curve_value + shift).clamp(0.0, 100.0);
+        let value = *curve_value + shift;
         if previous_value < 100.0 - EPSILON && value >= 100.0 - EPSILON {
             let delta = value - previous_value;
             if delta.abs() <= EPSILON {
@@ -1161,6 +1161,13 @@ mod tests {
             evaluate_samples(&samples, "acct", current_reset, WEEK_MINUTES, now, 80.0).unwrap();
         assert!(!pace.will_last_to_reset);
         assert!(pace.eta_seconds.unwrap_or(-1.0) >= 0.0);
+    }
+
+    #[test]
+    fn run_out_crossing_interpolates_with_unclamped_shifted_value() {
+        let crossing = first_crossing(0.0, &[80.0, 120.0], 0.0, 80.0).unwrap();
+
+        assert!((crossing - 0.5).abs() < EPSILON);
     }
 
     #[test]
