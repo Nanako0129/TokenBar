@@ -33,17 +33,10 @@ impl PathRoot {
                     if let Ok(xdg_config_home) = std::env::var("XDG_CONFIG_HOME") {
                         return format!("{xdg_config_home}/tokscale");
                     }
-                }
 
-                // Match paths::get_config_dir() platform branches so the
-                // scanner reads from the same root the writer (e.g.
-                // get_antigravity_cache_dir) targets. Hardcoding
-                // `{home}/.config/tokscale` everywhere would diverge from
-                // dirs::config_dir() on Windows (where it resolves to
-                // %APPDATA%\tokscale), causing synced data to land in
-                // %APPDATA% while the scanner looks in %USERPROFILE%.
-                #[cfg(target_os = "windows")]
-                {
+                    // Match paths::get_config_dir() so default Windows scans
+                    // read the same %APPDATA% root used by cache writers.
+                    #[cfg(target_os = "windows")]
                     if let Some(dir) = dirs::config_dir() {
                         return dir.join("tokscale").to_string_lossy().into_owned();
                     }
@@ -535,18 +528,55 @@ impl Default for ClientCounts {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
+    use serial_test::serial;
+    use std::ffi::OsStr;
 
-    fn env_lock() -> &'static Mutex<()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
+    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+
+        fn set(&mut self, key: &'static str, value: impl AsRef<OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &'static str) {
+            unsafe { std::env::remove_var(key) };
+        }
     }
 
-    fn restore_env(var: &str, previous: Option<String>) {
-        match previous {
-            Some(value) => unsafe { std::env::set_var(var, value) },
-            None => unsafe { std::env::remove_var(var) },
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                for (key, previous) in self.0.drain(..) {
+                    match previous {
+                        Some(value) => std::env::set_var(key, value),
+                        None => std::env::remove_var(key),
+                    }
+                }
+            }
         }
+    }
+
+    #[test]
+    #[serial]
+    fn test_env_guard_restores_after_unwind() {
+        const KEY: &str = "TOKSCALE_CLIENTS_ENV_GUARD_SELF_CHECK";
+        let mut outer = EnvGuard::capture(&[KEY]);
+        outer.set(KEY, "before");
+        let result = std::panic::catch_unwind(|| {
+            let mut inner = EnvGuard::capture(&[KEY]);
+            inner.set(KEY, "during");
+            panic!("exercise EnvGuard unwinding");
+        });
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os(KEY), Some("before".into()));
     }
 
     #[test]
@@ -583,77 +613,60 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_path_root_xdg_data_uses_env_var_when_set() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.set("XDG_DATA_HOME", "/tmp/xdg-data-home");
 
         let resolved = PathRoot::XdgData.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/xdg-data-home");
-
-        restore_env("XDG_DATA_HOME", previous);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_xdg_data_falls_back_when_unset() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.remove("XDG_DATA_HOME");
 
         let resolved = PathRoot::XdgData.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/home/.local/share");
-
-        restore_env("XDG_DATA_HOME", previous);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_xdg_data_ignores_env_when_disabled() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::set_var("XDG_DATA_HOME", "/tmp/xdg-data-home") };
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.set("XDG_DATA_HOME", "/tmp/xdg-data-home");
 
         let resolved = PathRoot::XdgData.resolve_with_env_strategy("/tmp/home", false);
         assert_eq!(resolved, "/tmp/home/.local/share");
-
-        restore_env("XDG_DATA_HOME", previous);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_config_uses_override_when_set() {
-        let _guard = env_lock().lock().unwrap();
-        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
-        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        unsafe {
-            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
-            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
-        }
+        let mut _env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_CONFIG_HOME"]);
+        _env.set("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+        _env.set("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
 
         let resolved = PathRoot::Config.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/custom-config-root");
-
-        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
-        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
+    #[serial]
     #[cfg(target_os = "linux")]
     fn test_path_root_config_uses_xdg_config_home_when_override_unset() {
-        let _guard = env_lock().lock().unwrap();
-        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
-        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        unsafe {
-            std::env::remove_var("TOKSCALE_CONFIG_DIR");
-            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
-        }
+        let mut _env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_CONFIG_HOME"]);
+        _env.remove("TOKSCALE_CONFIG_DIR");
+        _env.set("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
 
         let resolved = PathRoot::Config.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/xdg-config-home/tokscale");
-
-        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
-        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
+    #[serial]
     #[cfg(target_os = "windows")]
     fn test_path_root_config_uses_dirs_config_dir_on_windows() {
         // Windows must resolve PathRoot::Config to the same root that
@@ -661,11 +674,8 @@ mod tests {
         // i.e. dirs::config_dir() (= %APPDATA%\tokscale). Hardcoding
         // {home}/.config/tokscale would diverge from the writer side
         // and silently hide synced Antigravity data from reports.
-        let _guard = env_lock().lock().unwrap();
-        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
-        unsafe {
-            std::env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
+        let mut _env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR"]);
+        _env.remove("TOKSCALE_CONFIG_DIR");
 
         let resolved = PathRoot::Config.resolve("C:\\fake-home");
         let expected = dirs::config_dir()
@@ -677,33 +687,25 @@ mod tests {
             resolved, expected,
             "PathRoot::Config on Windows must match dirs::config_dir().join('tokscale') so the scanner agrees with the writer"
         );
-
-        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_config_ignores_env_when_disabled() {
-        let _guard = env_lock().lock().unwrap();
-        let previous_override = std::env::var("TOKSCALE_CONFIG_DIR").ok();
-        let previous_xdg = std::env::var("XDG_CONFIG_HOME").ok();
-        unsafe {
-            std::env::set_var("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
-            std::env::set_var("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
-        }
+        let mut _env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR", "XDG_CONFIG_HOME"]);
+        _env.set("TOKSCALE_CONFIG_DIR", "/tmp/custom-config-root");
+        _env.set("XDG_CONFIG_HOME", "/tmp/xdg-config-home");
 
         let resolved = PathRoot::Config.resolve_with_env_strategy("/tmp/home", false);
         assert_eq!(resolved, "/tmp/home/.config/tokscale");
-
-        restore_env("TOKSCALE_CONFIG_DIR", previous_override);
-        restore_env("XDG_CONFIG_HOME", previous_xdg);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_env_var_uses_env_when_set() {
-        let _guard = env_lock().lock().unwrap();
         let var = "TOKSCALE_TEST_PATH_ROOT";
-        let previous = std::env::var(var).ok();
-        unsafe { std::env::set_var(var, "/tmp/custom-root") };
+        let mut _env = EnvGuard::capture(&[var]);
+        _env.set(var, "/tmp/custom-root");
 
         let root = PathRoot::EnvVar {
             var,
@@ -711,16 +713,14 @@ mod tests {
         };
         let resolved = root.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/custom-root");
-
-        restore_env(var, previous);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_env_var_falls_back_when_unset() {
-        let _guard = env_lock().lock().unwrap();
         let var = "TOKSCALE_TEST_PATH_ROOT";
-        let previous = std::env::var(var).ok();
-        unsafe { std::env::remove_var(var) };
+        let mut _env = EnvGuard::capture(&[var]);
+        _env.remove(var);
 
         let root = PathRoot::EnvVar {
             var,
@@ -728,16 +728,14 @@ mod tests {
         };
         let resolved = root.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/home/.fallback");
-
-        restore_env(var, previous);
     }
 
     #[test]
+    #[serial]
     fn test_path_root_env_var_ignores_env_when_disabled() {
-        let _guard = env_lock().lock().unwrap();
         let var = "TOKSCALE_TEST_PATH_ROOT";
-        let previous = std::env::var(var).ok();
-        unsafe { std::env::set_var(var, "/tmp/custom-root") };
+        let mut _env = EnvGuard::capture(&[var]);
+        _env.set(var, "/tmp/custom-root");
 
         let root = PathRoot::EnvVar {
             var,
@@ -745,8 +743,6 @@ mod tests {
         };
         let resolved = root.resolve_with_env_strategy("/tmp/home", false);
         assert_eq!(resolved, "/tmp/home/.fallback");
-
-        restore_env(var, previous);
     }
 
     #[test]
@@ -837,17 +833,15 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_zed_data_dir_path() {
-        let _guard = env_lock().lock().unwrap();
-        let previous = std::env::var("XDG_DATA_HOME").ok();
-        unsafe { std::env::remove_var("XDG_DATA_HOME") };
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.remove("XDG_DATA_HOME");
 
         assert_eq!(
             ClientId::Zed.data().resolve_path("/tmp/home"),
             "/tmp/home/.local/share/zed/threads/threads.db"
         );
-
-        restore_env("XDG_DATA_HOME", previous);
     }
 
     #[test]
@@ -875,7 +869,9 @@ mod tests {
         assert!(client.data().parse_local);
         assert!(client.data().submit_default);
         assert_eq!(
-            client.data().resolve_path("/tmp/home"),
+            client
+                .data()
+                .resolve_path_with_env_strategy("/tmp/home", false),
             "/tmp/home/.grok/sessions"
         );
     }

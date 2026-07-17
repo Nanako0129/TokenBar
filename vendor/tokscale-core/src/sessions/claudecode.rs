@@ -1576,6 +1576,10 @@ mod tests {
     use std::io::Write;
     use tempfile::{NamedTempFile, TempDir};
 
+    fn parse_claude_file(path: &std::path::Path) -> Vec<UnifiedMessage> {
+        super::parse_claude_file_with_home(path, None)
+    }
+
     #[test]
     fn is_human_turn_counts_html_user_prompt() {
         let line = r#"{"type":"user","message":{"content":"<div>hello</div>"}}"#;
@@ -1672,10 +1676,12 @@ mod tests {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             variant_dir.join("variant.json"),
-            format!(
-                r#"{{"name":"{variant}","provider":"{provider}","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
+            serde_json::json!({
+                "name": variant,
+                "provider": provider,
+                "configDir": config_dir,
+            })
+            .to_string(),
         )
         .unwrap();
         std::fs::write(&path, content).unwrap();

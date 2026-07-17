@@ -482,10 +482,28 @@ mod tests {
 
     struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
+    impl EnvGuard {
+        fn capture(keys: &[&'static str]) -> Self {
+            Self(
+                keys.iter()
+                    .map(|key| (*key, std::env::var_os(key)))
+                    .collect(),
+            )
+        }
+
+        fn set(&mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) {
+            unsafe { std::env::set_var(key, value) };
+        }
+
+        fn remove(&mut self, key: &'static str) {
+            unsafe { std::env::remove_var(key) };
+        }
+    }
+
     impl Drop for EnvGuard {
         fn drop(&mut self) {
-            for (key, previous) in self.0.drain(..) {
-                unsafe {
+            unsafe {
+                for (key, previous) in self.0.drain(..) {
                     match previous {
                         Some(value) => std::env::set_var(key, value),
                         None => std::env::remove_var(key),
@@ -1541,24 +1559,21 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    #[cfg(not(target_os = "windows"))]
     fn migration_record_falls_back_to_legacy_path() {
-        use std::env;
-
         let temp_home = tempfile::tempdir().unwrap();
         let temp_xdg_cache = tempfile::tempdir().unwrap();
-        let prev_home = env::var_os("HOME");
-        let prev_xdg_cache = env::var_os("XDG_CACHE_HOME");
-        let prev_override = env::var_os("TOKSCALE_CONFIG_DIR");
-        let _guard = EnvGuard(vec![
-            ("TOKSCALE_CONFIG_DIR", prev_override),
-            ("XDG_CACHE_HOME", prev_xdg_cache),
-            ("HOME", prev_home),
+        let config_dir = temp_home.path().join(".config");
+        let mut _guard = EnvGuard::capture(&[
+            "TOKSCALE_CONFIG_DIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "HOME",
         ]);
-        unsafe {
-            env::set_var("HOME", temp_home.path());
-            env::set_var("XDG_CACHE_HOME", temp_xdg_cache.path());
-            env::remove_var("TOKSCALE_CONFIG_DIR");
-        }
+        _guard.set("HOME", temp_home.path());
+        _guard.set("XDG_CACHE_HOME", temp_xdg_cache.path());
+        _guard.set("XDG_CONFIG_HOME", &config_dir);
+        _guard.remove("TOKSCALE_CONFIG_DIR");
 
         let legacy_path = crate::paths::legacy_dirs_cache_dir()
             .unwrap()
@@ -1573,6 +1588,54 @@ mod tests {
         let loaded = load_opencode_migration_cache().unwrap();
         assert!(loaded.migration_complete);
         assert_eq!(loaded.json_file_count, 2);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[serial_test::serial]
+    fn legacy_migration_paths_are_ordered_and_override_gated_without_io() {
+        let mut _guard = EnvGuard::capture(&[
+            "TOKSCALE_CONFIG_DIR",
+            "XDG_CACHE_HOME",
+            "XDG_CONFIG_HOME",
+            "HOME",
+        ]);
+        _guard.remove("TOKSCALE_CONFIG_DIR");
+        let candidates = legacy_migration_cache_paths();
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(
+            candidates[0],
+            dirs::cache_dir()
+                .expect("Windows exposes a cache directory")
+                .join("tokscale")
+                .join(MIGRATION_CACHE_FILENAME)
+        );
+        assert_eq!(
+            candidates[1],
+            dirs::home_dir()
+                .expect("Windows exposes a home directory")
+                .join(".cache")
+                .join("tokscale")
+                .join(MIGRATION_CACHE_FILENAME)
+        );
+
+        _guard.set("TOKSCALE_CONFIG_DIR", std::env::temp_dir());
+        assert!(legacy_migration_cache_paths().is_empty());
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn env_guard_restores_after_unwind() {
+        const KEY: &str = "TOKSCALE_OPENCODE_ENV_GUARD_SELF_CHECK";
+        let mut outer = EnvGuard::capture(&[KEY]);
+        outer.set(KEY, "before");
+        let result = std::panic::catch_unwind(|| {
+            let mut inner = EnvGuard::capture(&[KEY]);
+            inner.set(KEY, "during");
+            panic!("exercise EnvGuard unwinding");
+        });
+        assert!(result.is_err());
+        assert_eq!(std::env::var_os(KEY), Some("before".into()));
     }
 }
 
