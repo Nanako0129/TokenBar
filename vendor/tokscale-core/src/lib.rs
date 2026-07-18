@@ -1391,25 +1391,36 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let kiro_outcomes: Vec<CachedParseOutcome> = scan_result
+    // Kiro globalStorage has a precedence relation between self-contained
+    // snapshots and execution records. Cache each source's raw parser output,
+    // then suppress only after every file has been collected. The suppression
+    // result must never be written back into the per-source cache.
+    let kiro_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Kiro)
         .par_iter()
         .map(|path| {
-            load_or_parse_source_with_fingerprint(
-                path,
-                &source_cache,
-                pricing,
-                message_cache::SourceFingerprint::from_kiro_path,
-                sessions::kiro::parse_kiro_file,
+            (
+                path.clone(),
+                load_or_parse_source_with_fingerprint(
+                    path,
+                    &source_cache,
+                    None,
+                    message_cache::SourceFingerprint::from_kiro_path,
+                    sessions::kiro::parse_kiro_file,
+                ),
             )
         })
         .collect();
-    for outcome in kiro_outcomes {
-        all_messages.extend(outcome.messages);
+    let mut kiro_sources = Vec::new();
+    for (path, outcome) in kiro_outcomes {
+        kiro_sources.push((path, outcome.messages));
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    let mut kiro_messages = sessions::kiro::merge_kiro_source_messages(kiro_sources);
+    apply_pricing_to_messages(&mut kiro_messages, pricing);
+    all_messages.extend(kiro_messages);
 
     if let Some(db_path) = &scan_result.kiro_db {
         let kiro_db_messages: Vec<UnifiedMessage> = sessions::kiro::parse_kiro_sqlite(db_path)
@@ -2612,11 +2623,73 @@ where
         true
     );
     simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
-    simple_lane!(
-        ClientId::Kiro,
-        sessions::kiro::parse_kiro_file,
-        message_cache::SourceFingerprint::from_kiro_path
-    );
+
+    // ---- Kiro globalStorage files (raw cache + batch suppression) ----
+    // Snapshots and successful executions can describe the same conversation.
+    // Collect every raw source first so suppression runs before pricing, client
+    // gating, date/report filters, and the sink. Suppressed aggregates are never
+    // written to the per-source cache, allowing a later execution removal to
+    // restore the cached snapshot.
+    {
+        let kiro_paths = scan_result.get(ClientId::Kiro);
+        let mut raw_by_path: Vec<Option<Vec<UnifiedMessage>>> =
+            (0..kiro_paths.len()).map(|_| None).collect();
+        let mut miss_paths: Vec<(usize, &PathBuf)> = Vec::new();
+
+        for (index, path) in kiro_paths.iter().enumerate() {
+            let fingerprint = message_cache::SourceFingerprint::from_kiro_path(path);
+            let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
+                source_cache.get(path).filter(|cached| {
+                    cached.fingerprint == *fingerprint && !cached.messages.is_empty()
+                })
+            });
+            if let Some(cached) = cache_hit {
+                raw_by_path[index] = Some(cached.messages.clone());
+            } else {
+                miss_paths.push((index, path));
+            }
+        }
+
+        let parsed_misses: Vec<(usize, &PathBuf, Vec<UnifiedMessage>)> = miss_paths
+            .par_iter()
+            .map(|(index, path)| (*index, *path, sessions::kiro::parse_kiro_file(path)))
+            .collect();
+        for (index, path, messages) in parsed_misses {
+            if !messages.is_empty() {
+                if let Some(fingerprint) = message_cache::SourceFingerprint::from_kiro_path(path) {
+                    source_cache.insert(message_cache::CachedSourceEntry::new(
+                        path,
+                        fingerprint,
+                        messages.clone(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            } else {
+                // A changed source that now parses empty must not keep replaying
+                // a stale non-empty entry through a later same-fingerprint hit.
+                source_cache.remove(path);
+            }
+            raw_by_path[index] = Some(messages);
+        }
+
+        let raw_sources = kiro_paths
+            .iter()
+            .cloned()
+            .zip(raw_by_path.into_iter().map(Option::unwrap_or_default))
+            .collect();
+        let messages = sessions::kiro::merge_kiro_source_messages(raw_sources);
+        for mut message in messages {
+            message.refresh_derived_fields();
+            reprice_lane_message(&mut message, pricing, false);
+            if !passes_client(&message) {
+                continue;
+            }
+            if filter(&message) {
+                sink(&message);
+            }
+        }
+    }
 
     // ---- Gemini (cache-aware with invalidate_cache semantics) ----
     // Uses load_or_parse_source_with_fingerprint_and_policy equivalent:
@@ -3337,8 +3410,19 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
             continue;
         }
         if lane == ClientId::Kiro as usize {
+            // globalStorage precedence crosses files. If any IDE source changed,
+            // retain the complete IDE cohort so an older execution can still
+            // suppress a newer snapshot; CLI sources remain independently prunable.
+            let keep_global_storage_batch = files
+                .iter()
+                .filter(|path| sessions::kiro::is_kiro_global_storage_source(path))
+                .any(|path| kiro_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms));
             files.retain(|path| {
-                kiro_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+                if sessions::kiro::is_kiro_global_storage_source(path) {
+                    keep_global_storage_batch
+                } else {
+                    kiro_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+                }
             });
             continue;
         }
@@ -3796,15 +3880,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         messages.extend(zed_msgs);
     }
 
-    let kiro_msgs: Vec<ParsedMessage> = scan_result
+    let kiro_sources: Vec<(PathBuf, Vec<UnifiedMessage>)> = scan_result
         .get(ClientId::Kiro)
         .par_iter()
-        .flat_map(|path| {
-            sessions::kiro::parse_kiro_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .map(|path| (path.clone(), sessions::kiro::parse_kiro_file(path)))
+        .collect();
+    let kiro_msgs: Vec<ParsedMessage> = sessions::kiro::merge_kiro_source_messages(kiro_sources)
+        .iter()
+        .map(unified_to_parsed)
         .collect();
     let kiro_count = summed_parsed_message_count(&kiro_msgs);
     counts.set(ClientId::Kiro, kiro_count);
@@ -11290,5 +11373,616 @@ mod tests {
             super::model_report_token_totals(&entries);
         assert_eq!(total_input, i64::MAX);
         assert_eq!(total_cache_read, i64::MAX);
+    }
+
+    fn m15a_global_root(home: &Path) -> PathBuf {
+        home.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent")
+    }
+
+    fn write_m15a_snapshot(home: &Path, body: &str) -> PathBuf {
+        let path = m15a_global_root(home).join("workspace-a/conversation.chat");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+        m15a_global_root(home).join("workspace-a/conversation.chat")
+    }
+
+    fn write_m15a_execution(home: &Path, status: &str, start_time: &str) -> PathBuf {
+        let path = m15a_global_root(home).join("workspace-a/execution");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            format!(
+                r#"{{
+                    "executionId": "exec-1",
+                    "chatSessionId": "chat-1",
+                    "status": "{status}",
+                    "startTime": {start_time},
+                    "endTime": 1770983427500,
+                    "completionOptions": {{"modelId": "claude-sonnet-4-5"}},
+                    "context": {{"messages": [{{"entries": [{{"type": "text", "text": "execution input"}}]}}]}},
+                    "actions": [{{"actionType": "say", "output": "execution output"}}]
+                }}"#
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    fn m15a_snapshot_body(execution_id: &str, prompt: &str, response: &str) -> String {
+        format!(
+            r#"{{
+                "executionId": "{execution_id}",
+                "model": "claude-sonnet-4-5",
+                "messages": [
+                    {{"role": "user", "content": "{prompt}"}},
+                    {{"role": "assistant", "content": "{response}"}}
+                ]
+            }}"#
+        )
+    }
+
+    fn m15a_local_options(home: &Path) -> LocalParseOptions {
+        LocalParseOptions {
+            home_dir: Some(home.to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["kiro".to_string()]),
+            ..Default::default()
+        }
+    }
+
+    fn m15a_report_options(home: &Path) -> ReportOptions {
+        ReportOptions {
+            home_dir: Some(home.to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(vec!["kiro".to_string()]),
+            ..Default::default()
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_cli_keys_cannot_seed_or_collide_with_globalstorage() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let cli_dir = source_home.path().join(".kiro/sessions/cli");
+        std::fs::create_dir_all(&cli_dir).unwrap();
+        std::fs::write(
+            cli_dir.join("cli.json"),
+            r#"{"session_id":"execution","cwd":"workspace-a","session_state":{"rts_model_state":{"model_info":{"model_id":"cli-model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(cli_dir.join("cli.jsonl"), "").unwrap();
+        std::fs::write(
+            cli_dir.join("cli-collision.json"),
+            r#"{"session_id":"workspace-a/conversation:globalstorage:exec","cwd":"workspace-a","session_state":{"rts_model_state":{"model_info":{"model_id":"cli-model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":1}]}}}"#,
+        )
+        .unwrap();
+        std::fs::write(cli_dir.join("cli-collision.jsonl"), "").unwrap();
+        write_m15a_snapshot(source_home.path(), &m15a_snapshot_body("0", "ABCD", ""));
+        std::fs::write(
+            m15a_global_root(source_home.path()).join("workspace-a/execution-zero"),
+            r#"{
+                "executionId": "0",
+                "chatSessionId": "conversation",
+                "status": "succeed",
+                "startTime": 1770983426,
+                "endTime": 1770983427500,
+                "completionOptions": {"modelId": "claude-sonnet-4-5"},
+                "context": {"messages": [{"entries": [{"type": "text", "text": "execution input"}]}]},
+                "actions": [{"actionType": "say", "output": "execution output"}]
+            }"#,
+        )
+        .unwrap();
+
+        let expected = vec![
+            "conversation",
+            "execution",
+            "workspace-a/conversation:globalstorage:exec",
+        ];
+        let mut materialized: Vec<_> = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        )
+        .into_iter()
+        .map(|message| message.session_id)
+        .collect();
+        materialized.sort();
+        assert_eq!(materialized, expected);
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.session_id.clone()),
+        );
+        streamed.sort();
+        assert_eq!(streamed, expected);
+
+        let mut counted: Vec<_> = parse_local_clients(m15a_local_options(source_home.path()))
+            .unwrap()
+            .messages
+            .into_iter()
+            .map(|message| message.session_id)
+            .collect();
+        counted.sort();
+        assert_eq!(counted, expected);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_duplicate_snapshot_extensions_are_exact_once() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let body = m15a_snapshot_body("unused", "ABCD", "WXYZ");
+        let chat = write_m15a_snapshot(source_home.path(), &body);
+        std::fs::write(chat.with_extension("json"), body).unwrap();
+
+        let materialized = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(materialized.len(), 1);
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        assert_eq!(streamed.len(), 1);
+
+        let counted = parse_local_clients(m15a_local_options(source_home.path())).unwrap();
+        assert_eq!(counted.counts.get(ClientId::Kiro), 1);
+        assert_eq!(counted.messages.len(), 1);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_materialized_streaming_count_and_report_parity() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let snapshot = write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-1", "snapshot input", "snapshot output"),
+        );
+        let execution = write_m15a_execution(source_home.path(), "succeed", "1770983426");
+        let mut pricing_data = HashMap::new();
+        pricing_data.insert(
+            "claude-sonnet-4-5".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(1.0),
+                output_cost_per_token: Some(1.0),
+                ..Default::default()
+            },
+        );
+        let pricing_service = pricing::PricingService::new(pricing_data, HashMap::new());
+
+        let materialized = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            Some(&pricing_service),
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(materialized.len(), 1);
+        assert_eq!(
+            materialized[0].dedup_key.as_deref(),
+            Some("execution:exec-1")
+        );
+        assert!(materialized[0].cost > 0.0);
+
+        // Both source entries are raw and independently cached even though the
+        // snapshot is suppressed in the merged result.
+        let cache = message_cache::SourceMessageCache::load();
+        assert!(cache.get(&snapshot).is_some_and(|entry| entry.messages[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":globalstorage:exec:exec-1"))));
+        assert!(cache.get(&execution).is_some_and(
+            |entry| entry.messages[0].dedup_key.as_deref() == Some("execution:exec-1")
+        ));
+        assert!(cache
+            .get(&snapshot)
+            .is_some_and(|entry| entry.messages[0].cost == 0.0));
+        assert!(cache
+            .get(&execution)
+            .is_some_and(|entry| entry.messages[0].cost == 0.0));
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            Some(&pricing_service),
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].dedup_key.as_deref(), Some("execution:exec-1"));
+        assert!(streamed[0].cost > 0.0);
+        assert_eq!(materialized[0].cost, streamed[0].cost);
+        assert_eq!(
+            (materialized[0].tokens.input, materialized[0].tokens.output),
+            (streamed[0].tokens.input, streamed[0].tokens.output)
+        );
+        assert_eq!(materialized[0].model_id, "claude-sonnet-4-5");
+        assert_eq!(materialized[0].session_id, "chat-1");
+        assert_eq!(
+            materialized[0].workspace_key.as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(
+            materialized[0].workspace_label.as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(materialized[0].timestamp, 1_770_983_426_000);
+        assert_eq!(materialized[0].duration_ms, Some(1_500));
+        assert_eq!(materialized[0].message_count, 1);
+        assert_eq!(
+            (
+                streamed[0].model_id.as_str(),
+                streamed[0].session_id.as_str(),
+                streamed[0].workspace_key.as_deref(),
+                streamed[0].workspace_label.as_deref(),
+                streamed[0].timestamp,
+                streamed[0].duration_ms,
+                streamed[0].message_count,
+            ),
+            (
+                materialized[0].model_id.as_str(),
+                materialized[0].session_id.as_str(),
+                materialized[0].workspace_key.as_deref(),
+                materialized[0].workspace_label.as_deref(),
+                materialized[0].timestamp,
+                materialized[0].duration_ms,
+                materialized[0].message_count,
+            )
+        );
+
+        let counted = parse_local_clients(m15a_local_options(source_home.path())).unwrap();
+        assert_eq!(counted.counts.get(ClientId::Kiro), 1);
+        assert_eq!(counted.messages.len(), 1);
+        assert_eq!(counted.messages[0].model_id, materialized[0].model_id);
+        assert_eq!(counted.messages[0].session_id, materialized[0].session_id);
+        assert_eq!(
+            counted.messages[0].workspace_key,
+            materialized[0].workspace_key
+        );
+        assert_eq!(
+            counted.messages[0].workspace_label,
+            materialized[0].workspace_label
+        );
+        assert_eq!(counted.messages[0].timestamp, materialized[0].timestamp);
+        assert_eq!(counted.messages[0].duration_ms, materialized[0].duration_ms);
+        assert_eq!(
+            counted.messages[0].message_count,
+            materialized[0].message_count
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = m15a_report_options(source_home.path());
+        let model = runtime.block_on(get_model_report(options.clone())).unwrap();
+        let monthly = runtime
+            .block_on(get_monthly_report(options.clone()))
+            .unwrap();
+        let hourly = runtime
+            .block_on(get_hourly_report(options.clone()))
+            .unwrap();
+        let agents = runtime
+            .block_on(get_agents_report(options.clone()))
+            .unwrap();
+        let mut session_options = options.clone();
+        session_options.group_by = GroupBy::Session;
+        let session_model = runtime.block_on(get_model_report(session_options)).unwrap();
+        let mut workspace_options = options;
+        workspace_options.group_by = GroupBy::WorkspaceModel;
+        let workspace_model = runtime
+            .block_on(get_model_report(workspace_options))
+            .unwrap();
+
+        assert_eq!(model.total_messages, 1);
+        assert_eq!(model.entries.len(), 1);
+        assert_eq!(model.entries[0].model, materialized[0].model_id);
+        assert_eq!(
+            model.entries[0].message_count,
+            materialized[0].message_count
+        );
+        assert_eq!(session_model.entries.len(), 1);
+        assert_eq!(
+            session_model.entries[0].session_id.as_deref(),
+            Some("chat-1")
+        );
+        assert_eq!(workspace_model.entries.len(), 1);
+        assert_eq!(
+            workspace_model.entries[0].workspace_key.as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(
+            workspace_model.entries[0].workspace_label.as_deref(),
+            Some("workspace-a")
+        );
+        assert_eq!(
+            monthly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            1
+        );
+        assert_eq!(
+            hourly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            1
+        );
+        assert_eq!(agents.total_messages, 1);
+        assert_eq!(model.total_input, monthly.entries[0].input);
+        assert_eq!(model.total_input, hourly.entries[0].input);
+        assert_eq!(model.total_input, agents.entries[0].input);
+        assert_eq!(model.total_output, monthly.entries[0].output);
+        assert_eq!(model.total_output, hourly.entries[0].output);
+        assert_eq!(model.total_output, agents.entries[0].output);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_warm_cache_mixed_hits_reapply_suppression_and_restore_snapshot() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let snapshot = write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-1", "snapshot input", "snapshot output"),
+        );
+        let execution = write_m15a_execution(source_home.path(), "succeed", "1770983426");
+        let home = source_home.path().to_str().unwrap();
+        let clients = ["kiro".to_string()];
+
+        let first = parse_all_messages_with_pricing_with_env_strategy(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].dedup_key.as_deref(), Some("execution:exec-1"));
+
+        // Snapshot hit + execution miss: only the newly parsed execution wins.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_m15a_execution(source_home.path(), "succeed", "1770983426.5");
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].dedup_key.as_deref(), Some("execution:exec-1"));
+
+        // Execution hit + snapshot miss: the snapshot change is still suppressed.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body(
+                "exec-1",
+                "changed snapshot input",
+                "changed snapshot output",
+            ),
+        );
+        let second = parse_all_messages_with_pricing_with_env_strategy(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].dedup_key.as_deref(), Some("execution:exec-1"));
+
+        // A successful execution rewritten as failed removes its stale cache
+        // entry and exposes the raw cached snapshot.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_m15a_execution(source_home.path(), "failed", "1770983426");
+        let mut failed = Vec::new();
+        scan_messages_streaming(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| failed.push(message.clone()),
+        );
+        assert_eq!(failed.len(), 1);
+        assert!(failed[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":globalstorage:exec:exec-1")));
+
+        // Restore a successful execution after the failed rewrite. This proves
+        // a cached successful execution can become authoritative again.
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        write_m15a_execution(source_home.path(), "succeed", "1770983426");
+        let restored_execution = parse_all_messages_with_pricing_with_env_strategy(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(restored_execution.len(), 1);
+        assert_eq!(
+            restored_execution[0].dedup_key.as_deref(),
+            Some("execution:exec-1")
+        );
+        assert!(message_cache::SourceMessageCache::load()
+            .get(&execution)
+            .is_some());
+
+        // Removing that cached successful execution must expose the raw cached
+        // snapshot on the other (streaming) lane.
+        std::fs::remove_file(&execution).unwrap();
+        let mut restored = Vec::new();
+        scan_messages_streaming(
+            home,
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| restored.push(message.clone()),
+        );
+        assert_eq!(restored.len(), 1);
+        assert!(restored[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":globalstorage:exec:exec-1")));
+        assert!(message_cache::SourceMessageCache::load()
+            .get(&snapshot)
+            .is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_suppression_precedes_report_date_filter() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let snapshot = write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-future", "snapshot input", "snapshot output"),
+        );
+        let execution = m15a_global_root(source_home.path()).join("workspace-a/execution-future");
+        std::fs::write(
+            &execution,
+            r#"{"executionId":"exec-future","chatSessionId":"chat-future","status":"succeed","startTime":4102444800000,"endTime":4102444801000,"actions":[{"actionType":"say","output":"future answer"}],"input":{"data":{"messages":[{"content":"future question"}]}}}"#,
+        )
+        .unwrap();
+        let snapshot_date = sessions::kiro::parse_kiro_file(&snapshot)[0].date.clone();
+
+        let mut options = m15a_report_options(source_home.path());
+        options.until = Some(snapshot_date);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report = runtime.block_on(get_model_report(options)).unwrap();
+        assert!(report.entries.is_empty());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial_test::serial]
+    fn m15a_globalstorage_mtime_pruning_and_stat_failure_fail_open() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+        ]);
+        let snapshot = write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-1", "initial input", "initial output"),
+        );
+        let options = m15a_local_options(source_home.path());
+        let before = latest_source_mtime_ms(&options).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-1", "rewritten input", "rewritten output"),
+        );
+        let after = latest_source_mtime_ms(&options).unwrap();
+        assert!(after > before, "globalStorage primary mtime must advance");
+
+        let parsed = parse_local_clients(LocalParseOptions {
+            modified_after: Some(before + 1),
+            ..options.clone()
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Kiro), 1);
+
+        let execution = write_m15a_execution(source_home.path(), "succeed", "1770983426");
+        let execution_mtime = super::kiro_source_mtime_ms(&execution).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_m15a_snapshot(
+            source_home.path(),
+            &m15a_snapshot_body("exec-1", "newer snapshot", "must stay suppressed"),
+        );
+        let snapshot_mtime = super::kiro_source_mtime_ms(&snapshot).unwrap();
+        assert!(snapshot_mtime > execution_mtime);
+        let snapshot_date = sessions::kiro::parse_kiro_file(&snapshot)[0].date.clone();
+        let parsed = parse_local_clients(LocalParseOptions {
+            modified_after: Some(execution_mtime + 1),
+            since: Some(snapshot_date),
+            ..options.clone()
+        })
+        .unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Kiro), 1);
+        assert!(
+            parsed.messages.is_empty(),
+            "mtime pruning must retain the older execution until suppression"
+        );
+
+        let missing = source_home.path().join("missing.chat");
+        let mut scan = scanner::ScanResult::default();
+        scan.get_mut(ClientId::Kiro).push(missing);
+        prune_scan_result_by_mtime(&mut scan, u64::MAX);
+        assert_eq!(scan.get(ClientId::Kiro).len(), 1);
+
+        // Keep the fixture path live for the cache/source identity assertion.
+        assert!(message_cache::SourceFingerprint::from_kiro_path(&snapshot).is_some());
     }
 }

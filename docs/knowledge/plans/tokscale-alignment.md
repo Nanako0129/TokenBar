@@ -4,7 +4,7 @@ id: kb-plan-tokscale-alignment
 kind: plan
 scope: repository
 read_when: planning the next vendor sync or reviewing issue #45 inventory
-last_verified: 2026-07-15
+last_verified: 2026-07-18
 sources: ["vendor/README.md", "public issue #45", "public tokscale history", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
 ---
 
@@ -23,6 +23,7 @@ TokenBar follows upstream `tokscale` as a rolling source and selects correctness
 | Copilot upstream follow-up | assessment complete; locally equivalent | Issue #879 is closed and PR #880 is merged; the exact merged diff matches the local M10-E behavior, so retain the equivalence record without another code or schema port |
 | New client breadth | deferred | Requires an explicit product decision and a complete streaming/cache/FFI adaptation |
 | Pricing pipeline expansion | deferred | Do not port a partial routed-pricing behavior without a complete precedence and safety model |
+| M15-A Kiro IDE globalStorage | completed | macOS globalStorage snapshot, execution, and workspace-session parsing through upstream PR #814 semantics; raw per-source cache plus batch suppression; schema 29 unchanged. The structured `sess_*` / `messages.jsonl` cohort is M15-B and remains deferred |
 
 ## Milestone protocol
 

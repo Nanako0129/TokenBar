@@ -299,6 +299,11 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 }
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
+                "kiro-globalstorage" => {
+                    file_name.ends_with(".chat")
+                        || file_name.ends_with(".json")
+                        || path.extension().is_none()
+                }
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 // Grok Build ACP session updates under
@@ -673,6 +678,16 @@ fn push_unique_scan_task(
     client_id: ClientId,
     raw_path: impl Into<PathBuf>,
 ) {
+    push_unique_scan_task_with_pattern(tasks, seen, client_id, raw_path, client_id.data().pattern);
+}
+
+fn push_unique_scan_task_with_pattern(
+    tasks: &mut Vec<(ClientId, String, &'static str)>,
+    seen: &mut HashSet<(ClientId, PathBuf)>,
+    client_id: ClientId,
+    raw_path: impl Into<PathBuf>,
+    pattern: &'static str,
+) {
     let raw_path = raw_path.into();
     if raw_path.as_os_str().is_empty() {
         return;
@@ -680,9 +695,22 @@ fn push_unique_scan_task(
 
     let key = std::fs::canonicalize(&raw_path).unwrap_or_else(|_| raw_path.clone());
     if seen.insert((client_id, key)) {
-        let pattern = client_id.data().pattern;
         tasks.push((client_id, raw_path.to_string_lossy().to_string(), pattern));
     }
+}
+
+#[cfg(target_os = "macos")]
+fn kiro_global_storage_roots(home_dir: &str) -> [PathBuf; 2] {
+    [
+        PathBuf::from(format!(
+            "{}/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+        PathBuf::from(format!(
+            "{}/Library/Application Support/kiro/User/globalStorage/kiro.kiroagent",
+            home_dir
+        )),
+    ]
 }
 
 /// Merge user-configured OpenCode db paths from [`ScannerSettings`] into the
@@ -812,6 +840,22 @@ fn scan_all_clients_with_env_strategy_inner(
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    // Register built-in Kiro IDE roots before user-configured or environment
+    // extras. Otherwise a default `*.json` task for an overlapping root can
+    // reserve it first and silently miss `.chat` and extensionless records.
+    #[cfg(target_os = "macos")]
+    if enabled.contains(&ClientId::Kiro) {
+        for root in kiro_global_storage_roots(home_dir) {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Kiro,
+                root,
+                "kiro-globalstorage",
+            );
+        }
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
@@ -1202,11 +1246,12 @@ fn scan_all_clients_with_env_strategy_inner(
         })
         .collect();
 
-    // Aggregate results, deduplicating file paths across overlapping directories
+    // Aggregate results, deduplicating physical files across overlapping roots.
     let mut seen: HashSet<PathBuf> = HashSet::new();
     for (client_id, files) in scan_results {
         for file in files {
-            if seen.insert(file.clone()) {
+            let key = std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone());
+            if seen.insert(key) {
                 result.get_mut(client_id).push(file);
             }
         }
@@ -1214,7 +1259,8 @@ fn scan_all_clients_with_env_strategy_inner(
 
     if enabled.contains(&ClientId::Copilot) {
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
-            if path.is_file() && seen.insert(path.clone()) {
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if path.is_file() && seen.insert(key) {
                 let copilot_files = result.get_mut(ClientId::Copilot);
                 copilot_files.push(path);
                 copilot_files.sort_unstable();
@@ -3530,5 +3576,101 @@ mod tests {
                 .all(|path| path.file_name().and_then(|n| n.to_str()) != Some("audit.jsonl")),
             "audit.jsonl must never be scanned: {claude_files:?}"
         );
+    }
+
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn m15a_globalstorage_scanner_discovers_file() {
+        let home = TempDir::new().unwrap();
+        let root = home
+            .path()
+            .join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent");
+        let file = root.join("workspace-a/conversation.chat");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        File::create(&file).unwrap();
+
+        let result = scan_all_clients_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            false,
+        );
+
+        assert!(
+            result.get(ClientId::Kiro).contains(&file),
+            "globalStorage fixture must be discovered; old scanner returned no file"
+        );
+    }
+
+    #[test]
+    fn test_scan_directory_kiro_globalstorage_pattern_filters_sidecars() {
+        let dir = TempDir::new().unwrap();
+        let root = dir.path().join("kiro.kiroagent");
+        let workspace = root.join("workspace-a");
+        fs::create_dir_all(&workspace).unwrap();
+        File::create(workspace.join("snapshot.chat")).unwrap();
+        File::create(workspace.join("snapshot.json")).unwrap();
+        File::create(workspace.join("execution")).unwrap();
+        File::create(workspace.join("index.sqlite")).unwrap();
+        File::create(workspace.join("notes.txt")).unwrap();
+
+        let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
+        let names: Vec<_> = files
+            .iter()
+            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .collect();
+
+        assert_eq!(names, vec!["execution", "snapshot.chat", "snapshot.json"]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[serial]
+    fn test_kiro_globalstorage_roots_precede_extra_paths_and_dedup_canonical_files() {
+        let mut extra = EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS"]);
+        let home = TempDir::new().unwrap();
+        let uppercase_root = home
+            .path()
+            .join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent");
+        let lowercase_root = home
+            .path()
+            .join("Library/Application Support/kiro/User/globalStorage/kiro.kiroagent");
+        let file = uppercase_root.join("workspace-a/transcript.chat");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        File::create(&file).unwrap();
+        File::create(uppercase_root.join("workspace-a/execution")).unwrap();
+
+        // The two casing roots resolve to the same physical root. The scanner
+        // must register the first root once and not duplicate its files.
+        if !lowercase_root.exists() {
+            fs::create_dir_all(lowercase_root.parent().unwrap()).unwrap();
+            std::os::unix::fs::symlink(&uppercase_root, &lowercase_root).unwrap();
+        }
+        let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
+            "extraScanPaths": {"kiro": [lowercase_root]}
+        }))
+        .unwrap();
+        extra.set(
+            "TOKSCALE_EXTRA_DIRS",
+            format!("kiro:{}", uppercase_root.display()),
+        );
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            true,
+            &settings,
+        );
+        assert_eq!(
+            result.get(ClientId::Kiro),
+            &vec![uppercase_root.join("workspace-a/execution"), file.clone(),]
+        );
+
+        let disabled = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            true,
+            &settings,
+        );
+        assert!(disabled.get(ClientId::Kiro).is_empty());
     }
 }

@@ -4,7 +4,7 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-17
+last_verified: 2026-07-18
 sources: ["Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md"]
 ---
 
@@ -83,6 +83,21 @@ The local streaming path is a cache-aware, per-file pass. Each client lane parse
 | Report fold | Feed filtered, deduped, priced messages into report-specific sinks | All report consumers need a documented arithmetic and client-set contract |
 
 A parser that reads a secondary file must update all four related seams together: fingerprint, active lane, latest-mtime probe, and mtime pruning. SQLite lanes also probe the WAL. This is the sibling rule captured in [`verification.md`](verification.md) and [`vendor-tokscale.md`](vendor-tokscale.md).
+
+### Kiro globalStorage precedence
+
+The M15-A macOS Kiro IDE lane is a special multi-source lane, not a normal per-file dedup pass. The scanner discovers the two macOS `globalStorage/kiro.kiroagent` casing roots and accepts `.chat`, `.json`, and extensionless records while excluding index databases and unrelated extensions. Parsing keeps snapshots, successful execution records, and workspace-session records as separate raw source messages.
+
+The source of truth for precedence is the raw batch, not a downstream report. Materialized and streaming consumers follow the same order:
+
+```text
+scan -> fingerprint/cache raw messages per source -> collect every Kiro source
+     -> suppress snapshots covered by successful executions
+     -> cohort-scoped exact dedup -> refresh derived fields -> reprice
+     -> exact client gate -> report/date filter -> sink/report fold
+```
+
+Suppressed snapshots are never written as an aggregate cache value. A later execution failure, rewrite, or removal can therefore invalidate only that execution source and reveal the still-cached raw snapshot. Source paths remain attached through suppression and exact deduplication, so only execution messages parsed from globalStorage or `.chat` sources seed suppression and only IDE-cohort messages are eligible suppression targets, while identical dedup strings are scoped to the IDE or CLI cohort; Kiro CLI and SQLite keys cannot be suppressed by, suppress, or collide with IDE snapshots. Count and representative model/monthly/hourly/Agents reports consume the same post-suppression identity, preserving model, session, workspace, timestamp, duration, and message-count parity. Kiro globalStorage has no related JSONL sibling, so each primary file mtime is its change signal. Because precedence crosses files, `modified_after` retains the complete IDE cohort whenever any IDE source passes the threshold; this keeps older authoritative executions available to suppress newer snapshots. Kiro CLI sources remain independently prunable, and missing-file stat remains fail-open.
 
 ## Pre-aggregation filters
 
