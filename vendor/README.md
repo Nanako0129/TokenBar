@@ -190,7 +190,7 @@ The expected terminal classification after every selected runtime milestone is `
 
 The local cache schedule is schema 29 at this checkpoint, schema 30 after M20, schema 31 after M16, and active shard format 2 after M26; M15-B, M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 remains the full remote inventory and is updated after each milestone merge with the actual PR, merge SHA, ledger transition, schema, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory, but it remains stale until the mandatory M15-T post-merge refresh publishes this 111-row checkpoint. After that refresh, each milestone merge updates it with the actual PR, merge SHA, ledger transition, schema, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
