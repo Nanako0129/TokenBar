@@ -11387,7 +11387,7 @@ mod tests {
     }
 
     fn write_m15a_execution(home: &Path, status: &str, start_time: &str) -> PathBuf {
-        let path = m15a_global_root(home).join("workspace-a/execution");
+        let path = m15a_global_root(home).join("workspace-a/execution-store/execution");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
@@ -11465,8 +11465,11 @@ mod tests {
         .unwrap();
         std::fs::write(cli_dir.join("cli-collision.jsonl"), "").unwrap();
         write_m15a_snapshot(source_home.path(), &m15a_snapshot_body("0", "ABCD", ""));
+        let execution_zero =
+            m15a_global_root(source_home.path()).join("workspace-a/execution-store/execution-zero");
+        std::fs::create_dir_all(execution_zero.parent().unwrap()).unwrap();
         std::fs::write(
-            m15a_global_root(source_home.path()).join("workspace-a/execution-zero"),
+            execution_zero,
             r#"{
                 "executionId": "0",
                 "chatSessionId": "conversation",
@@ -11905,7 +11908,9 @@ mod tests {
             source_home.path(),
             &m15a_snapshot_body("exec-future", "snapshot input", "snapshot output"),
         );
-        let execution = m15a_global_root(source_home.path()).join("workspace-a/execution-future");
+        let execution = m15a_global_root(source_home.path())
+            .join("workspace-a/execution-store/execution-future");
+        std::fs::create_dir_all(execution.parent().unwrap()).unwrap();
         std::fs::write(
             &execution,
             r#"{"executionId":"exec-future","chatSessionId":"chat-future","status":"succeed","startTime":4102444800000,"endTime":4102444801000,"actions":[{"actionType":"say","output":"future answer"}],"input":{"data":{"messages":[{"content":"future question"}]}}}"#,

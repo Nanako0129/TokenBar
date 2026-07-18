@@ -498,7 +498,12 @@ fn kiro_global_storage_workspace(path: &Path) -> Option<String> {
         .map(|component| component.as_os_str().to_string_lossy().into_owned());
     while let Some(component) = components.next() {
         if component == "kiro.kiroagent" {
-            return components.next();
+            let workspace = components.next()?;
+            if workspace == "workspace-sessions" {
+                let nested_workspace = components.next()?;
+                return components.next().map(|_| nested_workspace);
+            }
+            return Some(workspace);
         }
     }
     None
@@ -523,6 +528,12 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
     }
     if let Some(messages) = try_parse_kiro_workspace_session(&value, path, fallback_timestamp) {
         return messages;
+    }
+    // Generic role/content traversal is valid only for legacy `.chat` snapshots.
+    // JSON and extensionless sources must match an execution or workspace-session
+    // shape above, otherwise mirrored project data could be counted as usage.
+    if path.extension().and_then(|extension| extension.to_str()) != Some("chat") {
+        return Vec::new();
     }
 
     let file_stem = path
@@ -575,7 +586,20 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
 fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<UnifiedMessage>> {
     let obj = value.as_object()?;
     let execution_id = obj.get("executionId")?.as_str()?;
-    let actions = obj.get("actions")?.as_array()?;
+    let actions: &[Value] = match obj.get("actions") {
+        Some(actions) => actions.as_array()?.as_slice(),
+        None if path.extension().and_then(|extension| extension.to_str()) != Some("chat")
+            && obj.get("status").is_some()
+            && obj
+                .get("context")
+                .and_then(|context| context.get("messages"))
+                .and_then(Value::as_array)
+                .is_some() =>
+        {
+            &[]
+        }
+        None => return None,
+    };
     if obj.get("status").and_then(Value::as_str) != Some("succeed") {
         return Some(Vec::new());
     }
@@ -1295,7 +1319,7 @@ not valid json at all
     #[test]
     fn test_parse_kiro_execution_supports_input_output_shapes_and_model_duration() {
         let dir = TempDir::new().unwrap();
-        let path = globalstorage_path(&dir, "workspace-a/execution-one");
+        let path = globalstorage_path(&dir, "workspace-a/execution-store/execution-one");
         fs::write(
             &path,
             r#"{
@@ -1339,21 +1363,79 @@ not valid json at all
     }
 
     #[test]
+    fn test_parse_kiro_actionless_execution_uses_context_messages() {
+        let dir = TempDir::new().unwrap();
+        let path = globalstorage_path(&dir, "workspace-a/execution-store/actionless");
+        fs::write(
+            &path,
+            r#"{
+                "executionId": "exec-actionless",
+                "chatSessionId": "chat-actionless",
+                "status": "succeed",
+                "context": {"messages": [{"entries": [
+                    {"type": "text", "text": "actionless input"},
+                    {"type": "image", "text": "ignored"}
+                ]}]}
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, "chat-actionless");
+        assert_eq!(messages[0].tokens.input, 4);
+        assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("execution:exec-actionless")
+        );
+    }
+
+    #[test]
+    fn test_parse_kiro_status_bearing_chat_without_actions_stays_snapshot() {
+        let dir = TempDir::new().unwrap();
+        let path = globalstorage_path(&dir, "workspace-a/status.chat");
+        fs::write(
+            &path,
+            r#"{
+                "executionId": "snapshot-execution",
+                "status": "succeed",
+                "messages": [
+                    {"role": "user", "content": "0123456789abcdef"},
+                    {"role": "assistant", "content": "response"}
+                ]
+            }"#,
+        )
+        .unwrap();
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 4);
+        assert_eq!(messages[0].tokens.output, 2);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("workspace-a/status:globalstorage:exec:snapshot-execution")
+        );
+    }
+
+    #[test]
     fn test_parse_kiro_execution_success_failed_and_container_artifacts() {
         let dir = TempDir::new().unwrap();
-        let success = globalstorage_path(&dir, "workspace-a/success.json");
+        let success = globalstorage_path(&dir, "workspace-a/execution-store/success.json");
         fs::write(
             &success,
             r#"{"executionId":"success","status":"succeed","startTime":1770983426,"endTime":1770983427500,"actions":[{"actionType":"say","output":{"message":"answer"}}],"input":{"data":{"messages":[{"content":"question"}]}}}"#,
         )
         .unwrap();
-        let failed = globalstorage_path(&dir, "workspace-a/failed.json");
+        let failed = globalstorage_path(&dir, "workspace-a/execution-store/failed.json");
         fs::write(
             &failed,
             r#"{"executionId":"failed","status":"failed","actions":[{"actionType":"say","output":"answer"}],"input":{"data":{"messages":[{"content":"question"}]}}}"#,
         )
         .unwrap();
-        let container = globalstorage_path(&dir, "workspace-a/executions.json");
+        let container = globalstorage_path(&dir, "workspace-a/execution-store/executions.json");
         fs::write(&container, r#"{"version":1,"executions":[]}"#).unwrap();
 
         let success_messages = parse_kiro_file(&success);
@@ -1364,9 +1446,22 @@ not valid json at all
     }
 
     #[test]
+    fn test_parse_kiro_globalstorage_skips_non_session_json_and_extensionless_files() {
+        let dir = TempDir::new().unwrap();
+        let project_json = globalstorage_path(&dir, "workspace-a/project.json");
+        let mirrored_file = globalstorage_path(&dir, "workspace-a/project-store/mirror");
+        let body = r#"{"messages":[{"role":"user","content":"must not count"}]}"#;
+        fs::write(&project_json, body).unwrap();
+        fs::write(&mirrored_file, body).unwrap();
+
+        assert!(parse_kiro_file(&project_json).is_empty());
+        assert!(parse_kiro_file(&mirrored_file).is_empty());
+    }
+
+    #[test]
     fn test_parse_kiro_workspace_session_promptlogs() {
         let dir = TempDir::new().unwrap();
-        let path = globalstorage_path(&dir, "workspace-sessions/session.json");
+        let path = globalstorage_path(&dir, "workspace-sessions/workspace-a/session.json");
         fs::write(
             &path,
             r#"{
@@ -1387,6 +1482,8 @@ not valid json at all
         assert_eq!(messages[0].tokens.input, 8);
         assert_eq!(messages[0].tokens.output, 2);
         assert_eq!(messages[0].message_count, 2);
+        assert_eq!(messages[0].workspace_key.as_deref(), Some("workspace-a"));
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("workspace-a"));
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("session-1:workspace-session")
@@ -1398,7 +1495,7 @@ not valid json at all
         let dir = TempDir::new().unwrap();
         let cli = dir.path().join("session.json");
         let chat = globalstorage_path(&dir, "workspace-a/session.chat");
-        let extensionless = globalstorage_path(&dir, "workspace-a/execution");
+        let extensionless = globalstorage_path(&dir, "workspace-a/execution-store/execution");
         assert_eq!(
             kiro_related_messages_path(&cli),
             Some(dir.path().join("session.jsonl"))

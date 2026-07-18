@@ -231,9 +231,33 @@ pub fn copilot_exporter_path() -> Option<PathBuf> {
     copilot_exporter_path_with_env_strategy(true)
 }
 
+// Kiro keeps legacy snapshots at `<workspace>/*.chat`, execution records at
+// `<workspace>/<store>/*`, and workspace-session JSON at
+// `workspace-sessions/<workspace>/*.json`. Do not recurse into mirrored project
+// trees or treat root-level JSON/extensionless files as usage sources.
+fn is_kiro_globalstorage_artifact(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let components: Vec<_> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect();
+
+    match components.as_slice() {
+        [workspace, file] if workspace != "workspace-sessions" => file.ends_with(".chat"),
+        [bucket, _, file] if bucket == "workspace-sessions" => file.ends_with(".json"),
+        [workspace, _, file] if workspace != "workspace-sessions" => {
+            file.ends_with(".json") || Path::new(file.as_ref()).extension().is_none()
+        }
+        _ => false,
+    }
+}
+
 /// Scan a single directory for session files
 pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
-    if !std::path::Path::new(root).exists() {
+    let root_path = std::path::Path::new(root);
+    if !root_path.exists() {
         return Vec::new();
     }
 
@@ -299,11 +323,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 }
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
-                "kiro-globalstorage" => {
-                    file_name.ends_with(".chat")
-                        || file_name.ends_with(".json")
-                        || path.extension().is_none()
-                }
+                "kiro-globalstorage" => is_kiro_globalstorage_artifact(root_path, path),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 // Grok Build ACP session updates under
@@ -3606,20 +3626,38 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("kiro.kiroagent");
         let workspace = root.join("workspace-a");
-        fs::create_dir_all(&workspace).unwrap();
+        let execution_store = workspace.join("execution-store");
+        let workspace_session = root.join("workspace-sessions/workspace-a");
+        fs::create_dir_all(&execution_store).unwrap();
+        fs::create_dir_all(&workspace_session).unwrap();
         File::create(workspace.join("snapshot.chat")).unwrap();
-        File::create(workspace.join("snapshot.json")).unwrap();
-        File::create(workspace.join("execution")).unwrap();
+        File::create(workspace.join("project.json")).unwrap();
+        File::create(workspace.join("notes")).unwrap();
+        File::create(execution_store.join("execution.json")).unwrap();
+        File::create(execution_store.join("execution-record")).unwrap();
+        fs::create_dir_all(execution_store.join("project")).unwrap();
+        File::create(execution_store.join("project/mirror.json")).unwrap();
+        File::create(workspace_session.join("session.json")).unwrap();
+        fs::create_dir_all(workspace_session.join("project")).unwrap();
+        File::create(workspace_session.join("project/mirror.json")).unwrap();
         File::create(workspace.join("index.sqlite")).unwrap();
         File::create(workspace.join("notes.txt")).unwrap();
 
         let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
-        let names: Vec<_> = files
+        let relative: Vec<_> = files
             .iter()
-            .map(|path| path.file_name().unwrap().to_str().unwrap())
+            .map(|path| path.strip_prefix(&root).unwrap().to_string_lossy())
             .collect();
 
-        assert_eq!(names, vec!["execution", "snapshot.chat", "snapshot.json"]);
+        assert_eq!(
+            relative,
+            vec![
+                "workspace-a/execution-store/execution-record",
+                "workspace-a/execution-store/execution.json",
+                "workspace-a/snapshot.chat",
+                "workspace-sessions/workspace-a/session.json",
+            ]
+        );
     }
 
     #[cfg(target_os = "macos")]
@@ -3637,7 +3675,9 @@ mod tests {
         let file = uppercase_root.join("workspace-a/transcript.chat");
         fs::create_dir_all(file.parent().unwrap()).unwrap();
         File::create(&file).unwrap();
-        File::create(uppercase_root.join("workspace-a/execution")).unwrap();
+        let execution = uppercase_root.join("workspace-a/execution-store/execution");
+        fs::create_dir_all(execution.parent().unwrap()).unwrap();
+        File::create(&execution).unwrap();
 
         // The two casing roots resolve to the same physical root. The scanner
         // must register the first root once and not duplicate its files.
@@ -3660,10 +3700,7 @@ mod tests {
             true,
             &settings,
         );
-        assert_eq!(
-            result.get(ClientId::Kiro),
-            &vec![uppercase_root.join("workspace-a/execution"), file.clone(),]
-        );
+        assert_eq!(result.get(ClientId::Kiro), &vec![execution, file.clone()]);
 
         let disabled = scan_all_clients_with_scanner_settings(
             home.path().to_str().unwrap(),

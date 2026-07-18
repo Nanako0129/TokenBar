@@ -4,7 +4,7 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-18
+last_verified: 2026-07-19
 sources: ["Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md"]
 ---
 
@@ -86,7 +86,7 @@ A parser that reads a secondary file must update all four related seams together
 
 ### Kiro globalStorage precedence
 
-The M15-A macOS Kiro IDE lane is a special multi-source lane, not a normal per-file dedup pass. The scanner discovers the two macOS `globalStorage/kiro.kiroagent` casing roots and accepts `.chat`, `.json`, and extensionless records while excluding index databases and unrelated extensions. Parsing keeps snapshots, successful execution records, and workspace-session records as separate raw source messages.
+The M15-A macOS Kiro IDE lane is a special multi-source lane, not a normal per-file dedup pass. The scanner discovers the two macOS `globalStorage/kiro.kiroagent` casing roots and follows the known storage layouts: direct `<workspace>/*.chat` snapshots, `.json` or extensionless execution records one store directory deeper, and `workspace-sessions/<workspace>/*.json`. Deeper mirrored-project trees, root-level JSON/extensionless artifacts, index databases, and unrelated extensions are excluded. Generic role/content traversal is `.chat`-only; JSON and extensionless sources must match an execution or workspace-session shape. Parsing keeps snapshots, successful execution records (including status-bearing non-`.chat` `context.messages` records without an `actions` array), and workspace-session records as separate raw source messages. A legacy `.chat` snapshot is not reclassified as an execution by `status` alone. Workspace-session attribution comes from the nested workspace component rather than the literal `workspace-sessions` directory.
 
 The source of truth for precedence is the raw batch, not a downstream report. Materialized and streaming consumers follow the same order:
 
