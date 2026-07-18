@@ -98,6 +98,15 @@ pub(crate) fn read_file_or_none(path: &Path) -> Option<Vec<u8>> {
     std::fs::read(path).ok()
 }
 
+/// Back-calculate a start anchor from a recorded end timestamp and elapsed
+/// duration: `end - duration`. Non-positive candidates fall back to `end` so
+/// sessionization does not silently discard corrupt or clock-skewed rows.
+pub(crate) fn back_anchor_timestamp(end: i64, duration: i64) -> i64 {
+    end.checked_sub(duration)
+        .filter(|candidate| *candidate > 0)
+        .unwrap_or(end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
