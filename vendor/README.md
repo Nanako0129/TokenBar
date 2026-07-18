@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-The current audited TokenBar main is [`632aa739`](https://github.com/Nanako0129/TokenBar/commit/632aa7398faf832b2b8db2439afd028fdc4f937d), the rebase-merge result of Kiro M15-A [PR #63](https://github.com/Nanako0129/TokenBar/pull/63). The upstream target is [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), which merged OpenCode v2 [PR #920](https://github.com/junhoyeo/tokscale/pull/920); the local monolithic cache schema remains 29.
+This M20 implementation checkpoint starts from audited TokenBar main [`a2f852ac`](https://github.com/Nanako0129/TokenBar/commit/a2f852ac53c113de5dc6315d7e2ace5c4932b6df), the rebase-merge result of the M15-T ledger [PR #64](https://github.com/Nanako0129/TokenBar/pull/64), and ports upstream [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), which merged OpenCode v2 [PR #920](https://github.com/junhoyeo/tokscale/pull/920). The vendored tree in this checkpoint uses monolithic cache schema 30; public main and issue #45 remain at the M15-T state until this implementation PR merges.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,8 +32,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 59 |
-| `TAKE` | 29 |
+| `ALREADY_VENDORED` | 60 |
+| `TAKE` | 28 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 9 |
 | `SKIP` | 13 |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 59</summary>
+<summary><code>ALREADY_VENDORED</code> — 60</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -53,20 +53,20 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 979b7015 7403dafa d5f2c6c4 59421da9 31deb7e6 b8156e64 dcb053e0 23cf62e0
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
-163ec570 a2f7cef5 a0929482
+163ec570 a2f7cef5 a0929482 366ce643
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 29</summary>
+<summary><code>TAKE</code> — 28</summary>
 
 ```text
 63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d
 640e97b9 f7a124da 302d39c3 ed6f8b95 f6f7eced 0b454e60
 65f8f3e2 6c804711 405ded4a 315549b4 9a5aeb65 074619f7
 c1aef5e9 ae36db5c cd07bf78 6899ea03 b59979c5 9155018c 18cd13cc b64d861e
-34cfbb50 a87f0ab6 366ce643
+34cfbb50 a87f0ab6
 ```
 
 </details>
@@ -111,11 +111,11 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-The 29 `TAKE` rows cover existing-client correctness and the product-approved feature set. A mixed upstream commit remains one ledger row even when selected hunks land in several milestones.
+M20 moves `366ce643` to `ALREADY_VENDORED`; the remaining 28 `TAKE` rows cover the rest of the selected correctness and feature set. A mixed upstream commit remains one ledger row even when selected hunks land in several milestones.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
-| M20 | OpenCode v2 SQLite | `366ce643` |
+| M20 — landed in this checkpoint | OpenCode v2 SQLite | `366ce643` |
 | M15-B | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
 | M16 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc 34cfbb50` + `b64d861e` Jcode hunk |
 | M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
@@ -188,9 +188,9 @@ flowchart TD
 
 The expected terminal classification after every selected runtime milestone is `ALREADY_VENDORED 85`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 12`, `SKIP 13`, and `SUPERSEDED 1`, total 111. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
-The local cache schedule is schema 29 at this checkpoint, schema 30 after M20, schema 31 after M16, and active shard format 2 after M26; M15-B, M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. The legacy schema-31 monolith remains untouched when M26 activates shards.
+The local cache schedule is schema 30 at this M20 checkpoint, schema 31 after M16, and active shard format 2 after M26; M15-B, M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M20 rejects schema-29 hybrid OpenCode entries that can contain only non-empty v1 output for an otherwise unchanged database, forcing one rebuild that includes v2 rows. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory, but it remains stale until the mandatory M15-T post-merge refresh publishes this 111-row checkpoint. After that refresh, each milestone merge updates it with the actual PR, merge SHA, ledger transition, schema, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records the merged M15-T state. After M20 merges, its mandatory post-merge refresh records the actual PR, merge SHA, `366ce643` transition, `60/28/0/9/13/1` counts, schema 30, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -249,13 +249,19 @@ TokenBar's local M15-A adaptation adds only the macOS roots `~/Library/Applicati
 
 Because precedence crosses files, TokenBar caches raw parser output per source and runs batch suppression only after every Kiro source has been collected. The materialized, streaming, count, and model/monthly/hourly/Agents report paths all consume the same post-suppression dedup gate, so mirrored `.chat` and `.json` snapshots with the same identity remain exact-once on every lane. The cache remains raw so an execution rewrite, failure, or removal can restore a cached snapshot; mtime probing uses each primary globalStorage file, while `modified_after` retains the complete IDE cohort whenever any IDE source passes the threshold so an older authoritative execution cannot be pruned before suppressing a newer snapshot. Kiro CLI sources remain independently prunable and stat failures remain fail-open. No Linux or Windows globalStorage roots are added, and no structured `sess_*` / `session.json` / `messages.jsonl` cohort is included — that is M15-B. Upstream shard-cache, `parser_version`, and CLI-TUI-only changes are also excluded.
 
+## M20 OpenCode v2 SQLite completion
+
+M20 selectively ports upstream [#920](https://github.com/junhoyeo/tokscale/pull/920) / [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a). OpenCode v2 assistant rows are read from `session_message` only when `type = 'assistant'`; model identity falls back from v1 top-level `modelID` / `providerID` to v2 `model.id` / `model.providerID`, with top-level values retaining precedence. The v1 `message` table and v2 table feed one accumulator: fork copies with the same fingerprint and embedded id collapse, rows with different embedded ids remain distinct even when every fingerprint field collides, and row ids remain the fallback dedup key. TokenBar's shared post-parser identity also includes timestamp, duration, model/provider, tokens, and agent, so incompatible SQLite rows that reuse one embedded id remain distinct in materialized, shipping streaming, and count lanes while legacy JSON overlap and cost-only estimated/provider-reported copies still follow source authority. Legacy JSON files still require an explicit `role = "assistant"`; making the SQLite role optional does not broaden file parsing. Workspace attribution, negative-token clamping, provider canonicalization, and provider-reported `CostSource` behavior retain TokenBar's existing hardening.
+
+The scanner already accepts `opencode-next.db` through the existing `opencode-<channel>.db` rule, and all materialized, shipping streaming, count, model, monthly, hourly, and Agents paths already call the shared SQLite parser, so no scanner or registry change is required. Cache schema advances **29→30** for a real non-empty stale case: a hybrid database can have a schema-29 entry containing only its v1 rows, with the same SQLite/WAL-aware fingerprint that the new parser would otherwise reuse without reading v2 rows. A hermetic fixture writes exactly that schema-29 v1-only entry, proves the database fingerprint is unchanged, verifies rejection and rebuild to v1+v2, then confirms warm-cache, streaming, count, and report parity. Pure v2, v1/v2 overlap, same-id forks, distinct-id collisions, role filtering, workspace, and clamping remain covered in parser-local fixtures. The shard-cache architecture and per-client parser versions remain deferred to M26.
+
 ## Recovered Windows downstream commits
 
 The Windows port started from TokenBar [`2ed256ee`](https://github.com/Nanako0129/TokenBar/commit/2ed256eea7f6761e85198e3bc584e08a8d3d8ac1), then accumulated and validated the vendor-only sequence recorded in the [issue #45 handoff](https://github.com/Nanako0129/TokenBar/issues/45#issuecomment-5002865759). These commits are now recovered into this repository so it remains the canonical source for the next Windows sync; the detailed Windows build, hostile-environment, profile-manifest, and FFI evidence stays in that handoff rather than being duplicated here.
 
 | Commits | What | Files | Cache / upstream status |
 |---|---|---|---|
-| `e5200634` → `db2a96a3` → `15f418ee` → `e807f333` → `0979cdb0` → `26b892a6` → `6ac77c03` → `e91fb2c6` → `fbecb99c` → `3c8bfc52` → `aec5bd88` | Makes core tests hermetic with panic-safe environment/current-directory guards, serial coordination, isolated cache/XDG roots, platform-safe JSON/path fixtures, and explicit-home parser/scanner fixtures while retaining dedicated positive environment cases. Production fixes release the temporary cache writer before Windows atomic replacement, reopen the final cache read/write for the durability sync, derive Windows explicit-home config and Zed paths from supplied `<home>/AppData/Roaming/tokscale` and `<home>/AppData/Local/Zed/threads/threads.db` while limiting process known-folder fallbacks to env-aware scans, and compare extra-path warnings against the supplied scan home. | `src/clients.rs`, `src/lib.rs`, `src/message_cache.rs`, `src/pricing/cache.rs`, `src/scanner.rs`, `src/sessions/claudecode.rs`, `src/sessions/opencode.rs` | No serialized parser output, cache layout, FFI, or public API change; `CACHE_SCHEMA_VERSION` remains 29. The upstream-applicable portions are merged: cache PR [#914](https://github.com/junhoyeo/tokscale/pull/914) (`163ec570`) maps the handle ordering to upstream's shard writer, explicit-home PR [#916](https://github.com/junhoyeo/tokscale/pull/916) (`a2f7cef5`) matches the supplied-home and warning semantics including positive `AppData` roots, and core hermetic PR [#917](https://github.com/junhoyeo/tokscale/pull/917) (`a0929482`) carries the same fixture-isolation failure class on upstream's current test layout. The remaining structural differences are TokenBar-specific cache and test adaptations, not missing upstream behavior; no further code or schema port is required. |
+| `e5200634` → `db2a96a3` → `15f418ee` → `e807f333` → `0979cdb0` → `26b892a6` → `6ac77c03` → `e91fb2c6` → `fbecb99c` → `3c8bfc52` → `aec5bd88` | Makes core tests hermetic with panic-safe environment/current-directory guards, serial coordination, isolated cache/XDG roots, platform-safe JSON/path fixtures, and explicit-home parser/scanner fixtures while retaining dedicated positive environment cases. Production fixes release the temporary cache writer before Windows atomic replacement, reopen the final cache read/write for the durability sync, derive Windows explicit-home config and Zed paths from supplied `<home>/AppData/Roaming/tokscale` and `<home>/AppData/Local/Zed/threads/threads.db` while limiting process known-folder fallbacks to env-aware scans, and compare extra-path warnings against the supplied scan home. | `src/clients.rs`, `src/lib.rs`, `src/message_cache.rs`, `src/pricing/cache.rs`, `src/scanner.rs`, `src/sessions/claudecode.rs`, `src/sessions/opencode.rs` | No serialized parser output, cache layout, FFI, or public API change; `CACHE_SCHEMA_VERSION` remained 29 at that Windows-recovery checkpoint; M20 later advances the Native source to schema 30. The upstream-applicable portions are merged: cache PR [#914](https://github.com/junhoyeo/tokscale/pull/914) (`163ec570`) maps the handle ordering to upstream's shard writer, explicit-home PR [#916](https://github.com/junhoyeo/tokscale/pull/916) (`a2f7cef5`) matches the supplied-home and warning semantics including positive `AppData` roots, and core hermetic PR [#917](https://github.com/junhoyeo/tokscale/pull/917) (`a0929482`) carries the same fixture-isolation failure class on upstream's current test layout. The remaining structural differences are TokenBar-specific cache and test adaptations, not missing upstream behavior; no further code or schema port is required. |
 
 ## Upstream fixes reported but not yet vendored
 

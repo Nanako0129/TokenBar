@@ -885,23 +885,31 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         .filter(|message| message.cost_source == CostSource::ProviderReported)
         .filter_map(|message| message.dedup_key.clone())
         .collect();
-    let mut opencode_seen: HashSet<String> = HashSet::new();
+    let mut opencode_selection = OpenCodeSelection::new(opencode_authoritative);
 
-    for outcome in opencode_sqlite_outcomes
-        .into_iter()
-        .chain(opencode_json_outcomes)
-    {
-        all_messages.extend(outcome.messages.into_iter().filter(|message| {
-            message.dedup_key.as_ref().is_none_or(|key| {
-                (!opencode_authoritative.contains(key)
-                    || message.cost_source == CostSource::ProviderReported)
-                    && opencode_seen.insert(key.clone())
-            })
-        }));
+    for outcome in opencode_sqlite_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter_map(|message| opencode_selection.select_sqlite(message)),
+        );
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    for outcome in opencode_json_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter_map(|message| opencode_selection.select_json(message, true)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    all_messages.extend(opencode_selection.finish());
 
     let claude_home = PathBuf::from(home_dir);
     let claude_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -1824,91 +1832,132 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
-/// Applies one OpenCode source-priority snapshot without requiring sink
-/// retraction. Only estimated SQLite messages hidden by that snapshot are
-/// retained as fallbacks; JSON messages remain fully streaming.
-struct OpenCodeStreamingSelection {
-    authoritative_snapshot: HashSet<String>,
-    seen: HashSet<String>,
-    deferred_sqlite: Vec<Option<UnifiedMessage>>,
-    deferred_by_key: HashMap<String, usize>,
+/// Logical OpenCode request identity used after parser-local fork collapse.
+///
+/// The embedded message id alone is insufficient: OpenCode can reuse it for
+/// incompatible rows, which the parser correctly preserves. Session and
+/// workspace are excluded because true fork copies move between both. Cost is
+/// excluded so a provider-reported copy can still replace an estimated one.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OpenCodeMessageIdentity {
+    key: String,
+    timestamp: i64,
+    duration_ms: Option<i64>,
+    model_id: String,
+    provider_id: String,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    agent: Option<String>,
 }
 
-impl OpenCodeStreamingSelection {
+impl OpenCodeMessageIdentity {
+    fn from_message(message: &UnifiedMessage) -> Option<Self> {
+        Some(Self {
+            key: message.dedup_key.clone()?,
+            timestamp: message.timestamp,
+            duration_ms: message.duration_ms,
+            model_id: message.model_id.clone(),
+            provider_id: message.provider_id.clone(),
+            input: message.tokens.input,
+            output: message.tokens.output,
+            cache_read: message.tokens.cache_read,
+            cache_write: message.tokens.cache_write,
+            reasoning: message.tokens.reasoning,
+            agent: message.agent.clone(),
+        })
+    }
+}
+
+/// Applies one OpenCode source-priority snapshot without requiring sink
+/// retraction. SQLite fork copies deduplicate by full logical identity, while
+/// legacy JSON overlap retains OpenCode's message-id source precedence.
+struct OpenCodeSelection {
+    authoritative_snapshot: HashSet<String>,
+    seen_sqlite: HashSet<OpenCodeMessageIdentity>,
+    emitted_keys: HashSet<String>,
+    deferred_sqlite: Vec<Option<UnifiedMessage>>,
+    deferred_by_key: HashMap<String, Vec<(OpenCodeMessageIdentity, usize)>>,
+}
+
+impl OpenCodeSelection {
     fn new(authoritative_snapshot: HashSet<String>) -> Self {
         Self {
             authoritative_snapshot,
-            seen: HashSet::new(),
+            seen_sqlite: HashSet::new(),
+            emitted_keys: HashSet::new(),
             deferred_sqlite: Vec::new(),
             deferred_by_key: HashMap::new(),
         }
     }
 
     fn select_sqlite(&mut self, message: UnifiedMessage) -> Option<UnifiedMessage> {
-        let Some(key) = message.dedup_key.as_deref() else {
+        let Some(identity) = OpenCodeMessageIdentity::from_message(&message) else {
             return Some(message);
         };
-        if self.seen.contains(key) {
+        let key = identity.key.clone();
+        if !self.seen_sqlite.insert(identity.clone()) {
+            if message.cost_source == CostSource::ProviderReported {
+                if let Some(entries) = self.deferred_by_key.get_mut(&key) {
+                    if let Some(position) = entries
+                        .iter()
+                        .position(|(deferred, _)| deferred == &identity)
+                    {
+                        let (_, index) = entries.swap_remove(position);
+                        self.deferred_sqlite[index] = None;
+                        let remove_key = entries.is_empty();
+                        self.emitted_keys.insert(key.clone());
+                        if remove_key {
+                            self.deferred_by_key.remove(&key);
+                        }
+                        return Some(message);
+                    }
+                }
+            }
             return None;
         }
-        if let Some(&index) = self.deferred_by_key.get(key) {
-            if message.cost_source != CostSource::ProviderReported {
-                return None;
-            }
-            self.deferred_by_key.remove(key);
-            self.deferred_sqlite[index] = None;
-            self.seen.insert(key.to_owned());
-            return Some(message);
-        }
-        if self.authoritative_snapshot.contains(key)
+        if self.authoritative_snapshot.contains(&key)
             && message.cost_source != CostSource::ProviderReported
         {
             let index = self.deferred_sqlite.len();
-            self.deferred_by_key.insert(key.to_owned(), index);
+            self.deferred_by_key
+                .entry(key)
+                .or_default()
+                .push((identity, index));
             self.deferred_sqlite.push(Some(message));
             return None;
         }
-        self.seen.insert(key.to_owned());
+        self.emitted_keys.insert(key);
         Some(message)
     }
 
-    fn select_json(
-        &mut self,
-        message: UnifiedMessage,
-        will_emit: bool,
-    ) -> Option<UnifiedMessage> {
-        let Some(key) = message.dedup_key.as_deref() else {
+    fn select_json(&mut self, message: UnifiedMessage, will_emit: bool) -> Option<UnifiedMessage> {
+        let Some(key) = message.dedup_key.clone() else {
             return will_emit.then_some(message);
         };
-        if self.seen.contains(key) {
+        if self.emitted_keys.contains(&key) {
             return None;
         }
-        if self.authoritative_snapshot.contains(key) {
+        if self.authoritative_snapshot.contains(&key) {
             if message.cost_source != CostSource::ProviderReported || !will_emit {
                 return None;
             }
-            self.seen.insert(key.to_owned());
-            if let Some(index) = self.deferred_by_key.remove(key) {
-                self.deferred_sqlite[index] = None;
+            self.emitted_keys.insert(key.clone());
+            if let Some(entries) = self.deferred_by_key.remove(&key) {
+                for (_, index) in entries {
+                    self.deferred_sqlite[index] = None;
+                }
             }
             return Some(message);
         }
-        self.seen.insert(key.to_owned());
+        self.emitted_keys.insert(key);
         will_emit.then_some(message)
     }
 
     fn finish(self) -> impl Iterator<Item = UnifiedMessage> {
-        let Self {
-            mut seen,
-            deferred_sqlite,
-            ..
-        } = self;
-        deferred_sqlite.into_iter().flatten().filter(move |message| {
-            message
-                .dedup_key
-                .as_ref()
-                .is_none_or(|key| seen.insert(key.clone()))
-        })
+        self.deferred_sqlite.into_iter().flatten()
     }
 }
 
@@ -2398,7 +2447,7 @@ where
         );
     }
 
-    let mut opencode_selection = OpenCodeStreamingSelection::new(opencode_authoritative);
+    let mut opencode_selection = OpenCodeSelection::new(opencode_authoritative);
     for db_path in &scan_result.opencode_dbs {
         for mut message in sessions::opencode::parse_opencode_sqlite(db_path) {
             apply_pricing_if_available(&mut message, pricing);
@@ -3482,48 +3531,36 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut counts = ClientCounts::new();
 
     let opencode_count: i32 = {
-        let mut seen: HashSet<String> = HashSet::new();
-        let mut count: i32 = 0;
-
-        for db_path in &scan_result.opencode_dbs {
-            let sqlite_msgs: Vec<(String, ParsedMessage)> =
-                sessions::opencode::parse_opencode_sqlite(db_path)
-                    .into_iter()
-                    .filter_map(|msg| {
-                        let key = msg.dedup_key.clone().unwrap_or_default();
-                        // Dedup across multiple channel-suffixed dbs: the
-                        // same session can end up in both `opencode.db` and
-                        // `opencode-<channel>.db` if the user switches
-                        // channels mid-session.
-                        if !key.is_empty() && !seen.insert(key.clone()) {
-                            return None;
-                        }
-                        Some((key, unified_to_parsed(&msg)))
-                    })
-                    .collect();
-            count += sqlite_msgs.len() as i32;
-            for (_key, parsed) in sqlite_msgs {
-                messages.push(parsed);
-            }
-        }
-
-        let json_msgs: Vec<(String, ParsedMessage)> = scan_result
+        let sqlite_messages: Vec<UnifiedMessage> = scan_result
+            .opencode_dbs
+            .iter()
+            .flat_map(|db_path| sessions::opencode::parse_opencode_sqlite(db_path))
+            .collect();
+        let json_messages: Vec<UnifiedMessage> = scan_result
             .get(ClientId::OpenCode)
             .par_iter()
-            .filter_map(|path| {
-                let msg = sessions::opencode::parse_opencode_file(path)?;
-                let key = msg.dedup_key.clone().unwrap_or_default();
-                Some((key, unified_to_parsed(&msg)))
-            })
+            .filter_map(|path| sessions::opencode::parse_opencode_file(path))
             .collect();
-        let deduped: Vec<ParsedMessage> = json_msgs
+        let authoritative: HashSet<String> = sqlite_messages
+            .iter()
+            .chain(json_messages.iter())
+            .filter(|message| message.cost_source == CostSource::ProviderReported)
+            .filter_map(|message| message.dedup_key.clone())
+            .collect();
+        let mut selection = OpenCodeSelection::new(authoritative);
+        let mut selected: Vec<UnifiedMessage> = sqlite_messages
             .into_iter()
-            .filter(|(key, _)| key.is_empty() || seen.insert(key.clone()))
-            .map(|(_, msg)| msg)
+            .filter_map(|message| selection.select_sqlite(message))
             .collect();
-        count += deduped.len() as i32;
-        messages.extend(deduped);
+        selected.extend(
+            json_messages
+                .into_iter()
+                .filter_map(|message| selection.select_json(message, true)),
+        );
+        selected.extend(selection.finish());
 
+        let count = selected.len() as i32;
+        messages.extend(selected.iter().map(unified_to_parsed));
         count
     };
     counts.set(ClientId::OpenCode, opencode_count);
@@ -4138,9 +4175,10 @@ mod tests {
         parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
         select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
-        CostSource, GroupBy, LocalParseOptions, OpenCodeStreamingSelection, ReportOptions,
+        CostSource, GroupBy, LocalParseOptions, OpenCodeSelection, ReportOptions,
         TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
+    use bincode::Options;
     use std::collections::{HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
@@ -4348,13 +4386,17 @@ mod tests {
         message
     }
 
+    fn opencode_authority_set(key: &str) -> HashSet<String> {
+        HashSet::from([key.to_string()])
+    }
+
     #[test]
     fn test_opencode_streaming_selection_flushes_snapshot_fallback_on_json_drift() {
         // A missing file and an invalid file both produce no second-pass message;
         // a downgraded file produces an estimated message. All must flush SQLite.
         for second_pass in [None, None, Some(CostSource::Estimated)] {
             let key = "snapshot-authoritative";
-            let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+            let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
             assert!(selection.select_sqlite(make_opencode_selection_message(
                 key, 0.25, CostSource::Estimated,
             )).is_none());
@@ -4373,7 +4415,7 @@ mod tests {
     #[test]
     fn test_opencode_streaming_selection_replaces_deferred_sqlite_estimate() {
         let key = "sqlite-authoritative-replacement";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
                 key, 0.25, CostSource::Estimated,
@@ -4393,7 +4435,7 @@ mod tests {
     #[test]
     fn test_opencode_streaming_selection_keeps_first_sqlite_estimate() {
         let key = "sqlite-estimated-first-wins";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
                 key, 0.25, CostSource::Estimated,
@@ -4414,7 +4456,7 @@ mod tests {
     #[test]
     fn test_opencode_streaming_selection_keeps_first_sqlite_authority() {
         let key = "sqlite-authoritative-first-wins";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         let first = selection
             .select_sqlite(make_opencode_selection_message(
                 key, 0.50, CostSource::ProviderReported,
@@ -4432,7 +4474,7 @@ mod tests {
     #[test]
     fn test_opencode_streaming_selection_keeps_fallback_until_json_is_emitted() {
         let key = "filtered-authoritative";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection.select_sqlite(make_opencode_selection_message(
             key, 0.25, CostSource::Estimated,
         )).is_none());
@@ -4447,7 +4489,7 @@ mod tests {
     #[test]
     fn test_opencode_streaming_selection_does_not_double_count_new_authority() {
         let key = "newly-authoritative";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::new());
+        let mut selection = OpenCodeSelection::new(HashSet::new());
         assert!(selection.select_sqlite(make_opencode_selection_message(
             key, 0.25, CostSource::Estimated,
         )).is_some());
@@ -4458,9 +4500,23 @@ mod tests {
     }
 
     #[test]
+    fn test_opencode_streaming_selection_keeps_incompatible_same_id_rows() {
+        let key = "reused-message-id";
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
+        let first = make_opencode_selection_message(key, 0.25, CostSource::Estimated);
+        let mut second = make_opencode_selection_message(key, 0.50, CostSource::ProviderReported);
+        second.timestamp += 1_000;
+        second.tokens.input = 20;
+
+        assert!(selection.select_sqlite(first).is_none());
+        assert!(selection.select_sqlite(second).is_some());
+        assert_eq!(selection.finish().count(), 1);
+    }
+
+    #[test]
     fn test_opencode_streaming_selection_prefers_snapshot_authority() {
         let key = "stable-authoritative";
-        let mut selection = OpenCodeStreamingSelection::new(HashSet::from([key.to_string()]));
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection.select_sqlite(make_opencode_selection_message(
             key, 0.25, CostSource::Estimated,
         )).is_none());
@@ -4562,6 +4618,29 @@ mod tests {
             "CREATE TABLE message (
                 id TEXT PRIMARY KEY,
                 session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        conn
+    }
+
+    fn create_opencode_v2_sqlite_db(db_path: &std::path::Path) -> rusqlite::Connection {
+        let conn = rusqlite::Connection::open(db_path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                data TEXT NOT NULL
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT NOT NULL
+            );
+            CREATE TABLE session_message (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                type TEXT NOT NULL,
                 data TEXT NOT NULL
             );",
         )
@@ -6174,6 +6253,266 @@ mod tests {
             let repaired_entry = loaded.get(&cache_path).unwrap();
             assert_eq!(repaired_entry.messages.len(), 1);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_schema_29_hybrid_opencode_cache_rebuilds_with_v2_rows_across_lanes() {
+        #[derive(serde::Serialize)]
+        struct Schema29Store {
+            schema_version: u32,
+            entries: Vec<message_cache::CachedSourceEntry>,
+        }
+
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = opencode_test_env(cache_home.path(), source_home.path());
+        let _pricing_env =
+            EnvGuard::set(&[("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1"))]);
+
+        let db_dir = source_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode-next.db");
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        conn.execute(
+            "INSERT INTO session (id, directory) VALUES (?1, ?2), (?3, ?4)",
+            rusqlite::params!["session-v1", "/workspace/v1", "session-v2", "/workspace/v2"],
+        )
+        .unwrap();
+        let v1_data = r#"{
+            "id": "message-v1",
+            "role": "assistant",
+            "modelID": "claude-sonnet-4",
+            "providerID": "anthropic",
+            "mode": "build",
+            "cost": 0.01,
+            "tokens": { "input": 100, "output": 10, "reasoning": 1, "cache": { "read": 5, "write": 2 } },
+            "time": { "created": 1700000000000.0, "completed": 1700000000500.0 }
+        }"#;
+        let v2_data = r#"{
+            "id": "message-v1",
+            "model": { "id": "claude-sonnet-4", "providerID": "anthropic" },
+            "agent": "build",
+            "cost": 0.02,
+            "tokens": { "input": 200, "output": 20, "reasoning": 2, "cache": { "read": 10, "write": 4 } },
+            "time": { "created": 1700000001000.0, "completed": 1700000001750.0 }
+        }"#;
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["row-v1", "session-v1", v1_data],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["row-v2", "session-v2", "assistant", v2_data],
+        )
+        .unwrap();
+        drop(conn);
+
+        let fingerprint = message_cache::SourceFingerprint::from_sqlite_path(&db_path).unwrap();
+        let mut stale_message = UnifiedMessage::new_with_dedup(
+            "opencode",
+            "claude-sonnet-4",
+            "anthropic",
+            "session-v1",
+            1_700_000_000_000,
+            TokenBreakdown {
+                input: 100,
+                output: 10,
+                cache_read: 5,
+                cache_write: 2,
+                reasoning: 1,
+            },
+            0.01,
+            Some("message-v1".to_string()),
+        );
+        stale_message.duration_ms = Some(500);
+        stale_message.mark_provider_reported_cost();
+        let stale_store = Schema29Store {
+            schema_version: 29,
+            entries: vec![message_cache::CachedSourceEntry::new(
+                &db_path,
+                fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            )],
+        };
+        let cache_file = crate::paths::get_cache_dir().join("source-message-cache.bin");
+        std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        let writer = std::io::BufWriter::new(std::fs::File::create(&cache_file).unwrap());
+        bincode::options()
+            .serialize_into(writer, &stale_store)
+            .unwrap();
+
+        assert_eq!(
+            message_cache::SourceFingerprint::from_sqlite_path(&db_path).unwrap(),
+            fingerprint,
+            "the schema-29 v1-only entry must match the unchanged hybrid database"
+        );
+        assert!(
+            message_cache::SourceMessageCache::load().entries.is_empty(),
+            "schema-29 cache entries must be rejected before parsing v2 rows"
+        );
+
+        let clients = vec!["opencode".to_string()];
+        let parse_materialized = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let mut cold = parse_materialized();
+        let mut warm = parse_materialized();
+        cold.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        warm.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        assert_eq!(cold.len(), 2);
+        assert_eq!(
+            cold.iter()
+                .map(|message| message.dedup_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("message-v1"), Some("message-v1")],
+            "same embedded ids with incompatible timestamps and tokens must remain distinct"
+        );
+        assert_eq!(
+            cold.iter()
+                .map(|message| (&message.dedup_key, &message.tokens))
+                .collect::<Vec<_>>(),
+            warm.iter()
+                .map(|message| (&message.dedup_key, &message.tokens))
+                .collect::<Vec<_>>(),
+            "the rebuilt schema-30 entry must preserve v1+v2 output on a warm hit"
+        );
+        let rebuilt_cache = message_cache::SourceMessageCache::load();
+        assert_eq!(rebuilt_cache.get(&db_path).unwrap().messages.len(), 2);
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        streamed.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        assert_eq!(
+            streamed
+                .iter()
+                .map(|message| (&message.dedup_key, &message.tokens))
+                .collect::<Vec<_>>(),
+            cold.iter()
+                .map(|message| (&message.dedup_key, &message.tokens))
+                .collect::<Vec<_>>()
+        );
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::OpenCode), 2);
+        assert_eq!(counted.messages.len(), 2);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            300
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = ReportOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients),
+            ..Default::default()
+        };
+        let model = runtime.block_on(get_model_report(options.clone())).unwrap();
+        let monthly = runtime
+            .block_on(get_monthly_report(options.clone()))
+            .unwrap();
+        let hourly = runtime
+            .block_on(get_hourly_report(options.clone()))
+            .unwrap();
+        let agents = runtime.block_on(get_agents_report(options)).unwrap();
+        assert_eq!(model.total_messages, 2);
+        assert_eq!(
+            (
+                model.total_input,
+                model.total_output,
+                model.total_cache_read,
+                model.total_cache_write,
+                model
+                    .entries
+                    .iter()
+                    .map(|entry| entry.reasoning)
+                    .sum::<i64>(),
+            ),
+            (300, 30, 15, 6, 3)
+        );
+        assert_eq!(
+            monthly.entries.iter().fold((0, 0, 0, 0), |totals, entry| (
+                totals.0 + entry.input,
+                totals.1 + entry.output,
+                totals.2 + entry.cache_read,
+                totals.3 + entry.cache_write,
+            ),),
+            (300, 30, 15, 6)
+        );
+        assert_eq!(
+            hourly
+                .entries
+                .iter()
+                .fold((0, 0, 0, 0, 0), |totals, entry| (
+                    totals.0 + entry.input,
+                    totals.1 + entry.output,
+                    totals.2 + entry.cache_read,
+                    totals.3 + entry.cache_write,
+                    totals.4 + entry.reasoning,
+                ),),
+            (300, 30, 15, 6, 3)
+        );
+        assert_eq!(
+            agents
+                .entries
+                .iter()
+                .fold((0, 0, 0, 0, 0), |totals, entry| (
+                    totals.0 + entry.input,
+                    totals.1 + entry.output,
+                    totals.2 + entry.cache_read,
+                    totals.3 + entry.cache_write,
+                    totals.4 + entry.reasoning,
+                ),),
+            (300, 30, 15, 6, 3)
+        );
+        assert_eq!(
+            monthly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            model.total_messages
+        );
+        assert_eq!(
+            hourly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            model.total_messages
+        );
+        assert_eq!(agents.total_messages, model.total_messages);
     }
 
     #[test]

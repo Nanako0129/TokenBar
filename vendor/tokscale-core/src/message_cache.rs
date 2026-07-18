@@ -61,7 +61,11 @@ use std::time::UNIX_EPOCH;
 // snapshot instead of repeatedly measuring from the turn start. Schema-28
 // caches can replay overlapping duration_ms values or resume an incremental
 // parse without the new cursor, so unchanged sources must be rebuilt.)
-const CACHE_SCHEMA_VERSION: u32 = 29;
+// 30 (M20: OpenCode now reads v2 session_message rows. A hybrid database can
+// already have a non-empty schema-29 cache containing only its v1 message rows;
+// because the database fingerprint is unchanged, that entry must be rejected so
+// the same source is rebuilt with both v1 and v2 output.)
+const CACHE_SCHEMA_VERSION: u32 = 30;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

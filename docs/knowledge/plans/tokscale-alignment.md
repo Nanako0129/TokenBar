@@ -32,13 +32,13 @@ TokenBar follows upstream `tokscale` as a rolling source and selects bounded mil
 
 | Surface | Current value |
 |---|---|
-| TokenBar main | [`632aa739`](https://github.com/Nanako0129/TokenBar/commit/632aa7398faf832b2b8db2439afd028fdc4f937d), the rebase-merge result of Kiro M15-A PR #63 |
+| TokenBar main baseline | [`a2f852ac`](https://github.com/Nanako0129/TokenBar/commit/a2f852ac53c113de5dc6315d7e2ace5c4932b6df), the rebase-merge result of M15-T PR #64 |
 | tokscale target | [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), OpenCode v2 PR #920 merge |
 | Audited set | 111 `crates/tokscale-core` commits from `0c820a5d..366ce643` |
-| Classification | `ALREADY_VENDORED 59`, `TAKE 29`, `ADAPT_FOR_STREAMING 0`, `DEFER 9`, `SKIP 13`, `SUPERSEDED 1` |
-| Cache | TokenBar monolithic schema 29 |
+| M20 implementation classification | `ALREADY_VENDORED 60`, `TAKE 28`, `ADAPT_FOR_STREAMING 0`, `DEFER 9`, `SKIP 13`, `SUPERSEDED 1` |
+| Cache | TokenBar monolithic schema 30 in the M20 implementation checkpoint; public main remains schema 29 until merge |
 
-The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
+The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moves `366ce643` from `TAKE` to `ALREADY_VENDORED`; public issue #45 continues to show the merged M15-T `59/29/0/9/13/1` state until the implementation PR merges and its mandatory post-merge refresh publishes `60/28/0/9/13/1`. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
 
 ## Product decision
 
@@ -86,8 +86,8 @@ The shared-parser critical path is `M15-T → M20 → M15-B → M16`. M16 then u
 
 | Milestone | Dependency | Outcome | Cache decision |
 |---|---|---|---|
-| M15-T | M15-A merged | Publish the complete 111-row classification, selected scope, DAG, and transition rules in canonical docs | Keep schema 29 |
-| M20 | M15-T | Parse OpenCode v2 `session_message` data while preserving v1/JSON semantics and distinct embedded IDs | Schema 29 → 30 |
+| M15-T | M15-A merged | Merged as PR #64 and published the complete 111-row classification, selected scope, DAG, and transition rules | Schema 29 |
+| M20 | M15-T merged | Implemented in this checkpoint: parse OpenCode v2 `session_message` data while preserving v1/JSON semantics, distinct embedded IDs, and same-ID SQLite rows whose timestamp/token identity is incompatible across every lane; merge/review gates remain | Schema 29 → 30 |
 | M15-B | M20 | Add Kiro `sess_*` structured sessions and all four sibling-source observation sites without double-counting M15-A | Keep schema 30 |
 | M16 | M15-B | Land the existing-client correctness wave and leave only the 9Router hunk of its mixed commit deferred | Schema 30 → 31 |
 | M17 | M16 | Select Grok unified-over-legacy sessions once before any report fold | Keep schema 31 |
@@ -121,7 +121,7 @@ Prepared parser/specialist patches must not carry shared registry, scanner, cach
 | Checkpoint | Active cache contract |
 |---|---|
 | Baseline / M15-T | Monolithic schema 29 |
-| M20 | Monolithic schema 30, rebuilding cached empty OpenCode v2 output |
+| M20 | Monolithic schema 30, rejecting same-fingerprint hybrid-DB entries that cached only non-empty v1 output before v2 rows were understood |
 | M15-B | Schema 30 unchanged; sibling-aware identity handles new structured sources |
 | M16 | Monolithic schema 31, rebuilding all changed existing-parser outputs once |
 | M17, M18, M21, M22, M23, M24, M25, and M19-A | Schema 31 unchanged |
@@ -152,7 +152,7 @@ A milestone is complete only after its implementation and mandatory docs share o
 | Surface | Responsibility |
 |---|---|
 | [`vendor/README.md`](../../../vendor/README.md) | Exact 111-row classification, selected/mixed commit accounting, transition matrix, cache provenance, and local patch ledger |
-| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; it becomes current through the mandatory M15-T post-merge refresh, then records actual evidence after every later merge |
+| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; current through merged M15-T and updated to the M20 transition only after M20 merges |
 | Private Project #1 | Executable milestone cards only; no duplicate commit-by-commit ledger and no parser-preparation branches |
 | This plan | Product decisions, dependency graph, ownership, cache schedule, and milestone completion contract |
 | [`current-state.md`](../current-state.md) | Concise current queue and maintenance handoff |
