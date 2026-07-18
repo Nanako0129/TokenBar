@@ -16,6 +16,182 @@ This file remains the exact vendor ledger. The selective-port method and streami
 > which is stale. It sits between upstream v3.0.0 and v3.1.x, plus the local
 > patches below, plus the cherry-picked upstream commits listed next.
 
+## Current selective-alignment checkpoint
+
+The current audited TokenBar main is [`632aa739`](https://github.com/Nanako0129/TokenBar/commit/632aa7398faf832b2b8db2439afd028fdc4f937d), the rebase-merge result of Kiro M15-A [PR #63](https://github.com/Nanako0129/TokenBar/pull/63). The upstream target is [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), which merged OpenCode v2 [PR #920](https://github.com/junhoyeo/tokscale/pull/920); the local monolithic cache schema remains 29.
+
+The immutable audited set is the 111 hashes produced in a clean upstream clone:
+
+```bash
+git rev-list --reverse \
+  0c820a5d406241d85dc6c7fc65ac5a1ee026ccfd..366ce64395594abf111e0409581d91016561b25a \
+  -- crates/tokscale-core
+```
+
+The classification union has no duplicates and no symmetric difference from that range:
+
+| Classification | Count |
+|---|---:|
+| `ALREADY_VENDORED` | 59 |
+| `TAKE` | 29 |
+| `ADAPT_FOR_STREAMING` | 0 |
+| `DEFER` | 9 |
+| `SKIP` | 13 |
+| `SUPERSEDED` | 1 |
+| **Total** | **111** |
+
+### Exact 111-commit classification
+
+<details>
+<summary><code>ALREADY_VENDORED</code> — 59</summary>
+
+```text
+6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
+d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
+3a68cf52 a75533e6 70fd5249 cbbd0dff 81d721fd 7f48257a 0549e2ed 686f3cf2
+783bbb8d 5ff7bf44 c2156fea cb6ebf61 4bc2aa03 afa65ed6 235230ac bc06d4ee
+979b7015 7403dafa d5f2c6c4 59421da9 31deb7e6 b8156e64 dcb053e0 23cf62e0
+4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
+d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
+163ec570 a2f7cef5 a0929482
+```
+
+</details>
+
+<details>
+<summary><code>TAKE</code> — 29</summary>
+
+```text
+63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d
+640e97b9 f7a124da 302d39c3 ed6f8b95 f6f7eced 0b454e60
+65f8f3e2 6c804711 405ded4a 315549b4 9a5aeb65 074619f7
+c1aef5e9 ae36db5c cd07bf78 6899ea03 b59979c5 9155018c 18cd13cc b64d861e
+34cfbb50 a87f0ab6 366ce643
+```
+
+</details>
+
+<details>
+<summary><code>ADAPT_FOR_STREAMING</code> — 0</summary>
+
+```text
+(empty)
+```
+
+</details>
+
+<details>
+<summary><code>DEFER</code> — 9</summary>
+
+```text
+18c7e87f db88138b 1c91cb34 6a1535d1 90d28ec0
+20f6d4dd b9b7d09f 0097ba7e ed64e77b
+```
+
+</details>
+
+<details>
+<summary><code>SKIP</code> — 13</summary>
+
+```text
+b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
+471ad5a2 9b85b671 64f92fe9 8256280a cd394af2 d01db0a7
+```
+
+</details>
+
+<details>
+<summary><code>SUPERSEDED</code> — 1</summary>
+
+```text
+88b32ac8
+```
+
+</details>
+
+### Selected work
+
+The 29 `TAKE` rows cover existing-client correctness and the product-approved feature set. A mixed upstream commit remains one ledger row even when selected hunks land in several milestones.
+
+| Milestone | Selected scope | Audited-range commits |
+|---|---|---|
+| M20 | OpenCode v2 SQLite | `366ce643` |
+| M15-B | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
+| M16 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc 34cfbb50` + `b64d861e` Jcode hunk |
+| M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
+| M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
+| M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
+| M18 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
+| M25 | Reloadable configurable model aliases | `9a5aeb65` |
+| M24 | Warp producer and local reporting | `63a44d7c` |
+| M19-A | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` |
+| M26 | Full source-message shard cache, including format-2 related-file path/existence metadata | `ae36db5c` + `cd07bf78` cache-metadata hunks |
+
+The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
+
+### Deferred and skipped scope
+
+| Decision | Scope | Current audited rows |
+|---|---|---|
+| `DEFER` | Command Code | `18c7e87f db88138b` |
+| `DEFER` | CodeBuddy / WorkBuddy | `1c91cb34 6a1535d1 90d28ec0 20f6d4dd b9b7d09f` |
+| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b`; the remaining `b64d861e` Devin hunk joins this group after M22, and the remaining `cd07bf78` Devin hunks join after M26 |
+| `DEFER` | 9Router | The remaining `34cfbb50` hunk becomes the sole reason for that row after M16 lands |
+| `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
+
+### Mixed-commit bookkeeping
+
+| Commit | Current state | Terminal transition |
+|---|---|---|
+| `34cfbb50` | `TAKE` for M16 provider hardening; 9Router excluded | `TAKE → DEFER` after M16 |
+| `b64d861e` | Counted once while selected Kiro, Jcode, Junie/OpenCodeReview, and Zcode hunks land | `TAKE → DEFER` after M22; only Devin remains |
+| `c1aef5e9` | macOS Hermes scope already vendored; Windows discovery selected | `TAKE → ALREADY_VENDORED` after M23 |
+| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
+| `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
+
+### Execution order and ledger transitions
+
+```mermaid
+flowchart TD
+    T[M15-T canonical docs/ledger] --> O[M20 OpenCode v2]
+    O --> K[M15-B Kiro structured]
+    K --> C[M16 existing-parser correctness]
+    C --> G[M17 Grok unified]
+    G --> N1[M21 Kimi Code + Junie + OpenCodeReview]
+    N1 --> N2[M22 Zcode]
+    N2 --> N3[M23 Copilot Desktop/VS Code + Hermes Windows]
+    C --> P[M18 Sakana + long-context + routed pricing]
+    P --> A[M25 reloadable model aliases]
+    A --> W[M24 Warp producer/local reporting]
+    T --> F[M19-A Windows atomic retry]
+    N3 --> S[M26 full shard cache]
+    W --> S
+    F --> S
+    S --> WS[M19-B final TokenBar-Windows re-sync]
+```
+
+| Milestone | Ledger transition after merge |
+|---|---|
+| M20 | `366ce643: TAKE → ALREADY_VENDORED` |
+| M15-B | `405ded4a 315549b4: TAKE → ALREADY_VENDORED`; `b64d861e` remains `TAKE` |
+| M16 | `6899ea03 b59979c5 9155018c 18cd13cc: TAKE → ALREADY_VENDORED`; `34cfbb50: TAKE → DEFER`; `b64d861e` remains `TAKE` |
+| M17 | Non-main source; counts unchanged |
+| M21 | `839ce378 052f43de 633ea946 77948d9d 302d39c3: TAKE → ALREADY_VENDORED`; `b64d861e` remains `TAKE` |
+| M22 | `640e97b9 f7a124da ed6f8b95 65f8f3e2: TAKE → ALREADY_VENDORED`; `b64d861e: TAKE → DEFER` |
+| M23 | `f6f7eced 0b454e60 074619f7 c1aef5e9: TAKE → ALREADY_VENDORED` |
+| M18 | `959cce84 6c804711: TAKE → ALREADY_VENDORED`; non-main sources do not change counts |
+| M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
+| M24 | `63a44d7c: TAKE → ALREADY_VENDORED` |
+| M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
+| M26 | `ae36db5c: TAKE → ALREADY_VENDORED`; `cd07bf78: TAKE → DEFER` after taking only generic format-2 cache metadata |
+| M19-B | Consumer sync; counts unchanged |
+
+The expected terminal classification after every selected runtime milestone is `ALREADY_VENDORED 85`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 12`, `SKIP 13`, and `SUPERSEDED 1`, total 111. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
+
+The local cache schedule is schema 29 at this checkpoint, schema 30 after M20, schema 31 after M16, and active shard format 2 after M26; M15-B, M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. The legacy schema-31 monolith remains untouched when M26 activates shards.
+
+Public issue #45 remains the full remote inventory and is updated after each milestone merge with the actual PR, merge SHA, ledger transition, schema, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+
 ## Cherry-picked upstream commits (ahead of baseline)
 
 Specific later upstream fixes pulled in selectively (we do **not** re-vendor
