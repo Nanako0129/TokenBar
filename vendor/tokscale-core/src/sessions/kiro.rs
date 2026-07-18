@@ -318,20 +318,32 @@ fn duration_between_ms(start_ms: Option<i64>, end_ms: Option<i64>) -> Option<i64
     (duration > 0).then_some(duration)
 }
 
+fn numeric_epoch_to_millis(timestamp: f64) -> i64 {
+    if timestamp.abs() < 1_000_000_000_000.0 {
+        seconds_to_millis(timestamp)
+    } else {
+        timestamp as i64
+    }
+}
+
 fn parse_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
     match value? {
-        serde_json::Value::Number(number) => number.as_f64().map(|timestamp| {
-            if timestamp.abs() < 1_000_000_000_000.0 {
-                seconds_to_millis(timestamp)
-            } else {
-                timestamp as i64
-            }
-        }),
+        serde_json::Value::Number(number) => number.as_f64().map(numeric_epoch_to_millis),
         serde_json::Value::String(timestamp) => chrono::DateTime::parse_from_rfc3339(timestamp)
             .ok()
             .map(|dt| dt.timestamp_millis())
             .or_else(|| timestamp.parse::<f64>().ok().map(seconds_to_millis)),
         _ => None,
+    }
+}
+
+fn parse_execution_timestamp_value(value: Option<&serde_json::Value>) -> Option<i64> {
+    match value? {
+        serde_json::Value::String(timestamp) => chrono::DateTime::parse_from_rfc3339(timestamp)
+            .ok()
+            .map(|dt| dt.timestamp_millis())
+            .or_else(|| timestamp.parse::<f64>().ok().map(numeric_epoch_to_millis)),
+        value => parse_timestamp_value(Some(value)),
     }
 }
 
@@ -492,18 +504,40 @@ fn find_kiro_snapshot_model_id(value: &Value) -> Option<String> {
     }
 }
 
-fn kiro_global_storage_workspace(path: &Path) -> Option<String> {
+fn kiro_workspace_session_workspace(path: &Path) -> Option<String> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        return None;
+    }
+
     let mut components = path
         .components()
         .map(|component| component.as_os_str().to_string_lossy().into_owned());
     while let Some(component) = components.next() {
         if component == "kiro.kiroagent" {
-            let workspace = components.next()?;
-            if workspace == "workspace-sessions" {
-                let nested_workspace = components.next()?;
-                return components.next().map(|_| nested_workspace);
+            if components.next()?.as_str() != "workspace-sessions" {
+                return None;
             }
-            return Some(workspace);
+            let workspace = components.next()?;
+            components.next()?;
+            return components.next().is_none().then_some(workspace);
+        }
+    }
+    None
+}
+
+fn kiro_global_storage_workspace(path: &Path) -> Option<String> {
+    if let Some(workspace) = kiro_workspace_session_workspace(path) {
+        return Some(workspace);
+    }
+
+    let mut components = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().into_owned());
+    while let Some(component) = components.next() {
+        if component == "kiro.kiroagent" {
+            return components
+                .next()
+                .filter(|workspace| workspace != "workspace-sessions");
         }
     }
     None
@@ -526,8 +560,10 @@ fn parse_kiro_global_storage_file(path: &Path) -> Vec<UnifiedMessage> {
     if value.get("executions").is_some() && value.get("version").is_some() {
         return Vec::new();
     }
-    if let Some(messages) = try_parse_kiro_workspace_session(&value, path, fallback_timestamp) {
-        return messages;
+    if kiro_workspace_session_workspace(path).is_some() {
+        if let Some(messages) = try_parse_kiro_workspace_session(&value, path, fallback_timestamp) {
+            return messages;
+        }
     }
     // Generic role/content traversal is valid only for legacy `.chat` snapshots.
     // JSON and extensionless sources must match an execution or workspace-session
@@ -609,9 +645,9 @@ fn try_parse_kiro_execution_file(value: &Value, path: &Path) -> Option<Vec<Unifi
         .and_then(Value::as_str)
         .unwrap_or(execution_id)
         .to_string();
-    let start_time = parse_timestamp_value(obj.get("startTime"));
+    let start_time = parse_execution_timestamp_value(obj.get("startTime"));
     let timestamp = start_time.unwrap_or_else(|| file_modified_timestamp_ms(path));
-    let end_time = parse_timestamp_value(obj.get("endTime"));
+    let end_time = parse_execution_timestamp_value(obj.get("endTime"));
     let duration_ms = duration_between_ms(start_time.or(Some(timestamp)), end_time);
 
     let output_chars: usize = actions
@@ -845,7 +881,8 @@ pub(crate) fn merge_kiro_source_messages(
         );
     }
 
-    let mut seen_keys: std::collections::HashSet<(bool, String)> = std::collections::HashSet::new();
+    let mut seen_keys: std::collections::HashSet<(bool, Option<String>, String)> =
+        std::collections::HashSet::new();
     tagged_messages
         .into_iter()
         .filter(|(is_global_storage_source, message)| {
@@ -874,7 +911,18 @@ pub(crate) fn merge_kiro_source_messages(
         })
         .filter(|(is_global_storage_source, message)| {
             message.dedup_key.as_ref().is_none_or(|key| {
-                key.is_empty() || seen_keys.insert((*is_global_storage_source, key.clone()))
+                let execution_workspace =
+                    if *is_global_storage_source && key.starts_with("execution:") {
+                        message.workspace_key.clone()
+                    } else {
+                        None
+                    };
+                key.is_empty()
+                    || seen_keys.insert((
+                        *is_global_storage_source,
+                        execution_workspace,
+                        key.clone(),
+                    ))
             })
         })
         .map(|(_, message)| message)
@@ -1372,6 +1420,8 @@ not valid json at all
                 "executionId": "exec-actionless",
                 "chatSessionId": "chat-actionless",
                 "status": "succeed",
+                "startTime": "1770983426000",
+                "endTime": "1770983427500",
                 "context": {"messages": [{"entries": [
                     {"type": "text", "text": "actionless input"},
                     {"type": "image", "text": "ignored"}
@@ -1386,6 +1436,8 @@ not valid json at all
         assert_eq!(messages[0].session_id, "chat-actionless");
         assert_eq!(messages[0].tokens.input, 4);
         assert_eq!(messages[0].tokens.output, 0);
+        assert_eq!(messages[0].timestamp, 1770983426000);
+        assert_eq!(messages[0].duration_ms, Some(1500));
         assert_eq!(
             messages[0].dedup_key.as_deref(),
             Some("execution:exec-actionless")
@@ -1450,12 +1502,19 @@ not valid json at all
         let dir = TempDir::new().unwrap();
         let project_json = globalstorage_path(&dir, "workspace-a/project.json");
         let mirrored_file = globalstorage_path(&dir, "workspace-a/project-store/mirror");
+        let mirrored_session = globalstorage_path(&dir, "workspace-a/project-store/session.json");
         let body = r#"{"messages":[{"role":"user","content":"must not count"}]}"#;
         fs::write(&project_json, body).unwrap();
         fs::write(&mirrored_file, body).unwrap();
+        fs::write(
+            &mirrored_session,
+            r#"{"sessionId":"project-session","history":[{"promptLogs":[{"prompt":"must not count"}]}]}"#,
+        )
+        .unwrap();
 
         assert!(parse_kiro_file(&project_json).is_empty());
         assert!(parse_kiro_file(&mirrored_file).is_empty());
+        assert!(parse_kiro_file(&mirrored_session).is_empty());
     }
 
     #[test]
@@ -1532,6 +1591,38 @@ not valid json at all
         assert_eq!(kept.len(), 2);
         assert!(keys.contains("execution:0"));
         assert!(keys.contains("workspace-a/snapshot:globalstorage:exec:0"));
+    }
+
+    #[test]
+    fn test_kiro_execution_dedup_is_workspace_scoped() {
+        let dir = TempDir::new().unwrap();
+        let kept = merge_kiro_source_messages(vec![
+            (
+                globalstorage_path(&dir, "ws-a/execution-store/execution"),
+                vec![make_test_message(
+                    CLIENT_ID,
+                    "chat-a",
+                    "execution:shared-id",
+                    Some("ws-a"),
+                )],
+            ),
+            (
+                globalstorage_path(&dir, "ws-b/execution-store/execution"),
+                vec![make_test_message(
+                    CLIENT_ID,
+                    "chat-b",
+                    "execution:shared-id",
+                    Some("ws-b"),
+                )],
+            ),
+        ]);
+        let workspaces: HashSet<_> = kept
+            .iter()
+            .filter_map(|message| message.workspace_key.as_deref())
+            .collect();
+
+        assert_eq!(kept.len(), 2);
+        assert_eq!(workspaces, HashSet::from(["ws-a", "ws-b"]));
     }
 
     #[test]
