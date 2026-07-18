@@ -1122,6 +1122,12 @@ fn scan_all_clients_with_env_strategy_inner(
                 result.zed_db = Some(macos_path);
             }
         }
+        if !use_env_roots && result.zed_db.is_none() {
+            let windows_path = PathBuf::from(home_dir).join("AppData/Local/Zed/threads/threads.db");
+            if windows_path.is_file() {
+                result.zed_db = Some(windows_path);
+            }
+        }
         #[cfg(target_os = "windows")]
         if use_env_roots && result.zed_db.is_none() {
             if let Some(local_app_data) = dirs::data_local_dir() {
@@ -2256,11 +2262,31 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_with_scanner_settings_merges_zed_extra_threads_db() {
+    fn test_scan_all_clients_with_scanner_settings_discovers_zed_windows_local_appdata_home() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
 
         let windows_threads_dir = home.join("AppData/Local/Zed/threads");
+        fs::create_dir_all(&windows_threads_dir).unwrap();
+        let threads_db = windows_threads_dir.join("threads.db");
+        File::create(&threads_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["zed".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.zed_db.as_ref(), Some(&threads_db));
+    }
+
+    #[test]
+    fn test_scan_all_clients_with_scanner_settings_merges_zed_extra_threads_db() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let windows_threads_dir = home.join("custom-zed/threads");
         fs::create_dir_all(&windows_threads_dir).unwrap();
         let threads_db = windows_threads_dir.join("threads.db");
         File::create(&threads_db).unwrap();
