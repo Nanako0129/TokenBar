@@ -878,12 +878,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             })
         })
         .collect();
-    let opencode_authoritative: HashSet<String> = opencode_sqlite_outcomes
+    let opencode_authoritative: HashSet<OpenCodeSourceIdentity> = opencode_sqlite_outcomes
         .iter()
         .chain(opencode_json_outcomes.iter())
         .flat_map(|outcome| outcome.messages.iter())
         .filter(|message| message.cost_source == CostSource::ProviderReported)
-        .filter_map(|message| message.dedup_key.clone())
+        .filter_map(OpenCodeSourceIdentity::from_message)
         .collect();
     let mut opencode_selection = OpenCodeSelection::new(opencode_authoritative);
 
@@ -1832,7 +1832,25 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
-/// Logical OpenCode request identity used after parser-local fork collapse.
+/// Cross-store OpenCode identity. Legacy JSON and SQLite may disagree on
+/// tokens or embedded cost for the same request, but retain the same message id
+/// and creation timestamp.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct OpenCodeSourceIdentity {
+    key: String,
+    timestamp: i64,
+}
+
+impl OpenCodeSourceIdentity {
+    fn from_message(message: &UnifiedMessage) -> Option<Self> {
+        Some(Self {
+            key: message.dedup_key.clone()?,
+            timestamp: message.timestamp,
+        })
+    }
+}
+
+/// Logical SQLite request identity used after parser-local fork collapse.
 ///
 /// The embedded message id alone is insufficient: OpenCode can reuse it for
 /// incompatible rows, which the parser correctly preserves. Session and
@@ -1840,8 +1858,7 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
 /// excluded so a provider-reported copy can still replace an estimated one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OpenCodeMessageIdentity {
-    key: String,
-    timestamp: i64,
+    source: OpenCodeSourceIdentity,
     duration_ms: Option<i64>,
     model_id: String,
     provider_id: String,
@@ -1856,8 +1873,7 @@ struct OpenCodeMessageIdentity {
 impl OpenCodeMessageIdentity {
     fn from_message(message: &UnifiedMessage) -> Option<Self> {
         Some(Self {
-            key: message.dedup_key.clone()?,
-            timestamp: message.timestamp,
+            source: OpenCodeSourceIdentity::from_message(message)?,
             duration_ms: message.duration_ms,
             model_id: message.model_id.clone(),
             provider_id: message.provider_id.clone(),
@@ -1875,21 +1891,21 @@ impl OpenCodeMessageIdentity {
 /// retraction. SQLite fork copies deduplicate by full logical identity, while
 /// legacy JSON overlap retains OpenCode's message-id source precedence.
 struct OpenCodeSelection {
-    authoritative_snapshot: HashSet<String>,
+    authoritative_snapshot: HashSet<OpenCodeSourceIdentity>,
     seen_sqlite: HashSet<OpenCodeMessageIdentity>,
-    emitted_keys: HashSet<String>,
+    emitted_sources: HashSet<OpenCodeSourceIdentity>,
     deferred_sqlite: Vec<Option<UnifiedMessage>>,
-    deferred_by_key: HashMap<String, Vec<(OpenCodeMessageIdentity, usize)>>,
+    deferred_by_source: HashMap<OpenCodeSourceIdentity, Vec<(OpenCodeMessageIdentity, usize)>>,
 }
 
 impl OpenCodeSelection {
-    fn new(authoritative_snapshot: HashSet<String>) -> Self {
+    fn new(authoritative_snapshot: HashSet<OpenCodeSourceIdentity>) -> Self {
         Self {
             authoritative_snapshot,
             seen_sqlite: HashSet::new(),
-            emitted_keys: HashSet::new(),
+            emitted_sources: HashSet::new(),
             deferred_sqlite: Vec::new(),
-            deferred_by_key: HashMap::new(),
+            deferred_by_source: HashMap::new(),
         }
     }
 
@@ -1897,20 +1913,20 @@ impl OpenCodeSelection {
         let Some(identity) = OpenCodeMessageIdentity::from_message(&message) else {
             return Some(message);
         };
-        let key = identity.key.clone();
+        let source = identity.source.clone();
         if !self.seen_sqlite.insert(identity.clone()) {
             if message.cost_source == CostSource::ProviderReported {
-                if let Some(entries) = self.deferred_by_key.get_mut(&key) {
+                if let Some(entries) = self.deferred_by_source.get_mut(&source) {
                     if let Some(position) = entries
                         .iter()
                         .position(|(deferred, _)| deferred == &identity)
                     {
                         let (_, index) = entries.swap_remove(position);
                         self.deferred_sqlite[index] = None;
-                        let remove_key = entries.is_empty();
-                        self.emitted_keys.insert(key.clone());
-                        if remove_key {
-                            self.deferred_by_key.remove(&key);
+                        let remove_source = entries.is_empty();
+                        self.emitted_sources.insert(source.clone());
+                        if remove_source {
+                            self.deferred_by_source.remove(&source);
                         }
                         return Some(message);
                     }
@@ -1918,41 +1934,55 @@ impl OpenCodeSelection {
             }
             return None;
         }
-        if self.authoritative_snapshot.contains(&key)
+        if self.authoritative_snapshot.contains(&source)
             && message.cost_source != CostSource::ProviderReported
         {
             let index = self.deferred_sqlite.len();
-            self.deferred_by_key
-                .entry(key)
+            self.deferred_by_source
+                .entry(source)
                 .or_default()
                 .push((identity, index));
             self.deferred_sqlite.push(Some(message));
             return None;
         }
-        self.emitted_keys.insert(key);
+        self.emitted_sources.insert(source);
         Some(message)
     }
 
     fn select_json(&mut self, message: UnifiedMessage, will_emit: bool) -> Option<UnifiedMessage> {
-        let Some(key) = message.dedup_key.clone() else {
+        let Some(source) = OpenCodeSourceIdentity::from_message(&message) else {
             return will_emit.then_some(message);
         };
-        if self.emitted_keys.contains(&key) {
+        if self.emitted_sources.contains(&source) {
             return None;
         }
-        if self.authoritative_snapshot.contains(&key) {
+        if self.authoritative_snapshot.contains(&source) {
             if message.cost_source != CostSource::ProviderReported || !will_emit {
                 return None;
             }
-            self.emitted_keys.insert(key.clone());
-            if let Some(entries) = self.deferred_by_key.remove(&key) {
-                for (_, index) in entries {
-                    self.deferred_sqlite[index] = None;
-                }
+            self.emitted_sources.insert(source.clone());
+            let json_identity = OpenCodeMessageIdentity::from_message(&message);
+            let remove_source = if let Some(entries) = self.deferred_by_source.get_mut(&source) {
+                let position = json_identity
+                    .as_ref()
+                    .and_then(|identity| {
+                        entries
+                            .iter()
+                            .position(|(deferred, _)| deferred == identity)
+                    })
+                    .unwrap_or(0);
+                let (_, index) = entries.swap_remove(position);
+                self.deferred_sqlite[index] = None;
+                entries.is_empty()
+            } else {
+                false
+            };
+            if remove_source {
+                self.deferred_by_source.remove(&source);
             }
             return Some(message);
         }
-        self.emitted_keys.insert(key);
+        self.emitted_sources.insert(source);
         will_emit.then_some(message)
     }
 
@@ -2431,19 +2461,19 @@ where
     // The sink cannot retract an estimated duplicate, so pre-scan only the
     // authoritative identities before streaming the lane in its existing order.
     // Legacy JSON is parsed again below so this pass never retains message bodies.
-    let mut opencode_authoritative: HashSet<String> = scan_result
+    let mut opencode_authoritative: HashSet<OpenCodeSourceIdentity> = scan_result
         .get(ClientId::OpenCode)
         .par_iter()
         .filter_map(|path| sessions::opencode::parse_opencode_file(path))
         .filter(|message| message.cost_source == CostSource::ProviderReported)
-        .filter_map(|message| message.dedup_key)
+        .filter_map(|message| OpenCodeSourceIdentity::from_message(&message))
         .collect();
     for db_path in &scan_result.opencode_dbs {
         opencode_authoritative.extend(
             sessions::opencode::parse_opencode_sqlite(db_path)
                 .into_iter()
                 .filter(|message| message.cost_source == CostSource::ProviderReported)
-                .filter_map(|message| message.dedup_key),
+                .filter_map(|message| OpenCodeSourceIdentity::from_message(&message)),
         );
     }
 
@@ -3541,11 +3571,11 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .par_iter()
             .filter_map(|path| sessions::opencode::parse_opencode_file(path))
             .collect();
-        let authoritative: HashSet<String> = sqlite_messages
+        let authoritative: HashSet<OpenCodeSourceIdentity> = sqlite_messages
             .iter()
             .chain(json_messages.iter())
             .filter(|message| message.cost_source == CostSource::ProviderReported)
-            .filter_map(|message| message.dedup_key.clone())
+            .filter_map(OpenCodeSourceIdentity::from_message)
             .collect();
         let mut selection = OpenCodeSelection::new(authoritative);
         let mut selected: Vec<UnifiedMessage> = sqlite_messages
@@ -4175,8 +4205,8 @@ mod tests {
         parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
         select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
-        CostSource, GroupBy, LocalParseOptions, OpenCodeSelection, ReportOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        CostSource, GroupBy, LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity,
+        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
     use std::collections::{HashMap, HashSet};
@@ -4386,8 +4416,9 @@ mod tests {
         message
     }
 
-    fn opencode_authority_set(key: &str) -> HashSet<String> {
-        HashSet::from([key.to_string()])
+    fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
+        let message = make_opencode_selection_message(key, 0.0, CostSource::ProviderReported);
+        HashSet::from([OpenCodeSourceIdentity::from_message(&message).unwrap()])
     }
 
     #[test]
@@ -4504,13 +4535,16 @@ mod tests {
         let key = "reused-message-id";
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         let first = make_opencode_selection_message(key, 0.25, CostSource::Estimated);
-        let mut second = make_opencode_selection_message(key, 0.50, CostSource::ProviderReported);
-        second.timestamp += 1_000;
+        let mut second = make_opencode_selection_message(key, 0.50, CostSource::Estimated);
         second.tokens.input = 20;
+        let json = make_opencode_selection_message(key, 0.75, CostSource::ProviderReported);
 
         assert!(selection.select_sqlite(first).is_none());
-        assert!(selection.select_sqlite(second).is_some());
-        assert_eq!(selection.finish().count(), 1);
+        assert!(selection.select_sqlite(second).is_none());
+        assert!(selection.select_json(json, true).is_some());
+        let deferred: Vec<_> = selection.finish().collect();
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].tokens.input, 20);
     }
 
     #[test]
@@ -6285,7 +6319,7 @@ mod tests {
             "modelID": "claude-sonnet-4",
             "providerID": "anthropic",
             "mode": "build",
-            "cost": 0.01,
+            "cost": 0.0,
             "tokens": { "input": 100, "output": 10, "reasoning": 1, "cache": { "read": 5, "write": 2 } },
             "time": { "created": 1700000000000.0, "completed": 1700000000500.0 }
         }"#;
@@ -6309,6 +6343,24 @@ mod tests {
         .unwrap();
         drop(conn);
 
+        let json_dir = db_dir.join("storage/message/project-v1");
+        std::fs::create_dir_all(&json_dir).unwrap();
+        std::fs::write(
+            json_dir.join("message-v1.json"),
+            r#"{
+                "id": "message-v1",
+                "sessionID": "session-v1",
+                "role": "assistant",
+                "modelID": "claude-sonnet-4",
+                "providerID": "anthropic",
+                "mode": "build",
+                "cost": 0.01,
+                "tokens": { "input": 100, "output": 10, "reasoning": 1, "cache": { "read": 5, "write": 2 } },
+                "time": { "created": 1700000000000.0, "completed": 1700000000500.0 }
+            }"#,
+        )
+        .unwrap();
+
         let fingerprint = message_cache::SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         let mut stale_message = UnifiedMessage::new_with_dedup(
             "opencode",
@@ -6323,11 +6375,10 @@ mod tests {
                 cache_write: 2,
                 reasoning: 1,
             },
-            0.01,
+            0.0,
             Some("message-v1".to_string()),
         );
         stale_message.duration_ms = Some(500);
-        stale_message.mark_provider_reported_cost();
         let stale_store = Schema29Store {
             schema_version: 29,
             entries: vec![message_cache::CachedSourceEntry::new(
@@ -6367,8 +6418,12 @@ mod tests {
         };
         let mut cold = parse_materialized();
         let mut warm = parse_materialized();
-        cold.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
-        warm.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        cold.sort_by(|left, right| {
+            (&left.dedup_key, left.tokens.input).cmp(&(&right.dedup_key, right.tokens.input))
+        });
+        warm.sort_by(|left, right| {
+            (&left.dedup_key, left.tokens.input).cmp(&(&right.dedup_key, right.tokens.input))
+        });
         assert_eq!(cold.len(), 2);
         assert_eq!(
             cold.iter()
@@ -6399,7 +6454,9 @@ mod tests {
             &|_| true,
             &mut |message| streamed.push(message.clone()),
         );
-        streamed.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        streamed.sort_by(|left, right| {
+            (&left.dedup_key, left.tokens.input).cmp(&(&right.dedup_key, right.tokens.input))
+        });
         assert_eq!(
             streamed
                 .iter()
