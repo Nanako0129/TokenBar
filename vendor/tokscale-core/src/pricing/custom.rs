@@ -241,15 +241,22 @@ impl CustomPricing {
         self.lookup_with_key(model_id).map(|result| result.pricing)
     }
 
-    pub fn lookup_with_key(&self, model_id: &str) -> Option<CustomLookupResult<'_>> {
+    pub(crate) fn lookup_exact_with_key(&self, model_id: &str) -> Option<CustomLookupResult<'_>> {
         let raw_key = model_id.to_lowercase();
-        if let Some(pricing) = self.models.get_key_value(&raw_key) {
-            return Some(CustomLookupResult {
+        self.models
+            .get_key_value(&raw_key)
+            .map(|pricing| CustomLookupResult {
                 matched_key: pricing.0,
                 pricing: pricing.1,
-            });
+            })
+    }
+
+    pub fn lookup_with_key(&self, model_id: &str) -> Option<CustomLookupResult<'_>> {
+        if let Some(result) = self.lookup_exact_with_key(model_id) {
+            return Some(result);
         }
 
+        let raw_key = model_id.to_lowercase();
         let normalized_key = normalize_synthetic_model(model_id).to_lowercase();
         if normalized_key != raw_key {
             if let Some(pricing) = self.models.get_key_value(&normalized_key) {

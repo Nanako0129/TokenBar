@@ -184,6 +184,12 @@ pub fn inferred_provider_from_model(model: &str) -> Option<&'static str> {
         return Some("zai");
     }
 
+    // Sakana's Fugu model line. Provider identity is independent of whether
+    // the bare router model has a recoverable fixed price.
+    if lower.contains("fugu") {
+        return Some("sakana");
+    }
+
     None
 }
 
@@ -321,6 +327,19 @@ mod tests {
         assert_eq!(inferred_provider_from_model("kimiko"), None);
         assert_eq!(inferred_provider_from_model("mimosa"), None);
         assert_eq!(inferred_provider_from_model("aglm"), None);
+    }
+
+    #[test]
+    fn test_inferred_provider_fugu_maps_to_sakana() {
+        assert_eq!(inferred_provider_from_model("fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("fugu-ultra"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("Fugu"), Some("sakana"));
+        assert_eq!(inferred_provider_from_model("FUGU-ULTRA"), Some("sakana"));
+    }
+
+    #[test]
+    fn test_provider_tags_preserves_sakana() {
+        assert_eq!(provider_tags("sakana"), vec!["sakana"]);
     }
 
     #[test]

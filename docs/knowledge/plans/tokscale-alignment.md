@@ -32,13 +32,13 @@ TokenBar follows upstream `tokscale` as a rolling source and selects bounded mil
 
 | Surface | Current value |
 |---|---|
-| TokenBar main baseline | [`11ae1bed`](https://github.com/Nanako0129/TokenBar/commit/11ae1bed8c38df81f197d74c11be4d24fac78a9a), the rebase-merge result of Windows atomic replacement M19-A PR #68 |
+| TokenBar main baseline | [`d4ff968b`](https://github.com/Nanako0129/TokenBar/commit/d4ff968b763a86f3e3f83e8d88b757d2593c98fe), the rebase-merge result of Grok unified precedence M17 PR #69 |
 | tokscale target | [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), OpenCode v2 PR #920 merge |
 | Audited set | 111 `crates/tokscale-core` commits from `0c820a5d..366ce643` |
-| M17 implementation classification | `ALREADY_VENDORED 67`, `TAKE 20`, `ADAPT_FOR_STREAMING 0`, `DEFER 10`, `SKIP 13`, `SUPERSEDED 1` |
-| Cache | TokenBar main and the M17 implementation checkpoint use monolithic schema 31 |
+| M18 implementation classification | `ALREADY_VENDORED 69`, `TAKE 18`, `ADAPT_FOR_STREAMING 0`, `DEFER 10`, `SKIP 13`, `SUPERSEDED 1` |
+| Cache | TokenBar main and the M18 implementation checkpoint use monolithic schema 31 |
 
-The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED`, moved mixed `34cfbb50` to `DEFER`, and left mixed `b64d861e` as one `TAKE` row after its Jcode hunk. M19-A moved `a87f0ab6` from `TAKE` to `ALREADY_VENDORED` after taking only its Windows atomic-replacement hunk; public issue #45 now records merged M19-A at `67/20/0/10/13/1`. M17 takes non-main `ed798642`, so its implementation does not change those audited counts. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
+The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED`, moved mixed `34cfbb50` to `DEFER`, and left mixed `b64d861e` as one `TAKE` row after its Jcode hunk. M19-A moved `a87f0ab6`; M17 used non-main `ed798642` and left the audited counts unchanged; public issue #45 now records merged M17 at `67/20/0/10/13/1`. M18 moves audited `959cce84` and `6c804711` to `ALREADY_VENDORED`, producing the implementation classification `69/18/0/10/13/1`; its non-main long-context and routed-composition sources do not enter the audited range. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
 
 ## Product decision
 
@@ -80,7 +80,7 @@ flowchart TD
     S --> WS[M19-B final TokenBar-Windows re-sync]
 ```
 
-The shared-parser critical path through M16 and the independent M19-A filesystem checkpoint are merged. M17 is the active source-lane integration, while M18's disjoint money/settings patch is prepared for the next integration lock. M19-A's bounded Windows replacement behavior remains an M26 dependency. M26 is the final Native architecture barrier and M19-B runs exactly once after it.
+The shared-parser critical path through M17 and the independent M19-A filesystem checkpoint are merged. M21 is ready on the source lane, while M18 is the active money-correctness integration checkpoint and makes M25 ready after merge. M19-A's bounded Windows replacement behavior remains an M26 dependency. M26 is the final Native architecture barrier and M19-B runs exactly once after it.
 
 ## Milestone queue
 
@@ -90,11 +90,11 @@ The shared-parser critical path through M16 and the independent M19-A filesystem
 | M20 | M15-T merged | Merged as PR #65 at `1bc2fa76`: parse OpenCode v2 `session_message` data while preserving v1/JSON semantics, distinct embedded IDs, persisted primary/alias keys for overlaps without a v1 embedded id, same-ID SQLite rows whose timestamp/token identity is incompatible across every lane, and exact-deferred-first JSON authority replacement scoped by message id plus creation timestamp | Schema 29 → 30 |
 | M15-B | M20 merged | Merged as PR #66 at `f5773ea0`: add Kiro `sess_*` structured sessions; reuse one related-file helper across specialized fingerprinting, both active cache lanes, latest mtime, and sibling-aware pruning; preserve M15-A coexistence and existing CLI/SQLite model fallback | Kept schema 30 |
 | M16 | M15-B merged | Merged as PR #67 at `aebbc371`: land Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness; leave only the 9Router feature of mixed `34cfbb50` deferred and keep `b64d861e` in `TAKE` for later selected clients | Schema 30 → 31 |
-| M17 | M16 | Active implementation checkpoint: discover only exact top-level unified logs beside the primary Grok home and homes inferred from generic configured home/`sessions`/nested roots, canonical-dedup overlapping files without admitting archives, cache raw unified/legacy sources independently, keep pidless session model events, expire PID-scoped model authority at explicit `AuthManager::new` process starts, clamp cached prompt overlap instead of dropping usable rows, deduplicate exact replays without collapsing distinct same-base token records, refresh cached derived dates before streaming filters, count missing `loop_index` as loop one while preserving explicit later-loop zero-message semantics through live trace, batch/streaming sessionization, and unambiguous legacy model/workspace attribution, reprice selected materialized and streaming rows after model carry-over, retain the required authority cohort during modified-after pruning, and select unified-covered sessions exactly once across materialized, shipping streaming, count, and report lanes; a topology-sensitive FFI graph/live-tail token restores legacy fallback when a non-max unified source disappears | Keep schema 31 |
+| M17 | M16 | Merged as PR #69 at `d4ff968b`: select exact top-level Grok unified logs once over covered legacy sessions across materialized, shipping streaming, count, graph/time, and report lanes; retain legacy-only fallback, model/workspace carry-over, process/model authority, token/message semantics, topology-sensitive invalidation, and post-selector pricing | Kept schema 31 |
 | M21 | M17 | Add Kimi Code, Junie, and OpenCodeReview with append-only client IDs | Keep schema 31 |
 | M22 | M21 | Add Zcode legacy and v2 with one normalization/dedup authority | Keep schema 31 |
 | M23 | M22 | Add Copilot Desktop/VS Code sources and Hermes Windows fallback discovery | Keep schema 31 |
-| M18 | M16 | Add Fugu rates, verified whole-request long-context tiers, and the complete routed-pricing precedence pipeline | Keep schema 31 |
+| M18 | M16 | Active integration checkpoint: add `fugu-ultra` regular/long rates, select one whole-request tier only for verified Sakana and LiteLLM GPT-5.4/GPT-5.5 when `input + cache_read > 272,000`, preserve bare `fugu` as unpriced, and enforce exact raw/custom first refusal, parenthesized validation, provider-scoped fail-closed behavior, bounded path/terminal fallbacks, case-insensitive forced-source isolation, provider ranking/cache backfill, and one Claude never-degrade guard. Internal custom lookup is exact-only so synthetic terminal normalization cannot bypass provider-scoped isolation | Keep schema 31 |
 | M25 | M18 | Add reloadable grouping aliases and one process-wide usage-data invalidation seam | Keep schema 31 |
 | M24 | M25 | Add explicit-credential Warp fetching/local reporting through the shared invalidation seam; no automatic credential harvesting | Keep schema 31 |
 | M19-A | M15-T | Merged as PR #68 at `11ae1bed`: retry only Windows atomic-replacement errors 5/32 for at most five attempts with exact bounded backoff; preserve non-Windows rename and exclude TUI signal behavior | Keep schema 31 |
@@ -152,7 +152,7 @@ A milestone is complete only after its implementation and mandatory docs share o
 | Surface | Responsibility |
 |---|---|
 | [`vendor/README.md`](../../../vendor/README.md) | Exact 111-row classification, selected/mixed commit accounting, transition matrix, cache provenance, and local patch ledger |
-| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; current through merged M19-A at `67/20/0/10/13/1`; M17 keeps those counts because its source is non-main |
+| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; current through merged M17 at `67/20/0/10/13/1`; M18 moves two audited rows after merge |
 | Private Project #1 | Executable milestone cards only; no duplicate commit-by-commit ledger and no parser-preparation branches |
 | This plan | Product decisions, dependency graph, ownership, cache schedule, and milestone completion contract |
 | [`current-state.md`](../current-state.md) | Concise current queue and maintenance handoff |

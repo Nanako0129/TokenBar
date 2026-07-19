@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M17 implementation checkpoint starts from audited TokenBar main [`11ae1bed`](https://github.com/Nanako0129/TokenBar/commit/11ae1bed8c38df81f197d74c11be4d24fac78a9a), the rebase-merge result of Windows atomic replacement [PR #68](https://github.com/Nanako0129/TokenBar/pull/68), and selectively ports Grok unified-log precedence from non-main upstream [#849](https://github.com/junhoyeo/tokscale/pull/849) / [`ed798642`](https://github.com/junhoyeo/tokscale/commit/ed7986425efb8bad8df62e16269e30c15a82801a). TokenBar keeps its legacy compaction epoch and metadata-sibling hardening, discovers exact self-contained `logs/unified.jsonl` sources beside the primary Grok home and homes inferred from generic configured scan roots, caches both representations as raw per-source rows, and applies unified-over-legacy session precedence exactly once before every materialized, shipping streaming, count, and report fold. Selected rows are priced only after legacy model carry-over, so materialized and streaming costs stay aligned when the unified log omits a model event. This new source keeps monolithic cache schema 31. Public main and issue #45 remain at merged M19-A `67/20/0/10/13/1` until this implementation PR merges; M17 is a non-main semantic source and does not change those 111-row counts.
+This M18 implementation checkpoint starts from audited TokenBar main [`d4ff968b`](https://github.com/Nanako0129/TokenBar/commit/d4ff968b763a86f3e3f83e8d88b757d2593c98fe), the rebase-merge result of Grok unified precedence [PR #69](https://github.com/Nanako0129/TokenBar/pull/69), and selectively ports Sakana/Fugu plus routed-pricing semantics from audited commits [`959cce84`](https://github.com/junhoyeo/tokscale/commit/959cce84) and [`6c804711`](https://github.com/junhoyeo/tokscale/commit/6c804711), with request-level long-context behavior from non-main [`548dc124`](https://github.com/junhoyeo/tokscale/commit/548dc124) and prefix/suffix composition from non-main [`6ea27ca1`](https://github.com/junhoyeo/tokscale/commit/6ea27ca1). Exact raw and custom keys retain first refusal, provider-scoped paths fail closed, bounded path/terminal fallbacks share one Claude never-degrade guard, and verified Sakana plus LiteLLM GPT-5.4/GPT-5.5 requests select one whole-request tier only when input plus cache-read exceeds 272,000. Pricing remains post-cache retrieval, so raw model IDs, source fingerprints, and monolithic cache schema 31 stay unchanged. Public main and issue #45 remain at merged M17 `67/20/0/10/13/1` until this implementation PR merges; the M18 implementation classification is `69/18/0/10/13/1`.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,8 +32,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 67 |
-| `TAKE` | 20 |
+| `ALREADY_VENDORED` | 69 |
+| `TAKE` | 18 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 10 |
 | `SKIP` | 13 |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 67</summary>
+<summary><code>ALREADY_VENDORED</code> — 69</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -54,18 +54,18 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
-9155018c 18cd13cc a87f0ab6
+9155018c 18cd13cc a87f0ab6 959cce84 6c804711
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 20</summary>
+<summary><code>TAKE</code> — 18</summary>
 
 ```text
-63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d 640e97b9 f7a124da
-302d39c3 ed6f8b95 f6f7eced 0b454e60 65f8f3e2 6c804711 9a5aeb65 074619f7
-c1aef5e9 ae36db5c cd07bf78 b64d861e
+63a44d7c 839ce378 052f43de 633ea946 77948d9d 640e97b9 f7a124da 302d39c3
+ed6f8b95 f6f7eced 0b454e60 65f8f3e2 9a5aeb65 074619f7 c1aef5e9 ae36db5c
+cd07bf78 b64d861e
 ```
 
 </details>
@@ -110,18 +110,18 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A now moves `a87f0ab6` to `ALREADY_VENDORED` after taking only its Windows atomic-replacement hunk. This leaves 20 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 took its Jcode hunk.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 now moves `959cce84` and `6c804711` to `ALREADY_VENDORED`. This leaves 18 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 took its Jcode hunk.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
 | M20 — merged in PR #65 | OpenCode v2 SQLite | `366ce643` |
 | M15-B — merged in PR #66 | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
 | M16 — merged in PR #67 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
-| M17 — landed in this checkpoint | Grok unified-log precedence across all cache/report lanes | Non-main `ed798642` |
+| M17 — merged in PR #69 | Grok unified-log precedence across all cache/report lanes | Non-main `ed798642` |
 | M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
-| M18 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
+| M18 — landed in this checkpoint | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
@@ -190,7 +190,7 @@ The expected terminal classification after every selected runtime milestone is `
 
 The local cache is schema 31 after merged M16 and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep schema 31. M19-A changes only the Windows atomic replacement transport. M17 adds a separately fingerprinted source and report-time cross-source selector, so existing cached legacy rows remain valid and no schema bump is required. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records merged M19-A at `67/20/0/10/13/1`. M17's mandatory post-merge refresh records its actual PR and merge SHA, unchanged 111-row counts and schema 31, the non-main `ed798642` source, lifecycle/parity fixtures, and M21 as newly ready while M18 remains independently prepared. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M17 at `67/20/0/10/13/1`. M18's mandatory post-merge refresh will record its actual PR and merge SHA, the `959cce84`/`6c804711` transition to `69/18/0/10/13/1`, unchanged schema 31, routed-pricing and long-context fixtures, and M25 as newly ready. M21 is already ready from merged M17. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -278,6 +278,14 @@ M17 selectively ports non-main upstream [#849](https://github.com/junhoyeo/toksc
 One pure `prefer_unified_log_messages()` selector defines authority before aggregation: it first discovers every session represented by a `grok-unified:` row, carries an unambiguous non-placeholder legacy model plus unambiguous legacy workspace metadata onto matching unified rows that lack those values, then drops legacy rows only for those covered sessions. Conflicting legacy model or workspace values fail closed instead of choosing by input order. Legacy-only sessions remain unchanged. Authority is intentionally session-scoped because legacy rows expose cumulative turn deltas without a stable inference identity; attempting a same-session timestamp merge would risk counting the two representations together. No downstream subtraction or arithmetic attempts to remove already-folded usage. Materialized, shipping streaming, and count lanes all collect the complete raw Grok cohort and call the selector once. Materialized rows are repriced after selection so a unified row that borrows its model does not retain the zero cost calculated for `grok-unknown`; the streaming lane follows the same order before client filtering, dedup, and the report sink.
 
 Legacy `updates.jsonl` retains the existing composite fingerprint and sibling-aware latest-mtime/pruning contract for `signals.json`, `summary.json`, and `events.jsonl`; the self-contained unified log uses the normal primary-file fingerprint and mtime. Modified-after pruning keeps an older unified authority file whenever a legacy source is fresh, and a fresh unified file retains the legacy cohort needed for workspace attribution. FFI graph and live-tail caches use a topology-sensitive source token rather than the maximum mtime alone, so creating, rewriting, or deleting a non-max unified source invalidates stale unified authority even when a newer legacy file masks its mtime. Shipping streaming refreshes timestamp-derived fields after raw cache selection and before date filtering, so a timezone change cannot leave a cache-hit Grok row in the old local day. Live trace events retain each parsed row's `message_count`: later tool loops still contribute every token to rate and trace totals while adding zero messages. A hermetic lifecycle fixture deliberately makes legacy newer than unified, omits the unified in-log model event, and proves legacy-only cold/warm behavior, absent→created unified authority, legacy model recovery, exact token/message preservation, materialized/streaming/count/model/monthly/hourly/Agents parity, and unified removal restoring cached legacy rows and the original source token. Focused regressions additionally poison a cached derived date, preserve two distinct inferences that share session/timestamp/PID/loop while collapsing an exact replay, fail closed on conflicting legacy models, verify cold/warm materialized pricing after model carry-over against the streaming lane, discover exact unified logs for primary/settings/environment roots without duplicates or archived copies, and keep a reasoning-only zero-message loop's tokens without inflating live trace messages. Fresh verification first refuted the trace claim because `UsageEvent` omitted the reasoning bucket; after carrying reasoning and parser message counts through the live-tail event, the production FFI reproduction reports all 11 tokens and one message and a new verifier returned `CONFIRMED`. Later Codex passes found that unified rows without an in-log model event lost available legacy model metadata, that materialized rows retained pre-selection unknown-model costs, and that configured Grok roots omitted their unified logs; unique non-placeholder model carry-over, post-selector repricing, exact configured-root discovery, and conflict fail-closed behavior now cover those paths. The following current-head pass found three adjacent cases: a session model event could omit `pid`, generic configured roots could name a Grok home or an ancestor rather than exact `sessions`, and cached prompt overlap could exceed the prompt total without invalidating usable completion/reasoning usage. Session-only model authority, update-derived Grok-home discovery, and prompt-bounded cache clamping now preserve those rows, with focused old-fail/new-pass fixtures. The next pass found that an omitted `loop_index` silently became zero messages, that a restarted process could inherit a prior process's PID-only model catalog entry after OS PID reuse, and that both sessionization folds coerced explicit zero-message tool loops back to one. Missing loop indexes now default to the counted first loop, an explicit `AuthManager::new` boundary clears only PID-scoped authority while session-only model authority survives, and both `sessionize()` and `SessionizeAccumulator::feed()` preserve explicit zero counts while still retaining each row's tokens and timestamp. Parser-local and sessionization fixtures cover bucket decomposition, missing and explicit loop message counts, process-restart PID reuse, zero-message token retention, model precedence, replay dedup, session-level fallback, workspace carry-over, exact top-level discovery, authority-cohort pruning, and input-order-independent selection. Fresh verification returned `CONFIRMED`. This is a new source with distinct fingerprints, not a changed existing-source output, so monolithic cache schema remains **31** and the 111-row ledger remains `67/20/0/10/13/1`.
+
+## M18 Sakana, long-context, and routed-pricing completion
+
+M18 selectively ports audited upstream [`959cce84`](https://github.com/junhoyeo/tokscale/commit/959cce84) and [`6c804711`](https://github.com/junhoyeo/tokscale/commit/6c804711), plus the verified request-level long-context rule from non-main [`548dc124`](https://github.com/junhoyeo/tokscale/commit/548dc124) and routed prefix/suffix composition from non-main [`6ea27ca1`](https://github.com/junhoyeo/tokscale/commit/6ea27ca1). Sakana `fugu-ultra` uses regular per-million rates of `$5` input, `$30` output, and `$0.50` cache-read; requests with verified Sakana identity and `input + cache_read > 272,000` use `$10`, `$45`, and `$1`. Verified LiteLLM GPT-5.4/GPT-5.5 identities use the same whole-request threshold behavior with their own catalog tiers. Exactly 272,000 remains regular, output plus reasoning follows the selected request tier, cache-write does not select the tier, and bare `fugu` derives Sakana provider identity while remaining intentionally unpriced. The Sakana subscription billing-console scrape remains excluded.
+
+The routed lookup preserves forced LiteLLM/OpenRouter isolation before custom pricing. Exact full raw IDs, complete custom keys, and parenthesized custom or built-in literals receive first refusal before tier stripping or suffix validation; invalid parenthesized suffixes fail closed after that exact miss. Provider-scoped `accounts/<provider>/{models,routers}/...` paths never widen into a terminal-only custom or fuzzy cross-provider match. Bounded full-path suffixes precede terminal fallback, terminal custom lookup tries explicit raw and alias-normalized candidates, built-in direct/static aliases retain precedence, and every fallback result passes one Claude never-degrade guard. Provider ranking and cache-rate backfill remain unchanged.
+
+An early prepared-patch verifier reproduced a provider-scoped boundary bypass: `CustomPricing::lookup_with_key()` normalized a full Fireworks path to its terminal model before the fail-closed guard. Internal routed lookup now uses exact-only custom keys, while the public custom API retains its existing synthetic normalization and generic non-scoped terminal routes still work through explicit candidates. The final integrated verifier also reproduced case-sensitive forced-source matching (`OpenRouter` fell through to automatic lookup); the shared lookup boundary now lowercases the selector once so LiteLLM, OpenRouter, and Custom isolation remains case-insensitive through direct, exact, and fallback paths. Hermetic pricing fixtures cover the 272,000/272,001 boundary, cache-read threshold selection, output/reasoning tiering, cache-write exclusion, bare `fugu`, non-verified marginal behavior, exact/custom/alias/parenthesized/path/terminal routes, mixed-case forced sources, provider-scoped isolation, ranking/backfill, and every Claude never-degrade path. Pricing remains post-cache retrieval, so raw model identity and source-message cache identity are unchanged; monolithic schema remains **31**. M18 moves `959cce84` and `6c804711` to `ALREADY_VENDORED`, producing the duplicate-free exact classification `69/18/0/10/13/1`.
 
 ## M19-A Windows atomic-replacement completion
 
