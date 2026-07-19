@@ -55,21 +55,35 @@ pub fn parse_copilot_file(path: &Path) -> Vec<UnifiedMessage> {
     let agent_turn_response_ids =
         candidate_response_ids(&candidates, CopilotUsageSource::AgentTurnLog);
 
-    candidates
-        .into_iter()
-        .filter(|candidate| {
-            should_emit_candidate(
-                candidate,
-                &chat_traces,
-                &inference_traces,
-                &agent_turn_traces,
-                &chat_response_ids,
-                &inference_response_ids,
-                &agent_turn_response_ids,
-            )
-        })
-        .map(CopilotUsageCandidate::into_message)
-        .collect()
+    let mut messages = Vec::with_capacity(candidates.len());
+    let mut index_by_dedup_key = HashMap::new();
+
+    for candidate in candidates.into_iter().filter(|candidate| {
+        should_emit_candidate(
+            candidate,
+            &chat_traces,
+            &inference_traces,
+            &agent_turn_traces,
+            &chat_response_ids,
+            &inference_response_ids,
+            &agent_turn_response_ids,
+        )
+    }) {
+        let message = candidate.into_message();
+        let Some(dedup_key) = message.dedup_key.clone() else {
+            messages.push(message);
+            continue;
+        };
+
+        if let Some(&existing_index) = index_by_dedup_key.get(&dedup_key) {
+            merge_copilot_duplicate(&mut messages[existing_index], message);
+        } else {
+            index_by_dedup_key.insert(dedup_key, messages.len());
+            messages.push(message);
+        }
+    }
+
+    messages
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -125,6 +139,33 @@ impl CopilotUsageCandidate {
         message.agent = self.agent;
         message
     }
+}
+
+fn merge_copilot_duplicate(existing: &mut UnifiedMessage, duplicate: UnifiedMessage) {
+    // Copilot exports can repeat one span as its OTEL record is updated. Keep
+    // the most complete token buckets, but never add replayed usage together.
+    if existing.agent.is_none() {
+        existing.agent = duplicate.agent.clone();
+    }
+    existing.tokens.input = existing.tokens.input.max(duplicate.tokens.input);
+    existing.tokens.output = existing.tokens.output.max(duplicate.tokens.output);
+    existing.tokens.cache_read = existing.tokens.cache_read.max(duplicate.tokens.cache_read);
+    existing.tokens.cache_write = existing
+        .tokens
+        .cache_write
+        .max(duplicate.tokens.cache_write);
+    existing.tokens.reasoning = existing.tokens.reasoning.max(duplicate.tokens.reasoning);
+
+    // Sessionization needs the activity start, not the response completion. A
+    // repeated span can carry a different start and duration, so retain the
+    // earliest anchor and the longest observed duration without additive drift.
+    if duplicate.timestamp < existing.timestamp {
+        existing.set_timestamp(duplicate.timestamp);
+    }
+    existing.duration_ms = match (existing.duration_ms, duplicate.duration_ms) {
+        (Some(existing), Some(duplicate)) => Some(existing.max(duplicate)),
+        (None, duration) | (duration, None) => duration,
+    };
 }
 
 fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
@@ -754,9 +795,14 @@ fn value_as_i64(value: &Value) -> Option<i64> {
 
 fn timestamp_ms_from_record(value: &Value) -> Option<i64> {
     value
-        .get("endTime")
+        .get("startTime")
         .and_then(timestamp_ms_from_value)
-        .or_else(|| value.get("startTime").and_then(timestamp_ms_from_value))
+        .or_else(|| {
+            // When only endTime is available, back-calculate the start if duration is known.
+            let end_ms = value.get("endTime").and_then(timestamp_ms_from_value)?;
+            let duration = duration_ms_from_record(value).unwrap_or(0);
+            Some(end_ms.saturating_sub(duration))
+        })
         .or_else(|| value.get("hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("_hrTime").and_then(timestamp_ms_from_value))
         .or_else(|| value.get("time").and_then(timestamp_ms_from_value))
@@ -870,9 +916,40 @@ mod tests {
         assert_eq!(message.tokens.output, 281);
         assert_eq!(message.tokens.cache_read, 123);
         assert_eq!(message.tokens.reasoning, 128);
-        assert_eq!(message.timestamp, 1_775_934_264_967);
+        assert_eq!(message.timestamp, 1_775_934_260_133);
         assert_eq!(message.duration_ms, Some(4834));
         assert_eq!(message.dedup_key.as_deref(), Some("trace-1:span-1"));
+    }
+
+    #[test]
+    fn test_parse_copilot_back_calculates_start_from_end_and_duration() {
+        let content = r#"{"type":"span","traceId":"trace-back","spanId":"span-back","name":"chat gpt-5.4-mini","endTime":[1775934266,0],"duration":[7,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":5}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_775_934_259_000);
+        assert_eq!(messages[0].duration_ms, Some(7_000));
+    }
+
+    #[test]
+    fn test_parse_copilot_merges_duplicate_spans_without_additive_duration() {
+        let content = r#"{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":20}}
+{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934259,0],"endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":30,"gen_ai.usage.output_tokens":50}}"#;
+        let file = create_test_file(content);
+
+        let messages = parse_copilot_file(file.path());
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "duplicate spans must collapse before folds"
+        );
+        assert_eq!(messages[0].timestamp, 1_775_934_259_000);
+        assert_eq!(messages[0].duration_ms, Some(7_000));
+        assert_eq!(messages[0].tokens.input, 30);
+        assert_eq!(messages[0].tokens.output, 50);
     }
 
     #[test]
