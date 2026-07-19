@@ -11897,10 +11897,7 @@ mod tests {
         let unified = logs_dir.join("unified.jsonl");
         std::fs::write(
             &unified,
-            concat!(
-                "{\"ts\":\"2023-11-14T22:13:19Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"model changed\",\"ctx\":{\"model\":\"grok-build\"}}\n",
-                "{\"ts\":\"2023-11-14T22:13:20Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"loop_index\":1,\"prompt_tokens\":100,\"cached_prompt_tokens\":60,\"completion_tokens\":25,\"reasoning_tokens\":5}}\n",
-            ),
+            "{\"ts\":\"2023-11-14T22:13:20Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"loop_index\":1,\"prompt_tokens\":100,\"cached_prompt_tokens\":60,\"completion_tokens\":25,\"reasoning_tokens\":5}}\n",
         )
         .unwrap();
         let unified_time =
@@ -11922,6 +11919,14 @@ mod tests {
 
         let selected = materialized();
         assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected
+                .iter()
+                .find(|message| message.session_id == "covered")
+                .unwrap()
+                .model_id,
+            "grok-build"
+        );
         let selected_tokens =
             selected
                 .iter()

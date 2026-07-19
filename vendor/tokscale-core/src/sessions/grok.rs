@@ -399,11 +399,25 @@ pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Uni
         return messages;
     }
 
+    let mut legacy_models = HashMap::new();
     let mut legacy_workspaces = HashMap::new();
     for message in messages
         .iter()
         .filter(|message| !is_unified_log_message(message))
     {
+        if message.model_id != UNKNOWN_MODEL {
+            match legacy_models.entry(message.session_id.clone()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(message.model_id.clone()));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get().as_ref() != Some(&message.model_id) {
+                        entry.insert(None);
+                    }
+                }
+            }
+        }
+
         let workspace = (
             message.workspace_key.clone(),
             message.workspace_label.clone(),
@@ -428,6 +442,11 @@ pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Uni
         .iter_mut()
         .filter(|message| is_unified_log_message(message))
     {
+        if message.model_id == UNKNOWN_MODEL {
+            if let Some(Some(model_id)) = legacy_models.get(&message.session_id) {
+                message.model_id = model_id.clone();
+            }
+        }
         if message.workspace_key.is_none() && message.workspace_label.is_none() {
             if let Some(Some((workspace_key, workspace_label))) =
                 legacy_workspaces.get(&message.session_id)
@@ -915,6 +934,7 @@ mod tests {
         legacy_only.message_count = 3;
 
         let mut covered_unified = test_message("covered", "grok-unified:covered:1:17:1");
+        covered_unified.model_id = UNKNOWN_MODEL.to_string();
         covered_unified.tokens = TokenBreakdown {
             input: 40,
             output: 20,
@@ -932,6 +952,7 @@ mod tests {
             .iter()
             .find(|message| message.session_id == "covered" && is_unified_log_message(message))
             .unwrap();
+        assert_eq!(covered.model_id, "grok-build");
         assert_eq!(covered.workspace_key.as_deref(), Some("/tmp/project"));
         assert_eq!(covered.workspace_label.as_deref(), Some("project"));
         assert!(selected
@@ -1005,6 +1026,25 @@ mod tests {
         };
 
         assert_eq!(signature(forward), signature(reverse));
+    }
+
+    #[test]
+    fn selector_keeps_unknown_model_when_legacy_models_conflict() {
+        let mut legacy_a = test_message("covered", "grok:covered:0");
+        legacy_a.model_id = "grok-model-a".to_string();
+        let mut legacy_b = test_message("covered", "grok:covered:1");
+        legacy_b.model_id = "grok-model-b".to_string();
+        let mut unified = test_message("covered", "grok-unified:covered:1:17:1");
+        unified.model_id = UNKNOWN_MODEL.to_string();
+
+        for raw in [
+            vec![legacy_a.clone(), legacy_b.clone(), unified.clone()],
+            vec![legacy_b.clone(), unified.clone(), legacy_a.clone()],
+        ] {
+            let selected = prefer_unified_log_messages(raw);
+            assert_eq!(selected.len(), 1);
+            assert_eq!(selected[0].model_id, UNKNOWN_MODEL);
+        }
     }
 
     #[test]
