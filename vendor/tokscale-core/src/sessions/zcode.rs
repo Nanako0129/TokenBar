@@ -22,7 +22,7 @@ use std::io::{BufRead, BufReader};
 use std::path::Path;
 
 const CLIENT_ID: &str = "zcode";
-const PROVIDER_ID: &str = "zhipu";
+const PROVIDER_ID: &str = "zai";
 const UNKNOWN_MODEL: &str = "glm-5.2";
 
 /// A single JSONL line in a ZCode session transcript.
@@ -69,6 +69,8 @@ struct ZcodeUsage {
     cache_write: Option<serde_json::Value>,
     #[serde(default, alias = "reasoningTokens")]
     reasoning: Option<serde_json::Value>,
+    #[serde(default, alias = "completionTokensDetails")]
+    completion_tokens_details: Option<serde_json::Value>,
     #[serde(default, alias = "total_tokens", alias = "totalTokens")]
     total: Option<serde_json::Value>,
 }
@@ -115,7 +117,17 @@ impl ZcodeUsage {
             .unwrap_or(0);
         let raw_cache_read = non_negative_i64(self.cache_read.as_ref()).max(nested_cache_read);
         let raw_cache_write = non_negative_i64(self.cache_write.as_ref());
-        let raw_reasoning = non_negative_i64(self.reasoning.as_ref());
+        let nested_reasoning = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| {
+                details
+                    .get("reasoning_tokens")
+                    .or_else(|| details.get("reasoningTokens"))
+            })
+            .map(|value| non_negative_i64(Some(value)))
+            .unwrap_or(0);
+        let raw_reasoning = non_negative_i64(self.reasoning.as_ref()).max(nested_reasoning);
 
         if raw_input
             .saturating_add(raw_output)
@@ -156,6 +168,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let session_id_from_path = session_id_from_path(path);
+    let fallback_dedup_scope = fallback_dedup_scope(path);
     let workspace_key = workspace_key_from_path(path);
     let workspace_label = workspace_key.as_deref().and_then(workspace_label_from_key);
 
@@ -243,6 +256,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let resolved_session = session_id
                     .clone()
                     .unwrap_or_else(|| session_id_from_path.clone());
+                let dedup_scope = session_id.as_deref().unwrap_or(&fallback_dedup_scope);
                 let timestamp = entry
                     .timestamp
                     .as_deref()
@@ -257,7 +271,7 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                     timestamp,
                     breakdown,
                     0.0,
-                    Some(format!("{}:{}", resolved_session, assistant_index)),
+                    Some(format!("{}:{}", dedup_scope, assistant_index)),
                 );
                 message.message_count = 1;
                 message.is_turn_start = pending_turn_start;
@@ -391,8 +405,8 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             mu.cache_read_input_tokens,
             mu.cache_creation_input_tokens,
             mu.computed_total_tokens,
-            NULLIF(mu.agent, ''),
-            NULLIF(mu.mode, ''),
+            NULL,
+            NULL,
             NULL,
             NULL
         FROM model_usage mu
@@ -418,8 +432,8 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             mu.cache_read_input_tokens,
             mu.cache_creation_input_tokens,
             NULL,
-            NULLIF(mu.agent, ''),
-            NULLIF(mu.mode, ''),
+            NULL,
+            NULL,
             NULL,
             NULL
         FROM model_usage mu
@@ -703,6 +717,15 @@ fn session_id_from_path(path: &Path) -> String {
         .to_string()
 }
 
+/// Scope id-less fallback keys to the full source path without serializing the
+/// user's local path into `UnifiedMessage::dedup_key`.
+fn fallback_dedup_scope(path: &Path) -> String {
+    use sha2::{Digest, Sha256};
+
+    let path_hash = Sha256::digest(path.to_string_lossy().as_bytes());
+    format!("zcode-path:{path_hash:x}")
+}
+
 fn workspace_key_from_path(path: &Path) -> Option<String> {
     path.parent()
         .and_then(|dir| dir.file_name())
@@ -715,6 +738,7 @@ mod tests {
     use super::*;
     use rusqlite::{params, Connection};
     use serde_json::json;
+    use std::collections::HashMap;
     use std::io::Write;
     use tempfile::TempDir;
 
@@ -790,13 +814,46 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.client, "zcode");
-        assert_eq!(msg.provider_id, "zhipu");
+        assert_eq!(msg.provider_id, "zai");
         assert_eq!(msg.model_id, "glm-5.2");
         assert_eq!(msg.session_id, "s1");
         assert_eq!(msg.tokens.input, 100);
         assert_eq!(msg.tokens.output, 50);
         assert_eq!(msg.tokens.cache_read, 20);
         assert!(msg.is_turn_start);
+    }
+
+    #[test]
+    fn test_scoped_zai_model_reaches_matching_pricing() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s-priced", "content": "hello"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s-priced",
+                "model": "zai/glm-5.2",
+                "content": "reply",
+                "usage": {"input_tokens": 100, "output_tokens": 50}
+            }),
+        );
+        let path = write_session(&dir, "project", "s-priced", &jsonl);
+        let mut message = parse_zcode_file(&path).pop().unwrap();
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "z-ai/glm-5.2".into(),
+            crate::pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let pricing = crate::pricing::PricingService::new(litellm, HashMap::new());
+
+        crate::apply_pricing_if_available(&mut message, Some(&pricing));
+
+        assert_eq!(message.provider_id, "zai");
+        assert!((message.cost - 0.2).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -818,6 +875,31 @@ mod tests {
         assert!(msg.tokens.input > 0);
         assert!(msg.tokens.output > 0);
         assert_eq!(msg.tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_missing_session_id_scopes_dedup_key_to_source_path() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = json!({
+            "role": "assistant",
+            "content": "reply",
+            "usage": {"input_tokens": 10, "output_tokens": 2}
+        })
+        .to_string();
+        let first_path = write_session(&dir, "project-a", "shared", &jsonl);
+        let second_path = write_session(&dir, "project-b", "shared", &jsonl);
+
+        let first = parse_zcode_file(&first_path).pop().unwrap();
+        let second = parse_zcode_file(&second_path).pop().unwrap();
+
+        let first_expected = format!("{}:0", fallback_dedup_scope(&first_path));
+        let second_expected = format!("{}:0", fallback_dedup_scope(&second_path));
+        assert_eq!(first.session_id, "shared");
+        assert_eq!(second.session_id, "shared");
+        assert_eq!(first.dedup_key.as_deref(), Some(first_expected.as_str()));
+        assert_eq!(second.dedup_key.as_deref(), Some(second_expected.as_str()));
+        assert_ne!(first.dedup_key, second.dedup_key);
+        assert!(!first_expected.contains(dir.path().to_string_lossy().as_ref()));
     }
 
     #[test]
@@ -907,7 +989,7 @@ mod tests {
     }
 
     #[test]
-    fn test_zai_nested_prompt_cache_usage() {
+    fn test_zai_nested_cache_and_reasoning_usage() {
         let dir = TempDir::new().unwrap();
         let jsonl = format!(
             "{}\n{}",
@@ -920,7 +1002,9 @@ mod tests {
                     "prompt_tokens": 200,
                     "completion_tokens": 100,
                     "total_tokens": 300,
-                    "prompt_tokens_details": {"cached_tokens": 50}
+                    "prompt_tokens_details": {"cached_tokens": 50},
+                    "reasoningTokens": 20,
+                    "completion_tokens_details": {"reasoning_tokens": 30}
                 }
             }),
         );
@@ -929,8 +1013,9 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 150);
-        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.output, 70);
         assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.reasoning, 30);
         assert_eq!(messages[0].tokens.total(), 300);
     }
 
@@ -949,7 +1034,9 @@ mod tests {
                     "completion_tokens": 100,
                     "total_tokens": 300,
                     "cache_read_tokens": 40,
-                    "prompt_tokens_details": "bad"
+                    "prompt_tokens_details": "bad",
+                    "reasoningTokens": 10,
+                    "completion_tokens_details": "bad"
                 }
             }),
         );
@@ -958,8 +1045,9 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 160);
-        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.output, 90);
         assert_eq!(messages[0].tokens.cache_read, 40);
+        assert_eq!(messages[0].tokens.reasoning, 10);
         assert_eq!(messages[0].tokens.total(), 300);
     }
 
@@ -1094,7 +1182,7 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
         assert_eq!(msg.client, "zcode");
-        assert_eq!(msg.provider_id, "zhipu");
+        assert_eq!(msg.provider_id, "zai");
         assert_eq!(msg.model_id, "glm-5.2");
         assert_eq!(msg.session_id, "sess_1");
         // Timestamp anchors to `started_at` (the call's start), not
@@ -1295,9 +1383,7 @@ mod tests {
                 output_tokens INTEGER,
                 reasoning_tokens INTEGER,
                 cache_read_input_tokens INTEGER,
-                cache_creation_input_tokens INTEGER,
-                agent TEXT,
-                mode TEXT
+                cache_creation_input_tokens INTEGER
             );
             "#,
         )
@@ -1356,9 +1442,7 @@ mod tests {
                 reasoning_tokens INTEGER,
                 cache_read_input_tokens INTEGER,
                 cache_creation_input_tokens INTEGER,
-                computed_total_tokens INTEGER,
-                agent TEXT,
-                mode TEXT
+                computed_total_tokens INTEGER
             );
             "#,
         )
