@@ -276,23 +276,19 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
-    /// Fingerprint for a Grok `updates.jsonl` session and every sibling
-    /// `read_metadata` consults. `parse_grok_updates_file` reconciles session
-    /// totals from `signals.json` (compaction), and `read_metadata` additionally
-    /// reads `summary.json` (model id + `updated_at`/`created_at` timestamp) and
-    /// `events.jsonl` (model id, session id, `ts` timestamp) — so a sibling that
-    /// is written or rewritten after the last `updates.jsonl` write must still
-    /// invalidate the cache. An `updates.jsonl`-only (or `signals.json`-only)
-    /// fingerprint would leave a session pinned to its fallback model forever
-    /// when a late-arriving `summary.json`/`events.jsonl` is the only carrier of
-    /// the real model id.
+    /// Fingerprint a Grok source. Legacy `updates.jsonl` output also depends on
+    /// sibling `signals.json`, `summary.json`, and `events.jsonl`; the global
+    /// `unified.jsonl` source is self-contained and uses the normal fingerprint.
     ///
     /// LOCAL DIVERGENCE from upstream junhoyeo/tokscale, which fingerprints only
-    /// `signals.json` here even though its `read_metadata` reads all three — the
-    /// same class of gap as our reported #741 (roo history sibling). Must be
-    /// re-applied on any re-vendor of `message_cache.rs`; candidate to report
-    /// upstream. See vendor/README.md.
+    /// `signals.json` for legacy sessions even though `read_metadata` reads all
+    /// three siblings — the same class of gap as our reported #741 (roo history
+    /// sibling). Must be re-applied on any re-vendor of `message_cache.rs`.
     pub(crate) fn from_grok_path(path: &Path) -> Option<Self> {
+        if path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl") {
+            return Self::from_path(path);
+        }
+
         let session_dir = path.parent().unwrap_or_else(|| Path::new("."));
         let related_paths = GROK_METADATA_SIBLINGS
             .into_iter()

@@ -1316,10 +1316,11 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|message| should_keep_deduped_message(&mut gjc_seen, message)),
     );
 
-    // Grok Build: updates.jsonl + metadata-sibling fingerprint (signals/summary/
-    // events; a compaction rollup or late model id must invalidate the cache).
-    // Cumulative totalTokens deltas land as
-    // input tokens; pricing treats them as input at the resolved xai rates.
+    // Grok Build has two representations of the same sessions: legacy
+    // per-session updates and a global per-inference unified log. Collect both
+    // raw sets first and apply unified-over-legacy precedence exactly once before
+    // any report fold; a downstream aggregate cannot subtract covered legacy
+    // usage safely.
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Grok)
         .par_iter()
@@ -1329,16 +1330,18 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 &source_cache,
                 pricing,
                 message_cache::SourceFingerprint::from_grok_path,
-                sessions::grok::parse_grok_updates_file,
+                sessions::grok::parse_grok_file,
             )
         })
         .collect();
+    let mut grok_messages = Vec::new();
     for outcome in grok_outcomes {
-        all_messages.extend(outcome.messages);
+        grok_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    all_messages.extend(sessions::grok::prefer_unified_log_messages(grok_messages));
 
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
@@ -2840,14 +2843,70 @@ where
         sessions::jcode::parse_jcode_file,
         message_cache::SourceFingerprint::from_jcode_path
     );
-    // Grok Build: fingerprint updates.jsonl + every metadata sibling the parser
-    // reads (signals/summary/events) so a late compaction rollup or sibling-only
-    // model id invalidates the cache (parse reconciles signals totals).
-    simple_lane!(
-        ClientId::Grok,
-        sessions::grok::parse_grok_updates_file,
-        message_cache::SourceFingerprint::from_grok_path
-    );
+    // ---- Grok legacy updates + unified log (batch precedence) ----
+    // Cache each raw source independently, but do not emit cache hits early: the
+    // global unified log can suppress legacy rows from any session file.
+    {
+        let grok_paths = scan_result.get(ClientId::Grok);
+        let mut raw_by_path: Vec<Option<Vec<UnifiedMessage>>> =
+            (0..grok_paths.len()).map(|_| None).collect();
+        let mut miss_paths: Vec<(usize, &PathBuf)> = Vec::new();
+
+        for (index, path) in grok_paths.iter().enumerate() {
+            let fingerprint = message_cache::SourceFingerprint::from_grok_path(path);
+            let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
+                source_cache.get(path).filter(|cached| {
+                    cached.fingerprint == *fingerprint && !cached.messages.is_empty()
+                })
+            });
+            if let Some(cached) = cache_hit {
+                raw_by_path[index] = Some(cached.messages.clone());
+            } else {
+                miss_paths.push((index, path));
+            }
+        }
+
+        let parsed_misses: Vec<(usize, &PathBuf, Vec<UnifiedMessage>)> = miss_paths
+            .par_iter()
+            .map(|(index, path)| (*index, *path, sessions::grok::parse_grok_file(path)))
+            .collect();
+        for (index, path, messages) in parsed_misses {
+            if !messages.is_empty() {
+                if let Some(fingerprint) =
+                    message_cache::SourceFingerprint::from_grok_path(path)
+                {
+                    source_cache.insert(message_cache::CachedSourceEntry::new(
+                        path,
+                        fingerprint,
+                        messages.clone(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            }
+            raw_by_path[index] = Some(messages);
+        }
+
+        let raw_messages = raw_by_path
+            .into_iter()
+            .flatten()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut seen_keys: HashSet<String> = HashSet::new();
+        for mut message in sessions::grok::prefer_unified_log_messages(raw_messages) {
+            reprice_lane_message(&mut message, pricing, false);
+            if !passes_client(&message) {
+                continue;
+            }
+            let keep = message
+                .dedup_key
+                .as_ref()
+                .is_none_or(|key| key.is_empty() || dedup_gate_passes(key, &mut seen_keys));
+            if keep && filter(&message) {
+                sink(&message);
+            }
+        }
+    }
     // micode is WAL-mode SQLite; fingerprint via from_sqlite_path so a `-wal`
     // write invalidates the cache. MiMo Code records an authoritative per-message
     // cost (usage.cost), so this lane is cost-guarded (`true`): apply_pricing
@@ -3491,14 +3550,14 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
         let journal = message_cache::jcode_journal_path(snapshot);
         latest = latest.max(file_mtime_ms(&journal).unwrap_or(0));
     }
-    // Grok Build reconciles totals from sibling signals.json and reads the model
-    // id from summary.json / events.jsonl. Any of those metadata siblings can
-    // rewrite without touching updates.jsonl (compaction / live session refresh /
-    // a late-arriving model id), so probe every sibling the fingerprint covers for
-    // the live-tail change token too — otherwise a sibling-only write leaves the
-    // token unchanged and the tail never re-parses the new model.
-    for updates in scan_result.get(ClientId::Grok) {
-        if let Some(parent) = updates.parent() {
+    // Legacy Grok sessions reconcile sibling metadata that can change without
+    // touching updates.jsonl. The self-contained unified log is already covered
+    // by the primary-file scan above.
+    for source in scan_result.get(ClientId::Grok) {
+        if source.file_name().and_then(|name| name.to_str()) != Some("updates.jsonl") {
+            continue;
+        }
+        if let Some(parent) = source.parent() {
             for sibling in message_cache::GROK_METADATA_SIBLINGS {
                 latest = latest.max(file_mtime_ms(&parent.join(sibling)).unwrap_or(0));
             }
@@ -3584,14 +3643,17 @@ fn kiro_source_mtime_ms(session_path: &Path) -> Option<u64> {
     )
 }
 
-/// Newest mtime for a Grok session's scanned updates file and every metadata
-/// sibling the parser reads (`signals.json` / `summary.json` / `events.jsonl` —
-/// kept in lockstep with the fingerprint via `GROK_METADATA_SIBLINGS`). `None`
-/// keeps the source during pruning because over-parsing is safer than dropping a
-/// session when the updates file or an existing sibling cannot be inspected.
-fn grok_source_mtime_ms(updates_path: &Path) -> Option<u64> {
-    let mut latest = file_mtime_ms(updates_path)?;
-    let Some(parent) = updates_path.parent() else {
+/// Newest mtime for a Grok source and every file that affects its parse. The
+/// unified log is self-contained; legacy updates include metadata siblings kept
+/// in lockstep with `SourceFingerprint::from_grok_path`. `None` keeps the source
+/// during pruning because over-parsing is safer than silently dropping usage.
+fn grok_source_mtime_ms(source_path: &Path) -> Option<u64> {
+    let mut latest = file_mtime_ms(source_path)?;
+    if source_path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl") {
+        return Some(latest);
+    }
+
+    let Some(parent) = source_path.parent() else {
         return Some(latest);
     };
     for name in message_cache::GROK_METADATA_SIBLINGS {
@@ -4032,16 +4094,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Gjc, gjc_count);
     messages.extend(gjc_msgs);
 
-    let grok_msgs: Vec<ParsedMessage> = scan_result
+    let grok_messages: Vec<UnifiedMessage> = scan_result
         .get(ClientId::Grok)
         .par_iter()
-        .flat_map(|path| {
-            sessions::grok::parse_grok_updates_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .flat_map(|path| sessions::grok::parse_grok_file(path))
         .collect();
+    let grok_msgs: Vec<ParsedMessage> =
+        sessions::grok::prefer_unified_log_messages(grok_messages)
+            .into_iter()
+            .map(|message| unified_to_parsed(&message))
+            .collect();
     let grok_count = summed_parsed_message_count(&grok_msgs);
     counts.set(ClientId::Grok, grok_count);
     messages.extend(grok_msgs);

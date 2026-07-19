@@ -345,9 +345,9 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "kiro-ide-session" => is_kiro_ide_session_artifact(root_path, path),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
-                // Grok Build ACP session updates under
-                // ~/.grok/sessions/<workspace>/<session-id>/updates.jsonl
+                // Grok Build ACP session updates and unified inference log.
                 "updates.jsonl" => file_name == "updates.jsonl",
+                "unified.jsonl" => file_name == "unified.jsonl",
                 "ui_messages.json" => file_name == "ui_messages.json",
                 "session-usage.json" => file_name == "session-usage.json",
                 "chat-messages.json" => file_name == "chat-messages.json",
@@ -879,6 +879,23 @@ fn scan_all_clients_with_env_strategy_inner(
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    if enabled.contains(&ClientId::Grok) {
+        let grok_sessions = PathBuf::from(
+            ClientId::Grok
+                .data()
+                .resolve_path_with_env_strategy(home_dir, use_env_roots),
+        );
+        if let Some(grok_home) = grok_sessions.parent() {
+            push_unique_scan_task_with_pattern(
+                &mut tasks,
+                &mut seen_scan_roots,
+                ClientId::Grok,
+                grok_home.join("logs"),
+                "unified.jsonl",
+            );
+        }
     }
 
     // Register built-in Kiro IDE roots before user-configured or environment
@@ -1740,6 +1757,10 @@ mod tests {
         let mut file = File::create(grok_session.join("updates.jsonl")).unwrap();
         file.write_all(b"{\"method\":\"session/update\"}\n")
             .unwrap();
+
+        let grok_logs = base.join(".grok/logs");
+        fs::create_dir_all(&grok_logs).unwrap();
+        File::create(grok_logs.join("unified.jsonl")).unwrap();
     }
 
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
@@ -3275,8 +3296,15 @@ mod tests {
             &["grok".to_string()],
             false,
         );
-        assert_eq!(result.get(ClientId::Grok).len(), 1);
-        assert!(result.get(ClientId::Grok)[0].ends_with("updates.jsonl"));
+        assert_eq!(result.get(ClientId::Grok).len(), 2);
+        assert!(result
+            .get(ClientId::Grok)
+            .iter()
+            .any(|path| path.ends_with("updates.jsonl")));
+        assert!(result
+            .get(ClientId::Grok)
+            .iter()
+            .any(|path| path.ends_with("unified.jsonl")));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
