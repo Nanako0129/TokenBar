@@ -1189,6 +1189,73 @@ mod tests {
     }
 
     #[test]
+    fn test_sakana_override_requires_sakana_provider_identity() {
+        let service = PricingService::new(HashMap::new(), HashMap::new());
+
+        for (model_id, provider_id) in [
+            ("fugu-ultra", "openrouter"),
+            ("openrouter/fugu-ultra", "openrouter"),
+            ("openrouter/fugu-ultra", "sakana"),
+            ("sakana/fugu-ultra", "openrouter"),
+            ("fugu-ultra", "sakana/openrouter"),
+            ("fugu-ultra", "openrouter/sakana"),
+            ("fugu-ultra", "unknown"),
+            ("fugu-ultra", "unknown/sakana"),
+            ("fugu-ultra", "sakana/unknown"),
+            ("fugu-ultra", "sakana/"),
+            ("fugu-ultra", "/sakana"),
+            ("fugu-ultra", "sakana//sakana"),
+            ("fugu-ultra", "sakana.openrouter"),
+            ("fugu-ultra", ""),
+            ("fugu-ultra", "   "),
+        ] {
+            assert!(
+                service
+                    .lookup_with_source_and_provider(model_id, None, Some(provider_id))
+                    .is_none(),
+                "non-Sakana identity resolved: model={model_id} provider={provider_id}"
+            );
+        }
+
+        assert!(service
+            .lookup_with_source_and_provider("sakana/openrouter/fugu-ultra", None, None)
+            .is_none());
+
+        let result = service
+            .lookup_with_source_and_provider("sakana/fugu-ultra", None, Some("sakana"))
+            .unwrap();
+        assert_eq!(result.source, "Sakana");
+        assert_eq!(result.matched_key, "fugu-ultra");
+
+        let repeated = service
+            .lookup_with_source_and_provider(
+                "sakana/sakana/fugu-ultra",
+                None,
+                Some("sakana/sakana"),
+            )
+            .unwrap();
+        assert_eq!(repeated.source, "Sakana");
+        assert_eq!(repeated.matched_key, "fugu-ultra");
+
+        let usage = TokenBreakdown {
+            input: 1,
+            ..Default::default()
+        };
+        assert_eq!(
+            service.calculate_cost_with_provider("fugu-ultra", None, &usage),
+            5e-6
+        );
+        assert_eq!(
+            service.calculate_cost_with_provider("fugu-ultra", Some("unknown"), &usage),
+            0.0
+        );
+        assert_eq!(
+            service.calculate_cost_with_provider("fugu-ultra", None, &usage),
+            5e-6
+        );
+    }
+
+    #[test]
     fn test_sakana_fugu_ultra_request_tier_and_alias() {
         let service = PricingService::new(HashMap::new(), HashMap::new());
         let regular = service.calculate_cost("fugu-ultra", 272_000, 3, 0, 0, 4);
