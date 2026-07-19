@@ -1918,6 +1918,18 @@ fn is_fuzzy_eligible(model_id: &str) -> bool {
     if model_id.len() < MIN_FUZZY_MATCH_LEN {
         return false;
     }
+
+    // GLM versions are distinct billable models. Exact/provider-aware and
+    // explicit suffix-stripping stages may resolve them, but broad substring
+    // matching must not turn `glm-5.2` into `glm-5.2-turbo` (or another model).
+    let terminal = model_id.rsplit('/').next().unwrap_or(model_id);
+    if terminal
+        .strip_prefix("glm-")
+        .is_some_and(|version| version.starts_with(|ch: char| ch.is_ascii_digit()))
+    {
+        return false;
+    }
+
     !FUZZY_BLOCKLIST.contains(&model_id)
 }
 
@@ -1944,7 +1956,7 @@ where
         let candidate: String = parts[..parts.len() - strip].join("-");
 
         if candidate.len() >= MIN_MODEL_NAME_LEN {
-            if strips_claude_numeric_minor(&candidate, parts[parts.len() - strip]) {
+            if strips_numeric_model_version(&candidate, parts[parts.len() - strip]) {
                 continue;
             }
 
@@ -1957,10 +1969,16 @@ where
     None
 }
 
-fn strips_claude_numeric_minor(candidate: &str, first_stripped_segment: &str) -> bool {
+fn strips_numeric_model_version(candidate: &str, first_stripped_segment: &str) -> bool {
     if !is_version_segment(first_stripped_segment) {
         return false;
     }
+
+    let terminal = candidate.rsplit('/').next().unwrap_or(candidate);
+    if terminal == "glm" || terminal.starts_with("glm-") {
+        return true;
+    }
+
     let claude_branded = candidate.contains("claude")
         || candidate.contains("opus")
         || candidate.contains("sonnet")
@@ -2984,6 +3002,30 @@ mod tests {
         let result = lookup.lookup("glm-4-6").unwrap();
         assert_eq!(result.matched_key, "z-ai/glm-4.6");
         assert_eq!(result.source, "OpenRouter");
+    }
+
+    #[test]
+    fn test_versioned_glm_does_not_fuzzy_match_a_different_variant() {
+        let pricing = ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            ..Default::default()
+        };
+        for (litellm, openrouter) in [
+            (
+                HashMap::from([("z-ai/glm-5.2-turbo".into(), pricing.clone())]),
+                HashMap::new(),
+            ),
+            (
+                HashMap::new(),
+                HashMap::from([("z-ai/glm-5.2-turbo".into(), pricing.clone())]),
+            ),
+        ] {
+            let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+            for model_id in ["glm-5.2", "z-ai/glm-5.2", "zai/glm-5.2"] {
+                assert!(lookup.lookup_with_provider(model_id, Some("zai")).is_none());
+            }
+        }
     }
 
     #[test]

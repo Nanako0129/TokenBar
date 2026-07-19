@@ -398,7 +398,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             NULLIF(mu.model_id, ''),
             mu.started_at,
             mu.completed_at,
-            mu.duration_ms,
+            NULL,
             mu.input_tokens,
             mu.output_tokens,
             mu.reasoning_tokens,
@@ -425,7 +425,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             NULLIF(mu.model_id, ''),
             mu.started_at,
             mu.completed_at,
-            mu.duration_ms,
+            NULL,
             mu.input_tokens,
             mu.output_tokens,
             mu.reasoning_tokens,
@@ -1378,7 +1378,6 @@ mod tests {
                 model_id TEXT,
                 started_at INTEGER,
                 completed_at INTEGER,
-                duration_ms INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 reasoning_tokens INTEGER,
@@ -1420,6 +1419,7 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 5);
         assert_eq!(msg.tokens.reasoning, 10);
         assert_eq!(msg.tokens.total(), 150);
+        assert_eq!(msg.duration_ms, None);
     }
 
     #[test]
@@ -1436,7 +1436,6 @@ mod tests {
                 model_id TEXT,
                 started_at INTEGER,
                 completed_at INTEGER,
-                duration_ms INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
                 reasoning_tokens INTEGER,
@@ -1480,6 +1479,7 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 5);
         assert_eq!(msg.tokens.reasoning, 10);
         assert_eq!(msg.tokens.total(), 150);
+        assert_eq!(msg.duration_ms, None);
     }
 
     #[test]

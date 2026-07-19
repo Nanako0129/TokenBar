@@ -1943,9 +1943,25 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
+fn zcode_model_identity(model_id: &str) -> String {
+    let normalized = model_id.to_lowercase();
+    let Some((provider, terminal)) = normalized.split_once('/') else {
+        return normalized;
+    };
+    if !terminal.is_empty()
+        && provider_identity::canonical_provider(provider).as_deref() == Some("zai")
+    {
+        terminal.to_string()
+    } else {
+        normalized
+    }
+}
+
 /// Cross-store usage identity. Duration, agent, workspace, message count, and
 /// turn-start metadata are source-specific: SQLite can provide them when the
 /// legacy transcript cannot, so they must not prevent one-to-one token dedup.
+/// Z.AI's optional provider prefix is routing metadata because `provider_id`
+/// already carries that identity; it must not split otherwise identical rows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ZcodeMessageIdentity {
     session_id: String,
@@ -1964,7 +1980,7 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
         Self {
             session_id: message.session_id.clone(),
             timestamp: message.timestamp,
-            model_id: message.model_id.clone(),
+            model_id: zcode_model_identity(&message.model_id),
             provider_id: message.provider_id.clone(),
             input: message.tokens.input,
             output: message.tokens.output,
@@ -5144,6 +5160,14 @@ mod tests {
         let mut distinct_legacy = make_zcode_dedup_message(shared_key);
         distinct_legacy.tokens.input += 1;
         assert!(key_collision.should_keep(&distinct_legacy, false));
+
+        for scoped_model in ["zai/glm-5.2", "z-ai/glm-5.2", "z_ai/glm-5.2"] {
+            let mut scoped = ZcodeDedupState::default();
+            let mut sqlite = make_zcode_dedup_message("zcode-sqlite:scoped");
+            sqlite.model_id = scoped_model.to_string();
+            assert!(scoped.should_keep(&sqlite, true));
+            assert!(!scoped.should_keep(&make_zcode_dedup_message("legacy:scoped"), false));
+        }
     }
 
     fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
