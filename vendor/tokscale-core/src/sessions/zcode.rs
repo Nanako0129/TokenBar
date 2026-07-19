@@ -60,38 +60,61 @@ struct ZcodeMessagePayload {
 }
 
 /// Token usage block — field names follow the Z.ai / GLM API convention.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default)]
 struct ZcodeUsage {
-    #[serde(alias = "input_tokens", alias = "prompt_tokens", alias = "inputTokens")]
     input: Option<serde_json::Value>,
-    #[serde(
-        alias = "output_tokens",
-        alias = "completion_tokens",
-        alias = "outputTokens"
-    )]
     output: Option<serde_json::Value>,
-    #[serde(
-        alias = "input_cache_read",
-        alias = "cache_read_tokens",
-        alias = "cache_read_input_tokens",
-        alias = "cacheReadTokens"
-    )]
     cache_read: Option<serde_json::Value>,
-    #[serde(default, alias = "promptTokensDetails")]
     prompt_tokens_details: Option<serde_json::Value>,
-    #[serde(
-        alias = "input_cache_creation",
-        alias = "cache_write_tokens",
-        alias = "cache_creation_input_tokens",
-        alias = "cacheCreationTokens"
-    )]
     cache_write: Option<serde_json::Value>,
-    #[serde(default, alias = "reasoningTokens")]
     reasoning: Option<serde_json::Value>,
-    #[serde(default, alias = "completionTokensDetails")]
     completion_tokens_details: Option<serde_json::Value>,
-    #[serde(default, alias = "total_tokens", alias = "totalTokens")]
     total: Option<serde_json::Value>,
+}
+
+impl<'de> Deserialize<'de> for ZcodeUsage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let fields = HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
+        let first = |names: &[&str]| {
+            names
+                .iter()
+                .find_map(|name| fields.get(*name).filter(|value| !value.is_null()).cloned())
+        };
+
+        Ok(Self {
+            input: first(&["input", "input_tokens", "prompt_tokens", "inputTokens"]),
+            output: first(&[
+                "output",
+                "output_tokens",
+                "completion_tokens",
+                "outputTokens",
+            ]),
+            cache_read: first(&[
+                "cache_read",
+                "input_cache_read",
+                "cache_read_tokens",
+                "cache_read_input_tokens",
+                "cacheReadTokens",
+            ]),
+            prompt_tokens_details: first(&["prompt_tokens_details", "promptTokensDetails"]),
+            cache_write: first(&[
+                "cache_write",
+                "input_cache_creation",
+                "cache_write_tokens",
+                "cache_creation_input_tokens",
+                "cacheCreationTokens",
+            ]),
+            reasoning: first(&["reasoning", "reasoningTokens"]),
+            completion_tokens_details: first(&[
+                "completion_tokens_details",
+                "completionTokensDetails",
+            ]),
+            total: first(&["total", "total_tokens", "totalTokens"]),
+        })
+    }
 }
 
 fn non_negative_i64(value: Option<&serde_json::Value>) -> i64 {
@@ -1366,6 +1389,61 @@ mod tests {
         assert_eq!(messages[0].tokens.input, 321);
         assert_eq!(messages[0].tokens.output, 123);
         assert_eq!(messages[0].tokens.cache_read, 7);
+    }
+
+    #[test]
+    fn test_duplicate_usage_aliases_preserve_top_level_and_nested_counts() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}\n{}",
+            json!({"role": "user", "sessionId": "aliases", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "aliases",
+                "content": "top-level",
+                "usage": {
+                    "input_tokens": 100,
+                    "prompt_tokens": 100,
+                    "output_tokens": 20,
+                    "completion_tokens": 20,
+                    "cache_read_tokens": 10,
+                    "cache_read_input_tokens": 10,
+                    "total_tokens": 120,
+                    "totalTokens": 120
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "sessionId": "aliases",
+                    "content": "nested",
+                    "usage": {
+                        "input_tokens": 200,
+                        "prompt_tokens": 200,
+                        "output_tokens": 40,
+                        "completion_tokens": 40,
+                        "cache_read_tokens": 20,
+                        "cache_read_input_tokens": 20,
+                        "total_tokens": 240,
+                        "totalTokens": 240
+                    }
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "aliases", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 90);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 10);
+        assert_eq!(messages[0].tokens.total(), 120);
+        assert_eq!(messages[1].tokens.input, 180);
+        assert_eq!(messages[1].tokens.output, 40);
+        assert_eq!(messages[1].tokens.cache_read, 20);
+        assert_eq!(messages[1].tokens.total(), 240);
     }
 
     #[test]
