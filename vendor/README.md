@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M16 implementation checkpoint starts from audited TokenBar main [`f5773ea0`](https://github.com/Nanako0129/TokenBar/commit/f5773ea06bf4e4c589fd1cd61e9cf557f71e15b4), the rebase-merge result of Kiro structured sessions [PR #66](https://github.com/Nanako0129/TokenBar/pull/66), and selectively ports existing-parser correctness from [`6899ea03`](https://github.com/junhoyeo/tokscale/commit/6899ea03640b6de47bb3108c409be6fea7227bed), [`b59979c5`](https://github.com/junhoyeo/tokscale/commit/b59979c571d972418916df35df02f75f802d6b0b), [`9155018c`](https://github.com/junhoyeo/tokscale/commit/9155018c683fec78acf6c0ff9e77793ba02e34dc), and [`18cd13cc`](https://github.com/junhoyeo/tokscale/commit/18cd13cc921f42a309cab5a57b0331e1aebbda4c), plus only the provider-hardening hunks of mixed [`34cfbb50`](https://github.com/junhoyeo/tokscale/commit/34cfbb50796c5e084c55b595385f6fd3b48e802d) and the Jcode start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The 9Router feature remains excluded. The vendored tree advances the monolithic cache from schema 30 to 31 so unchanged existing sources cannot replay stale parser output; public main and issue #45 remain at merged M15-B `62/26/0/9/13/1` until this implementation PR merges.
+This M19-A implementation checkpoint starts from audited TokenBar main [`aebbc371`](https://github.com/Nanako0129/TokenBar/commit/aebbc371912df18c163465eaeb4a51dd3e33953a), the rebase-merge result of existing-parser correctness [PR #67](https://github.com/Nanako0129/TokenBar/pull/67), and selectively ports only the Windows atomic-replacement retry hunk from upstream [#906](https://github.com/junhoyeo/tokscale/pull/906) / [`a87f0ab6`](https://github.com/junhoyeo/tokscale/commit/a87f0ab6). The TUI signal and background-screen changes remain excluded. Windows `MoveFileExW` retries only transient errors 5 and 32 for at most five attempts with `10 × attempt` millisecond backoff; non-Windows replacement remains the existing single rename. This filesystem-only change keeps monolithic cache schema 31. Public main and issue #45 remain at merged M16 `66/21/0/10/13/1` until this implementation PR merges.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,8 +32,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 66 |
-| `TAKE` | 21 |
+| `ALREADY_VENDORED` | 67 |
+| `TAKE` | 20 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 10 |
 | `SKIP` | 13 |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 66</summary>
+<summary><code>ALREADY_VENDORED</code> — 67</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -54,18 +54,18 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
-9155018c 18cd13cc
+9155018c 18cd13cc a87f0ab6
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 21</summary>
+<summary><code>TAKE</code> — 20</summary>
 
 ```text
 63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d 640e97b9 f7a124da
 302d39c3 ed6f8b95 f6f7eced 0b454e60 65f8f3e2 6c804711 9a5aeb65 074619f7
-c1aef5e9 ae36db5c cd07bf78 b64d861e a87f0ab6
+c1aef5e9 ae36db5c cd07bf78 b64d861e
 ```
 
 </details>
@@ -110,20 +110,20 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 now moves `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moves to `DEFER` because only its excluded 9Router feature remains. This leaves 21 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 takes its Jcode hunk.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A now moves `a87f0ab6` to `ALREADY_VENDORED` after taking only its Windows atomic-replacement hunk. This leaves 20 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 took its Jcode hunk.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
 | M20 — merged in PR #65 | OpenCode v2 SQLite | `366ce643` |
 | M15-B — merged in PR #66 | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
-| M16 — landed in this checkpoint | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
+| M16 — merged in PR #67 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
 | M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
 | M18 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
-| M19-A | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` |
+| M19-A — landed in this checkpoint | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
 | M26 | Full source-message shard cache, including format-2 related-file path/existence metadata | `ae36db5c` + `cd07bf78` cache-metadata hunks |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
@@ -187,9 +187,9 @@ flowchart TD
 
 The expected terminal classification after every selected runtime milestone is `ALREADY_VENDORED 85`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 12`, `SKIP 13`, and `SUPERSEDED 1`, total 111. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
-The local cache advances from schema 30 to 31 at this M16 checkpoint and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M16 changes serialized output for existing Codex, Claude, Copilot, Jcode, and Antigravity sources, so one vendor-owned schema bump rejects every schema-30 entry before any unchanged fingerprint can replay stale timestamps, duration, token estimates, fork boundaries, or model aliases. The legacy schema-31 monolith remains untouched when M26 activates shards.
+The local cache is schema 31 after merged M16 and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep schema 31. M19-A changes only the Windows atomic replacement transport around cache and pricing writes; it does not change serialized output, fingerprints, or layout, so no schema bump is required. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records merged M15-B at `62/26/0/9/13/1`. After M16 merges, its mandatory post-merge refresh records the actual PR, merge SHA, four `TAKE → ALREADY_VENDORED` transitions, the mixed `34cfbb50 TAKE → DEFER` transition, `66/21/0/10/13/1` counts, schema 31, verification evidence, and M17 plus M18 as the next independent lanes. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M16 at `66/21/0/10/13/1`. After M19-A merges, its mandatory post-merge refresh records the actual PR and merge SHA, the `a87f0ab6 TAKE → ALREADY_VENDORED` transition, `67/20/0/10/13/1` counts, unchanged schema 31, deterministic retry evidence, and M17 plus M18 as the independently active lanes. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -269,6 +269,12 @@ Codex leniently decodes numeric `task_started.started_at`, keeps legacy UUID-v4 
 Provider identity is corrected before pricing and aggregation: delimited Kimi models infer `moonshotai`, MiMo infers `xiaomi`, GLM infers `zai`, and missing or empty GJC/Pi providers infer from the model before falling back to the client. Current Antigravity IDE placeholders and CLI response-model IDs resolve through single-hop machine aliases, including distinct Low/Medium tiers and the verified Gemini 3.5 Flash High mappings; hermetic synthetic-catalog tests prove representative aliases reach priced entries without changing forced-source or routed-pricing precedence.
 
 Because these are existing-source parser-output changes, TokenBar advances its monolithic `CACHE_SCHEMA_VERSION` **30→31** instead of importing upstream parser-version shards before M26. The integration fixture writes a real schema-30 Jcode entry with the unchanged specialized fingerprint and old completion timestamp, proves schema 31 rejects it, rebuilds the start-anchored message, and verifies cold/warm materialized, shipping streaming, count, model, monthly, hourly, and Agents parity. Parser-local fixtures cover each selected old-fail/new-pass behavior; no scanner, client registry, FFI, Swift, or C ABI change is required.
+
+## M19-A Windows atomic-replacement completion
+
+M19-A selectively ports only the `fs_atomic.rs` hunk from upstream [#906](https://github.com/junhoyeo/tokscale/pull/906) / [`a87f0ab6`](https://github.com/junhoyeo/tokscale/commit/a87f0ab6). On Windows, `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` retries only `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION` (32), stops after five total attempts, and sleeps for 10, 20, 30, then 40 milliseconds between failures. Other errors return after one attempt. The non-Windows path remains the existing single `std::fs::rename` call.
+
+TokenBar factors the retry loop into an injected replacement/sleep helper compiled on Windows and in tests, so deterministic non-Windows fixtures cover both retryable codes, eventual success, persistent failure at attempt five, immediate non-transient failure, and the exact attempt/backoff sequence without pretending to exercise `MoveFileExW` on macOS. The upstream TUI signal and background-screen changes are excluded. No serialized parser output, cache identity, layout, FFI, Swift, or C ABI changes, so monolithic cache schema remains 31; M26 can reuse this bounded replacement behavior for shard writes.
 
 ## Recovered Windows downstream commits
 
