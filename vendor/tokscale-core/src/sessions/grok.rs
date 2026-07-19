@@ -365,8 +365,9 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
         );
         // The unified log records one inference for each tool-loop iteration.
         // In observed Grok logs, loop one starts the user turn; later loops do
-        // not represent additional user interactions.
+        // not represent additional user interactions or messages.
         message.is_turn_start = loop_index == 1;
+        message.message_count = i32::from(message.is_turn_start);
         messages.push(message);
     }
 
@@ -386,7 +387,7 @@ pub fn parse_grok_file(path: &Path) -> Vec<UnifiedMessage> {
 /// Uses the richer, per-inference unified log for sessions it covers. Legacy
 /// updates remain a fallback for sessions absent from that log, avoiding an
 /// additive merge of two representations of the same activity.
-pub fn prefer_unified_log_messages(messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
+pub fn prefer_unified_log_messages(mut messages: Vec<UnifiedMessage>) -> Vec<UnifiedMessage> {
     let unified_sessions: HashSet<String> = messages
         .iter()
         .filter(|message| is_unified_log_message(message))
@@ -395,6 +396,44 @@ pub fn prefer_unified_log_messages(messages: Vec<UnifiedMessage>) -> Vec<Unified
 
     if unified_sessions.is_empty() {
         return messages;
+    }
+
+    let mut legacy_workspaces = HashMap::new();
+    for message in messages
+        .iter()
+        .filter(|message| !is_unified_log_message(message))
+    {
+        let workspace = (
+            message.workspace_key.clone(),
+            message.workspace_label.clone(),
+        );
+        if workspace == (None, None) {
+            continue;
+        }
+
+        match legacy_workspaces.entry(message.session_id.clone()) {
+            std::collections::hash_map::Entry::Vacant(entry) => {
+                entry.insert(Some(workspace));
+            }
+            std::collections::hash_map::Entry::Occupied(mut entry) => {
+                if entry.get().as_ref() != Some(&workspace) {
+                    entry.insert(None);
+                }
+            }
+        }
+    }
+
+    for message in messages
+        .iter_mut()
+        .filter(|message| is_unified_log_message(message))
+    {
+        if message.workspace_key.is_none() && message.workspace_label.is_none() {
+            if let Some(Some((workspace_key, workspace_label))) =
+                legacy_workspaces.get(&message.session_id)
+            {
+                message.set_workspace(workspace_key.clone(), workspace_label.clone());
+            }
+        }
     }
 
     messages
@@ -813,6 +852,7 @@ mod tests {
         assert!(messages[0].is_turn_start);
         assert_eq!(messages[1].tokens.input, 80);
         assert_eq!(messages[1].tokens.output, 12);
+        assert_eq!(messages[1].message_count, 0);
         assert!(!messages[1].is_turn_start);
     }
 
@@ -843,6 +883,10 @@ mod tests {
             reasoning: 50,
         };
         covered_legacy.message_count = 7;
+        covered_legacy.set_workspace(
+            Some("/tmp/project".to_string()),
+            Some("project".to_string()),
+        );
 
         let mut legacy_only = test_message("legacy-only", "grok:legacy-only:0");
         legacy_only.tokens.input = 17;
@@ -862,9 +906,12 @@ mod tests {
         let selected = prefer_unified_log_messages(raw.clone());
 
         assert_eq!(selected.len(), 2);
-        assert!(selected
+        let covered = selected
             .iter()
-            .any(|message| { message.session_id == "covered" && is_unified_log_message(message) }));
+            .find(|message| message.session_id == "covered" && is_unified_log_message(message))
+            .unwrap();
+        assert_eq!(covered.workspace_key.as_deref(), Some("/tmp/project"));
+        assert_eq!(covered.workspace_label.as_deref(), Some("project"));
         assert!(selected
             .iter()
             .any(|message| message.session_id == "legacy-only"));

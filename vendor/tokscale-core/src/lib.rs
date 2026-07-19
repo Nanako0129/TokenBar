@@ -3833,8 +3833,28 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
             continue;
         }
         if lane == ClientId::Grok as usize {
+            let is_unified = |path: &Path| {
+                path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl")
+            };
+            let is_fresh =
+                |path: &Path| grok_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms);
+            let unified_fresh = files.iter().any(|path| is_unified(path) && is_fresh(path));
+            if unified_fresh {
+                // A fresh global authority file can cover any legacy session and
+                // also needs those rows for workspace attribution.
+                continue;
+            }
+
+            let legacy_fresh = files.iter().any(|path| !is_unified(path) && is_fresh(path));
             files.retain(|path| {
-                grok_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
+                if is_unified(path) {
+                    // An older authority file must remain available while a
+                    // legacy session is fresh, or live-tail pruning can reopen
+                    // rows that full reports correctly suppress.
+                    legacy_fresh
+                } else {
+                    is_fresh(path)
+                }
             });
             continue;
         }
@@ -11502,6 +11522,83 @@ mod tests {
             scan_result.get(ClientId::Grok),
             std::slice::from_ref(&active_updates),
             "stale Grok sessions should be pruned while a fresh signals sibling keeps its session"
+        );
+    }
+
+    #[test]
+    fn test_modified_after_retains_grok_authority_sources() {
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let stale_dir = temp_dir.path().join("stale");
+        let active_dir = temp_dir.path().join("active");
+        let logs_dir = temp_dir.path().join("logs");
+        for dir in [&stale_dir, &active_dir, &logs_dir] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+
+        let stale_updates = stale_dir.join("updates.jsonl");
+        let active_updates = active_dir.join("updates.jsonl");
+        let unified = logs_dir.join("unified.jsonl");
+        for path in [&stale_updates, &active_updates, &unified] {
+            std::fs::File::create(path).unwrap();
+        }
+
+        let stale_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let active_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        for path in [&stale_updates, &unified] {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            let Ok(()) = file.set_modified(stale_time) else {
+                return;
+            };
+        }
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&active_updates)
+            .unwrap();
+        let Ok(()) = file.set_modified(active_time) else {
+            return;
+        };
+
+        let mut legacy_fresh = scanner::ScanResult::default();
+        legacy_fresh.get_mut(ClientId::Grok).extend([
+            stale_updates.clone(),
+            active_updates.clone(),
+            unified.clone(),
+        ]);
+        crate::prune_scan_result_by_mtime(&mut legacy_fresh, 1_700_043_200_000);
+        assert_eq!(
+            legacy_fresh.get(ClientId::Grok),
+            &[active_updates.clone(), unified.clone()],
+            "a stale unified authority source must survive while a legacy source is fresh"
+        );
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&unified)
+            .unwrap();
+        let Ok(()) = file.set_modified(active_time) else {
+            return;
+        };
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&active_updates)
+            .unwrap();
+        let Ok(()) = file.set_modified(stale_time) else {
+            return;
+        };
+
+        let mut unified_fresh = scanner::ScanResult::default();
+        unified_fresh.get_mut(ClientId::Grok).extend([
+            stale_updates.clone(),
+            active_updates.clone(),
+            unified.clone(),
+        ]);
+        crate::prune_scan_result_by_mtime(&mut unified_fresh, 1_700_043_200_000);
+        assert_eq!(
+            unified_fresh.get(ClientId::Grok),
+            &[stale_updates, active_updates, unified],
+            "a fresh unified source needs the legacy cohort for workspace attribution"
         );
     }
 

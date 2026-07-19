@@ -881,22 +881,18 @@ fn scan_all_clients_with_env_strategy_inner(
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
     }
 
-    if enabled.contains(&ClientId::Grok) {
+    let grok_unified_path = if enabled.contains(&ClientId::Grok) {
         let grok_sessions = PathBuf::from(
             ClientId::Grok
                 .data()
                 .resolve_path_with_env_strategy(home_dir, use_env_roots),
         );
-        if let Some(grok_home) = grok_sessions.parent() {
-            push_unique_scan_task_with_pattern(
-                &mut tasks,
-                &mut seen_scan_roots,
-                ClientId::Grok,
-                grok_home.join("logs"),
-                "unified.jsonl",
-            );
-        }
-    }
+        grok_sessions
+            .parent()
+            .map(|grok_home| grok_home.join("logs/unified.jsonl"))
+    } else {
+        None
+    };
 
     // Register built-in Kiro IDE roots before user-configured or environment
     // extras. Otherwise a default `*.json` task for an overlapping root can
@@ -1320,6 +1316,14 @@ fn scan_all_clients_with_env_strategy_inner(
             if seen.insert(key) {
                 result.get_mut(client_id).push(file);
             }
+        }
+    }
+
+    if let Some(path) = grok_unified_path {
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if path.is_file() && seen.insert(key) {
+            result.get_mut(ClientId::Grok).push(path);
+            result.get_mut(ClientId::Grok).sort_unstable();
         }
     }
 
@@ -1759,8 +1763,9 @@ mod tests {
             .unwrap();
 
         let grok_logs = base.join(".grok/logs");
-        fs::create_dir_all(&grok_logs).unwrap();
+        fs::create_dir_all(grok_logs.join("archive")).unwrap();
         File::create(grok_logs.join("unified.jsonl")).unwrap();
+        File::create(grok_logs.join("archive/unified.jsonl")).unwrap();
     }
 
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
@@ -3304,7 +3309,11 @@ mod tests {
         assert!(result
             .get(ClientId::Grok)
             .iter()
-            .any(|path| path.ends_with("unified.jsonl")));
+            .any(|path| path == &home.join(".grok/logs/unified.jsonl")));
+        assert!(!result
+            .get(ClientId::Grok)
+            .iter()
+            .any(|path| path == &home.join(".grok/logs/archive/unified.jsonl")));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
     }
