@@ -17,7 +17,7 @@ use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_reado
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::TokenBreakdown;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
 
@@ -356,117 +356,104 @@ fn normalize_zcode_input_and_output(
     (input, output)
 }
 
+fn sqlite_table_columns(conn: &rusqlite::Connection, table: &str) -> HashSet<String> {
+    let mut stmt = match conn.prepare(&format!("PRAGMA table_info({table})")) {
+        Ok(stmt) => stmt,
+        Err(_) => return HashSet::new(),
+    };
+    let rows = match stmt.query_map([], |row| row.get::<_, String>(1)) {
+        Ok(rows) => rows,
+        Err(_) => return HashSet::new(),
+    };
+    rows.filter_map(Result::ok).collect()
+}
+
+fn optional_sql_column<'a>(
+    columns: &HashSet<String>,
+    column: &str,
+    expression: &'a str,
+) -> &'a str {
+    if columns.contains(column) {
+        expression
+    } else {
+        "NULL"
+    }
+}
+
 pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     let Some(conn) = open_readonly_sqlite(db_path) else {
         return Vec::new();
     };
 
     let fallback_timestamp = file_modified_timestamp_ms(db_path);
-    let modern_query = r#"
-        SELECT
-            mu.id,
-            NULLIF(mu.session_id, ''),
-            NULLIF(mu.turn_id, ''),
-            NULLIF(mu.model_id, ''),
-            mu.started_at,
-            mu.completed_at,
-            mu.duration_ms,
-            mu.input_tokens,
-            mu.output_tokens,
-            mu.reasoning_tokens,
-            mu.cache_read_input_tokens,
-            mu.cache_creation_input_tokens,
-            mu.computed_total_tokens,
-            NULLIF(mu.agent, ''),
-            NULLIF(mu.mode, ''),
-            NULLIF(s.directory, ''),
-            NULLIF(s.path, '')
-        FROM model_usage mu
-        LEFT JOIN session s ON s.id = mu.session_id
-        WHERE COALESCE(mu.input_tokens, 0) > 0
-            OR COALESCE(mu.output_tokens, 0) > 0
-            OR COALESCE(mu.reasoning_tokens, 0) > 0
-            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
-            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
-        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
-    "#;
-    let modern_without_session_query = r#"
-        SELECT
-            mu.id,
-            NULLIF(mu.session_id, ''),
-            NULLIF(mu.turn_id, ''),
-            NULLIF(mu.model_id, ''),
-            mu.started_at,
-            mu.completed_at,
-            NULL,
-            mu.input_tokens,
-            mu.output_tokens,
-            mu.reasoning_tokens,
-            mu.cache_read_input_tokens,
-            mu.cache_creation_input_tokens,
-            mu.computed_total_tokens,
-            NULL,
-            NULL,
-            NULL,
-            NULL
-        FROM model_usage mu
-        WHERE COALESCE(mu.input_tokens, 0) > 0
-            OR COALESCE(mu.output_tokens, 0) > 0
-            OR COALESCE(mu.reasoning_tokens, 0) > 0
-            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
-            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
-        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
-    "#;
-    let legacy_query = r#"
-        SELECT
-            mu.id,
-            NULLIF(mu.session_id, ''),
-            NULLIF(mu.turn_id, ''),
-            NULLIF(mu.model_id, ''),
-            mu.started_at,
-            mu.completed_at,
-            NULL,
-            mu.input_tokens,
-            mu.output_tokens,
-            mu.reasoning_tokens,
-            mu.cache_read_input_tokens,
-            mu.cache_creation_input_tokens,
-            NULL,
-            NULL,
-            NULL,
-            NULL,
-            NULL
-        FROM model_usage mu
-        WHERE COALESCE(mu.input_tokens, 0) > 0
-            OR COALESCE(mu.output_tokens, 0) > 0
-            OR COALESCE(mu.reasoning_tokens, 0) > 0
-            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
-            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
-        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
-    "#;
+    let model_columns = sqlite_table_columns(&conn, "model_usage");
+    if model_columns.is_empty() {
+        return Vec::new();
+    }
+    let session_columns = sqlite_table_columns(&conn, "session");
+    let has_session_join = session_columns.contains("id");
+    let is_legacy_schema = !model_columns.contains("computed_total_tokens");
 
-    // Probe the `computed_total_tokens` column directly instead of inferring
-    // legacy schema from the modern query failing to prepare: the modern query
-    // also LEFT JOINs the `session` table, so it can fail for reasons
-    // unrelated to the column's existence (e.g. a missing or renamed session
-    // table). Conflating those would send modern-schema rows with NULL totals
-    // through the unconditional subtraction below (potential undercount)
-    // instead of the safe pass-through.
-    let is_legacy_schema = conn
-        .prepare("SELECT computed_total_tokens FROM model_usage LIMIT 1")
-        .is_err();
-
-    let fallback_query = if is_legacy_schema {
-        legacy_query
+    // Zcode releases have shipped partial schema combinations. Select every
+    // optional field independently so a missing attribution column does not
+    // discard a duration or workspace column that is still available.
+    let duration = optional_sql_column(&model_columns, "duration_ms", "mu.duration_ms");
+    let computed_total = optional_sql_column(
+        &model_columns,
+        "computed_total_tokens",
+        "mu.computed_total_tokens",
+    );
+    let agent = optional_sql_column(&model_columns, "agent", "NULLIF(mu.agent, '')");
+    let mode = optional_sql_column(&model_columns, "mode", "NULLIF(mu.mode, '')");
+    let session_directory = if has_session_join {
+        optional_sql_column(&session_columns, "directory", "NULLIF(s.directory, '')")
     } else {
-        modern_without_session_query
+        "NULL"
     };
-    let mut stmt = match conn.prepare(modern_query) {
+    let session_path = if has_session_join {
+        optional_sql_column(&session_columns, "path", "NULLIF(s.path, '')")
+    } else {
+        "NULL"
+    };
+    let session_join = if has_session_join {
+        "LEFT JOIN session s ON s.id = mu.session_id"
+    } else {
+        ""
+    };
+
+    let query = format!(
+        r#"
+        SELECT
+            mu.id,
+            NULLIF(mu.session_id, ''),
+            NULLIF(mu.turn_id, ''),
+            NULLIF(mu.model_id, ''),
+            mu.started_at,
+            mu.completed_at,
+            {duration},
+            mu.input_tokens,
+            mu.output_tokens,
+            mu.reasoning_tokens,
+            mu.cache_read_input_tokens,
+            mu.cache_creation_input_tokens,
+            {computed_total},
+            {agent},
+            {mode},
+            {session_directory},
+            {session_path}
+        FROM model_usage mu
+        {session_join}
+        WHERE COALESCE(mu.input_tokens, 0) > 0
+            OR COALESCE(mu.output_tokens, 0) > 0
+            OR COALESCE(mu.reasoning_tokens, 0) > 0
+            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
+            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
+        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
+        "#
+    );
+    let mut stmt = match conn.prepare(&query) {
         Ok(stmt) => stmt,
-        Err(_) => match conn.prepare(fallback_query) {
-            Ok(stmt) => stmt,
-            Err(_) => return Vec::new(),
-        },
+        Err(_) => return Vec::new(),
     };
 
     let rows = match stmt.query_map([], |row| {
@@ -1480,6 +1467,114 @@ mod tests {
         assert_eq!(msg.tokens.reasoning, 10);
         assert_eq!(msg.tokens.total(), 150);
         assert_eq!(msg.duration_ms, None);
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_modern_without_session_preserves_duration() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                computed_total_tokens INTEGER
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at, duration_ms,
+                input_tokens, output_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "#,
+            params![
+                "usage_modern_duration",
+                "sess_modern",
+                "glm-5.2",
+                6_000_i64,
+                5_000_i64,
+                10_i64,
+                1_i64,
+                11_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].timestamp, 1_000);
+        assert_eq!(messages[0].duration_ms, Some(5_000));
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_legacy_schema_preserves_available_workspace() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT
+            );
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER
+            );
+            INSERT INTO session (id, directory)
+            VALUES ('sess_legacy_workspace', '/Users/alice/work/legacy-demo');
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at, input_tokens, output_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+            "#,
+            params![
+                "usage_legacy_workspace",
+                "sess_legacy_workspace",
+                "glm-5.2",
+                1_000_i64,
+                10_i64,
+                1_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/Users/alice/work/legacy-demo")
+        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("legacy-demo"));
     }
 
     #[test]
