@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M18 implementation checkpoint starts from audited TokenBar main [`d4ff968b`](https://github.com/Nanako0129/TokenBar/commit/d4ff968b763a86f3e3f83e8d88b757d2593c98fe), the rebase-merge result of Grok unified precedence [PR #69](https://github.com/Nanako0129/TokenBar/pull/69), and selectively ports Sakana/Fugu plus routed-pricing semantics from audited commits [`959cce84`](https://github.com/junhoyeo/tokscale/commit/959cce84) and [`6c804711`](https://github.com/junhoyeo/tokscale/commit/6c804711), with request-level long-context behavior from non-main [`548dc124`](https://github.com/junhoyeo/tokscale/commit/548dc124) and prefix/suffix composition from non-main [`6ea27ca1`](https://github.com/junhoyeo/tokscale/commit/6ea27ca1). Exact raw and custom keys retain first refusal, provider-scoped paths fail closed, bounded path/terminal fallbacks share one Claude never-degrade guard, and verified Sakana plus LiteLLM GPT-5.4/GPT-5.5 requests select one whole-request tier only when input plus cache-read exceeds 272,000. Pricing remains post-cache retrieval, so raw model IDs, source fingerprints, and monolithic cache schema 31 stay unchanged. Public main and issue #45 remain at merged M17 `67/20/0/10/13/1` until this implementation PR merges; the M18 implementation classification is `69/18/0/10/13/1`.
+This M21 implementation checkpoint starts from audited TokenBar main [`0735fd2b`](https://github.com/Nanako0129/TokenBar/commit/0735fd2b47dbc023298ee51ce94f56569cb6bc63), the rebase-merge result of routed-pricing [PR #70](https://github.com/Nanako0129/TokenBar/pull/70), and selectively ports Kimi Code from audited commits [`839ce378`](https://github.com/junhoyeo/tokscale/commit/839ce378) and [`052f43de`](https://github.com/junhoyeo/tokscale/commit/052f43de), Junie from [`633ea946`](https://github.com/junhoyeo/tokscale/commit/633ea946), [`77948d9d`](https://github.com/junhoyeo/tokscale/commit/77948d9d), and the Junie start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e), plus OpenCodeReview from [`302d39c3`](https://github.com/junhoyeo/tokscale/commit/302d39c3) and the matching start-anchor hunk of `b64d861e`. Kimi Code reuses the existing `kimi` client identity and is selected structurally from its `agents/<agent>/wire.jsonl` topology; Junie and OpenCodeReview append client IDs 31 and 32 without moving existing values. All three sources use the shared materialized, shipping streaming, count, and report paths, while Kimi legacy config remains a dependency only for legacy Kimi CLI files. These are new source outputs, so monolithic cache schema 31 stays unchanged. Public main and issue #45 remain at merged M18 `69/18/0/10/13/1` until this implementation PR merges; the M21 implementation classification is `74/13/0/10/13/1`.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,8 +32,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 69 |
-| `TAKE` | 18 |
+| `ALREADY_VENDORED` | 74 |
+| `TAKE` | 13 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 10 |
 | `SKIP` | 13 |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 69</summary>
+<summary><code>ALREADY_VENDORED</code> — 74</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -54,18 +54,18 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
-9155018c 18cd13cc a87f0ab6 959cce84 6c804711
+9155018c 18cd13cc a87f0ab6 959cce84 6c804711 839ce378 052f43de 633ea946
+77948d9d 302d39c3
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 18</summary>
+<summary><code>TAKE</code> — 13</summary>
 
 ```text
-63a44d7c 839ce378 052f43de 633ea946 77948d9d 640e97b9 f7a124da 302d39c3
-ed6f8b95 f6f7eced 0b454e60 65f8f3e2 9a5aeb65 074619f7 c1aef5e9 ae36db5c
-cd07bf78 b64d861e
+63a44d7c 640e97b9 f7a124da ed6f8b95 f6f7eced 0b454e60 65f8f3e2 9a5aeb65
+074619f7 c1aef5e9 ae36db5c cd07bf78 b64d861e
 ```
 
 </details>
@@ -110,7 +110,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 now moves `959cce84` and `6c804711` to `ALREADY_VENDORED`. This leaves 18 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 took its Jcode hunk.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 now moves `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. This leaves 13 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because M21 takes its Junie/OpenCodeReview start-anchor hunks while its selected Zcode and deferred Devin hunks still remain.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -118,10 +118,10 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M15-B — merged in PR #66 | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
 | M16 — merged in PR #67 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
 | M17 — merged in PR #69 | Grok unified-log precedence across all cache/report lanes | Non-main `ed798642` |
-| M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
+| M21 — landed in this checkpoint | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
-| M18 — landed in this checkpoint | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
+| M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
@@ -144,7 +144,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | Commit | Current state | Terminal transition |
 |---|---|---|
 | `34cfbb50` | `DEFER`; M16 vendors the provider hardening, while the remaining bridge and scanner hunks are 9Router-only | Remains `DEFER` |
-| `b64d861e` | Kiro and Jcode start-anchor hunks are vendored in M15-B/M16; selected Junie/OpenCodeReview and Zcode hunks remain `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
+| `b64d861e` | Kiro, Jcode, Junie, and OpenCodeReview start-anchor hunks are vendored through M21; the selected Zcode hunk remains `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
 | `c1aef5e9` | macOS Hermes scope already vendored; Windows discovery selected | `TAKE → ALREADY_VENDORED` after M23 |
 | `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
 | `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
@@ -190,7 +190,7 @@ The expected terminal classification after every selected runtime milestone is `
 
 The local cache is schema 31 after merged M16 and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep schema 31. M19-A changes only the Windows atomic replacement transport. M17 adds a separately fingerprinted source and report-time cross-source selector, so existing cached legacy rows remain valid and no schema bump is required. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records merged M17 at `67/20/0/10/13/1`. M18's mandatory post-merge refresh will record its actual PR and merge SHA, the `959cce84`/`6c804711` transition to `69/18/0/10/13/1`, unchanged schema 31, routed-pricing and long-context fixtures, and M25 as newly ready. M21 is already ready from merged M17. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M18 at `69/18/0/10/13/1`. M21's mandatory post-merge refresh will record its actual PR and merge SHA, the five audited transitions to `74/13/0/10/13/1`, unchanged schema 31, Kimi legacy/Code coexistence, Junie authoritative cost, OpenCodeReview duration/workspace, and all-lane parity fixtures, with M22 next on the source lane. M25 is independently ready from merged M18. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -286,6 +286,12 @@ M18 selectively ports audited upstream [`959cce84`](https://github.com/junhoyeo/
 The routed lookup preserves forced LiteLLM/OpenRouter isolation before custom pricing. Exact full raw IDs, complete custom keys, and parenthesized custom or built-in literals receive first refusal before tier stripping or suffix validation; invalid parenthesized suffixes fail closed after that exact miss. Provider-scoped `accounts/<provider>/{models,routers}/...` paths never widen into a terminal-only custom or fuzzy cross-provider match. Bounded full-path suffixes precede terminal fallback, terminal custom lookup tries explicit raw and alias-normalized candidates, built-in direct/static aliases retain precedence, and every fallback result passes one Claude never-degrade guard. Provider ranking and cache-rate backfill remain unchanged.
 
 An early prepared-patch verifier reproduced a provider-scoped boundary bypass: `CustomPricing::lookup_with_key()` normalized a full Fireworks path to its terminal model before the fail-closed guard. Internal routed lookup now uses exact-only custom keys, while the public custom API retains its existing synthetic normalization and generic non-scoped terminal routes still work through explicit candidates. The final integrated verifier also reproduced case-sensitive forced-source matching (`OpenRouter` fell through to automatic lookup); the shared lookup boundary now lowercases the selector once so LiteLLM, OpenRouter, and Custom isolation remains case-insensitive through direct, exact, and fallback paths. GitHub review then found three adjacent provenance cases: provider-prefixed verified GPT-5.4/GPT-5.5 LiteLLM rows missed whole-request tiering, an unknown router path could let a Cursor model-part override beat the terminal upstream exact row, and an explicit non-Sakana provider could inherit the Sakana override. Whole-request identity now recognizes the exact terminal GPT key, only truly unknown router prefixes defer model-part overrides until terminal upstream resolution, and Sakana pricing requires every explicit path segment and provider hint to agree with Sakana. Post-review fresh verification extended the router case to suffix normalization (`cx/gpt-5.3-codex-high`) and the provider case to both a nested model path (`sakana/openrouter/fugu-ultra`) and a composite provider hint (`sakana/openrouter`): full-path suffix candidates remain exact-only for unknown routers before terminal suffix resolution can choose the upstream exact row, while any non-Sakana routing or hint tag now makes the Fugu override fail closed. Explicit `unknown`, empty, or whitespace-only hints retain that explicitness for the Sakana gate instead of becoming an absent hint; the cached lookup path bypasses cache for those invalid hints so an unhinted Sakana result cannot be reused. Hermetic pricing fixtures cover the 272,000/272,001 boundary, cache-read threshold selection, output/reasoning tiering, cache-write exclusion, bare `fugu`, non-verified marginal behavior, exact/custom/alias/parenthesized/path/terminal routes, mixed-case forced sources, provider-scoped isolation, ranking/backfill, and every Claude never-degrade path. Pricing remains post-cache retrieval, so raw model identity and source-message cache identity are unchanged; monolithic schema remains **31**. M18 moves `959cce84` and `6c804711` to `ALREADY_VENDORED`, producing the duplicate-free exact classification `69/18/0/10/13/1`.
+
+## M21 Kimi Code, Junie, and OpenCodeReview completion
+
+M21 selectively ports Kimi Code from upstream [`839ce378`](https://github.com/junhoyeo/tokscale/commit/839ce378) and [`052f43de`](https://github.com/junhoyeo/tokscale/commit/052f43de), Junie from [`633ea946`](https://github.com/junhoyeo/tokscale/commit/633ea946) and [`77948d9d`](https://github.com/junhoyeo/tokscale/commit/77948d9d), OpenCodeReview from [`302d39c3`](https://github.com/junhoyeo/tokscale/commit/302d39c3), and only the Junie/OpenCodeReview start-anchor hunks of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e). Kimi Code reuses public client ID `kimi`, is selected by the `sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` topology, counts only explicit turn-scoped `usage.record` rows, and collapses exact replays without merging distinct turns that happen to use the same token counts. The default `~/.kimi-code` root and explicit `KIMI_CODE_HOME` root coexist with legacy `~/.kimi`; environment overrides are ignored when `use_env_roots` is false. Legacy Kimi keeps its config-dependent model lookup, while self-contained Kimi Code files exclude that unrelated sibling from fingerprint, mtime, pruning, and change-token semantics.
+
+Junie reads `events.jsonl`, preserves each finite non-negative provider-reported cost as authoritative, marks only the first valid usage in the next response event as a turn start while consuming prompt ownership even when that response has no `modelUsage` array or no countable usage, and start-anchors explicit response end timestamps by duration. OpenCodeReview reads session JSONL, carries normalized workspace metadata from `session_start`, and likewise start-anchors duration while retaining the recorded end timestamp in replay identity. Append-only `ClientId::Junie = 31` and `ClientId::OpenCodeReview = 32` raise `COUNT` to 33 without changing existing IDs; Swift uses `Kimi`, `Junie`, and `OpenCodeReview` display metadata and retains the existing initial-letter fallback instead of adding unverified logo assets. Materialized, shipping streaming, count, model, monthly, hourly, and Agents paths share parser selection, per-client dedup, raw source caching, and post-cache pricing. Hermetic fixtures prove Kimi legacy/Code coexistence, in-file and cross-agent replay collapse with distinct-turn retention, overflow-safe preservation of extreme nonzero token buckets, Junie authoritative cost through cold/warm rewrite, OpenCodeReview removal without stale cache replay, count/report parity, and unchanged totals across every lane. These are new source identities rather than changed existing-source serialization, so monolithic cache schema remains **31**. M21 moves five audited rows to `ALREADY_VENDORED`, producing the duplicate-free exact classification `74/13/0/10/13/1`; mixed `b64d861e` remains `TAKE` until M22 lands its Zcode hunk.
 
 ## M19-A Windows atomic-replacement completion
 

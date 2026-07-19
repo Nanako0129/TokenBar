@@ -64,7 +64,7 @@ impl TokenUsage {
         let cache_read = self.input_cache_read.unwrap_or(0).max(0);
         let cache_write = self.input_cache_creation.unwrap_or(0).max(0);
 
-        if input + output + cache_read + cache_write == 0 {
+        if input == 0 && output == 0 && cache_read == 0 && cache_write == 0 {
             return None;
         }
 
@@ -85,6 +85,9 @@ const DEFAULT_PROVIDER: &str = "moonshot";
 
 /// Locate the legacy Kimi CLI config consumed by `parse_kimi_file`.
 pub(crate) fn kimi_config_path(wire_path: &Path) -> Option<PathBuf> {
+    if is_kimi_code_path(wire_path) {
+        return None;
+    }
     let sessions_dir = wire_path.parent()?.parent()?.parent()?;
     Some(sessions_dir.parent()?.join("config.json"))
 }
@@ -408,6 +411,12 @@ mod tests {
             kimi_config_path(wire),
             Some(PathBuf::from("root/.kimi/config.json"))
         );
+        assert_eq!(
+            kimi_config_path(Path::new(
+                "root/.kimi-code/sessions/workspace/session/agents/main/wire.jsonl"
+            )),
+            None
+        );
         assert_eq!(kimi_config_path(Path::new("wire.jsonl")), None);
     }
 
@@ -617,6 +626,24 @@ not valid json at all
         assert_eq!(messages[0].tokens.input, 100);
         assert_eq!(messages[0].tokens.output, 50);
         assert_eq!(messages[0].tokens.cache_read, 10);
+    }
+
+    #[test]
+    fn kimi_code_extreme_tokens_do_not_overflow_zero_check() {
+        let content = format!(
+            r#"{{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{{"inputOther":{},"output":1,"inputCacheRead":{},"inputCacheCreation":1}},"usageScope":"turn","time":1,"turnId":"turn-extreme"}}"#,
+            i64::MAX,
+            i64::MAX,
+        );
+        let (_dir, path) = create_kimi_code_test_file(&content);
+
+        let messages = parse_kimi_code_file(&path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, i64::MAX);
+        assert_eq!(messages[0].tokens.output, 1);
+        assert_eq!(messages[0].tokens.cache_read, i64::MAX);
+        assert_eq!(messages[0].tokens.cache_write, 1);
+        assert_eq!(messages[0].tokens.total(), i64::MAX);
     }
 
     #[test]

@@ -345,6 +345,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "kiro-ide-session" => is_kiro_ide_session_artifact(root_path, path),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
+                "events.jsonl" => file_name == "events.jsonl",
                 // Grok Build ACP session updates and unified inference log.
                 "updates.jsonl" => file_name == "updates.jsonl",
                 "unified.jsonl" => file_name == "unified.jsonl",
@@ -896,6 +897,20 @@ fn scan_all_clients_with_env_strategy_inner(
         let def = client_id.data();
         let path = def.resolve_path_with_env_strategy(home_dir, use_env_roots);
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
+    }
+
+    if enabled.contains(&ClientId::Kimi) {
+        let kimi_code_home = if use_env_roots {
+            std::env::var("KIMI_CODE_HOME").unwrap_or_else(|_| format!("{}/.kimi-code", home_dir))
+        } else {
+            format!("{}/.kimi-code", home_dir)
+        };
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Kimi,
+            format!("{}/sessions", kimi_code_home),
+        );
     }
 
     let mut grok_unified_paths = Vec::new();
@@ -1784,6 +1799,27 @@ mod tests {
         let mut file = File::create(kimi_session.join("wire.jsonl")).unwrap();
         file.write_all(b"{\"type\": \"metadata\", \"protocol_version\": \"1.3\"}\n")
             .unwrap();
+    }
+
+    fn setup_mock_kimi_code_dir(base: &std::path::Path) -> PathBuf {
+        let wire = base.join(".kimi-code/sessions/workspace/session-code/agents/main/wire.jsonl");
+        fs::create_dir_all(wire.parent().unwrap()).unwrap();
+        File::create(&wire).unwrap();
+        wire
+    }
+
+    fn setup_mock_junie_dir(base: &std::path::Path) -> PathBuf {
+        let events = base.join(".junie/sessions/session-1/events.jsonl");
+        fs::create_dir_all(events.parent().unwrap()).unwrap();
+        File::create(&events).unwrap();
+        events
+    }
+
+    fn setup_mock_opencodereview_dir(base: &std::path::Path) -> PathBuf {
+        let session = base.join(".opencodereview/sessions/repo/session-1.jsonl");
+        fs::create_dir_all(session.parent().unwrap()).unwrap();
+        File::create(&session).unwrap();
+        session
     }
 
     fn setup_mock_grok_home(grok_home: &std::path::Path) {
@@ -3292,20 +3328,80 @@ mod tests {
     }
 
     #[test]
-    fn test_scan_all_clients_kimi() {
+    fn test_scan_all_clients_kimi_and_kimi_code() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
         setup_mock_kimi_dir(home);
+        let kimi_code = setup_mock_kimi_code_dir(home);
 
         let result = scan_all_clients_with_env_strategy(
             home.to_str().unwrap(),
             &["kimi".to_string()],
             false,
         );
-        assert_eq!(result.get(ClientId::Kimi).len(), 1);
-        assert!(result.get(ClientId::Kimi)[0].ends_with("wire.jsonl"));
+        assert_eq!(result.get(ClientId::Kimi).len(), 2);
+        assert!(result
+            .get(ClientId::Kimi)
+            .iter()
+            .any(|path| path == &kimi_code));
+        assert!(result
+            .get(ClientId::Kimi)
+            .iter()
+            .all(|path| path.ends_with("wire.jsonl")));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_kimi_code_home_obeys_env_strategy() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let override_home = dir.path().join("override");
+        fs::create_dir_all(&home).unwrap();
+        let default_wire = setup_mock_kimi_code_dir(&home);
+        let override_wire =
+            override_home.join("sessions/workspace/session-code/agents/main/wire.jsonl");
+        fs::create_dir_all(override_wire.parent().unwrap()).unwrap();
+        File::create(&override_wire).unwrap();
+
+        let mut env = EnvGuard::capture(&["KIMI_CODE_HOME"]);
+        env.set("KIMI_CODE_HOME", &override_home);
+        let with_env =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["kimi".to_string()], true);
+        assert_eq!(
+            with_env.get(ClientId::Kimi),
+            std::slice::from_ref(&override_wire)
+        );
+
+        let without_env = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["kimi".to_string()],
+            false,
+        );
+        assert_eq!(
+            without_env.get(ClientId::Kimi),
+            std::slice::from_ref(&default_wire)
+        );
+    }
+
+    #[test]
+    fn test_scan_all_clients_junie_and_opencodereview() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let junie = setup_mock_junie_dir(home);
+        let review = setup_mock_opencodereview_dir(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["junie".to_string(), "opencodereview".to_string()],
+            false,
+        );
+        assert_eq!(result.get(ClientId::Junie), std::slice::from_ref(&junie));
+        assert_eq!(
+            result.get(ClientId::OpenCodeReview),
+            std::slice::from_ref(&review)
+        );
     }
 
     #[test]

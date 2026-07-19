@@ -142,7 +142,10 @@ fn tokens_from_usage(usage: &Value) -> TokenBreakdown {
 fn number_field(value: &Value, field: &str) -> i64 {
     value
         .get(field)
-        .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_u64().map(|u| u.min(i64::MAX as u64) as i64))
+        })
         .unwrap_or(0)
         .max(0)
 }
@@ -236,6 +239,12 @@ mod tests {
         );
         let msgs = parse_events(&content);
         assert_eq!(msgs.len(), 2);
+    }
+
+    #[test]
+    fn oversized_unsigned_tokens_clamp() {
+        let usage = serde_json::json!({ "prompt_tokens": u64::MAX });
+        assert_eq!(number_field(&usage, "prompt_tokens"), i64::MAX);
     }
 
     #[test]

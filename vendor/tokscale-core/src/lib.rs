@@ -501,6 +501,14 @@ pub fn get_home_dir_string(home_dir_option: &Option<String>) -> Result<String, S
         })
 }
 
+fn parse_kimi_source(path: &Path) -> Vec<UnifiedMessage> {
+    if sessions::kimi::is_kimi_code_path(path) {
+        sessions::kimi::parse_kimi_code_file(path)
+    } else {
+        sessions::kimi::parse_kimi_file(path)
+    }
+}
+
 #[allow(dead_code)]
 fn parse_all_messages_with_pricing(
     home_dir: &str,
@@ -1132,21 +1140,78 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let kimi_outcomes: Vec<CachedParseOutcome> = scan_result
+    let kimi_outcomes: Vec<(bool, CachedParseOutcome)> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
         .map(|path| {
-            load_or_parse_source_with_fingerprint(
-                path,
-                &source_cache,
-                pricing,
-                message_cache::SourceFingerprint::from_kimi_path,
-                sessions::kimi::parse_kimi_file,
+            (
+                sessions::kimi::is_kimi_code_path(path),
+                load_or_parse_source_with_fingerprint(
+                    path,
+                    &source_cache,
+                    pricing,
+                    message_cache::SourceFingerprint::from_kimi_path,
+                    parse_kimi_source,
+                ),
             )
         })
         .collect();
-    for outcome in kimi_outcomes {
-        all_messages.extend(outcome.messages);
+    let mut kimi_code_seen: HashSet<String> = HashSet::new();
+    for (is_kimi_code, outcome) in kimi_outcomes {
+        if is_kimi_code {
+            all_messages.extend(
+                outcome
+                    .messages
+                    .into_iter()
+                    .filter(|message| should_keep_deduped_message(&mut kimi_code_seen, message)),
+            );
+        } else {
+            all_messages.extend(outcome.messages);
+        }
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let junie_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Junie)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::junie::parse_junie_file(path)
+            })
+        })
+        .collect();
+    let mut junie_seen: HashSet<String> = HashSet::new();
+    for outcome in junie_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut junie_seen, message)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
+    let opencodereview_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::OpenCodeReview)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::opencodereview::parse_opencodereview_file(path)
+            })
+        })
+        .collect();
+    let mut opencodereview_seen: HashSet<String> = HashSet::new();
+    for outcome in opencodereview_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| should_keep_deduped_message(&mut opencodereview_seen, message)),
+        );
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -2823,8 +2888,13 @@ where
     simple_lane!(ClientId::Pi,        sessions::pi::parse_pi_file);
     simple_lane!(
         ClientId::Kimi,
-        sessions::kimi::parse_kimi_file,
+        parse_kimi_source,
         message_cache::SourceFingerprint::from_kimi_path
+    );
+    simple_lane!(ClientId::Junie, sessions::junie::parse_junie_file);
+    simple_lane!(
+        ClientId::OpenCodeReview,
+        sessions::opencodereview::parse_opencodereview_file
     );
     simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
     // roo family: fingerprint via from_roo_path so a history-only rewrite of the
@@ -4102,20 +4172,64 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Pi, pi_count);
     messages.extend(pi_msgs);
 
-    // Parse Kimi wire.jsonl files in parallel
-    let kimi_msgs: Vec<ParsedMessage> = scan_result
+    let kimi_outcomes: Vec<(bool, Vec<UnifiedMessage>)> = scan_result
         .get(ClientId::Kimi)
         .par_iter()
-        .flat_map(|path| {
-            sessions::kimi::parse_kimi_file(path)
+        .map(|path| {
+            (
+                sessions::kimi::is_kimi_code_path(path),
+                parse_kimi_source(path),
+            )
+        })
+        .collect();
+    let mut kimi_code_seen: HashSet<String> = HashSet::new();
+    let kimi_msgs: Vec<ParsedMessage> = kimi_outcomes
+        .into_iter()
+        .flat_map(|(is_kimi_code, messages)| {
+            messages
                 .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
+                .filter(|message| {
+                    !is_kimi_code || should_keep_deduped_message(&mut kimi_code_seen, message)
+                })
+                .map(|message| unified_to_parsed(&message))
                 .collect::<Vec<_>>()
         })
         .collect();
-    let kimi_count = kimi_msgs.len() as i32;
+    let kimi_count = summed_parsed_message_count(&kimi_msgs);
     counts.set(ClientId::Kimi, kimi_count);
     messages.extend(kimi_msgs);
+
+    let junie_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::Junie)
+        .par_iter()
+        .flat_map(|path| sessions::junie::parse_junie_file(path))
+        .collect();
+    let mut junie_seen: HashSet<String> = HashSet::new();
+    let junie_msgs: Vec<ParsedMessage> = junie_msgs_raw
+        .into_iter()
+        .filter(|message| should_keep_deduped_message(&mut junie_seen, message))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let junie_count = summed_parsed_message_count(&junie_msgs);
+    counts.set(ClientId::Junie, junie_count);
+    messages.extend(junie_msgs);
+
+    let opencodereview_msgs_raw: Vec<UnifiedMessage> = scan_result
+        .get(ClientId::OpenCodeReview)
+        .par_iter()
+        .flat_map(|path| sessions::opencodereview::parse_opencodereview_file(path))
+        .collect();
+    let mut opencodereview_seen: HashSet<String> = HashSet::new();
+    let opencodereview_msgs: Vec<ParsedMessage> = opencodereview_msgs_raw
+        .into_iter()
+        .filter(|message| {
+            should_keep_deduped_message(&mut opencodereview_seen, message)
+        })
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    let opencodereview_count = summed_parsed_message_count(&opencodereview_msgs);
+    counts.set(ClientId::OpenCodeReview, opencodereview_count);
+    messages.extend(opencodereview_msgs);
 
     // Parse Qwen JSONL files in parallel
     let qwen_msgs: Vec<ParsedMessage> = scan_result
@@ -10524,6 +10638,232 @@ mod tests {
             assert_eq!(count, 1, "the jcode assistant message must flow through the streaming lane");
             assert_eq!(input_sum, 1200);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m21_sources_keep_materialized_streaming_count_and_report_parity() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let report_cache = tempfile::TempDir::new().unwrap();
+        let clients = vec![
+            "kimi".to_string(),
+            "junie".to_string(),
+            "opencodereview".to_string(),
+        ];
+
+        let legacy_kimi = source_home
+            .path()
+            .join(".kimi/sessions/group/legacy-session/wire.jsonl");
+        std::fs::create_dir_all(legacy_kimi.parent().unwrap()).unwrap();
+        std::fs::write(
+            &legacy_kimi,
+            r#"{"timestamp":1770983410.0,"message":{"type":"StatusUpdate","payload":{"token_usage":{"input_other":7,"output":3},"message_id":"legacy-1"}}}"#,
+        )
+        .unwrap();
+
+        let kimi_code = source_home
+            .path()
+            .join(".kimi-code/sessions/workspace/code-session/agents/main/wire.jsonl");
+        std::fs::create_dir_all(kimi_code.parent().unwrap()).unwrap();
+        let code_a = r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":10,"inputCacheCreation":0},"usageScope":"turn","time":1770983420000,"turnId":"turn-a"}"#;
+        let code_b = r#"{"type":"usage.record","model":"kimi-code/kimi-for-coding","usage":{"inputOther":100,"output":50,"inputCacheRead":10,"inputCacheCreation":0},"usageScope":"turn","time":1770983420001,"turnId":"turn-b"}"#;
+        std::fs::write(&kimi_code, format!("{code_a}\n{code_a}\n{code_b}\n")).unwrap();
+        let kimi_code_replay = source_home
+            .path()
+            .join(".kimi-code/sessions/workspace/code-session/agents/reviewer/wire.jsonl");
+        std::fs::create_dir_all(kimi_code_replay.parent().unwrap()).unwrap();
+        std::fs::write(&kimi_code_replay, format!("{code_a}\n")).unwrap();
+
+        let junie = source_home
+            .path()
+            .join(".junie/sessions/session-260213-120000/events.jsonl");
+        std::fs::create_dir_all(junie.parent().unwrap()).unwrap();
+        let write_junie = |input: i64, cost: f64| {
+            let usage = serde_json::json!({
+                "timestampMs": 1_770_983_430_000_i64,
+                "event": {
+                    "agentEvent": {
+                        "kind": "LlmResponseMetadataEvent",
+                        "agent": { "name": "reviewer" },
+                        "modelUsage": [{
+                            "model": "gpt-5",
+                            "provider": "openai",
+                            "inputTokens": input,
+                            "outputTokens": 50,
+                            "time": 2_000,
+                            "cost": cost
+                        }]
+                    }
+                }
+            });
+            std::fs::write(
+                &junie,
+                format!("{}\n{usage}\n", r#"{"kind":"UserPromptEvent"}"#),
+            )
+            .unwrap();
+        };
+        write_junie(100, 0.125);
+
+        let review = source_home
+            .path()
+            .join(".opencodereview/sessions/repo/review-session.jsonl");
+        std::fs::create_dir_all(review.parent().unwrap()).unwrap();
+        let review_contents = concat!(
+            r#"{"type":"session_start","cwd":"/work/repo"}"#,
+            "\n",
+            r#"{"type":"llm_response","timestamp":"2026-02-13T12:00:40Z","model":"gpt-4o","duration_ms":1500,"usage":{"prompt_tokens":20,"completion_tokens":5,"cache_read_tokens":1,"cache_write_tokens":2}}"#,
+            "\n"
+        );
+        std::fs::write(&review, review_contents).unwrap();
+
+        let home = source_home.path().to_string_lossy().into_owned();
+        let run_materialized = || {
+            with_isolated_tokscale_cache(materialized_cache.path(), || {
+                let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                    &home,
+                    &clients,
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                );
+                messages.sort_by(|left, right| {
+                    (&left.client, &left.session_id, &left.dedup_key).cmp(&(
+                        &right.client,
+                        &right.session_id,
+                        &right.dedup_key,
+                    ))
+                });
+                messages
+            })
+        };
+        let run_streaming = || {
+            with_isolated_tokscale_cache(streaming_cache.path(), || {
+                let mut messages = Vec::new();
+                scan_messages_streaming(
+                    &home,
+                    &clients,
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                    &|_| true,
+                    &mut |message| messages.push(message.clone()),
+                );
+                messages.sort_by(|left, right| {
+                    (&left.client, &left.session_id, &left.dedup_key).cmp(&(
+                        &right.client,
+                        &right.session_id,
+                        &right.dedup_key,
+                    ))
+                });
+                messages
+            })
+        };
+
+        let cold_materialized = run_materialized();
+        let cold_streaming = run_streaming();
+        assert_eq!(cold_materialized, cold_streaming);
+        assert_eq!(cold_materialized.len(), 5);
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .filter(|message| message.client == "kimi")
+                .count(),
+            3
+        );
+        let junie_message = cold_materialized
+            .iter()
+            .find(|message| message.client == "junie")
+            .unwrap();
+        assert_eq!(junie_message.cost_source, CostSource::ProviderReported);
+        assert!((junie_message.cost - 0.125).abs() < 1e-9);
+        assert!(junie_message.is_turn_start);
+        assert_eq!(junie_message.duration_ms, Some(2_000));
+        let review_message = cold_materialized
+            .iter()
+            .find(|message| message.client == "opencodereview")
+            .unwrap();
+        assert_eq!(review_message.duration_ms, Some(1_500));
+        assert_eq!(review_message.workspace_label.as_deref(), Some("repo"));
+        assert_eq!(run_materialized(), cold_materialized);
+        assert_eq!(run_streaming(), cold_streaming);
+
+        write_junie(200, 0.25);
+        let rewritten_materialized = run_materialized();
+        let rewritten_streaming = run_streaming();
+        assert_eq!(rewritten_materialized, rewritten_streaming);
+        let rewritten_junie = rewritten_materialized
+            .iter()
+            .find(|message| message.client == "junie")
+            .unwrap();
+        assert_eq!(rewritten_junie.tokens.input, 200);
+        assert!((rewritten_junie.cost - 0.25).abs() < 1e-9);
+
+        std::fs::remove_file(&review).unwrap();
+        assert_eq!(run_materialized().len(), 4);
+        assert_eq!(run_streaming().len(), 4);
+        std::fs::write(&review, review_contents).unwrap();
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::Kimi), 3);
+        assert_eq!(counted.counts.get(ClientId::Junie), 1);
+        assert_eq!(counted.counts.get(ClientId::OpenCodeReview), 1);
+        assert_eq!(counted.messages.len(), 5);
+
+        with_isolated_tokscale_cache(report_cache.path(), || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let options = ReportOptions {
+                home_dir: Some(home),
+                use_env_roots: false,
+                clients: Some(clients),
+                ..Default::default()
+            };
+            let model = runtime.block_on(get_model_report(options.clone())).unwrap();
+            let monthly = runtime
+                .block_on(get_monthly_report(options.clone()))
+                .unwrap();
+            let hourly = runtime
+                .block_on(get_hourly_report(options.clone()))
+                .unwrap();
+            let agents = runtime.block_on(get_agents_report(options)).unwrap();
+            assert_eq!(model.total_messages, 5);
+            assert_eq!(model.total_input, 427);
+            assert_eq!(model.total_output, 158);
+            assert_eq!(model.total_cache_read, 21);
+            assert_eq!(model.total_cache_write, 2);
+            assert!((model.total_cost - 0.25).abs() < 1e-9);
+            assert_eq!(
+                monthly
+                    .entries
+                    .iter()
+                    .map(|entry| entry.message_count)
+                    .sum::<i32>(),
+                5
+            );
+            assert_eq!(
+                hourly
+                    .entries
+                    .iter()
+                    .map(|entry| entry.message_count)
+                    .sum::<i32>(),
+                5
+            );
+            assert_eq!(agents.total_messages, 5);
+            assert_eq!(
+                agents.entries.iter().map(|entry| entry.input).sum::<i64>(),
+                427
+            );
+        });
     }
 
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered

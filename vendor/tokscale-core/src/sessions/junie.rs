@@ -67,6 +67,7 @@ pub fn parse_junie_file(path: &Path) -> Vec<UnifiedMessage> {
         let timestamp = explicit_timestamp.unwrap_or(default_timestamp);
         let agent = agent_name(agent_event);
         let Some(usages) = agent_event.get("modelUsage").and_then(Value::as_array) else {
+            pending_turn_start = false;
             continue;
         };
 
@@ -332,6 +333,20 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert!(messages[0].is_turn_start);
+    }
+
+    #[test]
+    fn prompt_does_not_leak_past_response_without_usage_array() {
+        let content = format!(
+            "{}\n{}\n{}\n",
+            r#"{"kind":"UserPromptEvent"}"#,
+            r#"{"timestampMs":1750000000000,"event":{"agentEvent":{"kind":"LlmResponseMetadataEvent"}}}"#,
+            usage_event(1_750_000_100_000, "gpt-5", 100, 50),
+        );
+        let messages = parse_events(&content);
+
+        assert_eq!(messages.len(), 1);
+        assert!(!messages[0].is_turn_start);
     }
 
     #[test]

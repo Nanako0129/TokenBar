@@ -509,6 +509,9 @@ enum SelfTest {
         expect(ClientRegistry.canonicalClient("antigravity-cli") == "antigravity-cli", "canonical preserves registered antigravity-cli")
         expect(ClientRegistry.canonicalClient("droid-cli") == "droid-cli", "canonical does NOT strip a generic -cli")
         expect(ClientRegistry.canonicalClient("claude") == "claude", "canonical short id passes through")
+        expect(ClientRegistry.style("kimi").displayName == "Kimi", "Kimi registry covers CLI and Code")
+        expect(ClientRegistry.style("junie").displayName == "Junie", "Junie registry metadata")
+        expect(ClientRegistry.style("opencodereview").displayName == "OpenCodeReview", "OpenCodeReview registry metadata")
         // AgentLimitsCard keeps its own generic "-cli" fold for quota-card
         // attribution: explicit aliases via the registry, then a local strip so
         // antigravity-cli shares the antigravity quota snapshot — this fold must

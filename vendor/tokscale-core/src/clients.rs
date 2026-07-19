@@ -500,6 +500,24 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Junie = 31 => {
+        id: "junie",
+        root: PathRoot::Home,
+        relative: ".junie/sessions",
+        pattern: "events.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
+    },
+    OpenCodeReview = 32 => {
+        id: "opencodereview",
+        root: PathRoot::Home,
+        relative: ".opencodereview/sessions",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -589,7 +607,27 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 31);
+        assert_eq!(ClientId::COUNT, 33);
+    }
+
+    #[test]
+    fn test_m21_clients_registered() {
+        let junie = ClientId::Junie.data();
+        assert_eq!(junie.resolve_path("/tmp/home"), "/tmp/home/.junie/sessions");
+        assert_eq!(junie.pattern, "events.jsonl");
+        assert!(junie.parse_local);
+        assert!(junie.submit_default);
+        assert!(!junie.headless);
+
+        let review = ClientId::OpenCodeReview.data();
+        assert_eq!(
+            review.resolve_path("/tmp/home"),
+            "/tmp/home/.opencodereview/sessions"
+        );
+        assert_eq!(review.pattern, "*.jsonl");
+        assert!(review.parse_local);
+        assert!(review.submit_default);
+        assert!(!review.headless);
     }
 
     #[test]
