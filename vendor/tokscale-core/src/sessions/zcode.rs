@@ -79,76 +79,97 @@ impl<'de> Deserialize<'de> for ZcodeUsage {
         D: serde::Deserializer<'de>,
     {
         let fields = HashMap::<String, serde_json::Value>::deserialize(deserializer)?;
-        let first = |names: &[&str]| {
+        let first_numeric = |names: &[&str]| {
+            names.iter().find_map(|name| {
+                fields
+                    .get(*name)
+                    .filter(|value| parse_non_negative_i64(value).is_some())
+                    .cloned()
+            })
+        };
+        let first_object = |names: &[&str]| {
             names
                 .iter()
-                .find_map(|name| fields.get(*name).filter(|value| !value.is_null()).cloned())
+                .find_map(|name| fields.get(*name).filter(|value| value.is_object()).cloned())
         };
 
         Ok(Self {
-            input: first(&[
+            input: first_numeric(&[
                 "input",
                 "input_tokens",
                 "prompt_tokens",
                 "inputTokens",
                 "promptTokens",
             ]),
-            output: first(&[
+            output: first_numeric(&[
                 "output",
                 "output_tokens",
                 "completion_tokens",
                 "outputTokens",
                 "completionTokens",
             ]),
-            cache_read: first(&[
+            cache_read: first_numeric(&[
                 "cache_read",
                 "input_cache_read",
                 "cache_read_tokens",
                 "cache_read_input_tokens",
                 "cacheReadTokens",
             ]),
-            prompt_tokens_details: first(&["prompt_tokens_details", "promptTokensDetails"]),
-            cache_write: first(&[
+            prompt_tokens_details: first_object(&["prompt_tokens_details", "promptTokensDetails"]),
+            cache_write: first_numeric(&[
                 "cache_write",
                 "input_cache_creation",
                 "cache_write_tokens",
                 "cache_creation_input_tokens",
                 "cacheCreationTokens",
             ]),
-            reasoning: first(&["reasoning", "reasoningTokens"]),
-            completion_tokens_details: first(&[
+            reasoning: first_numeric(&["reasoning", "reasoningTokens"]),
+            completion_tokens_details: first_object(&[
                 "completion_tokens_details",
                 "completionTokensDetails",
             ]),
-            total: first(&["total", "total_tokens", "totalTokens"]),
+            total: first_numeric(&["total", "total_tokens", "totalTokens"]),
         })
     }
 }
 
-fn non_negative_i64(value: Option<&serde_json::Value>) -> i64 {
-    let Some(value) = value else {
-        return 0;
-    };
+fn parse_non_negative_i64(value: &serde_json::Value) -> Option<i64> {
     if let Some(value) = value.as_i64() {
-        return value.max(0);
+        return Some(value.max(0));
     }
     if let Some(value) = value.as_u64() {
-        return i64::try_from(value).unwrap_or(i64::MAX);
+        return Some(i64::try_from(value).unwrap_or(i64::MAX));
     }
     if let Some(value) = value.as_f64() {
-        return if !value.is_finite() || value <= 0.0 {
+        return Some(if !value.is_finite() || value <= 0.0 {
             0
         } else if value >= i64::MAX as f64 {
             i64::MAX
         } else {
             value as i64
-        };
+        });
     }
     value
-        .as_str()
-        .and_then(|value| value.trim().parse::<i128>().ok())
+        .as_str()?
+        .trim()
+        .parse::<i128>()
+        .ok()
         .map(|value| value.clamp(0, i64::MAX as i128) as i64)
-        .unwrap_or(0)
+}
+
+fn non_negative_i64(value: Option<&serde_json::Value>) -> i64 {
+    value.and_then(parse_non_negative_i64).unwrap_or(0)
+}
+
+fn first_numeric_field<'a>(
+    value: &'a serde_json::Value,
+    names: &[&str],
+) -> Option<&'a serde_json::Value> {
+    names.iter().find_map(|name| {
+        value
+            .get(*name)
+            .filter(|value| parse_non_negative_i64(value).is_some())
+    })
 }
 
 impl ZcodeUsage {
@@ -158,34 +179,29 @@ impl ZcodeUsage {
         let nested_cache_read = self
             .prompt_tokens_details
             .as_ref()
-            .and_then(|details| {
-                details
-                    .get("cached_tokens")
-                    .or_else(|| details.get("cachedTokens"))
-            })
-            .map(|value| non_negative_i64(Some(value)))
-            .unwrap_or(0);
-        let raw_cache_read = non_negative_i64(self.cache_read.as_ref()).max(nested_cache_read);
+            .and_then(|details| first_numeric_field(details, &["cached_tokens", "cachedTokens"]));
+        let raw_cache_read =
+            non_negative_i64(self.cache_read.as_ref()).max(non_negative_i64(nested_cache_read));
         let raw_cache_write = non_negative_i64(self.cache_write.as_ref());
-        let nested_reasoning = self
-            .completion_tokens_details
+        let nested_reasoning = self.completion_tokens_details.as_ref().and_then(|details| {
+            first_numeric_field(details, &["reasoning_tokens", "reasoningTokens"])
+        });
+        let raw_reasoning =
+            non_negative_i64(self.reasoning.as_ref()).max(non_negative_i64(nested_reasoning));
+        let raw_total = self
+            .total
             .as_ref()
-            .and_then(|details| {
-                details
-                    .get("reasoning_tokens")
-                    .or_else(|| details.get("reasoningTokens"))
-            })
-            .map(|value| non_negative_i64(Some(value)))
-            .unwrap_or(0);
-        let raw_reasoning = non_negative_i64(self.reasoning.as_ref()).max(nested_reasoning);
+            .map(|value| non_negative_i64(Some(value)));
+        let has_explicit_counters = self.input.is_some()
+            || self.output.is_some()
+            || self.cache_read.is_some()
+            || self.cache_write.is_some()
+            || self.reasoning.is_some()
+            || nested_cache_read.is_some()
+            || nested_reasoning.is_some()
+            || raw_total == Some(0);
 
-        if raw_input
-            .saturating_add(raw_output)
-            .saturating_add(raw_cache_read)
-            .saturating_add(raw_cache_write)
-            .saturating_add(raw_reasoning)
-            == 0
-        {
+        if !has_explicit_counters {
             return None;
         }
 
@@ -195,9 +211,7 @@ impl ZcodeUsage {
             raw_cache_read,
             raw_cache_write,
             raw_reasoning,
-            self.total
-                .as_ref()
-                .map(|value| non_negative_i64(Some(value))),
+            raw_total,
         );
 
         Some(TokenBreakdown {
@@ -321,8 +335,12 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
 
         match role {
             Some("assistant") => {
-                let breakdown = if let Some(u) = breakdown_from_usage {
-                    u
+                let breakdown = if let Some(usage) = breakdown_from_usage {
+                    if usage.total() == 0 {
+                        context_chars = context_chars.saturating_add(chars);
+                        continue;
+                    }
+                    usage
                 } else {
                     // Estimate from content.
                     let input = estimate_tokens(context_chars);
@@ -474,6 +492,17 @@ fn optional_sql_column<'a>(
         expression
     } else {
         "NULL"
+    }
+}
+
+pub(crate) fn scope_zcode_sqlite_dedup_keys(messages: &mut [UnifiedMessage], db_path: &Path) {
+    let source_scope = fallback_dedup_scope(db_path);
+    for message in messages {
+        let Some(key) = message.dedup_key.as_deref() else {
+            continue;
+        };
+        let row_id = key.strip_prefix("zcode-sqlite:").unwrap_or(key);
+        message.dedup_key = Some(format!("zcode-sqlite:{source_scope}:{row_id}"));
     }
 }
 
@@ -763,7 +792,7 @@ fn resolve_zcode_timestamp(
     if let Some(started) = started_at.filter(|value| *value > 0) {
         return started;
     }
-    match completed_at {
+    match completed_at.filter(|value| *value > 0) {
         Some(completed) => match duration_ms.filter(|duration| *duration > 0) {
             Some(duration) => back_anchor_timestamp(completed, duration),
             None => completed,
@@ -989,6 +1018,77 @@ mod tests {
                 .unwrap()
                 .timestamp_millis()
         );
+    }
+
+    #[test]
+    fn test_explicit_zero_usage_skips_row_without_consuming_turn_start() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = [
+            json!({"role": "user", "sessionId": "zero", "content": "prompt"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "zero",
+                "content": "request cancelled",
+                "usage": {"input_tokens": 0, "output_tokens": 0}
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "zero",
+                "content": "status only",
+                "usage": {"total_tokens": 0}
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "zero",
+                "content": "reply",
+                "usage": {"input_tokens": 3, "output_tokens": 1}
+            }),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let path = write_session(&dir, "proj", "zero", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 3);
+        assert_eq!(messages[0].tokens.output, 1);
+        assert!(messages[0].is_turn_start);
+    }
+
+    #[test]
+    fn test_malformed_earlier_aliases_do_not_shadow_valid_usage() {
+        let dir = TempDir::new().unwrap();
+        let path = write_session(
+            &dir,
+            "proj",
+            "aliases",
+            &json!({
+                "role": "assistant",
+                "sessionId": "aliases",
+                "usage": {
+                    "input": "malformed",
+                    "input_tokens": 100,
+                    "output_tokens": 50,
+                    "prompt_tokens_details": {
+                        "cached_tokens": "malformed",
+                        "cachedTokens": 10
+                    },
+                    "total": "malformed",
+                    "total_tokens": 150
+                }
+            })
+            .to_string(),
+        );
+
+        let message = parse_zcode_file(&path).pop().unwrap();
+
+        assert_eq!(message.tokens.input, 90);
+        assert_eq!(message.tokens.output, 50);
+        assert_eq!(message.tokens.cache_read, 10);
+        assert_eq!(message.tokens.total(), 150);
     }
 
     #[test]
@@ -1745,6 +1845,16 @@ mod tests {
         assert_eq!(messages.len(), 2);
         assert!(messages[0].is_turn_start);
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn test_resolve_zcode_timestamp_ignores_non_positive_completion() {
+        for completed_at in [Some(0), Some(-1), None] {
+            assert_eq!(
+                resolve_zcode_timestamp(None, completed_at, Some(100), 42_000),
+                42_000
+            );
+        }
     }
 
     #[test]

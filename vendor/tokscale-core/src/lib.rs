@@ -1218,11 +1218,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     let mut zcode_sqlite = Vec::new();
-    if let Some(db_path) = &scan_result.zcode_db {
+    for db_path in &scan_result.zcode_dbs {
         let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::zcode::parse_zcode_sqlite(path)
         });
-        zcode_sqlite = outcome.messages;
+        let mut messages = outcome.messages;
+        sessions::zcode::scope_zcode_sqlite_dedup_keys(&mut messages, db_path);
+        zcode_sqlite.extend(messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -3128,14 +3130,14 @@ where
     // across the complete cohort before pricing or emitting any row.
     {
         let mut zcode_sqlite = Vec::new();
-        if let Some(db_path) = &scan_result.zcode_db {
+        for db_path in &scan_result.zcode_dbs {
             let fingerprint = message_cache::SourceFingerprint::from_sqlite_path(db_path);
             let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
                 source_cache.get(db_path).filter(|cached| {
                     cached.fingerprint == *fingerprint && !cached.messages.is_empty()
                 })
             });
-            zcode_sqlite = if let Some(cached) = cache_hit {
+            let mut messages = if let Some(cached) = cache_hit {
                 cached.messages.clone()
             } else {
                 let messages = sessions::zcode::parse_zcode_sqlite(db_path);
@@ -3152,6 +3154,8 @@ where
                 }
                 messages
             };
+            sessions::zcode::scope_zcode_sqlite_dedup_keys(&mut messages, db_path);
+            zcode_sqlite.extend(messages);
         }
 
         let legacy_paths = scan_result.get(ClientId::Zcode);
@@ -3904,9 +3908,9 @@ fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
-        &scan_result.zcode_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
+    dbs.extend(scan_result.zcode_dbs.iter().cloned());
     // Hermes/Zed dbs may also be auto-discovered or supplied through extra
     // scan roots (the `files` lanes) — use the plural helpers so every db gets
     // its `-wal` sidecar probed, not just the default-path single.
@@ -3992,9 +3996,9 @@ pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, Str
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
-        &scan_result.zcode_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
+    dbs.extend(scan_result.zcode_dbs.iter().cloned());
     dbs.extend(scan_result.hermes_db_paths());
     dbs.extend(scan_result.zed_db_paths());
     dbs.extend(
@@ -4537,10 +4541,14 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(opencodereview_msgs);
 
     let zcode_sqlite = scan_result
-        .zcode_db
-        .as_ref()
-        .map(|path| sessions::zcode::parse_zcode_sqlite(path))
-        .unwrap_or_default();
+        .zcode_dbs
+        .par_iter()
+        .flat_map(|path| {
+            let mut messages = sessions::zcode::parse_zcode_sqlite(path);
+            sessions::zcode::scope_zcode_sqlite_dedup_keys(&mut messages, path);
+            messages
+        })
+        .collect();
     let zcode_legacy = scan_result
         .get(ClientId::Zcode)
         .par_iter()
@@ -11367,6 +11375,7 @@ mod tests {
     #[serial_test::serial]
     fn m22_zcode_sources_keep_all_lane_parity_and_db_authority() {
         let source_home = tempfile::TempDir::new().unwrap();
+        let extra_home = tempfile::TempDir::new().unwrap();
         let materialized_cache = tempfile::TempDir::new().unwrap();
         let streaming_cache = tempfile::TempDir::new().unwrap();
         let report_cache = tempfile::TempDir::new().unwrap();
@@ -11558,8 +11567,39 @@ mod tests {
         .unwrap();
         drop(conn);
 
+        let extra_db = extra_home.path().join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(extra_db.parent().unwrap()).unwrap();
+        std::fs::copy(&db, &extra_db).unwrap();
+        let extra_conn = rusqlite::Connection::open(&extra_db).unwrap();
+        extra_conn
+            .execute_batch(
+                r#"
+                DELETE FROM model_usage;
+                DELETE FROM session;
+                INSERT INTO session (id, directory, path)
+                VALUES ('extra-v2', 'extra-db', 'extra-db');
+                INSERT INTO model_usage (
+                    id, session_id, model_id, started_at, input_tokens, output_tokens,
+                    reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                    computed_total_tokens
+                ) VALUES (
+                    'db-modern-null', 'extra-v2', 'glm-5.2', 1770983430000,
+                    7, 2, 0, 0, 0, 9
+                );
+                "#,
+            )
+            .unwrap();
+        drop(extra_conn);
+
         let home = source_home.path().to_string_lossy().into_owned();
         let clients = vec!["zcode".to_string()];
+        let scanner_settings = scanner::ScannerSettings {
+            extra_scan_paths: std::collections::BTreeMap::from([(
+                "zcode".to_string(),
+                vec![extra_home.path().join(".zcode")],
+            )]),
+            ..Default::default()
+        };
         let run_materialized = || {
             with_isolated_tokscale_cache(materialized_cache.path(), || {
                 let mut messages = parse_all_messages_with_pricing_with_env_strategy(
@@ -11567,7 +11607,7 @@ mod tests {
                     &clients,
                     None,
                     false,
-                    &scanner::ScannerSettings::default(),
+                    &scanner_settings,
                 );
                 messages.sort_by(|left, right| {
                     (&left.timestamp, &left.dedup_key).cmp(&(&right.timestamp, &right.dedup_key))
@@ -11583,7 +11623,7 @@ mod tests {
                     &clients,
                     None,
                     false,
-                    &scanner::ScannerSettings::default(),
+                    &scanner_settings,
                     &|_| true,
                     &mut |message| messages.push(message.clone()),
                 );
@@ -11597,20 +11637,20 @@ mod tests {
         let cold_materialized = run_materialized();
         let cold_streaming = run_streaming();
         assert_eq!(cold_materialized, cold_streaming);
-        assert_eq!(cold_materialized.len(), 4);
+        assert_eq!(cold_materialized.len(), 5);
         assert_eq!(
             cold_materialized
                 .iter()
                 .map(|message| message.tokens.input)
                 .sum::<i64>(),
-            240
+            247
         );
         assert_eq!(
             cold_materialized
                 .iter()
                 .map(|message| message.tokens.output)
                 .sum::<i64>(),
-            47
+            49
         );
         assert_eq!(
             cold_materialized
@@ -11633,29 +11673,65 @@ mod tests {
                 .sum::<i64>(),
             7
         );
-        assert_eq!(
-            cold_materialized
-                .iter()
-                .filter(|message| message.session_id == "shared"
-                    && message.timestamp == shared_timestamp)
-                .map(|message| message.dedup_key.as_deref())
-                .collect::<Vec<_>>(),
-            vec![Some("zcode-sqlite:db-shared-exact")],
-            "exact-start authority must win while completion matching remaps the other legacy row"
-        );
-        for (key, timestamp) in [
-            ("zcode-sqlite:db-shared", shared_timestamp - 5_000),
-            ("zcode-sqlite:db-shared-exact", shared_timestamp),
+        let exact_start = cold_materialized
+            .iter()
+            .filter(|message| {
+                message.session_id == "shared" && message.timestamp == shared_timestamp
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(exact_start.len(), 1);
+        assert!(exact_start[0]
+            .dedup_key
+            .as_deref()
+            .is_some_and(|key| key.ends_with(":db-shared-exact")));
+        for (row_id, timestamp) in [
+            ("db-shared", shared_timestamp - 5_000),
+            ("db-shared-exact", shared_timestamp),
         ] {
             let selected_db = cold_materialized
                 .iter()
-                .find(|message| message.dedup_key.as_deref() == Some(key))
+                .find(|message| {
+                    message
+                        .dedup_key
+                        .as_deref()
+                        .is_some_and(|key| key.ends_with(&format!(":{row_id}")))
+                })
                 .unwrap();
             assert_eq!(selected_db.timestamp, timestamp);
             assert_eq!(selected_db.workspace_key.as_deref(), Some("demo"));
             assert_eq!(selected_db.workspace_label.as_deref(), Some("demo"));
             assert!(selected_db.is_turn_start);
         }
+        let colliding_row_ids = cold_materialized
+            .iter()
+            .filter_map(|message| message.dedup_key.as_deref())
+            .filter(|key| key.ends_with(":db-modern-null"))
+            .collect::<Vec<_>>();
+        assert_eq!(colliding_row_ids.len(), 2);
+        assert_ne!(colliding_row_ids[0], colliding_row_ids[1]);
+
+        let mut shared_sqlite_keys = cold_materialized
+            .iter()
+            .filter(|message| message.session_id == "shared")
+            .filter_map(|message| message.dedup_key.clone())
+            .filter(|key| key.starts_with("zcode-sqlite:"))
+            .collect::<Vec<_>>();
+        shared_sqlite_keys.sort_unstable();
+        let parked_extra_db = extra_db.with_extension("sqlite.parked");
+        std::fs::rename(&extra_db, &parked_extra_db).unwrap();
+        let single_db_materialized = run_materialized();
+        let single_db_streaming = run_streaming();
+        assert_eq!(single_db_materialized, single_db_streaming);
+        let mut single_db_shared_keys = single_db_materialized
+            .iter()
+            .filter(|message| message.session_id == "shared")
+            .filter_map(|message| message.dedup_key.clone())
+            .filter(|key| key.starts_with("zcode-sqlite:"))
+            .collect::<Vec<_>>();
+        single_db_shared_keys.sort_unstable();
+        assert_eq!(single_db_shared_keys, shared_sqlite_keys);
+        std::fs::rename(&parked_extra_db, &extra_db).unwrap();
+
         let modern_null = cold_materialized
             .iter()
             .find(|message| message.session_id == "v2-only")
@@ -11670,18 +11746,18 @@ mod tests {
         let rewritten_materialized = run_materialized();
         let rewritten_streaming = run_streaming();
         assert_eq!(rewritten_materialized, rewritten_streaming);
-        assert_eq!(rewritten_materialized.len(), 4);
+        assert_eq!(rewritten_materialized.len(), 5);
         assert_eq!(
             rewritten_materialized
                 .iter()
                 .map(|message| message.tokens.input)
                 .sum::<i64>(),
-            270
+            277
         );
 
         std::fs::remove_file(&legacy).unwrap();
-        assert_eq!(run_materialized().len(), 3);
-        assert_eq!(run_streaming().len(), 3);
+        assert_eq!(run_materialized().len(), 4);
+        assert_eq!(run_streaming().len(), 4);
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_legacy(30);
 
@@ -11689,11 +11765,12 @@ mod tests {
             home_dir: Some(home.clone()),
             use_env_roots: false,
             clients: Some(clients.clone()),
+            scanner_settings: scanner_settings.clone(),
             ..Default::default()
         })
         .unwrap();
-        assert_eq!(counted.counts.get(ClientId::Zcode), 4);
-        assert_eq!(counted.messages.len(), 4);
+        assert_eq!(counted.counts.get(ClientId::Zcode), 5);
+        assert_eq!(counted.messages.len(), 5);
         assert!(
             counted
                 .messages
@@ -11706,7 +11783,7 @@ mod tests {
                 .iter()
                 .map(|message| message.input)
                 .sum::<i64>(),
-            240
+            247
         );
 
         with_isolated_tokscale_cache(report_cache.path(), || {
@@ -11719,6 +11796,7 @@ mod tests {
                 use_env_roots: false,
                 clients: Some(clients),
                 group_by: GroupBy::WorkspaceModel,
+                scanner_settings,
                 ..Default::default()
             };
             let model = runtime.block_on(get_model_report(options.clone())).unwrap();
@@ -11729,9 +11807,9 @@ mod tests {
                 .block_on(get_hourly_report(options.clone()))
                 .unwrap();
             let agents = runtime.block_on(get_agents_report(options)).unwrap();
-            assert_eq!(model.total_messages, 4);
-            assert_eq!(model.total_input, 240);
-            assert_eq!(model.total_output, 47);
+            assert_eq!(model.total_messages, 5);
+            assert_eq!(model.total_input, 247);
+            assert_eq!(model.total_output, 49);
             assert_eq!(model.total_cache_read, 22);
             assert_eq!(model.total_cache_write, 10);
             assert!(
@@ -11746,7 +11824,7 @@ mod tests {
                     .iter()
                     .map(|entry| entry.message_count)
                     .sum::<i32>(),
-                4
+                5
             );
             assert_eq!(
                 hourly
@@ -11754,7 +11832,7 @@ mod tests {
                     .iter()
                     .map(|entry| entry.message_count)
                     .sum::<i32>(),
-                4
+                5
             );
             assert_eq!(
                 hourly
@@ -11764,10 +11842,10 @@ mod tests {
                     .sum::<i32>(),
                 3
             );
-            assert_eq!(agents.total_messages, 4);
+            assert_eq!(agents.total_messages, 5);
             assert_eq!(
                 agents.entries.iter().map(|entry| entry.input).sum::<i64>(),
-                240
+                247
             );
         });
     }
@@ -11776,8 +11854,9 @@ mod tests {
     #[serial_test::serial]
     fn m22_zcode_wal_only_write_invalidates_cache_and_source_tokens() {
         let source_home = tempfile::TempDir::new().unwrap();
+        let extra_home = tempfile::TempDir::new().unwrap();
         let cache_home = tempfile::TempDir::new().unwrap();
-        let db = source_home.path().join(".zcode/cli/db/db.sqlite");
+        let db = extra_home.path().join(".zcode/cli/db/db.sqlite");
         std::fs::create_dir_all(db.parent().unwrap()).unwrap();
         let conn = rusqlite::Connection::open(&db).unwrap();
         let journal_mode: String = conn
@@ -11822,10 +11901,18 @@ mod tests {
 
         let home = source_home.path().to_string_lossy().into_owned();
         let clients = vec!["zcode".to_string()];
+        let scanner_settings = scanner::ScannerSettings {
+            extra_scan_paths: std::collections::BTreeMap::from([(
+                "zcode".to_string(),
+                vec![extra_home.path().join(".zcode")],
+            )]),
+            ..Default::default()
+        };
         let options = LocalParseOptions {
             home_dir: Some(home.clone()),
             use_env_roots: false,
             clients: Some(clients.clone()),
+            scanner_settings: scanner_settings.clone(),
             ..Default::default()
         };
         let run_materialized = || {
@@ -11835,7 +11922,7 @@ mod tests {
                     &clients,
                     None,
                     false,
-                    &scanner::ScannerSettings::default(),
+                    &scanner_settings,
                 )
             })
         };
@@ -11892,7 +11979,7 @@ mod tests {
                 &clients,
                 None,
                 false,
-                &scanner::ScannerSettings::default(),
+                &scanner_settings,
                 &|_| true,
                 &mut |message| messages.push(message.clone()),
             );

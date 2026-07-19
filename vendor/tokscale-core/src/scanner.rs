@@ -86,8 +86,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
-    /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
-    pub zcode_db: Option<PathBuf>,
+    /// ZCode v2 CLI usage databases from the default and configured roots.
+    pub zcode_dbs: Vec<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -104,7 +104,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
-            zcode_db: None,
+            zcode_dbs: Vec::new(),
             opencode_json_dir: None,
         }
     }
@@ -708,11 +708,42 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // Roo/KiloCode require local + remote and server task roots, and Crush
     // discovers SQLite DBs via the project registry rather than scanned file
     // paths. Hermes/Zed profile databases are named consistently enough for
-    // `scan_directory` to find them from user-provided roots.
+    // `scan_directory` to find them from user-provided roots; Zcode adds its
+    // dedicated SQLite discovery alongside the generic legacy JSONL scan.
     !matches!(
         client_id,
         ClientId::Kilo | ClientId::Crush | ClientId::Goose
     )
+}
+
+fn push_zcode_db_candidates(paths: &mut Vec<PathBuf>, scan_root: &Path) {
+    let mut candidates = vec![
+        scan_root.to_path_buf(),
+        scan_root.join("db.sqlite"),
+        scan_root.join("db/db.sqlite"),
+        scan_root.join("cli/db/db.sqlite"),
+    ];
+    if scan_root.file_name().and_then(|name| name.to_str()) == Some("projects") {
+        if let Some(zcode_home) = scan_root.parent() {
+            candidates.push(zcode_home.join("cli/db/db.sqlite"));
+        }
+    }
+
+    for candidate in candidates {
+        if candidate.file_name().and_then(|name| name.to_str()) != Some("db.sqlite")
+            || !candidate.is_file()
+        {
+            continue;
+        }
+        let key = std::fs::canonicalize(&candidate).unwrap_or_else(|_| candidate.clone());
+        if paths
+            .iter()
+            .any(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()) == key)
+        {
+            continue;
+        }
+        paths.push(candidate);
+    }
 }
 
 fn push_grok_unified_log_candidates(candidates: &mut Vec<PathBuf>, scan_root: &Path) {
@@ -956,6 +987,8 @@ fn scan_all_clients_with_env_strategy_inner(
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
         if client_id == ClientId::Grok {
             push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
+        } else if client_id == ClientId::Zcode {
+            push_zcode_db_candidates(&mut result.zcode_dbs, &path);
         }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
@@ -963,6 +996,8 @@ fn scan_all_clients_with_env_strategy_inner(
     for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
         if client_id == ClientId::Grok {
             push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
+        } else if client_id == ClientId::Zcode {
+            push_zcode_db_candidates(&mut result.zcode_dbs, &path);
         }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
@@ -976,6 +1011,8 @@ fn scan_all_clients_with_env_strategy_inner(
             warn_if_escapes_home(Path::new(home_dir), client_id, &path);
             if client_id == ClientId::Grok {
                 push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
+            } else if client_id == ClientId::Zcode {
+                push_zcode_db_candidates(&mut result.zcode_dbs, &path);
             }
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
@@ -1292,10 +1329,10 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Zcode) {
-        let zcode_db_path = PathBuf::from(format!("{}/.zcode/cli/db/db.sqlite", home_dir));
-        if zcode_db_path.is_file() {
-            result.zcode_db = Some(zcode_db_path);
-        }
+        push_zcode_db_candidates(
+            &mut result.zcode_dbs,
+            &PathBuf::from(home_dir).join(".zcode"),
+        );
     }
 
     if enabled.contains(&ClientId::Kiro) {
@@ -1394,6 +1431,7 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
+    result.zcode_dbs.sort_unstable();
     result
 }
 
@@ -3438,8 +3476,34 @@ mod tests {
         );
 
         assert_eq!(result.get(ClientId::Zcode), std::slice::from_ref(&legacy));
-        assert_eq!(result.zcode_db.as_deref(), Some(db.as_path()));
+        assert_eq!(result.zcode_dbs, vec![db]);
         assert!(result.get(ClientId::Junie).is_empty());
+    }
+
+    #[test]
+    fn test_scan_all_clients_zcode_extra_root_includes_legacy_and_v2() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("home");
+        let extra_home = dir.path().join("external");
+        fs::create_dir_all(&home).unwrap();
+        let (legacy, db) = setup_mock_zcode_sources(&extra_home);
+        let settings = ScannerSettings {
+            extra_scan_paths: BTreeMap::from([(
+                "zcode".to_string(),
+                vec![extra_home.join(".zcode")],
+            )]),
+            ..Default::default()
+        };
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["zcode".to_string()],
+            false,
+            &settings,
+        );
+
+        assert_eq!(result.get(ClientId::Zcode), std::slice::from_ref(&legacy));
+        assert_eq!(result.zcode_dbs, vec![db]);
     }
 
     #[test]
