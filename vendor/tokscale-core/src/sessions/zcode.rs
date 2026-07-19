@@ -34,6 +34,8 @@ struct ZcodeEntry {
     usage: Option<ZcodeUsage>,
     #[serde(default)]
     token_usage: Option<ZcodeUsage>,
+    #[serde(flatten)]
+    direct_usage: ZcodeUsage,
     model: Option<String>,
     timestamp: Option<String>,
     #[serde(rename = "sessionId")]
@@ -41,7 +43,7 @@ struct ZcodeEntry {
 }
 
 /// Token usage block — field names follow the Z.ai / GLM API convention.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct ZcodeUsage {
     #[serde(alias = "input_tokens", alias = "prompt_tokens", alias = "inputTokens")]
     input: Option<serde_json::Value>,
@@ -199,13 +201,19 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
         let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
 
         // Prefer authoritative token usage from the API. Choose the first block
-        // that actually yields a breakdown, so an empty `usage` does not shadow
-        // a populated `token_usage`.
+        // that actually yields a breakdown, so an empty nested block does not
+        // shadow a populated sibling or documented top-level token fields.
         let breakdown_from_usage = entry
             .usage
             .as_ref()
-            .and_then(|u| u.to_breakdown())
-            .or_else(|| entry.token_usage.as_ref().and_then(|u| u.to_breakdown()));
+            .and_then(|usage| usage.to_breakdown())
+            .or_else(|| {
+                entry
+                    .token_usage
+                    .as_ref()
+                    .and_then(|usage| usage.to_breakdown())
+            })
+            .or_else(|| entry.direct_usage.to_breakdown());
 
         match entry.role.as_deref() {
             Some("assistant") => {
@@ -870,6 +878,32 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 100);
+    }
+
+    #[test]
+    fn test_top_level_token_usage_fields() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s-direct", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s-direct",
+                "content": "bye",
+                "input_tokens": 120,
+                "output_tokens": 30,
+                "input_cache_read": 20,
+                "total_tokens": 150
+            }),
+        );
+        let path = write_session(&dir, "p", "s-direct", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 100);
+        assert_eq!(messages[0].tokens.output, 30);
+        assert_eq!(messages[0].tokens.cache_read, 20);
+        assert_eq!(messages[0].tokens.total(), 150);
     }
 
     #[test]
