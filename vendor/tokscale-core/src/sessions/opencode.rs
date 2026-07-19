@@ -401,9 +401,10 @@ impl OpenCodeSqliteAccumulator {
 
         // Among entries sharing this fingerprint, merge into the first one that
         // is NOT a definitively-different message -- i.e. skip any whose stored
-        // embedded id conflicts with this row's. (Cloning the small index list
-        // avoids holding a borrow of `fingerprint_indices` while we read
-        // `dedup_states`.)
+        // embedded id conflicts with this row's. The SQL row id remains a source
+        // fallback, not a hard identity: forked sessions can assign a new row id
+        // to the same id-less payload. (Cloning the small index list avoids
+        // holding a borrow of `fingerprint_indices` while we read `dedup_states`.)
         let candidate = {
             let slots = self
                 .fingerprint_indices
@@ -945,7 +946,8 @@ mod tests {
         let db_path = dir.path().join("opencode-next.db");
 
         let conn = create_opencode_v2_sqlite_db(&db_path);
-        // Same payload copied into a forked session must collapse to one entry.
+        // Forking can assign a new SQL row id while copying the same id-less
+        // payload, so row ids cannot be hard identities for this overlap.
         conn.execute(
             "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params!["root_row", "root_session", "assistant", V2_ASSISTANT_DATA],
