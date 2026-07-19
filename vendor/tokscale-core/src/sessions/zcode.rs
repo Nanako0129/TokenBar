@@ -492,6 +492,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // Zcode releases have shipped partial schema combinations. Select every
     // optional field independently so a missing attribution column does not
     // discard a duration or workspace column that is still available.
+    let turn_id = optional_sql_column(&model_columns, "turn_id", "NULLIF(mu.turn_id, '')");
     let duration = optional_sql_column(&model_columns, "duration_ms", "mu.duration_ms");
     let computed_total = optional_sql_column(
         &model_columns,
@@ -521,7 +522,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         SELECT
             mu.id,
             NULLIF(mu.session_id, ''),
-            NULLIF(mu.turn_id, ''),
+            {turn_id},
             NULLIF(mu.model_id, ''),
             mu.started_at,
             mu.completed_at,
@@ -1884,7 +1885,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_zcode_sqlite_modern_schema_without_session_preserves_computed_total() {
+    fn test_parse_zcode_sqlite_modern_schema_without_session_or_turn_preserves_usage() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("db.sqlite");
         let conn = Connection::open(&db_path).unwrap();
@@ -1893,7 +1894,6 @@ mod tests {
             CREATE TABLE model_usage (
                 id TEXT PRIMARY KEY,
                 session_id TEXT,
-                turn_id TEXT,
                 model_id TEXT,
                 started_at INTEGER,
                 completed_at INTEGER,
@@ -1943,6 +1943,7 @@ mod tests {
         assert_eq!(msg.tokens.total(), 150);
         assert_eq!(msg.timestamp, 1_000);
         assert_eq!(msg.duration_ms, Some(5_000));
+        assert!(!msg.is_turn_start);
     }
 
     #[test]

@@ -1973,14 +1973,12 @@ where
 }
 
 fn strips_glm_variant_suffix(candidate: &str, first_stripped_segment: &str) -> bool {
-    if first_stripped_segment == "free" {
+    let terminal = candidate.rsplit('/').next().unwrap_or(candidate);
+    if first_stripped_segment == "free" && terminal == "glm-4.7" {
         return false;
     }
 
-    candidate
-        .rsplit('/')
-        .next()
-        .unwrap_or(candidate)
+    terminal
         .strip_prefix("glm-")
         .is_some_and(|version| version.starts_with(|ch: char| ch.is_ascii_digit()))
 }
@@ -3045,7 +3043,7 @@ mod tests {
     }
 
     #[test]
-    fn test_glm_named_variant_does_not_strip_to_base_model() {
+    fn test_glm_undocumented_variant_does_not_strip_to_base_model() {
         let pricing = ModelPricing {
             input_cost_per_token: Some(1e-6),
             output_cost_per_token: Some(2e-6),
@@ -3073,6 +3071,8 @@ mod tests {
                 "z-ai/glm-5-turbo",
                 "glm-5.2-turbo",
                 "zai/glm-5.2-turbo",
+                "glm-5.2-free",
+                "z-ai/glm-5.2-free",
             ] {
                 assert!(lookup.lookup_with_provider(model_id, Some("zai")).is_none());
             }
