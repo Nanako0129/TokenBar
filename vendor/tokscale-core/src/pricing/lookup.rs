@@ -1956,7 +1956,10 @@ where
         let candidate: String = parts[..parts.len() - strip].join("-");
 
         if candidate.len() >= MIN_MODEL_NAME_LEN {
-            if strips_numeric_model_version(&candidate, parts[parts.len() - strip]) {
+            let first_stripped_segment = parts[parts.len() - strip];
+            if strips_glm_variant_suffix(&candidate, first_stripped_segment)
+                || strips_numeric_model_version(&candidate, first_stripped_segment)
+            {
                 continue;
             }
 
@@ -1967,6 +1970,19 @@ where
     }
 
     None
+}
+
+fn strips_glm_variant_suffix(candidate: &str, first_stripped_segment: &str) -> bool {
+    if first_stripped_segment == "free" {
+        return false;
+    }
+
+    candidate
+        .rsplit('/')
+        .next()
+        .unwrap_or(candidate)
+        .strip_prefix("glm-")
+        .is_some_and(|version| version.starts_with(|ch: char| ch.is_ascii_digit()))
 }
 
 fn strips_numeric_model_version(candidate: &str, first_stripped_segment: &str) -> bool {
@@ -3023,6 +3039,41 @@ mod tests {
         ] {
             let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
             for model_id in ["glm-5.2", "z-ai/glm-5.2", "zai/glm-5.2"] {
+                assert!(lookup.lookup_with_provider(model_id, Some("zai")).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn test_glm_named_variant_does_not_strip_to_base_model() {
+        let pricing = ModelPricing {
+            input_cost_per_token: Some(1e-6),
+            output_cost_per_token: Some(2e-6),
+            ..Default::default()
+        };
+        for (litellm, openrouter) in [
+            (
+                HashMap::from([
+                    ("z-ai/glm-5".into(), pricing.clone()),
+                    ("z-ai/glm-5.2".into(), pricing.clone()),
+                ]),
+                HashMap::new(),
+            ),
+            (
+                HashMap::new(),
+                HashMap::from([
+                    ("z-ai/glm-5".into(), pricing.clone()),
+                    ("z-ai/glm-5.2".into(), pricing.clone()),
+                ]),
+            ),
+        ] {
+            let lookup = PricingLookup::new(litellm, openrouter, HashMap::new());
+            for model_id in [
+                "glm-5-turbo",
+                "z-ai/glm-5-turbo",
+                "glm-5.2-turbo",
+                "zai/glm-5.2-turbo",
+            ] {
                 assert!(lookup.lookup_with_provider(model_id, Some("zai")).is_none());
             }
         }

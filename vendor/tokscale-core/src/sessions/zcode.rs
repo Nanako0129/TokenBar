@@ -29,11 +29,28 @@ const UNKNOWN_MODEL: &str = "glm-5.2";
 #[derive(Debug, Deserialize)]
 struct ZcodeEntry {
     role: Option<String>,
+    #[serde(rename = "type")]
+    entry_type: Option<String>,
     content: Option<serde_json::Value>,
     #[serde(default)]
     usage: Option<ZcodeUsage>,
     #[serde(default)]
     token_usage: Option<ZcodeUsage>,
+    #[serde(flatten)]
+    direct_usage: ZcodeUsage,
+    model: Option<String>,
+    timestamp: Option<String>,
+    #[serde(rename = "sessionId")]
+    session_id: Option<String>,
+    message: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct ZcodeMessagePayload {
+    role: Option<String>,
+    content: Option<serde_json::Value>,
+    usage: Option<serde_json::Value>,
+    token_usage: Option<serde_json::Value>,
     #[serde(flatten)]
     direct_usage: ZcodeUsage,
     model: Option<String>,
@@ -162,6 +179,12 @@ impl ZcodeUsage {
     }
 }
 
+fn breakdown_from_usage_value(value: Option<&serde_json::Value>) -> Option<TokenBreakdown> {
+    serde_json::from_value::<ZcodeUsage>(value?.clone())
+        .ok()
+        .and_then(|usage| usage.to_breakdown())
+}
+
 pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
@@ -197,9 +220,27 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
             Ok(entry) => entry,
             Err(_) => continue,
         };
+        let nested = entry.message.as_ref().and_then(|message| {
+            serde_json::from_value::<ZcodeMessagePayload>(message.clone()).ok()
+        });
+        let role = entry
+            .role
+            .as_deref()
+            .or_else(|| nested.as_ref().and_then(|message| message.role.as_deref()))
+            .or_else(|| {
+                entry
+                    .entry_type
+                    .as_deref()
+                    .filter(|entry_type| matches!(*entry_type, "user" | "assistant"))
+            });
+        let entry_session_id = entry.session_id.as_deref().or_else(|| {
+            nested
+                .as_ref()
+                .and_then(|message| message.session_id.as_deref())
+        });
 
         if session_id.is_none() {
-            if let Some(id) = entry.session_id.as_deref().filter(|id| !id.is_empty()) {
+            if let Some(id) = entry_session_id.filter(|id| !id.is_empty()) {
                 session_id = Some(id.to_string());
             }
         }
@@ -208,12 +249,20 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
         // model in effect at that point in the transcript. When the user
         // switches models mid-session, later messages must not be priced under
         // the first model.
-        if let Some(m) = entry.model.as_deref().filter(|m| !m.is_empty()) {
-            model_id = Some(canonicalize_model(m));
+        let entry_model = entry
+            .model
+            .as_deref()
+            .or_else(|| nested.as_ref().and_then(|message| message.model.as_deref()));
+        if let Some(model) = entry_model.filter(|model| !model.is_empty()) {
+            model_id = Some(canonicalize_model(model));
         }
 
         let resolved_model = model_id.as_deref().unwrap_or(UNKNOWN_MODEL).to_string();
-        let chars = entry.content.as_ref().map(content_chars).unwrap_or(0);
+        let content = entry
+            .content
+            .as_ref()
+            .or_else(|| nested.as_ref().and_then(|message| message.content.as_ref()));
+        let chars = content.map(content_chars).unwrap_or(0);
 
         // Prefer authoritative token usage from the API. Choose the first block
         // that actually yields a breakdown, so an empty nested block does not
@@ -228,9 +277,26 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                     .as_ref()
                     .and_then(|usage| usage.to_breakdown())
             })
-            .or_else(|| entry.direct_usage.to_breakdown());
+            .or_else(|| entry.direct_usage.to_breakdown())
+            .or_else(|| {
+                breakdown_from_usage_value(
+                    nested.as_ref().and_then(|message| message.usage.as_ref()),
+                )
+            })
+            .or_else(|| {
+                breakdown_from_usage_value(
+                    nested
+                        .as_ref()
+                        .and_then(|message| message.token_usage.as_ref()),
+                )
+            })
+            .or_else(|| {
+                nested
+                    .as_ref()
+                    .and_then(|message| message.direct_usage.to_breakdown())
+            });
 
-        match entry.role.as_deref() {
+        match role {
             Some("assistant") => {
                 let breakdown = if let Some(u) = breakdown_from_usage {
                     u
@@ -262,6 +328,11 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let timestamp = entry
                     .timestamp
                     .as_deref()
+                    .or_else(|| {
+                        nested
+                            .as_ref()
+                            .and_then(|message| message.timestamp.as_deref())
+                    })
                     .and_then(parse_rfc3339_ms)
                     .unwrap_or(fallback_timestamp);
 
@@ -501,10 +572,11 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .as_deref()
             .map(canonicalize_model)
             .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        let duration_ms = resolve_zcode_duration(row.started_at, row.completed_at, row.duration_ms);
         let timestamp = resolve_zcode_timestamp(
             row.started_at,
             row.completed_at,
-            row.duration_ms,
+            duration_ms,
             fallback_timestamp,
         );
 
@@ -576,7 +648,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             agent,
         );
         message.dedup_key = Some(format!("zcode-sqlite:{}", row.id));
-        message.duration_ms = row.duration_ms.filter(|duration| *duration > 0);
+        message.duration_ms = duration_ms;
 
         let workspace_root = row.session_directory.or(row.session_path);
         let workspace_key = workspace_root.as_deref().and_then(normalize_workspace_key);
@@ -617,6 +689,20 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     }
 
     messages
+}
+
+fn resolve_zcode_duration(
+    started_at: Option<i64>,
+    completed_at: Option<i64>,
+    duration_ms: Option<i64>,
+) -> Option<i64> {
+    duration_ms.filter(|duration| *duration > 0).or_else(|| {
+        let started = started_at.filter(|timestamp| *timestamp > 0)?;
+        let completed = completed_at.filter(|timestamp| *timestamp > 0)?;
+        completed
+            .checked_sub(started)
+            .filter(|duration| *duration > 0)
+    })
 }
 
 /// Resolve the anchor timestamp for a `model_usage` row.
@@ -864,6 +950,129 @@ mod tests {
         assert!(msg.tokens.input > 0);
         assert!(msg.tokens.output > 0);
         assert_eq!(msg.tokens.cache_read, 0);
+    }
+
+    #[test]
+    fn test_parse_nested_message_with_authoritative_usage() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "sessionId": "nested-session",
+                    "content": "hello"
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "sessionId": "nested-session",
+                    "timestamp": "2026-06-20T10:00:05Z",
+                    "model": "GLM-5.2",
+                    "content": "reply",
+                    "usage": {
+                        "input_tokens": 120,
+                        "output_tokens": 30,
+                        "cache_read_input_tokens": 20,
+                        "total_tokens": 150
+                    }
+                }
+            }),
+        );
+        let path = write_session(&dir, "nested", "fallback-name", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.session_id, "nested-session");
+        assert_eq!(message.timestamp, 1_781_949_605_000);
+        assert_eq!(message.model_id, "glm-5.2");
+        assert_eq!(message.tokens.input, 100);
+        assert_eq!(message.tokens.output, 30);
+        assert_eq!(message.tokens.cache_read, 20);
+        assert_eq!(message.tokens.total(), 150);
+        assert!(message.is_turn_start);
+    }
+
+    #[test]
+    fn test_malformed_nested_usage_preserves_metadata_and_direct_tokens() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "sessionId": "nested-malformed",
+                    "content": "hello"
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "sessionId": "nested-malformed",
+                    "timestamp": "2026-06-20T10:00:05Z",
+                    "model": "GLM-5-Turbo",
+                    "content": "reply",
+                    "usage": "malformed",
+                    "input_tokens": 123,
+                    "output_tokens": 33
+                }
+            }),
+        );
+        let path = write_session(&dir, "nested", "fallback-name", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.session_id, "nested-malformed");
+        assert_eq!(message.timestamp, 1_781_949_605_000);
+        assert_eq!(message.model_id, "glm-5-turbo");
+        assert_eq!(message.tokens.input, 123);
+        assert_eq!(message.tokens.output, 33);
+        assert!(message.is_turn_start);
+    }
+
+    #[test]
+    fn test_parse_nested_message_falls_back_to_estimated_tokens() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({
+                "type": "user",
+                "message": {
+                    "role": "user",
+                    "sessionId": "nested-estimated",
+                    "content": "12345678"
+                }
+            }),
+            json!({
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "sessionId": "nested-estimated",
+                    "model": "glm-5.2",
+                    "content": "abcd"
+                }
+            }),
+        );
+        let path = write_session(&dir, "nested", "fallback-name", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.session_id, "nested-estimated");
+        assert_eq!(message.model_id, "glm-5.2");
+        assert!(message.tokens.input > 0);
+        assert!(message.tokens.output > 0);
+        assert!(message.is_turn_start);
     }
 
     #[test]
@@ -1469,16 +1678,17 @@ mod tests {
         conn.execute(
             r#"
             INSERT INTO model_usage (
-                id, session_id, model_id, completed_at,
+                id, session_id, model_id, started_at, completed_at,
                 input_tokens, output_tokens, reasoning_tokens,
                 cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
             "#,
             params![
                 "usage_modern_no_session",
                 "sess_modern",
                 "glm-5.2",
                 1_000_i64,
+                6_000_i64,
                 100_i64,
                 50_i64,
                 10_i64,
@@ -1499,7 +1709,8 @@ mod tests {
         assert_eq!(msg.tokens.cache_write, 5);
         assert_eq!(msg.tokens.reasoning, 10);
         assert_eq!(msg.tokens.total(), 150);
-        assert_eq!(msg.duration_ms, None);
+        assert_eq!(msg.timestamp, 1_000);
+        assert_eq!(msg.duration_ms, Some(5_000));
     }
 
     #[test]
