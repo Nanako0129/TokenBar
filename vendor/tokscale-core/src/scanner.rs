@@ -86,6 +86,8 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// ZCode v2 CLI usage database at `~/.zcode/cli/db/db.sqlite`.
+    pub zcode_db: Option<PathBuf>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -102,6 +104,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            zcode_db: None,
             opencode_json_dir: None,
         }
     }
@@ -1288,6 +1291,13 @@ fn scan_all_clients_with_env_strategy_inner(
         result.crush_dbs = discover_crush_dbs(home_dir, use_env_roots);
     }
 
+    if enabled.contains(&ClientId::Zcode) {
+        let zcode_db_path = PathBuf::from(format!("{}/.zcode/cli/db/db.sqlite", home_dir));
+        if zcode_db_path.is_file() {
+            result.zcode_db = Some(zcode_db_path);
+        }
+    }
+
     if enabled.contains(&ClientId::Kiro) {
         let xdg_path = PathBuf::from(format!("{}/.local/share/kiro-cli/data.sqlite3", home_dir));
         if xdg_path.is_file() {
@@ -1820,6 +1830,17 @@ mod tests {
         fs::create_dir_all(session.parent().unwrap()).unwrap();
         File::create(&session).unwrap();
         session
+    }
+
+    fn setup_mock_zcode_sources(base: &std::path::Path) -> (PathBuf, PathBuf) {
+        let legacy = base.join(".zcode/projects/demo/session-1.jsonl");
+        fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        File::create(&legacy).unwrap();
+
+        let db = base.join(".zcode/cli/db/db.sqlite");
+        fs::create_dir_all(db.parent().unwrap()).unwrap();
+        File::create(&db).unwrap();
+        (legacy, db)
     }
 
     fn setup_mock_grok_home(grok_home: &std::path::Path) {
@@ -3402,6 +3423,23 @@ mod tests {
             result.get(ClientId::OpenCodeReview),
             std::slice::from_ref(&review)
         );
+    }
+
+    #[test]
+    fn test_scan_all_clients_zcode_legacy_and_v2() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let (legacy, db) = setup_mock_zcode_sources(home);
+
+        let result = scan_all_clients_with_env_strategy(
+            home.to_str().unwrap(),
+            &["zcode".to_string()],
+            false,
+        );
+
+        assert_eq!(result.get(ClientId::Zcode), std::slice::from_ref(&legacy));
+        assert_eq!(result.zcode_db.as_deref(), Some(db.as_path()));
+        assert!(result.get(ClientId::Junie).is_empty());
     }
 
     #[test]

@@ -518,6 +518,15 @@ define_clients!(
         headless: false,
         parse_local: true,
         submit_default: true
+    },
+    Zcode = 33 => {
+        id: "zcode",
+        root: PathRoot::Home,
+        relative: ".zcode/projects",
+        pattern: "*.jsonl",
+        headless: false,
+        parse_local: true,
+        submit_default: true
     }
 );
 
@@ -607,7 +616,7 @@ mod tests {
 
     #[test]
     fn test_client_id_count() {
-        assert_eq!(ClientId::COUNT, 33);
+        assert_eq!(ClientId::COUNT, 34);
     }
 
     #[test]
@@ -628,6 +637,16 @@ mod tests {
         assert!(review.parse_local);
         assert!(review.submit_default);
         assert!(!review.headless);
+    }
+
+    #[test]
+    fn test_m22_zcode_registered() {
+        let zcode = ClientId::Zcode.data();
+        assert_eq!(zcode.resolve_path("/tmp/home"), "/tmp/home/.zcode/projects");
+        assert_eq!(zcode.pattern, "*.jsonl");
+        assert!(zcode.parse_local);
+        assert!(zcode.submit_default);
+        assert!(!zcode.headless);
     }
 
     #[test]

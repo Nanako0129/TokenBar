@@ -27,6 +27,7 @@ public enum ClientRegistry {
         "kimi": ("Kimi", "#fbbf24"),
         "junie": ("Junie", "#6b7280"),
         "opencodereview": ("OpenCodeReview", "#6b7280"),
+        "zcode": ("ZCode", "#6b7280"),
         "qwen": ("Qwen CLI", "#7c3aed"),
         "roocode": ("Roo Code", "#ef4444"),
         "kilocode": ("KiloCode", "#f97316"),

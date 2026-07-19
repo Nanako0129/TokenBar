@@ -512,6 +512,17 @@ enum SelfTest {
         expect(ClientRegistry.style("kimi").displayName == "Kimi", "Kimi registry covers CLI and Code")
         expect(ClientRegistry.style("junie").displayName == "Junie", "Junie registry metadata")
         expect(ClientRegistry.style("opencodereview").displayName == "OpenCodeReview", "OpenCodeReview registry metadata")
+        expect(ClientRegistry.style("zcode").displayName == "ZCode", "ZCode registry metadata")
+        expect(
+            ClientRegistry.displayClients(
+                present: ["junie", "zcode"], hiddenRaw: "", orderRaw: "junie")
+                == ["junie", "zcode"],
+            "new ZCode client appends after an existing saved order")
+        expect(
+            ClientRegistry.displayClients(
+                present: ["junie", "zcode"], hiddenRaw: "zcode", orderRaw: "zcode,junie")
+                == ["junie"],
+            "hidden ZCode client stays excluded despite saved order")
         // AgentLimitsCard keeps its own generic "-cli" fold for quota-card
         // attribution: explicit aliases via the registry, then a local strip so
         // antigravity-cli shares the antigravity quota snapshot — this fold must

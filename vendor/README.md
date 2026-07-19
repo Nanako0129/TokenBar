@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M21 implementation checkpoint starts from audited TokenBar main [`0735fd2b`](https://github.com/Nanako0129/TokenBar/commit/0735fd2b47dbc023298ee51ce94f56569cb6bc63), the rebase-merge result of routed-pricing [PR #70](https://github.com/Nanako0129/TokenBar/pull/70), and selectively ports Kimi Code from audited commits [`839ce378`](https://github.com/junhoyeo/tokscale/commit/839ce378) and [`052f43de`](https://github.com/junhoyeo/tokscale/commit/052f43de), Junie from [`633ea946`](https://github.com/junhoyeo/tokscale/commit/633ea946), [`77948d9d`](https://github.com/junhoyeo/tokscale/commit/77948d9d), and the Junie start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e), plus OpenCodeReview from [`302d39c3`](https://github.com/junhoyeo/tokscale/commit/302d39c3) and the matching start-anchor hunk of `b64d861e`. Kimi Code reuses the existing `kimi` client identity and is selected structurally from its `agents/<agent>/wire.jsonl` topology; Junie and OpenCodeReview append client IDs 31 and 32 without moving existing values. All three sources use the shared materialized, shipping streaming, count, and report paths, while Kimi legacy config remains a dependency only for legacy Kimi CLI files. These are new source outputs, so monolithic cache schema 31 stays unchanged. Public main and issue #45 remain at merged M18 `69/18/0/10/13/1` until this implementation PR merges; the M21 implementation classification is `74/13/0/10/13/1`.
+This M22 implementation checkpoint starts from audited TokenBar main [`471a7f23`](https://github.com/Nanako0129/TokenBar/commit/471a7f239f0270b4ebfaed04894335c506d588d3), the rebase-merge result of new-source [PR #71](https://github.com/Nanako0129/TokenBar/pull/71), and selectively ports Zcode legacy JSONL plus v2 SQLite from audited commits [`640e97b9`](https://github.com/junhoyeo/tokscale/commit/640e97b9), [`f7a124da`](https://github.com/junhoyeo/tokscale/commit/f7a124da), [`ed6f8b95`](https://github.com/junhoyeo/tokscale/commit/ed6f8b95), [`65f8f3e2`](https://github.com/junhoyeo/tokscale/commit/65f8f3e2), and only the Zcode start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e). Append-only `ClientId::Zcode = 33` raises `COUNT` to 34 without moving existing values. Legacy `~/.zcode/projects/**/*.jsonl` and v2 `~/.zcode/cli/db/db.sqlite` feed one DB-first exact cross-store authority shared by materialized, shipping streaming, count, and report paths; SQLite fingerprints and source-change probes include the WAL sidecar. These are new independently fingerprinted source outputs, so monolithic cache schema 31 stays unchanged. Public main and issue #45 remain at merged M21 `74/13/0/10/13/1` until this implementation PR merges; the M22 implementation classification is `78/8/0/11/13/1`.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,10 +32,10 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 74 |
-| `TAKE` | 13 |
+| `ALREADY_VENDORED` | 78 |
+| `TAKE` | 8 |
 | `ADAPT_FOR_STREAMING` | 0 |
-| `DEFER` | 10 |
+| `DEFER` | 11 |
 | `SKIP` | 13 |
 | `SUPERSEDED` | 1 |
 | **Total** | **111** |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 74</summary>
+<summary><code>ALREADY_VENDORED</code> — 78</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -55,17 +55,16 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
 9155018c 18cd13cc a87f0ab6 959cce84 6c804711 839ce378 052f43de 633ea946
-77948d9d 302d39c3
+77948d9d 302d39c3 640e97b9 f7a124da ed6f8b95 65f8f3e2
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 13</summary>
+<summary><code>TAKE</code> — 8</summary>
 
 ```text
-63a44d7c 640e97b9 f7a124da ed6f8b95 f6f7eced 0b454e60 65f8f3e2 9a5aeb65
-074619f7 c1aef5e9 ae36db5c cd07bf78 b64d861e
+63a44d7c f6f7eced 0b454e60 9a5aeb65 074619f7 c1aef5e9 ae36db5c cd07bf78
 ```
 
 </details>
@@ -80,11 +79,11 @@ d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 </details>
 
 <details>
-<summary><code>DEFER</code> — 10</summary>
+<summary><code>DEFER</code> — 11</summary>
 
 ```text
 18c7e87f db88138b 1c91cb34 6a1535d1 90d28ec0
-20f6d4dd b9b7d09f 0097ba7e ed64e77b 34cfbb50
+20f6d4dd b9b7d09f 0097ba7e ed64e77b 34cfbb50 b64d861e
 ```
 
 </details>
@@ -110,7 +109,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 now moves `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. This leaves 13 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because M21 takes its Junie/OpenCodeReview start-anchor hunks while its selected Zcode and deferred Devin hunks still remain.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3`; M22 now moves `640e97b9`, `f7a124da`, `ed6f8b95`, and `65f8f3e2` to `ALREADY_VENDORED`. This leaves 8 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` moves to `DEFER` because its selected Kiro, Jcode, Junie, OpenCodeReview, and Zcode hunks are now vendored and only Devin remains.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -118,8 +117,8 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M15-B — merged in PR #66 | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
 | M16 — merged in PR #67 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
 | M17 — merged in PR #69 | Grok unified-log precedence across all cache/report lanes | Non-main `ed798642` |
-| M21 — landed in this checkpoint | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
-| M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
+| M21 — merged in PR #71 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
+| M22 — landed in this checkpoint | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
 | M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 | Reloadable configurable model aliases | `9a5aeb65` |
@@ -135,7 +134,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 |---|---|---|
 | `DEFER` | Command Code | `18c7e87f db88138b` |
 | `DEFER` | CodeBuddy / WorkBuddy | `1c91cb34 6a1535d1 90d28ec0 20f6d4dd b9b7d09f` |
-| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b`; the remaining `b64d861e` Devin hunk joins this group after M22, and the remaining `cd07bf78` Devin hunks join after M26 |
+| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b b64d861e`; M22 took every selected hunk from mixed `b64d861e`, leaving only Devin, and the remaining `cd07bf78` Devin hunks join after M26 |
 | `DEFER` | 9Router | `34cfbb50`; M16 takes only its provider hardening, leaving the bridge and 9Router product integration excluded |
 | `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
 
@@ -144,7 +143,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | Commit | Current state | Terminal transition |
 |---|---|---|
 | `34cfbb50` | `DEFER`; M16 vendors the provider hardening, while the remaining bridge and scanner hunks are 9Router-only | Remains `DEFER` |
-| `b64d861e` | Kiro, Jcode, Junie, and OpenCodeReview start-anchor hunks are vendored through M21; the selected Zcode hunk remains `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
+| `b64d861e` | `DEFER`; Kiro, Jcode, Junie, OpenCodeReview, and Zcode start-anchor hunks are vendored through M22, while only Devin remains | Remains `DEFER` |
 | `c1aef5e9` | macOS Hermes scope already vendored; Windows discovery selected | `TAKE → ALREADY_VENDORED` after M23 |
 | `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
 | `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
@@ -190,7 +189,7 @@ The expected terminal classification after every selected runtime milestone is `
 
 The local cache is schema 31 after merged M16 and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep schema 31. M19-A changes only the Windows atomic replacement transport. M17 adds a separately fingerprinted source and report-time cross-source selector, so existing cached legacy rows remain valid and no schema bump is required. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records merged M18 at `69/18/0/10/13/1`. M21's mandatory post-merge refresh will record its actual PR and merge SHA, the five audited transitions to `74/13/0/10/13/1`, unchanged schema 31, Kimi legacy/Code coexistence, Junie authoritative cost, OpenCodeReview duration/workspace, and all-lane parity fixtures, with M22 next on the source lane. M25 is independently ready from merged M18. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M21 at `74/13/0/10/13/1`. M22's mandatory post-merge refresh will record its actual PR and merge SHA, four audited transitions to `ALREADY_VENDORED`, mixed `b64d861e` moving to `DEFER`, the resulting `78/8/0/11/13/1`, unchanged schema 31, DB-first exact cross-store authority, WAL invalidation, and all-lane parity fixtures, with M23 next on the source lane. M25 remains independently ready from merged M18. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -292,6 +291,14 @@ An early prepared-patch verifier reproduced a provider-scoped boundary bypass: `
 M21 selectively ports Kimi Code from upstream [`839ce378`](https://github.com/junhoyeo/tokscale/commit/839ce378) and [`052f43de`](https://github.com/junhoyeo/tokscale/commit/052f43de), Junie from [`633ea946`](https://github.com/junhoyeo/tokscale/commit/633ea946) and [`77948d9d`](https://github.com/junhoyeo/tokscale/commit/77948d9d), OpenCodeReview from [`302d39c3`](https://github.com/junhoyeo/tokscale/commit/302d39c3), and only the Junie/OpenCodeReview start-anchor hunks of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e). Kimi Code reuses public client ID `kimi`, is selected by the `sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` topology, counts only explicit turn-scoped `usage.record` rows, and collapses exact replays without merging distinct turns that happen to use the same token counts. The default `~/.kimi-code` root and explicit `KIMI_CODE_HOME` root coexist with legacy `~/.kimi`; environment overrides are ignored when `use_env_roots` is false. Legacy Kimi keeps its config-dependent model lookup, while self-contained Kimi Code files exclude that unrelated sibling from fingerprint, mtime, pruning, and change-token semantics.
 
 Junie reads `events.jsonl`, preserves each finite non-negative provider-reported cost as authoritative, marks only the first valid usage in the next response event as a turn start while consuming prompt ownership even when that response has no `modelUsage` array or no countable usage, and start-anchors explicit response end timestamps by duration. OpenCodeReview reads session JSONL, carries normalized workspace metadata from `session_start`, and likewise start-anchors duration while retaining the recorded end timestamp in replay identity. Append-only `ClientId::Junie = 31` and `ClientId::OpenCodeReview = 32` raise `COUNT` to 33 without changing existing IDs; Swift uses `Kimi`, `Junie`, and `OpenCodeReview` display metadata and retains the existing initial-letter fallback instead of adding unverified logo assets. Materialized, shipping streaming, count, model, monthly, hourly, and Agents paths share parser selection, per-client dedup, raw source caching, and post-cache pricing. Hermetic fixtures prove Kimi legacy/Code coexistence, in-file and cross-agent replay collapse with distinct-turn retention, overflow-safe preservation of extreme nonzero token buckets, Junie authoritative cost through cold/warm rewrite, OpenCodeReview removal without stale cache replay, count/report parity, and unchanged totals across every lane. These are new source identities rather than changed existing-source serialization, so monolithic cache schema remains **31**. M21 moves five audited rows to `ALREADY_VENDORED`, producing the duplicate-free exact classification `74/13/0/10/13/1`; mixed `b64d861e` remains `TAKE` until M22 lands its Zcode hunk.
+
+## M22 Zcode legacy and v2 completion
+
+M22 selectively ports upstream [`640e97b9`](https://github.com/junhoyeo/tokscale/commit/640e97b9), the Zcode correction hunk of [`f7a124da`](https://github.com/junhoyeo/tokscale/commit/f7a124da), [`ed6f8b95`](https://github.com/junhoyeo/tokscale/commit/ed6f8b95), [`65f8f3e2`](https://github.com/junhoyeo/tokscale/commit/65f8f3e2), and only the Zcode start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e). Legacy Zcode reads `~/.zcode/projects/**/*.jsonl`, prefers explicit API usage over character estimates, preserves model switches, and uses overflow-safe non-negative token conversion. V2 reads the read-only SQLite `model_usage` database at `~/.zcode/cli/db/db.sqlite`, carries session workspace and agent metadata, and fingerprints the database with its WAL sidecar. The post-target `~/.zcode/cli/agents/<session>/<agent>/transcript.jsonl` discovery gap is not part of these audited commits and remains outside M22 rather than adding an unreviewed root. `ClientId::Zcode = 33` is append-only and raises `COUNT` to 34; Swift registers the display name `ZCode` with a neutral disc and deliberately keeps the existing initial-letter icon fallback rather than inventing an unverified logo.
+
+Zcode reports input that may already include cache-read plus cache-creation and output that may already include reasoning. The parser converts those values into TokenBar's five mutually exclusive buckets only when `computed_total_tokens` proves the inclusive shape; an exact exclusive total remains unchanged. A direct schema probe distinguishes a genuinely legacy table, where sampled rows require unconditional overlap subtraction, from a modern row whose existing `computed_total_tokens` column is `NULL`, where subtraction would undercount and therefore fails safe to pass-through. Every addition and subtraction saturates, malformed or oversized JSON token values are bounded, and zero detection cannot wrap. V2 timestamps prefer a positive `started_at`; otherwise a positive duration back-anchors from completion without producing a non-positive timestamp. Turn ownership is assigned after parsing to the earliest start-anchored request per turn, not the first completion-ordered row.
+
+Materialized, shipping streaming, and count lanes process the SQLite database before legacy JSONL and share one source-tagged exact cross-store authority. Per-source dedup keys still collapse exact replays, while a complete semantic identity suppresses a payload only when the same row appears once in SQLite and once in JSONL; two distinct rows from the same store remain distinct even when their payloads match. Source kind is passed explicitly rather than inferred from a user-controlled session-derived key, and raw parser rows are cached before pricing. The dedicated SQLite source uses `SourceFingerprint::from_sqlite_path`; `latest_source_mtime_ms()` and `local_source_change_token()` include its WAL, while `modified_after` never drops the dedicated database before that composite identity is checked. Hermetic fixtures prove pure legacy and v2 parsing, modern-NULL versus legacy normalization, inclusive/exclusive boundaries, earliest-start ownership, malformed/extreme tokens, WAL-only visibility, exact DB authority with distinct-row preservation, cold/warm materialized and shipping streaming parity, count/model/monthly/hourly/Agents totals, same-size legacy rewrites, source removal, WAL-only cache invalidation, and dedicated-DB retention under an otherwise-pruning threshold. These are new independently fingerprinted source identities, so monolithic cache schema remains **31**. M22 moves four audited rows to `ALREADY_VENDORED` and mixed `b64d861e` to `DEFER`, producing the duplicate-free exact implementation classification `78/8/0/11/13/1`.
 
 ## M19-A Windows atomic-replacement completion
 

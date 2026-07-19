@@ -1217,6 +1217,42 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
+    let mut zcode_dedup = ZcodeDedupState::default();
+    if let Some(db_path) = &scan_result.zcode_db {
+        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+            sessions::zcode::parse_zcode_sqlite(path)
+        });
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| zcode_dedup.should_keep(message, true)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    let zcode_outcomes: Vec<CachedParseOutcome> = scan_result
+        .get(ClientId::Zcode)
+        .par_iter()
+        .map(|path| {
+            load_or_parse_source(path, &source_cache, pricing, |path| {
+                sessions::zcode::parse_zcode_file(path)
+            })
+        })
+        .collect();
+    for outcome in zcode_outcomes {
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| zcode_dedup.should_keep(message, false)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+
     // Parse Qwen files
     let qwen_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Qwen)
@@ -1905,6 +1941,85 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     }
     seen.insert(key.to_owned());
     true
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ZcodeMessageIdentity {
+    session_id: String,
+    timestamp: i64,
+    duration_ms: Option<i64>,
+    model_id: String,
+    provider_id: String,
+    input: i64,
+    output: i64,
+    cache_read: i64,
+    cache_write: i64,
+    reasoning: i64,
+    message_count: i32,
+    is_turn_start: bool,
+    agent: Option<String>,
+    workspace_key: Option<String>,
+    workspace_label: Option<String>,
+}
+
+impl From<&UnifiedMessage> for ZcodeMessageIdentity {
+    fn from(message: &UnifiedMessage) -> Self {
+        Self {
+            session_id: message.session_id.clone(),
+            timestamp: message.timestamp,
+            duration_ms: message.duration_ms,
+            model_id: message.model_id.clone(),
+            provider_id: message.provider_id.clone(),
+            input: message.tokens.input,
+            output: message.tokens.output,
+            cache_read: message.tokens.cache_read,
+            cache_write: message.tokens.cache_write,
+            reasoning: message.tokens.reasoning,
+            message_count: message.message_count,
+            is_turn_start: message.is_turn_start,
+            agent: message.agent.clone(),
+            workspace_key: message.workspace_key.clone(),
+            workspace_label: message.workspace_label.clone(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ZcodeDedupState {
+    seen_sqlite_keys: HashSet<String>,
+    seen_legacy_keys: HashSet<String>,
+    unmatched_sqlite_payloads: HashMap<ZcodeMessageIdentity, usize>,
+}
+
+impl ZcodeDedupState {
+    fn should_keep(&mut self, message: &UnifiedMessage, from_sqlite: bool) -> bool {
+        if let Some(key) = message.dedup_key.as_deref().filter(|key| !key.is_empty()) {
+            let seen_keys = if from_sqlite {
+                &mut self.seen_sqlite_keys
+            } else {
+                &mut self.seen_legacy_keys
+            };
+            if !dedup_gate_passes(key, seen_keys) {
+                return false;
+            }
+        }
+
+        let identity = ZcodeMessageIdentity::from(message);
+        if from_sqlite {
+            let count = self.unmatched_sqlite_payloads.entry(identity).or_default();
+            *count = count.saturating_add(1);
+            return true;
+        }
+
+        let Some(count) = self.unmatched_sqlite_payloads.get_mut(&identity) else {
+            return true;
+        };
+        if *count == 0 {
+            return true;
+        }
+        *count -= 1;
+        false
+    }
 }
 
 /// Cross-store OpenCode source identity. A migrated SQLite message can carry
@@ -2896,6 +3011,95 @@ where
         ClientId::OpenCodeReview,
         sessions::opencodereview::parse_opencodereview_file
     );
+
+    // ---- ZCode v2 SQLite + legacy JSONL ----
+    // Cache each raw source independently, prefer the authoritative v2 database
+    // on an exact cross-store payload match, then price and emit once.
+    {
+        let mut dedup = ZcodeDedupState::default();
+        if let Some(db_path) = &scan_result.zcode_db {
+            let fingerprint = message_cache::SourceFingerprint::from_sqlite_path(db_path);
+            let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
+                source_cache.get(db_path).filter(|cached| {
+                    cached.fingerprint == *fingerprint && !cached.messages.is_empty()
+                })
+            });
+            let raw_messages = if let Some(cached) = cache_hit {
+                cached.messages.clone()
+            } else {
+                let messages = sessions::zcode::parse_zcode_sqlite(db_path);
+                if !messages.is_empty() {
+                    if let Some(fingerprint) = fingerprint {
+                        source_cache.insert(message_cache::CachedSourceEntry::new(
+                            db_path,
+                            fingerprint,
+                            messages.clone(),
+                            Vec::new(),
+                            None,
+                        ));
+                    }
+                }
+                messages
+            };
+            for mut message in raw_messages {
+                message.refresh_derived_fields();
+                if !dedup.should_keep(&message, true) {
+                    continue;
+                }
+                apply_pricing_if_available(&mut message, pricing);
+                if passes_client(&message) && filter(&message) {
+                    sink(&message);
+                }
+            }
+        }
+
+        let legacy_paths = scan_result.get(ClientId::Zcode);
+        let mut raw_by_path: Vec<Option<Vec<UnifiedMessage>>> =
+            (0..legacy_paths.len()).map(|_| None).collect();
+        let mut miss_paths: Vec<(usize, &PathBuf)> = Vec::new();
+        for (index, path) in legacy_paths.iter().enumerate() {
+            let fingerprint = message_cache::SourceFingerprint::from_path(path);
+            let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
+                source_cache.get(path).filter(|cached| {
+                    cached.fingerprint == *fingerprint && !cached.messages.is_empty()
+                })
+            });
+            if let Some(cached) = cache_hit {
+                raw_by_path[index] = Some(cached.messages.clone());
+            } else {
+                miss_paths.push((index, path));
+            }
+        }
+        let parsed_misses: Vec<(usize, &PathBuf, Vec<UnifiedMessage>)> = miss_paths
+            .par_iter()
+            .map(|(index, path)| (*index, *path, sessions::zcode::parse_zcode_file(path)))
+            .collect();
+        for (index, path, messages) in parsed_misses {
+            if !messages.is_empty() {
+                if let Some(fingerprint) = message_cache::SourceFingerprint::from_path(path) {
+                    source_cache.insert(message_cache::CachedSourceEntry::new(
+                        path,
+                        fingerprint,
+                        messages.clone(),
+                        Vec::new(),
+                        None,
+                    ));
+                }
+            }
+            raw_by_path[index] = Some(messages);
+        }
+        for mut message in raw_by_path.into_iter().flatten().flatten() {
+            message.refresh_derived_fields();
+            if !dedup.should_keep(&message, false) {
+                continue;
+            }
+            apply_pricing_if_available(&mut message, pricing);
+            if passes_client(&message) && filter(&message) {
+                sink(&message);
+            }
+        }
+    }
+
     simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
     // roo family: fingerprint via from_roo_path so a history-only rewrite of the
     // sibling api_conversation_history.json (which parse_roo_kilo_file reads for
@@ -3601,6 +3805,7 @@ fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
+        &scan_result.zcode_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
     // Hermes/Zed dbs may also be auto-discovered or supplied through extra
@@ -3688,6 +3893,7 @@ pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, Str
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
+        &scan_result.zcode_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
     dbs.extend(scan_result.hermes_db_paths());
@@ -4231,6 +4437,32 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::OpenCodeReview, opencodereview_count);
     messages.extend(opencodereview_msgs);
 
+    let zcode_sqlite = scan_result
+        .zcode_db
+        .as_ref()
+        .map(|path| sessions::zcode::parse_zcode_sqlite(path))
+        .unwrap_or_default();
+    let zcode_legacy = scan_result
+        .get(ClientId::Zcode)
+        .par_iter()
+        .flat_map(|path| sessions::zcode::parse_zcode_file(path))
+        .collect::<Vec<_>>();
+    let mut zcode_dedup = ZcodeDedupState::default();
+    let mut zcode_msgs: Vec<ParsedMessage> = zcode_sqlite
+        .into_iter()
+        .filter(|message| zcode_dedup.should_keep(message, true))
+        .map(|message| unified_to_parsed(&message))
+        .collect();
+    zcode_msgs.extend(
+        zcode_legacy
+            .into_iter()
+            .filter(|message| zcode_dedup.should_keep(message, false))
+            .map(|message| unified_to_parsed(&message)),
+    );
+    let zcode_count = summed_parsed_message_count(&zcode_msgs);
+    counts.set(ClientId::Zcode, zcode_count);
+    messages.extend(zcode_msgs);
+
     // Parse Qwen JSONL files in parallel
     let qwen_msgs: Vec<ParsedMessage> = scan_result
         .get(ClientId::Qwen)
@@ -4678,7 +4910,7 @@ mod tests {
         select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
         opencode_authoritative_sources, opencode_identity_group, CostSource, GroupBy,
         LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity, ReportOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        TokenBreakdown, UnifiedMessage, ZcodeDedupState, UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
     use std::collections::{HashMap, HashSet};
@@ -4886,6 +5118,41 @@ mod tests {
             CostSource::Unknown => {}
         }
         message
+    }
+
+    fn make_zcode_dedup_message(key: &str) -> UnifiedMessage {
+        UnifiedMessage::new_with_dedup(
+            "zcode",
+            "glm-5.2",
+            "zai",
+            "shared",
+            1_771_000_000_000,
+            TokenBreakdown {
+                input: 100,
+                output: 20,
+                cache_read: 10,
+                cache_write: 5,
+                reasoning: 3,
+            },
+            0.0,
+            Some(key.to_string()),
+        )
+    }
+
+    #[test]
+    fn test_zcode_cross_store_dedup_pairs_payloads_one_to_one() {
+        let mut dedup = ZcodeDedupState::default();
+
+        assert!(dedup.should_keep(&make_zcode_dedup_message("zcode-sqlite:db-shared"), true));
+        assert!(!dedup.should_keep(&make_zcode_dedup_message("shared:0"), false));
+        assert!(dedup.should_keep(&make_zcode_dedup_message("shared:1"), false));
+
+        let mut key_collision = ZcodeDedupState::default();
+        let shared_key = "zcode-sqlite:user-controlled:0";
+        assert!(key_collision.should_keep(&make_zcode_dedup_message(shared_key), true));
+        let mut distinct_legacy = make_zcode_dedup_message(shared_key);
+        distinct_legacy.tokens.input += 1;
+        assert!(key_collision.should_keep(&distinct_legacy, false));
     }
 
     fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
@@ -10864,6 +11131,493 @@ mod tests {
                 427
             );
         });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m22_zcode_sources_keep_all_lane_parity_and_db_authority() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let report_cache = tempfile::TempDir::new().unwrap();
+        let legacy = source_home.path().join(".zcode/projects/demo/shared.jsonl");
+        std::fs::create_dir_all(legacy.parent().unwrap()).unwrap();
+        let write_legacy = |unique_input: i64| {
+            let lines = [
+                serde_json::json!({
+                    "role": "user",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:00Z",
+                    "content": "shared prompt"
+                }),
+                serde_json::json!({
+                    "role": "assistant",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:05Z",
+                    "model": "GLM-5.2",
+                    "content": "shared answer",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "input_cache_read": 10,
+                        "input_cache_creation": 5,
+                        "reasoning": 3,
+                        "totalTokens": 120
+                    }
+                }),
+                serde_json::json!({
+                    "role": "user",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:00Z",
+                    "content": "same-store duplicate prompt"
+                }),
+                serde_json::json!({
+                    "role": "assistant",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:05Z",
+                    "model": "GLM-5.2",
+                    "content": "same-store duplicate answer",
+                    "usage": {
+                        "input_tokens": 100,
+                        "output_tokens": 20,
+                        "input_cache_read": 10,
+                        "input_cache_creation": 5,
+                        "reasoning": 3,
+                        "totalTokens": 120
+                    }
+                }),
+                serde_json::json!({
+                    "role": "user",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:06Z",
+                    "content": "legacy-only prompt"
+                }),
+                serde_json::json!({
+                    "role": "assistant",
+                    "sessionId": "shared",
+                    "timestamp": "2026-02-13T12:00:10Z",
+                    "model": "glm-5.2",
+                    "content": "legacy-only answer",
+                    "usage": {
+                        "input_tokens": unique_input,
+                        "output_tokens": 5
+                    }
+                }),
+            ];
+            std::fs::write(
+                &legacy,
+                format!(
+                    "{}\n",
+                    lines
+                        .iter()
+                        .map(serde_json::Value::to_string)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                ),
+            )
+            .unwrap();
+        };
+        write_legacy(30);
+
+        let db = source_home.path().join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                computed_total_tokens INTEGER,
+                agent TEXT,
+                mode TEXT
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                path TEXT
+            );
+            INSERT INTO session (id, directory, path) VALUES
+                ('shared', 'demo', 'demo'),
+                ('v2-only', 'db-only', 'db-only');
+            "#,
+        )
+        .unwrap();
+        let shared_timestamp = chrono::DateTime::parse_from_rfc3339("2026-02-13T12:00:05Z")
+            .unwrap()
+            .timestamp_millis();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, turn_id, model_id, started_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+            "#,
+            rusqlite::params![
+                "db-shared",
+                "shared",
+                "turn-shared",
+                "GLM-5.2",
+                shared_timestamp,
+                100_i64,
+                20_i64,
+                3_i64,
+                10_i64,
+                5_i64,
+                120_i64,
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, started_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, NULL)
+            "#,
+            rusqlite::params![
+                "db-modern-null",
+                "v2-only",
+                "glm-5.2",
+                shared_timestamp + 15_000,
+                40_i64,
+                8_i64,
+                1_i64,
+                2_i64,
+                0_i64,
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let home = source_home.path().to_string_lossy().into_owned();
+        let clients = vec!["zcode".to_string()];
+        let run_materialized = || {
+            with_isolated_tokscale_cache(materialized_cache.path(), || {
+                let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                    &home,
+                    &clients,
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                );
+                messages.sort_by(|left, right| {
+                    (&left.timestamp, &left.dedup_key).cmp(&(&right.timestamp, &right.dedup_key))
+                });
+                messages
+            })
+        };
+        let run_streaming = || {
+            with_isolated_tokscale_cache(streaming_cache.path(), || {
+                let mut messages = Vec::new();
+                scan_messages_streaming(
+                    &home,
+                    &clients,
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                    &|_| true,
+                    &mut |message| messages.push(message.clone()),
+                );
+                messages.sort_by(|left, right| {
+                    (&left.timestamp, &left.dedup_key).cmp(&(&right.timestamp, &right.dedup_key))
+                });
+                messages
+            })
+        };
+
+        let cold_materialized = run_materialized();
+        let cold_streaming = run_streaming();
+        assert_eq!(cold_materialized, cold_streaming);
+        assert_eq!(cold_materialized.len(), 4);
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            240
+        );
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .map(|message| message.tokens.output)
+                .sum::<i64>(),
+            47
+        );
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .map(|message| message.tokens.cache_read)
+                .sum::<i64>(),
+            22
+        );
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .map(|message| message.tokens.cache_write)
+                .sum::<i64>(),
+            10
+        );
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .map(|message| message.tokens.reasoning)
+                .sum::<i64>(),
+            7
+        );
+        assert_eq!(
+            cold_materialized
+                .iter()
+                .filter(|message| message.session_id == "shared"
+                    && message.timestamp == shared_timestamp)
+                .map(|message| message.dedup_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("shared:1"), Some("zcode-sqlite:db-shared")],
+            "SQLite must replace one cross-store match without dropping a second legacy source key"
+        );
+        let modern_null = cold_materialized
+            .iter()
+            .find(|message| message.session_id == "v2-only")
+            .unwrap();
+        assert_eq!(modern_null.tokens.input, 40);
+        assert_eq!(modern_null.tokens.output, 8);
+        assert_eq!(run_materialized(), cold_materialized);
+        assert_eq!(run_streaming(), cold_streaming);
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_legacy(60);
+        let rewritten_materialized = run_materialized();
+        let rewritten_streaming = run_streaming();
+        assert_eq!(rewritten_materialized, rewritten_streaming);
+        assert_eq!(rewritten_materialized.len(), 4);
+        assert_eq!(
+            rewritten_materialized
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            270
+        );
+
+        std::fs::remove_file(&legacy).unwrap();
+        assert_eq!(run_materialized().len(), 2);
+        assert_eq!(run_streaming().len(), 2);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        write_legacy(30);
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::Zcode), 4);
+        assert_eq!(counted.messages.len(), 4);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            240
+        );
+
+        with_isolated_tokscale_cache(report_cache.path(), || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let options = ReportOptions {
+                home_dir: Some(home),
+                use_env_roots: false,
+                clients: Some(clients),
+                ..Default::default()
+            };
+            let model = runtime.block_on(get_model_report(options.clone())).unwrap();
+            let monthly = runtime
+                .block_on(get_monthly_report(options.clone()))
+                .unwrap();
+            let hourly = runtime
+                .block_on(get_hourly_report(options.clone()))
+                .unwrap();
+            let agents = runtime.block_on(get_agents_report(options)).unwrap();
+            assert_eq!(model.total_messages, 4);
+            assert_eq!(model.total_input, 240);
+            assert_eq!(model.total_output, 47);
+            assert_eq!(model.total_cache_read, 22);
+            assert_eq!(model.total_cache_write, 10);
+            assert_eq!(
+                monthly
+                    .entries
+                    .iter()
+                    .map(|entry| entry.message_count)
+                    .sum::<i32>(),
+                4
+            );
+            assert_eq!(
+                hourly
+                    .entries
+                    .iter()
+                    .map(|entry| entry.message_count)
+                    .sum::<i32>(),
+                4
+            );
+            assert_eq!(agents.total_messages, 4);
+            assert_eq!(
+                agents.entries.iter().map(|entry| entry.input).sum::<i64>(),
+                240
+            );
+        });
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m22_zcode_wal_only_write_invalidates_cache_and_source_tokens() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let db = source_home.path().join(".zcode/cli/db/db.sqlite");
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let conn = rusqlite::Connection::open(&db).unwrap();
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode=WAL", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(journal_mode.to_ascii_lowercase(), "wal");
+        conn.execute_batch(
+            r#"
+            PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                computed_total_tokens INTEGER,
+                agent TEXT,
+                mode TEXT
+            );
+            CREATE TABLE session (
+                id TEXT PRIMARY KEY,
+                directory TEXT,
+                path TEXT
+            );
+            INSERT INTO session (id, directory, path) VALUES ('wal-session', 'wal-demo', 'wal-demo');
+            INSERT INTO model_usage (
+                id, session_id, model_id, started_at, input_tokens, output_tokens,
+                reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                computed_total_tokens
+            ) VALUES ('wal-1', 'wal-session', 'glm-5.2', 1770983400000, 10, 1, 0, 0, 0, 11);
+            PRAGMA wal_checkpoint(TRUNCATE);
+            "#,
+        )
+        .unwrap();
+
+        let home = source_home.path().to_string_lossy().into_owned();
+        let clients = vec!["zcode".to_string()];
+        let options = LocalParseOptions {
+            home_dir: Some(home.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        };
+        let run_materialized = || {
+            with_isolated_tokscale_cache(cache_home.path(), || {
+                parse_all_messages_with_pricing_with_env_strategy(
+                    &home,
+                    &clients,
+                    None,
+                    false,
+                    &scanner::ScannerSettings::default(),
+                )
+            })
+        };
+
+        assert_eq!(run_materialized().len(), 1);
+        let before_fingerprint = message_cache::SourceFingerprint::from_sqlite_path(&db).unwrap();
+        let before_mtime = latest_source_mtime_ms(&options).unwrap();
+        let before_change_token = local_source_change_token(&options).unwrap();
+        let before_db_metadata = std::fs::metadata(&db).unwrap();
+        let before_db_len = before_db_metadata.len();
+        let before_db_modified = before_db_metadata.modified().unwrap();
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, started_at, input_tokens, output_tokens,
+                reasoning_tokens, cache_read_input_tokens, cache_creation_input_tokens,
+                computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, 0, 0, ?7)
+            "#,
+            rusqlite::params![
+                "wal-2",
+                "wal-session",
+                "glm-5.2",
+                1_770_983_410_000_i64,
+                20_i64,
+                2_i64,
+                22_i64,
+            ],
+        )
+        .unwrap();
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        let after_db_metadata = std::fs::metadata(&db).unwrap();
+        assert_eq!(after_db_metadata.len(), before_db_len);
+        assert_eq!(after_db_metadata.modified().unwrap(), before_db_modified);
+        assert_ne!(
+            message_cache::SourceFingerprint::from_sqlite_path(&db).unwrap(),
+            before_fingerprint
+        );
+        assert!(latest_source_mtime_ms(&options).unwrap() > before_mtime);
+        assert_ne!(
+            local_source_change_token(&options).unwrap(),
+            before_change_token
+        );
+
+        let refreshed = run_materialized();
+        assert_eq!(refreshed.len(), 2);
+        let streamed = with_isolated_tokscale_cache(cache_home.path(), || {
+            let mut messages = Vec::new();
+            scan_messages_streaming(
+                &home,
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_| true,
+                &mut |message| messages.push(message.clone()),
+            );
+            messages
+        });
+        assert_eq!(streamed.len(), 2);
+
+        let counted = parse_local_clients(LocalParseOptions {
+            modified_after: Some(u64::MAX),
+            ..options
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::Zcode), 2);
+        assert_eq!(counted.messages.len(), 2);
     }
 
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered
