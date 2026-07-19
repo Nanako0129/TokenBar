@@ -24,7 +24,9 @@ pub use sessionize::{
 pub use sessions::{CostSource, UnifiedMessage};
 
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::cmp::Reverse;
+use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1994,67 +1996,305 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
     }
 }
 
-fn augment_zcode_matching(
-    root_legacy: usize,
-    legacy_identities: &[ZcodeMessageIdentity],
-    sqlite_starts: &HashMap<ZcodeMessageIdentity, Vec<usize>>,
-    sqlite_completions: &HashMap<ZcodeMessageIdentity, Vec<usize>>,
-    sqlite_matches: &mut [Option<usize>],
-) -> bool {
-    let identity = &legacy_identities[root_legacy];
-    for candidates in [sqlite_starts.get(identity), sqlite_completions.get(identity)] {
-        if let Some(sqlite_index) = candidates
-            .into_iter()
-            .flatten()
-            .copied()
-            .find(|index| sqlite_matches[*index].is_none())
-        {
-            sqlite_matches[sqlite_index] = Some(root_legacy);
-            return true;
+/// Shared request identity for the fallback pass after token-bearing matching.
+/// It intentionally excludes source-specific metadata and estimated token buckets.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct ZcodeRelaxedIdentity {
+    session_id: String,
+    model_id: String,
+    provider_id: String,
+    timestamp: i64,
+}
+
+impl ZcodeRelaxedIdentity {
+    fn at(message: &UnifiedMessage, timestamp: i64) -> Self {
+        Self {
+            session_id: message.session_id.clone(),
+            model_id: zcode_model_identity(&message.model_id),
+            provider_id: provider_identity::canonical_provider(&message.provider_id)
+                .unwrap_or_else(|| message.provider_id.trim().to_lowercase()),
+            timestamp,
         }
     }
 
-    let mut queue = VecDeque::from([root_legacy]);
-    let mut visited_legacy = vec![false; legacy_identities.len()];
-    let mut visited_sqlite = vec![false; sqlite_matches.len()];
-    let mut prior_sqlite = vec![None; legacy_identities.len()];
-    let mut prior_legacy = vec![None; sqlite_matches.len()];
-    visited_legacy[root_legacy] = true;
+    fn from(message: &UnifiedMessage) -> Self {
+        Self::at(message, message.timestamp)
+    }
 
-    while let Some(legacy_index) = queue.pop_front() {
-        let identity = &legacy_identities[legacy_index];
-        for candidates in [sqlite_starts.get(identity), sqlite_completions.get(identity)] {
-            let Some(candidates) = candidates else {
-                continue;
-            };
+    fn is_matchable(&self) -> bool {
+        self.timestamp > 0
+            && !self.session_id.is_empty()
+            && !self.session_id.eq_ignore_ascii_case("unknown")
+            && !self.model_id.is_empty()
+            && !self.provider_id.is_empty()
+            && !self.provider_id.eq_ignore_ascii_case("unknown")
+    }
+
+    fn completed(message: &UnifiedMessage) -> Option<Self> {
+        let duration = message.duration_ms.filter(|duration| *duration > 0)?;
+        let timestamp = message.timestamp.checked_add(duration)?;
+        Some(Self::at(message, timestamp))
+    }
+}
+
+/// Compute a maximum-cardinality, maximum-exact-start matching.
+///
+/// Edge scores are `legacy_count + 1` for every match plus one more for an
+/// exact-start edge. Successive shortest augmenting paths therefore optimize
+/// cardinality first and exact-start edges second. Legacy rows with the same
+/// identity are grouped into one capacity node, so each SQLite row contributes
+/// at most one start and one completion incidence to the residual graph.
+fn augment_zcode_matching<I>(
+    legacy_identities: &[I],
+    eligible_legacy: &[bool],
+    sqlite_starts: &HashMap<I, Vec<usize>>,
+    sqlite_completions: &HashMap<I, Vec<usize>>,
+    sqlite_matches: &mut [Option<usize>],
+)
+where
+    I: Eq + Hash,
+{
+    let sqlite_count = sqlite_matches.len();
+    if sqlite_count == 0 {
+        return;
+    }
+
+    let mut group_lookup: HashMap<&I, usize> = HashMap::new();
+    let mut group_keys = Vec::new();
+    let mut group_members: Vec<Vec<usize>> = Vec::new();
+    for (legacy_index, identity) in legacy_identities.iter().enumerate() {
+        if !eligible_legacy[legacy_index] {
+            continue;
+        }
+        let group_index = if let Some(&group_index) = group_lookup.get(identity) {
+            group_index
+        } else {
+            let group_index = group_keys.len();
+            group_lookup.insert(identity, group_index);
+            group_keys.push(identity);
+            group_members.push(Vec::new());
+            group_index
+        };
+        group_members[group_index].push(legacy_index);
+    }
+    let group_count = group_keys.len();
+    if group_count == 0 {
+        return;
+    }
+
+    let mut adjacency: Vec<Vec<(usize, bool)>> = vec![Vec::new(); group_count];
+    let mut has_sqlite_edge = vec![false; sqlite_count];
+    for (group_index, identity) in group_keys.iter().enumerate() {
+        if let Some(candidates) = sqlite_starts.get(identity) {
             for &sqlite_index in candidates {
-                if visited_sqlite[sqlite_index] {
-                    continue;
+                if sqlite_matches[sqlite_index].is_none() {
+                    adjacency[group_index].push((sqlite_index, true));
+                    has_sqlite_edge[sqlite_index] = true;
                 }
-                visited_sqlite[sqlite_index] = true;
-                prior_legacy[sqlite_index] = Some(legacy_index);
-
-                let Some(displaced_legacy) = sqlite_matches[sqlite_index] else {
-                    let mut current_sqlite = sqlite_index;
-                    loop {
-                        let current_legacy = prior_legacy[current_sqlite].unwrap();
-                        sqlite_matches[current_sqlite] = Some(current_legacy);
-                        let Some(previous_sqlite) = prior_sqlite[current_legacy] else {
-                            return true;
-                        };
-                        current_sqlite = previous_sqlite;
-                    }
-                };
-
-                if !visited_legacy[displaced_legacy] {
-                    visited_legacy[displaced_legacy] = true;
-                    prior_sqlite[displaced_legacy] = Some(sqlite_index);
-                    queue.push_back(displaced_legacy);
+            }
+        }
+        if let Some(candidates) = sqlite_completions.get(identity) {
+            for &sqlite_index in candidates {
+                if sqlite_matches[sqlite_index].is_none() {
+                    adjacency[group_index].push((sqlite_index, false));
+                    has_sqlite_edge[sqlite_index] = true;
                 }
             }
         }
     }
-    false
+
+    let cardinality_score = i64::try_from(legacy_identities.len())
+        .unwrap_or(i64::MAX.saturating_sub(2))
+        .saturating_add(1);
+    let node_count = group_count + sqlite_count;
+    let sqlite_node = |index: usize| group_count + index;
+    let edge_cost = |exact: bool| -(cardinality_score.saturating_add(i64::from(exact)));
+    let mut potentials = vec![0_i64; node_count];
+    for adjacency in &adjacency {
+        for &(sqlite_index, exact) in adjacency {
+            let node = sqlite_node(sqlite_index);
+            let cost = edge_cost(exact);
+            if cost < potentials[node] {
+                potentials[node] = cost;
+            }
+        }
+    }
+    let mut sink_potential = has_sqlite_edge
+        .iter()
+        .enumerate()
+        .filter_map(|(index, present)| present.then_some(potentials[sqlite_node(index)]))
+        .min()
+        .unwrap_or(0);
+
+    let mut group_match_count = vec![0; group_count];
+    let mut sqlite_match_group = vec![None; sqlite_count];
+    let mut sqlite_match_is_exact = vec![false; sqlite_count];
+    let mut unmatched_groups = VecDeque::new();
+    for group_index in 0..group_count {
+        unmatched_groups.push_back(group_index);
+    }
+
+    let infinity = i64::MAX / 4;
+    let mut distances = vec![infinity; node_count];
+    let mut previous = vec![None; node_count];
+    let mut previous_is_exact = vec![false; node_count];
+
+    loop {
+        let mut direct_zero_edge = None;
+        let rounds = unmatched_groups.len();
+        for _ in 0..rounds {
+            let Some(group_index) = unmatched_groups.pop_front() else {
+                break;
+            };
+            if group_match_count[group_index] >= group_members[group_index].len() {
+                continue;
+            }
+            let mut candidate = None;
+            for &(sqlite_index, exact) in &adjacency[group_index] {
+                if sqlite_match_group[sqlite_index].is_some() {
+                    continue;
+                }
+                let node = sqlite_node(sqlite_index);
+                let edge = edge_cost(exact)
+                    .saturating_add(potentials[group_index])
+                    .saturating_sub(potentials[node]);
+                let sink = potentials[node].saturating_sub(sink_potential);
+                debug_assert!(edge >= 0 && sink >= 0);
+                if edge.saturating_add(sink) == 0 {
+                    candidate = Some((sqlite_index, exact));
+                    break;
+                }
+            }
+            if let Some((sqlite_index, exact)) = candidate {
+                sqlite_match_group[sqlite_index] = Some(group_index);
+                sqlite_match_is_exact[sqlite_index] = exact;
+                group_match_count[group_index] += 1;
+                if group_match_count[group_index] < group_members[group_index].len() {
+                    unmatched_groups.push_back(group_index);
+                }
+                direct_zero_edge = Some(());
+                break;
+            }
+            unmatched_groups.push_back(group_index);
+        }
+        if direct_zero_edge.is_some() {
+            continue;
+        }
+
+        distances.fill(infinity);
+        previous.fill(None);
+        previous_is_exact.fill(false);
+        let mut heap = BinaryHeap::new();
+        for group_index in 0..group_count {
+            if group_match_count[group_index] < group_members[group_index].len() {
+                distances[group_index] = 0;
+                heap.push(Reverse((0_i64, group_index)));
+            }
+        }
+
+        while let Some(Reverse((distance, node))) = heap.pop() {
+            if distance != distances[node] {
+                continue;
+            }
+            if node < group_count {
+                for &(sqlite_index, exact) in &adjacency[node] {
+                    if sqlite_match_group[sqlite_index] == Some(node) {
+                        continue;
+                    }
+                    let target = sqlite_node(sqlite_index);
+                    let reduced = edge_cost(exact)
+                        .saturating_add(potentials[node])
+                        .saturating_sub(potentials[target]);
+                    debug_assert!(reduced >= 0);
+                    let next = distance.saturating_add(reduced);
+                    if next < distances[target] {
+                        distances[target] = next;
+                        previous[target] = Some(node);
+                        previous_is_exact[target] = exact;
+                        heap.push(Reverse((next, target)));
+                    }
+                }
+            } else {
+                let sqlite_index = node - group_count;
+                let Some(group_index) = sqlite_match_group[sqlite_index] else {
+                    continue;
+                };
+                let score = cardinality_score
+                    .saturating_add(i64::from(sqlite_match_is_exact[sqlite_index]));
+                let reduced = score
+                    .saturating_add(potentials[node])
+                    .saturating_sub(potentials[group_index]);
+                debug_assert!(reduced >= 0);
+                let next = distance.saturating_add(reduced);
+                if next < distances[group_index] {
+                    distances[group_index] = next;
+                    previous[group_index] = Some(node);
+                    heap.push(Reverse((next, group_index)));
+                }
+            }
+        }
+
+        let Some((end_sqlite, sink_distance)) = has_sqlite_edge
+            .iter()
+            .enumerate()
+            .filter(|(index, present)| **present && sqlite_match_group[*index].is_none())
+            .filter_map(|(index, _)| {
+                let node = sqlite_node(index);
+                (distances[node] < infinity).then_some((
+                    index,
+                    distances[node]
+                        .saturating_add(potentials[node])
+                        .saturating_sub(sink_potential),
+                ))
+            })
+            .min_by_key(|(_, distance)| *distance)
+        else {
+            break;
+        };
+
+        for (node, distance) in distances.iter().enumerate() {
+            if *distance < infinity {
+                potentials[node] = potentials[node].saturating_add(*distance);
+            }
+        }
+        sink_potential = sink_potential.saturating_add(sink_distance);
+
+        let mut forward_edges = Vec::new();
+        let mut node = sqlite_node(end_sqlite);
+        while let Some(previous_node) = previous[node] {
+            if previous_node < group_count {
+                forward_edges.push((
+                    previous_node,
+                    node - group_count,
+                    previous_is_exact[node],
+                ));
+            }
+            node = previous_node;
+        }
+        for (group_index, sqlite_index, exact) in forward_edges {
+            if let Some(old_group) = sqlite_match_group[sqlite_index] {
+                group_match_count[old_group] -= 1;
+            }
+            group_match_count[group_index] += 1;
+            sqlite_match_group[sqlite_index] = Some(group_index);
+            sqlite_match_is_exact[sqlite_index] = exact;
+        }
+    }
+
+    for group_index in 0..group_count {
+        let mut member_index = 0;
+        for sqlite_index in 0..sqlite_count {
+            if sqlite_match_group[sqlite_index] != Some(group_index) {
+                continue;
+            }
+            let Some(&legacy_index) = group_members[group_index].get(member_index) else {
+                unreachable!("matching exceeded legacy group capacity");
+            };
+            member_index += 1;
+            sqlite_matches[sqlite_index] = Some(legacy_index);
+        }
+        debug_assert_eq!(member_index, group_match_count[group_index]);
+    }
 }
 
 fn select_zcode_messages(
@@ -2098,25 +2338,66 @@ fn select_zcode_messages(
         .iter()
         .map(ZcodeMessageIdentity::from)
         .collect();
-    // Match exact starts before completion-only fallbacks. Augmenting paths may
-    // still move an exact match when that is required to increase cardinality.
-    let mut legacy_order: Vec<_> = (0..legacy_messages.len()).collect();
-    legacy_order.sort_by_key(|index| !sqlite_starts.contains_key(&legacy_identities[*index]));
-
     let mut sqlite_matches = vec![None; selected.len()];
-    for legacy_index in legacy_order {
-        augment_zcode_matching(
-            legacy_index,
-            &legacy_identities,
-            &sqlite_starts,
-            &sqlite_completions,
-            &mut sqlite_matches,
-        );
-    }
+    augment_zcode_matching(
+        &legacy_identities,
+        &vec![true; legacy_messages.len()],
+        &sqlite_starts,
+        &sqlite_completions,
+        &mut sqlite_matches,
+    );
     let mut legacy_matches = vec![None; legacy_messages.len()];
-    for (sqlite_index, legacy_index) in sqlite_matches.into_iter().enumerate() {
+    for (sqlite_index, legacy_index) in sqlite_matches.iter().enumerate() {
         if let Some(legacy_index) = legacy_index {
-            legacy_matches[legacy_index] = Some(sqlite_index);
+            legacy_matches[*legacy_index] = Some(sqlite_index);
+        }
+    }
+
+    // Exact token-bearing identities have first priority. Only rows left on
+    // both sides enter the relaxed pass, so SQLite remains authoritative and
+    // same-store cardinality is preserved.
+    let relaxed_legacy_identities: Vec<_> = legacy_messages
+        .iter()
+        .map(ZcodeRelaxedIdentity::from)
+        .collect();
+    let mut relaxed_sqlite_starts: HashMap<ZcodeRelaxedIdentity, Vec<usize>> = HashMap::new();
+    let mut relaxed_sqlite_completions: HashMap<ZcodeRelaxedIdentity, Vec<usize>> = HashMap::new();
+    for (sqlite_index, message) in selected.iter().enumerate() {
+        if sqlite_matches[sqlite_index].is_some() {
+            continue;
+        }
+        let start = ZcodeRelaxedIdentity::from(message);
+        if start.is_matchable() {
+            relaxed_sqlite_starts
+                .entry(start)
+                .or_default()
+                .push(sqlite_index);
+        }
+        if let Some(completion) =
+            ZcodeRelaxedIdentity::completed(message).filter(ZcodeRelaxedIdentity::is_matchable)
+        {
+            relaxed_sqlite_completions
+                .entry(completion)
+                .or_default()
+                .push(sqlite_index);
+        }
+    }
+    let relaxed_legacy_eligible: Vec<_> = legacy_matches
+        .iter()
+        .map(Option::is_none)
+        .collect();
+    augment_zcode_matching(
+        &relaxed_legacy_identities,
+        &relaxed_legacy_eligible,
+        &relaxed_sqlite_starts,
+        &relaxed_sqlite_completions,
+        &mut sqlite_matches,
+    );
+
+    legacy_matches.fill(None);
+    for (sqlite_index, legacy_index) in sqlite_matches.iter().enumerate() {
+        if let Some(legacy_index) = legacy_index {
+            legacy_matches[*legacy_index] = Some(sqlite_index);
         }
     }
 
@@ -5256,6 +5537,7 @@ mod tests {
         let shared_key = "zcode-sqlite:user-controlled:0";
         let mut distinct_legacy = make_zcode_dedup_message(shared_key);
         distinct_legacy.tokens.input += 1;
+        distinct_legacy.timestamp += 1;
         let selected = select_zcode_messages(
             vec![make_zcode_dedup_message(shared_key)],
             vec![distinct_legacy],
@@ -5279,6 +5561,116 @@ mod tests {
             vec![make_zcode_dedup_message("legacy:openrouter")],
         );
         assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn test_zcode_cross_store_dedup_suppresses_estimated_legacy_row() {
+        let mut sqlite = make_zcode_dedup_message("zcode-sqlite:authoritative");
+        let authoritative_tokens = sqlite.tokens.clone();
+        // This models a schema-31 cached legacy assistant with no usage block:
+        // the parser's character estimate has a different token breakdown.
+        let mut legacy = make_zcode_dedup_message("legacy:estimated");
+        legacy.tokens = TokenBreakdown {
+            input: 7,
+            output: 2,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        sqlite.timestamp = 1_771_000_000_000;
+        legacy.timestamp = sqlite.timestamp;
+
+        let selected = select_zcode_messages(vec![sqlite], vec![legacy]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].tokens, authoritative_tokens);
+        assert_eq!(
+            selected[0].dedup_key.as_deref(),
+            Some("zcode-sqlite:authoritative")
+        );
+    }
+
+    #[test]
+    fn test_zcode_relaxed_matching_is_one_to_one_and_prefers_start() {
+        let started_at = 1_771_000_000_000;
+        let mut sqlite = make_zcode_dedup_message("zcode-sqlite:authoritative");
+        sqlite.timestamp = started_at;
+        sqlite.duration_ms = Some(5_000);
+
+        let mut legacy_completion = make_zcode_dedup_message("legacy:completion");
+        legacy_completion.timestamp = started_at + 5_000;
+        legacy_completion.tokens.input = 7;
+
+        let mut legacy_start = make_zcode_dedup_message("legacy:start");
+        legacy_start.timestamp = started_at;
+        legacy_start.tokens.input = 8;
+        legacy_start.is_turn_start = true;
+
+        let selected = select_zcode_messages(
+            vec![sqlite],
+            vec![legacy_completion, legacy_start],
+        );
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected[0].dedup_key.as_deref(),
+            Some("zcode-sqlite:authoritative")
+        );
+        assert!(selected[0].is_turn_start);
+        assert_eq!(
+            selected[1].dedup_key.as_deref(),
+            Some("legacy:completion")
+        );
+    }
+
+    #[test]
+    fn test_zcode_relaxed_matching_lexicographic_counterexample_preserves_metadata() {
+        let mut sqlite_zero = make_zcode_dedup_message("zcode-sqlite:s0");
+        sqlite_zero.timestamp = 1_000;
+        sqlite_zero.duration_ms = Some(1);
+        let mut sqlite_one = make_zcode_dedup_message("zcode-sqlite:s1");
+        sqlite_one.timestamp = 1_001;
+        sqlite_one.duration_ms = Some(1);
+
+        let mut legacy_zero = make_zcode_dedup_message("legacy:l0");
+        legacy_zero.timestamp = 1_001;
+        legacy_zero.tokens.input = 7;
+        let mut legacy_one = make_zcode_dedup_message("legacy:l1");
+        legacy_one.timestamp = 1_001;
+        legacy_one.tokens.input = 8;
+        let mut legacy_two = make_zcode_dedup_message("legacy:l2");
+        legacy_two.timestamp = 1_000;
+        legacy_two.tokens.input = 9;
+        legacy_two.set_workspace(
+            Some("/Users/alice/project".to_string()),
+            Some("project".to_string()),
+        );
+        legacy_two.is_turn_start = true;
+
+        let selected = select_zcode_messages(
+            vec![sqlite_zero, sqlite_one],
+            vec![legacy_zero, legacy_one, legacy_two],
+        );
+
+        assert_eq!(selected.len(), 3);
+        let authoritative_zero = selected
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("zcode-sqlite:s0"))
+            .unwrap();
+        assert_eq!(
+            authoritative_zero.workspace_key.as_deref(),
+            Some("/Users/alice/project")
+        );
+        assert!(authoritative_zero.is_turn_start);
+        assert!(selected
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("legacy:l1")));
+        assert!(!selected
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("legacy:l0")));
+        assert!(!selected
+            .iter()
+            .any(|message| message.dedup_key.as_deref() == Some("legacy:l2")));
     }
 
     #[test]
