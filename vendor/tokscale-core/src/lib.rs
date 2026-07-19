@@ -3514,7 +3514,7 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
     }
     // These file-backed parsers consult secondary sources whose writes do not
     // update the scanned primary: Droid's fallback transcript, legacy Kimi's
-    // shared config, and Kiro CLI's same-stem message log. Probe each dependency
+    // shared config, and Kiro's CLI/IDE message sidecars. Probe each dependency
     // so a sibling-only change reaches the specialized cache fingerprint.
     for settings in scan_result.get(ClientId::Droid) {
         latest = latest.max(droid_source_mtime_ms(settings).unwrap_or(0));
@@ -3610,8 +3610,8 @@ fn grok_source_mtime_ms(updates_path: &Path) -> Option<u64> {
 /// (WAL writes may not bump the main `.db` mtime), while the jcode lane holds a
 /// `session_*.json` snapshot whose sibling `.journal.jsonl` is appended between
 /// snapshot rewrites. Those lanes remain exempt. Roo-family, Droid, legacy Kimi,
-/// Kiro CLI, and Grok sources can still be bounded by folding every parser
-/// dependency into their newest mtime.
+/// Kiro file sources, and Grok sources can still be bounded by folding every
+/// parser dependency into their newest mtime.
 /// Any stat failure keeps the file — over-parsing is safe, silently skipping is
 /// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
@@ -12333,6 +12333,205 @@ mod tests {
             clients: Some(vec!["kiro".to_string()]),
             ..Default::default()
         }
+    }
+
+    fn m15b_ide_paths(home: &Path) -> (PathBuf, PathBuf) {
+        let dir = home.join(".kiro/sessions/workspace-a/sess_m15b");
+        (dir.join("session.json"), dir.join("messages.jsonl"))
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m15b_ide_sibling_changes_reach_cache_all_lanes_and_reports() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let (session, messages) = m15b_ide_paths(source_home.path());
+        std::fs::create_dir_all(session.parent().unwrap()).unwrap();
+        std::fs::write(
+            &session,
+            r#"{
+                "id":"sess_m15b",
+                "modelId":"claude-opus-4.6",
+                "workspacePaths":["/tmp/m15b-project"]
+            }"#,
+        )
+        .unwrap();
+
+        let clients = ["kiro".to_string()];
+        let scanner_settings = scanner::ScannerSettings::default();
+        let parse_materialized = || {
+            let mut parsed = parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner_settings,
+            );
+            parsed.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            parsed
+        };
+
+        let source_fingerprint = message_cache::SourceFingerprint::from_path(&session).unwrap();
+        let missing_sidecar_fingerprint =
+            message_cache::SourceFingerprint::from_kiro_path(&session).unwrap();
+        let before = latest_source_mtime_ms(&m15a_local_options(source_home.path())).unwrap();
+        assert!(parse_materialized().is_empty());
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(
+            &messages,
+            concat!(
+                "{\"timestamp\":\"2026-06-20T10:00:00Z\",\"payload\":{\"type\":\"user\",\"content\":\"hello\"}}\n",
+                "{\"payload\":{\"type\":\"session_metadata\",\"key\":\"contextUsage\",\"value\":{\"usagePercentage\":10.0}}}\n",
+                "{\"payload\":{\"type\":\"assistant\",\"content\":\"answer\"}}\n",
+                "{\"payload\":{\"type\":\"usage_summary\",\"elapsedTime\":1000}}\n",
+                "{\"timestamp\":\"2026-06-20T10:00:01Z\",\"payload\":{\"type\":\"turn_end\"}}\n",
+            ),
+        )
+        .unwrap();
+        let first_sidecar_fingerprint =
+            message_cache::SourceFingerprint::from_kiro_path(&session).unwrap();
+        assert_ne!(missing_sidecar_fingerprint, first_sidecar_fingerprint);
+        assert_eq!(
+            source_fingerprint,
+            message_cache::SourceFingerprint::from_path(&session).unwrap(),
+            "messages.jsonl must invalidate through the related-file fingerprint"
+        );
+        let after_first = latest_source_mtime_ms(&m15a_local_options(source_home.path())).unwrap();
+        assert!(after_first > before);
+
+        let first = parse_materialized();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].tokens.input, 20_000);
+        assert_eq!(first[0].dedup_key.as_deref(), Some("sess_m15b:ide:0"));
+        assert_eq!(first[0].model_id, "claude-opus-4.6");
+        assert_eq!(first[0].workspace_key.as_deref(), Some("/tmp/m15b-project"));
+        assert_eq!(
+            parse_materialized(),
+            first,
+            "the first warm hit must be stable"
+        );
+
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(
+            &messages,
+            concat!(
+                "{\"timestamp\":\"2026-06-20T10:00:00Z\",\"payload\":{\"type\":\"user\",\"content\":\"hello\"}}\n",
+                "{\"payload\":{\"type\":\"session_metadata\",\"key\":\"contextUsage\",\"value\":{\"usagePercentage\":10.0}}}\n",
+                "{\"payload\":{\"type\":\"assistant\",\"content\":\"answer\"}}\n",
+                "{\"payload\":{\"type\":\"usage_summary\",\"elapsedTime\":1000}}\n",
+                "{\"timestamp\":\"2026-06-20T10:00:01Z\",\"payload\":{\"type\":\"turn_end\"}}\n",
+                "{\"timestamp\":\"2026-06-20T10:01:00Z\",\"payload\":{\"type\":\"user\",\"content\":\"next\"}}\n",
+                "{\"payload\":{\"type\":\"session_metadata\",\"key\":\"contextUsage\",\"value\":{\"usagePercentage\":20.0}}}\n",
+                "{\"payload\":{\"type\":\"assistant\",\"content\":\"done\"}}\n",
+                "{\"payload\":{\"type\":\"usage_summary\",\"elapsedTime\":1000}}\n",
+                "{\"timestamp\":\"2026-06-20T10:01:01Z\",\"payload\":{\"type\":\"turn_end\"}}\n",
+            ),
+        )
+        .unwrap();
+        let updated_sidecar_fingerprint =
+            message_cache::SourceFingerprint::from_kiro_path(&session).unwrap();
+        assert_ne!(first_sidecar_fingerprint, updated_sidecar_fingerprint);
+        let after_second = latest_source_mtime_ms(&m15a_local_options(source_home.path())).unwrap();
+        assert!(after_second > after_first);
+
+        let updated = parse_materialized();
+        assert_eq!(updated.len(), 2);
+        assert_eq!(
+            updated
+                .iter()
+                .map(|message| message.tokens.input)
+                .sum::<i64>(),
+            60_000
+        );
+        assert_eq!(
+            parse_materialized(),
+            updated,
+            "the rebuilt cache must stay warm-complete"
+        );
+        assert_eq!(
+            message_cache::SourceMessageCache::load()
+                .get(&session)
+                .unwrap()
+                .messages
+                .len(),
+            2
+        );
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner_settings,
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        streamed.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+        assert_eq!(streamed, updated);
+
+        let counted = parse_local_clients(m15a_local_options(source_home.path())).unwrap();
+        assert_eq!(counted.counts.get(ClientId::Kiro), 2);
+        assert_eq!(counted.messages.len(), 2);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            60_000
+        );
+        let pruned = parse_local_clients(LocalParseOptions {
+            modified_after: Some(after_first + 1),
+            ..m15a_local_options(source_home.path())
+        })
+        .unwrap();
+        assert_eq!(pruned.counts.get(ClientId::Kiro), 2);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let report_options = m15a_report_options(source_home.path());
+        let model = runtime
+            .block_on(get_model_report(report_options.clone()))
+            .unwrap();
+        let monthly = runtime
+            .block_on(get_monthly_report(report_options.clone()))
+            .unwrap();
+        let hourly = runtime
+            .block_on(get_hourly_report(report_options.clone()))
+            .unwrap();
+        let agents = runtime.block_on(get_agents_report(report_options)).unwrap();
+        assert_eq!(model.total_messages, 2);
+        assert_eq!(model.total_input, 60_000);
+        assert_eq!(
+            monthly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            2
+        );
+        assert_eq!(
+            hourly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            2
+        );
+        assert_eq!(agents.total_messages, 2);
+        assert_eq!(
+            agents.entries.iter().map(|entry| entry.input).sum::<i64>(),
+            60_000
+        );
     }
 
     #[cfg(target_os = "macos")]

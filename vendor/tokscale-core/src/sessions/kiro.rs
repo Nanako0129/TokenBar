@@ -25,7 +25,8 @@ use tracing::warn;
 
 const CLIENT_ID: &str = "kiro";
 const PROVIDER_ID: &str = "amazon-bedrock";
-const UNKNOWN_MODEL: &str = "auto";
+const UNKNOWN_MODEL: &str = "unknown";
+const IDE_UNKNOWN_MODEL: &str = "auto";
 
 #[derive(Debug, Deserialize)]
 struct KiroSessionHeader {
@@ -110,9 +111,13 @@ struct KiroIdeSession {
     last_modified_at: Option<String>,
 }
 
-/// Return the message sidecar consumed by a Kiro CLI session header.
-/// GlobalStorage and `.chat` artifacts are self-contained.
+/// Return the message sidecar consumed by a Kiro file source: same-stem JSONL
+/// for CLI headers and sibling `messages.jsonl` for IDE sessions. GlobalStorage
+/// and `.chat` artifacts are self-contained.
 pub(crate) fn kiro_related_messages_path(session_path: &Path) -> Option<PathBuf> {
+    if is_kiro_ide_session_path(session_path) {
+        return Some(session_path.with_file_name("messages.jsonl"));
+    }
     if is_kiro_global_storage_source(session_path) {
         return None;
     }
@@ -605,7 +610,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
     if has_structured_format && !turns.is_empty() {
         let model_id = session_model_id
             .clone()
-            .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+            .unwrap_or_else(|| IDE_UNKNOWN_MODEL.to_string());
         return turns
             .into_iter()
             .enumerate()
@@ -678,7 +683,7 @@ fn parse_kiro_ide_session_file(path: &Path) -> Vec<UnifiedMessage> {
     let model_id = session_model_id
         .or(flat_model_id)
         .filter(|model| !model.trim().is_empty())
-        .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
+        .unwrap_or_else(|| IDE_UNKNOWN_MODEL.to_string());
 
     let mut message = UnifiedMessage::new_with_dedup(
         CLIENT_ID,
@@ -1465,6 +1470,22 @@ mod tests {
     }
 
     #[test]
+    fn m15b_keeps_existing_cli_unknown_model_default() {
+        let dir = TempDir::new().unwrap();
+        let json = r#"{"session_id":"session-unknown","session_state":{"conversation_metadata":{"user_turn_metadatas":[{"message_ids":["assistant-unknown"]}]}}}"#;
+        let jsonl = concat!(
+            "{\"kind\":\"Prompt\",\"data\":{\"message_id\":\"prompt-unknown\",\"content\":[{\"kind\":\"text\",\"data\":\"hello\"}]}}\n",
+            "{\"kind\":\"AssistantMessage\",\"data\":{\"message_id\":\"assistant-unknown\",\"content\":[{\"kind\":\"text\",\"data\":\"answer\"}]}}\n",
+        );
+        let path = create_session_files(&dir, "session-unknown", json, jsonl);
+
+        let messages = parse_kiro_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "unknown");
+    }
+
+    #[test]
     fn test_parse_kiro_skips_zero_content_turns() {
         let dir = TempDir::new().unwrap();
         let json = r#"{"session_id":"session-2","cwd":"/tmp","session_state":{"rts_model_state":{"model_info":{"model_id":"model"}},"conversation_metadata":{"user_turn_metadatas":[{"input_token_count":0,"output_token_count":0,"message_ids":["missing"]}]}}}"#;
@@ -1729,6 +1750,7 @@ not valid json at all
             .unwrap()
             .timestamp_millis();
         assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "auto");
         assert_eq!(messages[0].timestamp, end - 5_000);
         assert_eq!(messages[0].duration_ms, Some(5_000));
     }

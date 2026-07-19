@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M20 implementation checkpoint starts from audited TokenBar main [`a2f852ac`](https://github.com/Nanako0129/TokenBar/commit/a2f852ac53c113de5dc6315d7e2ace5c4932b6df), the rebase-merge result of the M15-T ledger [PR #64](https://github.com/Nanako0129/TokenBar/pull/64), and ports upstream [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), which merged OpenCode v2 [PR #920](https://github.com/junhoyeo/tokscale/pull/920). The vendored tree in this checkpoint uses monolithic cache schema 30; public main and issue #45 remain at the M15-T state until this implementation PR merges.
+This M15-B implementation checkpoint starts from audited TokenBar main [`1bc2fa76`](https://github.com/Nanako0129/TokenBar/commit/1bc2fa764f447e2f603950b0402903ebef9f81b5), the rebase-merge result of OpenCode v2 [PR #65](https://github.com/Nanako0129/TokenBar/pull/65), and selectively ports Kiro structured-session commits [`405ded4a`](https://github.com/junhoyeo/tokscale/commit/405ded4a529013ad6bc668ba519bbe9eb68e8ad4) and [`315549b4`](https://github.com/junhoyeo/tokscale/commit/315549b4bbaa53638672ff5977c0d6cb77e43793), plus only the Kiro start-anchor hunk from mixed commit [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The vendored tree remains on monolithic cache schema 30; public main and issue #45 remain at the merged M20 `60/28/0/9/13/1` state until this implementation PR merges.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,8 +32,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 60 |
-| `TAKE` | 28 |
+| `ALREADY_VENDORED` | 62 |
+| `TAKE` | 26 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 9 |
 | `SKIP` | 13 |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 60</summary>
+<summary><code>ALREADY_VENDORED</code> — 62</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -53,18 +53,18 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 979b7015 7403dafa d5f2c6c4 59421da9 31deb7e6 b8156e64 dcb053e0 23cf62e0
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
-163ec570 a2f7cef5 a0929482 366ce643
+163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 28</summary>
+<summary><code>TAKE</code> — 26</summary>
 
 ```text
 63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d
 640e97b9 f7a124da 302d39c3 ed6f8b95 f6f7eced 0b454e60
-65f8f3e2 6c804711 405ded4a 315549b4 9a5aeb65 074619f7
+65f8f3e2 6c804711 9a5aeb65 074619f7
 c1aef5e9 ae36db5c cd07bf78 6899ea03 b59979c5 9155018c 18cd13cc b64d861e
 34cfbb50 a87f0ab6
 ```
@@ -111,12 +111,12 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moves `366ce643` to `ALREADY_VENDORED`; the remaining 28 `TAKE` rows cover the rest of the selected correctness and feature set. A mixed upstream commit remains one ledger row even when selected hunks land in several milestones.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B now moves `405ded4a` and `315549b4`, leaving 26 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Jcode, Junie/OpenCodeReview, and Zcode hunks still await later milestones.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
-| M20 — landed in this checkpoint | OpenCode v2 SQLite | `366ce643` |
-| M15-B | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
+| M20 — merged in PR #65 | OpenCode v2 SQLite | `366ce643` |
+| M15-B — landed in this checkpoint | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
 | M16 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc 34cfbb50` + `b64d861e` Jcode hunk |
 | M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
@@ -144,7 +144,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | Commit | Current state | Terminal transition |
 |---|---|---|
 | `34cfbb50` | `TAKE` for M16 provider hardening; 9Router excluded | `TAKE → DEFER` after M16 |
-| `b64d861e` | Counted once while selected Kiro, Jcode, Junie/OpenCodeReview, and Zcode hunks land | `TAKE → DEFER` after M22; only Devin remains |
+| `b64d861e` | Kiro start-anchor hunk is vendored in M15-B; selected Jcode, Junie/OpenCodeReview, and Zcode hunks remain `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
 | `c1aef5e9` | macOS Hermes scope already vendored; Windows discovery selected | `TAKE → ALREADY_VENDORED` after M23 |
 | `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
 | `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
@@ -188,9 +188,9 @@ flowchart TD
 
 The expected terminal classification after every selected runtime milestone is `ALREADY_VENDORED 85`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 12`, `SKIP 13`, and `SUPERSEDED 1`, total 111. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
-The local cache schedule is schema 30 at this M20 checkpoint, schema 31 after M16, and active shard format 2 after M26; M15-B, M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M20 rejects schema-29 hybrid OpenCode entries that can contain only non-empty v1 output for an otherwise unchanged database, forcing one rebuild that includes v2 rows. The legacy schema-31 monolith remains untouched when M26 activates shards.
+The local cache remains schema 30 at this M15-B checkpoint, advances to schema 31 after M16, and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M15-B changes only a newly discovered `sess_*` source and reuses the existing related-file fingerprint seam for `messages.jsonl`, so cached output from existing Kiro CLI, globalStorage, and SQLite sources remains valid. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records the merged M15-T state. After M20 merges, its mandatory post-merge refresh records the actual PR, merge SHA, `366ce643` transition, `60/28/0/9/13/1` counts, schema 30, verification evidence, and next-ready work. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M20 at `60/28/0/9/13/1`. After M15-B merges, its mandatory post-merge refresh records the actual PR, merge SHA, `405ded4a` / `315549b4` transitions, `62/26/0/9/13/1` counts, unchanged schema 30, verification evidence, and M16 as the next shared-parser checkpoint. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -247,13 +247,19 @@ The upstream semantic chain is preserved from the reviewed public tokscale commi
 
 TokenBar's local M15-A adaptation adds only the macOS roots `~/Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent` and `~/Library/Application Support/kiro/User/globalStorage/kiro.kiroagent`. The special `kiro-globalstorage` scanner follows the known storage layouts instead of accepting every matching file recursively: legacy snapshots are direct `<workspace>/*.chat` files, execution records are `.json` or extensionless files one store directory deeper, and workspace-session JSON lives under `workspace-sessions/<workspace>/`. Deeper mirrored-project trees, root-level JSON/extensionless artifacts, `index.sqlite`, and unrelated extensions are excluded; generic role/content traversal is additionally limited to `.chat`, while JSON and extensionless sources must match an execution shape and workspace-session parsing is gated to the exact `workspace-sessions/<workspace>/*.json` subtree. Snapshot role/text traversal is recursive with alias-value deduplication and distinct-subtree counting. Explicit nested `tool` or unknown role/type markers clear an inherited user/assistant role, while neutral content types such as `text` retain it; this local hardening prevents injected tool payloads from inflating estimated usage. Model lookup is recursive and skips the Kiro placeholders `agent`, `auto`, and `qdev`, falling back to `auto`; this is model selection, not suppression of usage messages. Successful execution records support both input shapes, both output shapes, timestamp variants, duration, and execution precedence over snapshots; numeric-string epochs use the same seconds-versus-milliseconds discrimination as JSON numbers. Status-bearing non-`.chat` records with `context.messages` remain valid when `actions` is absent, while legacy `.chat` snapshots are not reclassified by `status` alone. Workspace-session paths attribute the nested workspace component rather than the literal `workspace-sessions` bucket. Source paths stay attached through the batch merge, so only execution messages parsed from globalStorage or `.chat` sources can seed suppression and only IDE-cohort messages can be suppression targets; exact dedup keys are likewise scoped to the IDE or CLI cohort, and successful execution identities are additionally scoped by workspace, so arbitrary CLI session ids or repeated execution IDs in another workspace cannot suppress, impersonate, collide with, or drop globalStorage usage. Workspace-session records retain their global session-id suppression semantics.
 
-Because precedence crosses files, TokenBar caches raw parser output per source and runs batch suppression only after every Kiro source has been collected. The materialized, streaming, count, and model/monthly/hourly/Agents report paths all consume the same post-suppression dedup gate, so mirrored `.chat` and `.json` snapshots with the same identity remain exact-once on every lane. The cache remains raw so an execution rewrite, failure, or removal can restore a cached snapshot; mtime probing uses each primary globalStorage file, while `modified_after` retains the complete IDE cohort whenever any IDE source passes the threshold so an older authoritative execution cannot be pruned before suppressing a newer snapshot. Kiro CLI sources remain independently prunable and stat failures remain fail-open. No Linux or Windows globalStorage roots are added, and no structured `sess_*` / `session.json` / `messages.jsonl` cohort is included — that is M15-B. Upstream shard-cache, `parser_version`, and CLI-TUI-only changes are also excluded.
+Because precedence crosses files, TokenBar caches raw parser output per source and runs batch suppression only after every Kiro source has been collected. The materialized, streaming, count, and model/monthly/hourly/Agents report paths all consume the same post-suppression dedup gate, so mirrored `.chat` and `.json` snapshots with the same identity remain exact-once on every lane. The cache remains raw so an execution rewrite, failure, or removal can restore a cached snapshot; mtime probing uses each primary globalStorage file, while `modified_after` retains the complete IDE cohort whenever any IDE source passes the threshold so an older authoritative execution cannot be pruned before suppressing a newer snapshot. Kiro CLI sources remain independently prunable and stat failures remain fail-open. M15-A itself added no Linux or Windows globalStorage roots and did not include the structured `sess_*` / `session.json` / `messages.jsonl` cohort; M15-B below adds that cohort as a separate source with distinct identities. Upstream shard-cache, `parser_version`, and CLI-TUI-only changes are also excluded.
 
 ## M20 OpenCode v2 SQLite completion
 
 M20 selectively ports upstream [#920](https://github.com/junhoyeo/tokscale/pull/920) / [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a). OpenCode v2 assistant rows are read from `session_message` only when `type = 'assistant'`; model identity falls back from v1 top-level `modelID` / `providerID` to v2 `model.id` / `model.providerID`, with top-level values retaining precedence. The v1 `message` table and v2 table feed one accumulator: fork copies with the same non-cost payload fingerprint and embedded id collapse, rows with different embedded ids remain distinct even when every fingerprint field collides, and row ids remain the fallback dedup key. Cost is deliberately excluded from that payload fingerprint; when cost-only copies merge, the first provider-reported cost upgrades an estimate without changing logical identity. When an overlapping v1 row has no embedded id, the merged row retains its `message.id` fallback as an alternate source key; if neither copy has an embedded id, the v1 key remains primary and the v2 row key becomes the alias. Provider authority expands across connected primary/alias groups before any streaming emission, while full payload identity still prevents unrelated embedded ids with coincidentally equal tokens from collapsing. TokenBar's shared post-parser identity includes timestamp, duration, model/provider, tokens, and agent, so incompatible SQLite rows that reuse one embedded id remain distinct in materialized, shipping streaming, and count lanes. Legacy JSON authority matches an exact deferred payload through any primary/alias source key before applying source-level suppression and replaces only that one SQLite identity, while cost-only estimated/provider-reported copies retain source precedence. Legacy JSON files still require an explicit `role = "assistant"`; making the SQLite role optional does not broaden file parsing. Workspace attribution, negative-token clamping, provider canonicalization, and provider-reported `CostSource` behavior retain TokenBar's existing hardening.
 
 The scanner already accepts `opencode-next.db` through the existing `opencode-<channel>.db` rule, and all materialized, shipping streaming, count, model, monthly, hourly, and Agents paths already call the shared SQLite parser, so no scanner or registry change is required. Cache schema advances **29→30** for a real non-empty stale case: a hybrid database can have a schema-29 entry containing only its v1 rows, with the same SQLite/WAL-aware fingerprint that the new parser would otherwise reuse without reading v2 rows. A hermetic fixture writes exactly that schema-29 v1-only entry, proves the database fingerprint is unchanged, verifies rejection and rebuild to v1+v2, then confirms warm-cache, streaming, count, and report parity. Pure v2, v1/v2 overlap, same-id forks, distinct-id collisions, role filtering, workspace, and clamping remain covered in parser-local fixtures. The shard-cache architecture and per-client parser versions remain deferred to M26.
+
+## M15-B Kiro structured-session completion
+
+M15-B selectively ports upstream [#836](https://github.com/junhoyeo/tokscale/pull/836) / [`405ded4a`](https://github.com/junhoyeo/tokscale/commit/405ded4a529013ad6bc668ba519bbe9eb68e8ad4), [#847](https://github.com/junhoyeo/tokscale/pull/847) / [`315549b4`](https://github.com/junhoyeo/tokscale/commit/315549b4bbaa53638672ff5977c0d6cb77e43793), and only the Kiro start-anchor hunk of mixed commit [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The scanner discovers only `~/.kiro/sessions/<workspace>/sess_*/session.json` anchors; sibling `messages.jsonl` files are parser dependencies, not independent sessions. Structured `payload.type` records emit one message per completed turn: `contextUsage.usagePercentage` estimates input against a 200,000-token window, assistant text and tool-call arguments estimate output, `usage_summary.elapsedTime` supplies duration, and a missing prompt timestamp back-calculates the start anchor from `turn_end - elapsedTime`. Older flat role/content JSONL remains an aggregated fallback. Session metadata supplies model and workspace when present; only this new IDE source falls back to model `auto`, while existing CLI and SQLite sources retain their schema-30 `unknown` fallback.
+
+The existing `kiro_related_messages_path()` seam now identifies same-stem CLI JSONL or IDE sibling `messages.jsonl`, so one source of truth drives specialized fingerprints, materialized and shipping streaming cache loads, live latest-mtime detection, and sibling-aware fail-open pruning. Hermetic coverage proves absent-then-created and sibling-only rewritten files invalidate the specialized fingerprint without changing the primary fingerprint, warm cache rebuilds from one to two turns, `modified_after` retains a source whose sibling is newer, and materialized, streaming, count, model, monthly, hourly, and Agents results agree. M15-A globalStorage and M15-B structured messages keep distinct dedup identities, so coincident text does not suppress either cohort. This is a new discovery source rather than a changed existing parser output, so `CACHE_SCHEMA_VERSION` remains **30**; shard cache and per-client parser versions remain deferred to M26.
 
 ## Recovered Windows downstream commits
 

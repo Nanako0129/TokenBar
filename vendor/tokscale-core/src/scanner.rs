@@ -254,6 +254,24 @@ fn is_kiro_globalstorage_artifact(root: &Path, path: &Path) -> bool {
     }
 }
 
+// Kiro structured sessions have one exact topology below the sessions root:
+// `<workspace>/sess_<uuid>/session.json`. Reject deeper mirrored trees so an
+// unrelated nested `sess_*` directory cannot become an automatic source.
+fn is_kiro_ide_session_artifact(root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(root) else {
+        return false;
+    };
+    let components: Vec<_> = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect();
+
+    matches!(
+        components.as_slice(),
+        [_, session, file] if session.starts_with("sess_") && file == "session.json"
+    )
+}
+
 /// Scan a single directory for session files
 pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
     let root_path = std::path::Path::new(root);
@@ -324,6 +342,7 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
                 "T-*.json" => file_name.starts_with("T-") && file_name.ends_with(".json"),
                 "*.settings.json" => file_name.ends_with(".settings.json"),
                 "kiro-globalstorage" => is_kiro_globalstorage_artifact(root_path, path),
+                "kiro-ide-session" => is_kiro_ide_session_artifact(root_path, path),
                 "sessions.json" => file_name == "sessions.json",
                 "wire.jsonl" => file_name == "wire.jsonl",
                 // Grok Build ACP session updates under
@@ -876,6 +895,16 @@ fn scan_all_clients_with_env_strategy_inner(
                 "kiro-globalstorage",
             );
         }
+    }
+
+    if enabled.contains(&ClientId::Kiro) {
+        push_unique_scan_task_with_pattern(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Kiro,
+            PathBuf::from(format!("{}/.kiro/sessions", home_dir)),
+            "kiro-ide-session",
+        );
     }
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
@@ -3658,6 +3687,39 @@ mod tests {
                 "workspace-sessions/workspace-a/session.json",
             ]
         );
+    }
+
+    #[test]
+    fn m15b_kiro_ide_scanner_discovers_only_session_anchors() {
+        let home = TempDir::new().unwrap();
+        let sessions_root = home.path().join(".kiro/sessions");
+        let sess_dir = sessions_root.join("workspace-a/sess_02f1c107");
+        fs::create_dir_all(&sess_dir).unwrap();
+        let session = sess_dir.join("session.json");
+        let messages = sess_dir.join("messages.jsonl");
+        File::create(&session).unwrap();
+        File::create(&messages).unwrap();
+
+        let cli_dir = sessions_root.join("cli");
+        fs::create_dir_all(&cli_dir).unwrap();
+        File::create(cli_dir.join("session.json")).unwrap();
+        File::create(sessions_root.join("workspace-a/session.json")).unwrap();
+        let nested_mirror = sessions_root.join("workspace-a/mirror/sess_nested");
+        fs::create_dir_all(&nested_mirror).unwrap();
+        File::create(nested_mirror.join("session.json")).unwrap();
+
+        assert_eq!(
+            scan_directory(sessions_root.to_str().unwrap(), "kiro-ide-session"),
+            vec![session.clone()]
+        );
+
+        let result = scan_all_clients_with_env_strategy(
+            home.path().to_str().unwrap(),
+            &["kiro".to_string()],
+            false,
+        );
+        assert!(result.get(ClientId::Kiro).contains(&session));
+        assert!(!result.get(ClientId::Kiro).contains(&messages));
     }
 
     #[cfg(target_os = "macos")]

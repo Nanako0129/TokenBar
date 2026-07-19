@@ -261,8 +261,8 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
-    /// Fingerprint a Kiro CLI session header together with its same-stem
-    /// message sidecar.
+    /// Fingerprint a Kiro file source together with the message sidecar it reads:
+    /// same-stem JSONL for CLI sessions, sibling `messages.jsonl` for IDE sessions.
     pub(crate) fn from_kiro_path(path: &Path) -> Option<Self> {
         let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
             return Self::from_path(path);
@@ -1229,6 +1229,38 @@ mod tests {
         let rewritten = SourceFingerprint::from_kiro_path(&session).unwrap();
         assert_ne!(after, rewritten);
         assert_eq!(plain_after, SourceFingerprint::from_path(&session).unwrap());
+    }
+
+    #[test]
+    fn m15b_kiro_ide_fingerprint_tracks_messages_sidecar() {
+        let dir = TempDir::new().unwrap();
+        let sess_dir = dir.path().join("workspace-a/sess_02f1c107");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let session = sess_dir.join("session.json");
+        std::fs::write(&session, br#"{"schemaVersion":"1.0.0"}"#).unwrap();
+
+        let before = SourceFingerprint::from_kiro_path(&session).unwrap();
+        let plain_before = SourceFingerprint::from_path(&session).unwrap();
+        let messages = crate::sessions::kiro::kiro_related_messages_path(&session).unwrap();
+        assert_eq!(messages, sess_dir.join("messages.jsonl"));
+        assert!(before.related_files.is_empty());
+
+        std::fs::write(&messages, b"first turn\n").unwrap();
+        let after = SourceFingerprint::from_kiro_path(&session).unwrap();
+        assert_ne!(before, after);
+        assert_eq!(
+            plain_before,
+            SourceFingerprint::from_path(&session).unwrap()
+        );
+        assert_eq!(after.related_files[0].suffix, "messages.jsonl");
+
+        std::fs::write(&messages, b"first turn\nsecond turn\n").unwrap();
+        let rewritten = SourceFingerprint::from_kiro_path(&session).unwrap();
+        assert_ne!(after, rewritten);
+        assert_eq!(
+            plain_before,
+            SourceFingerprint::from_path(&session).unwrap()
+        );
     }
 
     #[test]
