@@ -1967,6 +1967,15 @@ struct ZcodeMessageIdentity {
     reasoning: i64,
 }
 
+impl ZcodeMessageIdentity {
+    fn completed(message: &UnifiedMessage) -> Option<Self> {
+        let duration = message.duration_ms.filter(|duration| *duration > 0)?;
+        let mut completed = Self::from(message);
+        completed.timestamp = completed.timestamp.checked_add(duration)?;
+        Some(completed)
+    }
+}
+
 impl From<&UnifiedMessage> for ZcodeMessageIdentity {
     fn from(message: &UnifiedMessage) -> Self {
         Self {
@@ -1983,6 +1992,69 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
     }
 }
 
+fn augment_zcode_matching(
+    root_legacy: usize,
+    legacy_identities: &[ZcodeMessageIdentity],
+    sqlite_starts: &HashMap<ZcodeMessageIdentity, Vec<usize>>,
+    sqlite_completions: &HashMap<ZcodeMessageIdentity, Vec<usize>>,
+    sqlite_matches: &mut [Option<usize>],
+) -> bool {
+    let identity = &legacy_identities[root_legacy];
+    for candidates in [sqlite_starts.get(identity), sqlite_completions.get(identity)] {
+        if let Some(sqlite_index) = candidates
+            .into_iter()
+            .flatten()
+            .copied()
+            .find(|index| sqlite_matches[*index].is_none())
+        {
+            sqlite_matches[sqlite_index] = Some(root_legacy);
+            return true;
+        }
+    }
+
+    let mut queue = VecDeque::from([root_legacy]);
+    let mut visited_legacy = vec![false; legacy_identities.len()];
+    let mut visited_sqlite = vec![false; sqlite_matches.len()];
+    let mut prior_sqlite = vec![None; legacy_identities.len()];
+    let mut prior_legacy = vec![None; sqlite_matches.len()];
+    visited_legacy[root_legacy] = true;
+
+    while let Some(legacy_index) = queue.pop_front() {
+        let identity = &legacy_identities[legacy_index];
+        for candidates in [sqlite_starts.get(identity), sqlite_completions.get(identity)] {
+            let Some(candidates) = candidates else {
+                continue;
+            };
+            for &sqlite_index in candidates {
+                if visited_sqlite[sqlite_index] {
+                    continue;
+                }
+                visited_sqlite[sqlite_index] = true;
+                prior_legacy[sqlite_index] = Some(legacy_index);
+
+                let Some(displaced_legacy) = sqlite_matches[sqlite_index] else {
+                    let mut current_sqlite = sqlite_index;
+                    loop {
+                        let current_legacy = prior_legacy[current_sqlite].unwrap();
+                        sqlite_matches[current_sqlite] = Some(current_legacy);
+                        let Some(previous_sqlite) = prior_sqlite[current_legacy] else {
+                            return true;
+                        };
+                        current_sqlite = previous_sqlite;
+                    }
+                };
+
+                if !visited_legacy[displaced_legacy] {
+                    visited_legacy[displaced_legacy] = true;
+                    prior_sqlite[displaced_legacy] = Some(sqlite_index);
+                    queue.push_back(displaced_legacy);
+                }
+            }
+        }
+    }
+    false
+}
+
 fn select_zcode_messages(
     sqlite_messages: Vec<UnifiedMessage>,
     legacy_messages: Vec<UnifiedMessage>,
@@ -1990,8 +2062,8 @@ fn select_zcode_messages(
     let mut selected = Vec::with_capacity(sqlite_messages.len() + legacy_messages.len());
     let mut seen_sqlite_keys = HashSet::new();
     let mut seen_legacy_keys = HashSet::new();
-    let mut unmatched_sqlite_payloads: HashMap<ZcodeMessageIdentity, VecDeque<usize>> =
-        HashMap::new();
+    let mut sqlite_starts: HashMap<ZcodeMessageIdentity, Vec<usize>> = HashMap::new();
+    let mut sqlite_completions: HashMap<ZcodeMessageIdentity, Vec<usize>> = HashMap::new();
 
     for message in sqlite_messages {
         if let Some(key) = message.dedup_key.as_deref().filter(|key| !key.is_empty()) {
@@ -2000,32 +2072,62 @@ fn select_zcode_messages(
             }
         }
         let index = selected.len();
-        unmatched_sqlite_payloads
+        sqlite_starts
             .entry(ZcodeMessageIdentity::from(&message))
             .or_default()
-            .push_back(index);
+            .push(index);
+        if let Some(identity) = ZcodeMessageIdentity::completed(&message) {
+            sqlite_completions.entry(identity).or_default().push(index);
+        }
         selected.push(message);
     }
 
-    for legacy in legacy_messages {
-        if let Some(key) = legacy.dedup_key.as_deref().filter(|key| !key.is_empty()) {
-            if !dedup_gate_passes(key, &mut seen_legacy_keys) {
-                continue;
-            }
+    let legacy_messages: Vec<_> = legacy_messages
+        .into_iter()
+        .filter(|legacy| {
+            legacy
+                .dedup_key
+                .as_deref()
+                .filter(|key| !key.is_empty())
+                .is_none_or(|key| dedup_gate_passes(key, &mut seen_legacy_keys))
+        })
+        .collect();
+    let legacy_identities: Vec<_> = legacy_messages
+        .iter()
+        .map(ZcodeMessageIdentity::from)
+        .collect();
+    // Match exact starts before completion-only fallbacks. Augmenting paths may
+    // still move an exact match when that is required to increase cardinality.
+    let mut legacy_order: Vec<_> = (0..legacy_messages.len()).collect();
+    legacy_order.sort_by_key(|index| !sqlite_starts.contains_key(&legacy_identities[*index]));
+
+    let mut sqlite_matches = vec![None; selected.len()];
+    for legacy_index in legacy_order {
+        augment_zcode_matching(
+            legacy_index,
+            &legacy_identities,
+            &sqlite_starts,
+            &sqlite_completions,
+            &mut sqlite_matches,
+        );
+    }
+    let mut legacy_matches = vec![None; legacy_messages.len()];
+    for (sqlite_index, legacy_index) in sqlite_matches.into_iter().enumerate() {
+        if let Some(legacy_index) = legacy_index {
+            legacy_matches[legacy_index] = Some(sqlite_index);
         }
-        let identity = ZcodeMessageIdentity::from(&legacy);
-        let sqlite_index = unmatched_sqlite_payloads
-            .get_mut(&identity)
-            .and_then(VecDeque::pop_front);
-        let Some(sqlite_index) = sqlite_index else {
+    }
+
+    for (legacy_index, legacy) in legacy_messages.into_iter().enumerate() {
+        let Some(sqlite_index) = legacy_matches[legacy_index] else {
             selected.push(legacy);
             continue;
         };
-
         let sqlite = &mut selected[sqlite_index];
         if sqlite.workspace_key.is_none() && legacy.workspace_key.is_some() {
             sqlite.set_workspace(legacy.workspace_key, legacy.workspace_label);
         }
+        sqlite.is_turn_start |= legacy.is_turn_start;
     }
 
     selected
@@ -5172,6 +5274,93 @@ mod tests {
     }
 
     #[test]
+    fn test_zcode_cross_store_dedup_finds_non_greedy_one_to_one_assignment() {
+        let started_at = 1_771_000_000_000;
+        let mut sqlite_a = make_zcode_dedup_message("zcode-sqlite:a");
+        sqlite_a.timestamp = started_at;
+        sqlite_a.duration_ms = Some(5_000);
+        let mut sqlite_b = make_zcode_dedup_message("zcode-sqlite:b");
+        sqlite_b.timestamp = started_at + 5_000;
+
+        let mut legacy_completion = make_zcode_dedup_message("legacy:completion");
+        legacy_completion.timestamp = started_at + 5_000;
+        let mut legacy_start = make_zcode_dedup_message("legacy:start");
+        legacy_start.timestamp = started_at;
+
+        let selected = select_zcode_messages(
+            vec![sqlite_a, sqlite_b],
+            vec![legacy_completion, legacy_start],
+        );
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected
+                .iter()
+                .map(|message| message.dedup_key.as_deref())
+                .collect::<Vec<_>>(),
+            vec![Some("zcode-sqlite:a"), Some("zcode-sqlite:b")]
+        );
+    }
+
+    #[test]
+    fn test_zcode_cross_store_dedup_prefers_exact_start_when_cardinality_ties() {
+        let started_at = 1_771_000_000_000;
+        let mut sqlite = make_zcode_dedup_message("zcode-sqlite:exact");
+        sqlite.timestamp = started_at;
+        sqlite.duration_ms = Some(5_000);
+
+        let mut legacy_completion = make_zcode_dedup_message("legacy:completion-only");
+        legacy_completion.timestamp = started_at + 5_000;
+        let mut legacy_start = make_zcode_dedup_message("legacy:exact-start");
+        legacy_start.timestamp = started_at;
+        legacy_start.is_turn_start = true;
+
+        let selected =
+            select_zcode_messages(vec![sqlite], vec![legacy_completion, legacy_start]);
+
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected[0].dedup_key.as_deref(),
+            Some("zcode-sqlite:exact")
+        );
+        assert!(selected[0].is_turn_start);
+        assert_eq!(
+            selected[1].dedup_key.as_deref(),
+            Some("legacy:completion-only")
+        );
+    }
+
+    #[test]
+    fn test_zcode_cross_store_dedup_handles_deep_augmenting_path_iteratively() {
+        const COUNT: usize = 15_000;
+        let started_at = 1_771_000_000_000;
+        let sqlite_messages = (0..COUNT)
+            .map(|index| {
+                let mut message =
+                    make_zcode_dedup_message(&format!("zcode-sqlite:{index}"));
+                message.timestamp = started_at + index as i64;
+                message.duration_ms = Some(1);
+                message
+            })
+            .collect();
+        let legacy_messages = (0..=COUNT)
+            .map(|index| {
+                let mut message = make_zcode_dedup_message(&format!("legacy:{index}"));
+                message.timestamp = started_at + index as i64;
+                message
+            })
+            .collect();
+
+        let selected = select_zcode_messages(sqlite_messages, legacy_messages);
+
+        assert_eq!(selected.len(), COUNT + 1);
+        assert_eq!(
+            selected.last().unwrap().dedup_key.as_deref(),
+            Some("legacy:15000")
+        );
+    }
+
+    #[test]
     fn test_zcode_cross_store_dedup_carries_legacy_workspace_to_sqlite() {
         let sqlite = make_zcode_dedup_message("zcode-sqlite:workspace");
         let mut legacy = make_zcode_dedup_message("legacy:workspace");
@@ -5179,6 +5368,7 @@ mod tests {
             Some("/Users/alice/work/project".to_string()),
             Some("project".to_string()),
         );
+        legacy.is_turn_start = true;
 
         let selected = select_zcode_messages(vec![sqlite], vec![legacy]);
 
@@ -5192,6 +5382,7 @@ mod tests {
             Some("/Users/alice/work/project")
         );
         assert_eq!(selected[0].workspace_label.as_deref(), Some("project"));
+        assert!(selected[0].is_turn_start);
     }
 
     fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
@@ -11207,13 +11398,13 @@ mod tests {
                 serde_json::json!({
                     "role": "user",
                     "sessionId": "shared",
-                    "timestamp": "2026-02-13T12:00:00Z",
+                    "timestamp": "2026-02-13T11:59:59Z",
                     "content": "same-store duplicate prompt"
                 }),
                 serde_json::json!({
                     "role": "assistant",
                     "sessionId": "shared",
-                    "timestamp": "2026-02-13T12:00:05Z",
+                    "timestamp": "2026-02-13T12:00:00Z",
                     "model": "GLM-5.2",
                     "content": "same-store duplicate answer",
                     "usage": {
@@ -11307,8 +11498,8 @@ mod tests {
                 "db-shared",
                 "shared",
                 "GLM-5.2",
+                shared_timestamp - 5_000,
                 shared_timestamp,
-                shared_timestamp + 5_000,
                 5_000_i64,
                 100_i64,
                 20_i64,
@@ -11317,6 +11508,29 @@ mod tests {
                 5_i64,
                 120_i64,
                 "zcode-agent",
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, started_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens,
+                computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            rusqlite::params![
+                "db-shared-exact",
+                "shared",
+                "GLM-5.2",
+                shared_timestamp,
+                100_i64,
+                20_i64,
+                3_i64,
+                10_i64,
+                5_i64,
+                120_i64,
             ],
         )
         .unwrap();
@@ -11426,15 +11640,22 @@ mod tests {
                     && message.timestamp == shared_timestamp)
                 .map(|message| message.dedup_key.as_deref())
                 .collect::<Vec<_>>(),
-            vec![Some("shared:1"), Some("zcode-sqlite:db-shared")],
-            "SQLite must replace one cross-store match without dropping a second legacy source key"
+            vec![Some("zcode-sqlite:db-shared-exact")],
+            "exact-start authority must win while completion matching remaps the other legacy row"
         );
-        let selected_db = cold_materialized
-            .iter()
-            .find(|message| message.dedup_key.as_deref() == Some("zcode-sqlite:db-shared"))
-            .unwrap();
-        assert_eq!(selected_db.workspace_key.as_deref(), Some("demo"));
-        assert_eq!(selected_db.workspace_label.as_deref(), Some("demo"));
+        for (key, timestamp) in [
+            ("zcode-sqlite:db-shared", shared_timestamp - 5_000),
+            ("zcode-sqlite:db-shared-exact", shared_timestamp),
+        ] {
+            let selected_db = cold_materialized
+                .iter()
+                .find(|message| message.dedup_key.as_deref() == Some(key))
+                .unwrap();
+            assert_eq!(selected_db.timestamp, timestamp);
+            assert_eq!(selected_db.workspace_key.as_deref(), Some("demo"));
+            assert_eq!(selected_db.workspace_label.as_deref(), Some("demo"));
+            assert!(selected_db.is_turn_start);
+        }
         let modern_null = cold_materialized
             .iter()
             .find(|message| message.session_id == "v2-only")
@@ -11459,8 +11680,8 @@ mod tests {
         );
 
         std::fs::remove_file(&legacy).unwrap();
-        assert_eq!(run_materialized().len(), 2);
-        assert_eq!(run_streaming().len(), 2);
+        assert_eq!(run_materialized().len(), 3);
+        assert_eq!(run_streaming().len(), 3);
         std::thread::sleep(std::time::Duration::from_millis(20));
         write_legacy(30);
 
@@ -11534,6 +11755,14 @@ mod tests {
                     .map(|entry| entry.message_count)
                     .sum::<i32>(),
                 4
+            );
+            assert_eq!(
+                hourly
+                    .entries
+                    .iter()
+                    .map(|entry| entry.turn_count)
+                    .sum::<i32>(),
+                3
             );
             assert_eq!(agents.total_messages, 4);
             assert_eq!(
