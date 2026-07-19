@@ -179,12 +179,12 @@ pub fn parse_gjc_file(path: &Path) -> Vec<UnifiedMessage> {
             None => continue,
         };
 
-        // A missing provider field is recoverable: infer it from the model name
-        // (and fall back to "gjc") rather than dropping a message that carries
-        // valid tokens.
+        // A missing/blank provider field is recoverable: infer it from the
+        // model name (and fall back to "gjc") rather than dropping a message
+        // that carries valid tokens.
         let provider = match message.provider {
-            Some(p) => p,
-            None => inferred_provider_from_model(&model)
+            Some(p) if !p.is_empty() => p,
+            _ => inferred_provider_from_model(&model)
                 .unwrap_or("gjc")
                 .to_string(),
         };
@@ -561,6 +561,19 @@ not valid json at all
             parse_gjc_file(file.path()).is_empty(),
             "missing usage should be skipped"
         );
+    }
+
+    #[test]
+    fn test_parse_gjc_infers_provider_from_model_when_blank() {
+        // A blank provider must follow the same inference path as an absent
+        // provider, rather than leaking an empty provider identity downstream.
+        let content = r#"{"type":"session","id":"gjc_ses_blank_provider","cwd":"/tmp"}
+{"type":"message","id":"msg_blank_provider","message":{"role":"assistant","model":"gpt-5","provider":"","timestamp":1700000001000,"usage":{"input":10,"output":5,"cost":{"total":0.02}}}}"#;
+        let file = create_test_file(content);
+        let messages = parse_gjc_file(file.path());
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].provider_id, "openai");
     }
 
     /// (e) Negative token values are clamped to >= 0.

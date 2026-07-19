@@ -2843,6 +2843,53 @@ mod tests {
         );
     }
 
+    #[test]
+    fn antigravity_model_aliases_reach_priced_catalog_entries() {
+        let priced = [
+            "gemini-3.1-pro",
+            "gemini-3-flash-preview",
+            "gemini-3.5-flash-high",
+            "gemini-3.5-flash-extra-low",
+            "gemini-3.5-flash-medium",
+        ];
+        let mut litellm = HashMap::new();
+        for model in priced {
+            litellm.insert(
+                model.to_string(),
+                ModelPricing {
+                    input_cost_per_token: Some(0.000002),
+                    output_cost_per_token: Some(0.000012),
+                    cache_read_input_token_cost: Some(0.0000002),
+                    ..Default::default()
+                },
+            );
+        }
+        let lookup = PricingLookup::new(litellm, HashMap::new(), HashMap::new());
+
+        let cases = [
+            ("MODEL_PLACEHOLDER_M16", "gemini-3.1-pro"),
+            ("MODEL_PLACEHOLDER_M84", "gemini-3-flash-preview"),
+            ("MODEL_PLACEHOLDER_M133", "gemini-3.5-flash-high"),
+            ("gemini-3-flash-agent", "gemini-3.5-flash-high"),
+            ("gemini-3-flash-b", "gemini-3.5-flash-high"),
+            ("gemini-3-flash-a", "gemini-3.5-flash-high"),
+            ("MODEL_PLACEHOLDER_M187", "gemini-3.5-flash-extra-low"),
+            ("MODEL_PLACEHOLDER_M20", "gemini-3.5-flash-medium"),
+        ];
+
+        for (raw, expected_key) in cases {
+            let result = lookup
+                .lookup(raw)
+                .unwrap_or_else(|| panic!("unpriced alias: {raw}"));
+            assert_eq!(result.matched_key, expected_key, "raw model: {raw}");
+            assert!(result.pricing.input_cost_per_token.is_some());
+        }
+
+        assert!(
+            lookup.calculate_cost("gemini-3-flash-agent", 1_000_000, 100_000, 50_000, 0, 0) > 0.0
+        );
+    }
+
     // =========================================================================
     // BASELINE / LEGACY TESTS
     // =========================================================================
