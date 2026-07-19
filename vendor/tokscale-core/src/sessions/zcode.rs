@@ -13,7 +13,9 @@
 //! counts are used. When absent, tokens are estimated at ~4 chars/token,
 //! consistent with tokscale's other estimated sources (see CommandCode, Kiro).
 
-use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
+use super::utils::{
+    back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite, parse_timestamp_value,
+};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
 use crate::TokenBreakdown;
@@ -38,7 +40,7 @@ struct ZcodeEntry {
     #[serde(flatten)]
     direct_usage: ZcodeUsage,
     model: Option<String>,
-    timestamp: Option<String>,
+    timestamp: Option<serde_json::Value>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
     message: Option<serde_json::Value>,
@@ -53,7 +55,7 @@ struct ZcodeMessagePayload {
     #[serde(flatten)]
     direct_usage: ZcodeUsage,
     model: Option<String>,
-    timestamp: Option<String>,
+    timestamp: Option<serde_json::Value>,
     #[serde(rename = "sessionId")]
     session_id: Option<String>,
 }
@@ -348,13 +350,13 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                 let dedup_scope = session_id.as_deref().unwrap_or(&fallback_dedup_scope);
                 let timestamp = entry
                     .timestamp
-                    .as_deref()
+                    .as_ref()
                     .or_else(|| {
                         nested
                             .as_ref()
-                            .and_then(|message| message.timestamp.as_deref())
+                            .and_then(|message| message.timestamp.as_ref())
                     })
-                    .and_then(parse_rfc3339_ms)
+                    .and_then(parse_timestamp_value)
                     .unwrap_or(fallback_timestamp);
 
                 let provider_id = provider_for_model(&resolved_model);
@@ -494,6 +496,17 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // discard a duration or workspace column that is still available.
     let turn_id = optional_sql_column(&model_columns, "turn_id", "NULLIF(mu.turn_id, '')");
     let duration = optional_sql_column(&model_columns, "duration_ms", "mu.duration_ms");
+    let reasoning = optional_sql_column(&model_columns, "reasoning_tokens", "mu.reasoning_tokens");
+    let cache_read = optional_sql_column(
+        &model_columns,
+        "cache_read_input_tokens",
+        "mu.cache_read_input_tokens",
+    );
+    let cache_write = optional_sql_column(
+        &model_columns,
+        "cache_creation_input_tokens",
+        "mu.cache_creation_input_tokens",
+    );
     let computed_total = optional_sql_column(
         &model_columns,
         "computed_total_tokens",
@@ -529,9 +542,9 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             {duration},
             mu.input_tokens,
             mu.output_tokens,
-            mu.reasoning_tokens,
-            mu.cache_read_input_tokens,
-            mu.cache_creation_input_tokens,
+            {reasoning},
+            {cache_read},
+            {cache_write},
             {computed_total},
             {agent},
             {mode},
@@ -541,9 +554,9 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         {session_join}
         WHERE COALESCE(mu.input_tokens, 0) > 0
             OR COALESCE(mu.output_tokens, 0) > 0
-            OR COALESCE(mu.reasoning_tokens, 0) > 0
-            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
-            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
+            OR COALESCE({reasoning}, 0) > 0
+            OR COALESCE({cache_read}, 0) > 0
+            OR COALESCE({cache_write}, 0) > 0
         ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
         "#
     );
@@ -821,12 +834,6 @@ fn estimate_tokens(chars: usize) -> i64 {
     i64::try_from(chars.div_ceil(4)).unwrap_or(i64::MAX)
 }
 
-fn parse_rfc3339_ms(timestamp: &str) -> Option<i64> {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .ok()
-        .map(|dt| dt.timestamp_millis())
-}
-
 fn session_id_from_path(path: &Path) -> String {
     path.file_stem()
         .and_then(|stem| stem.to_str())
@@ -938,6 +945,50 @@ mod tests {
         assert_eq!(msg.tokens.output, 50);
         assert_eq!(msg.tokens.cache_read, 20);
         assert!(msg.is_turn_start);
+    }
+
+    #[test]
+    fn test_parse_accepts_json_numeric_and_tolerant_string_timestamps() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = [
+            json!({
+                "role": "assistant",
+                "sessionId": "timestamps",
+                "timestamp": 1_700_000_000_i64,
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+            json!({
+                "message": {
+                    "role": "assistant",
+                    "sessionId": "timestamps",
+                    "timestamp": "1700000001",
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                }
+            }),
+            json!({
+                "role": "assistant",
+                "sessionId": "timestamps",
+                "timestamp": "2026-06-16T12:00:00",
+                "usage": {"input_tokens": 1, "output_tokens": 1}
+            }),
+        ]
+        .into_iter()
+        .map(|value| value.to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+        let path = write_session(&dir, "proj", "timestamps", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0].timestamp, 1_700_000_000_000);
+        assert_eq!(messages[1].timestamp, 1_700_000_001_000);
+        assert_eq!(
+            messages[2].timestamp,
+            chrono::DateTime::parse_from_rfc3339("2026-06-16T12:00:00Z")
+                .unwrap()
+                .timestamp_millis()
+        );
     }
 
     #[test]
@@ -1885,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn test_parse_zcode_sqlite_modern_schema_without_session_or_turn_preserves_usage() {
+    fn test_parse_zcode_sqlite_modern_schema_without_optional_columns_preserves_core_usage() {
         let dir = TempDir::new().unwrap();
         let db_path = dir.path().join("db.sqlite");
         let conn = Connection::open(&db_path).unwrap();
@@ -1899,9 +1950,6 @@ mod tests {
                 completed_at INTEGER,
                 input_tokens INTEGER,
                 output_tokens INTEGER,
-                reasoning_tokens INTEGER,
-                cache_read_input_tokens INTEGER,
-                cache_creation_input_tokens INTEGER,
                 computed_total_tokens INTEGER
             );
             "#,
@@ -1911,9 +1959,8 @@ mod tests {
             r#"
             INSERT INTO model_usage (
                 id, session_id, model_id, started_at, completed_at,
-                input_tokens, output_tokens, reasoning_tokens,
-                cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                input_tokens, output_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
             "#,
             params![
                 "usage_modern_no_session",
@@ -1923,9 +1970,6 @@ mod tests {
                 6_000_i64,
                 100_i64,
                 50_i64,
-                10_i64,
-                80_i64,
-                5_i64,
                 150_i64,
             ],
         )
@@ -1935,11 +1979,11 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         let msg = &messages[0];
-        assert_eq!(msg.tokens.input, 15);
-        assert_eq!(msg.tokens.output, 40);
-        assert_eq!(msg.tokens.cache_read, 80);
-        assert_eq!(msg.tokens.cache_write, 5);
-        assert_eq!(msg.tokens.reasoning, 10);
+        assert_eq!(msg.tokens.input, 100);
+        assert_eq!(msg.tokens.output, 50);
+        assert_eq!(msg.tokens.cache_read, 0);
+        assert_eq!(msg.tokens.cache_write, 0);
+        assert_eq!(msg.tokens.reasoning, 0);
         assert_eq!(msg.tokens.total(), 150);
         assert_eq!(msg.timestamp, 1_000);
         assert_eq!(msg.duration_ms, Some(5_000));
