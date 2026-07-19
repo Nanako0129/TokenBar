@@ -336,8 +336,9 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
             .and_then(parse_timestamp_value)
             .unwrap_or(fallback_timestamp);
         let reasoning = reasoning_tokens.min(completion_tokens);
-        let dedup_key =
-            format!("{UNIFIED_LOG_DEDUP_PREFIX}{session_id}:{timestamp}:{pid}:{loop_index}");
+        let dedup_key = format!(
+            "{UNIFIED_LOG_DEDUP_PREFIX}{session_id}:{timestamp}:{pid}:{loop_index}:{prompt_tokens}:{cached_prompt_tokens}:{completion_tokens}:{reasoning_tokens}"
+        );
         if !seen.insert(dedup_key.clone()) {
             continue;
         }
@@ -854,6 +855,27 @@ mod tests {
         assert_eq!(messages[1].tokens.output, 12);
         assert_eq!(messages[1].message_count, 0);
         assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn unified_log_keeps_distinct_inferences_that_share_base_identity() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":120,"cached_prompt_tokens":70,"completion_tokens":30,"reasoning_tokens":6}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
+        assert_eq!(
+            messages
+                .iter()
+                .map(|message| message.tokens.total())
+                .sum::<i64>(),
+            275
+        );
     }
 
     #[test]

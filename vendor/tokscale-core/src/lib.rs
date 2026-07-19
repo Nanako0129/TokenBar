@@ -2894,6 +2894,7 @@ where
             .collect::<Vec<_>>();
         let mut seen_keys: HashSet<String> = HashSet::new();
         for mut message in sessions::grok::prefer_unified_log_messages(raw_messages) {
+            message.refresh_derived_fields();
             reprice_lane_message(&mut message, pricing, false);
             if !passes_client(&message) {
                 continue;
@@ -11733,6 +11734,56 @@ mod tests {
     #[serial_test::serial]
     fn test_latest_source_mtime_ms_probes_grok_events() {
         latest_source_mtime_ms_probes_grok_sibling("events.jsonl");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grok_streaming_cache_hits_refresh_derived_date_before_filtering() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let logs_dir = source_home.path().join(".grok/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let unified = logs_dir.join("unified.jsonl");
+        std::fs::write(
+            &unified,
+            "{\"ts\":\"2023-11-14T22:13:20Z\",\"pid\":7,\"sid\":\"cached\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"loop_index\":1,\"prompt_tokens\":10,\"completion_tokens\":2}}\n",
+        )
+        .unwrap();
+
+        let mut cached_messages = sessions::grok::parse_grok_unified_log_file(&unified);
+        assert_eq!(cached_messages.len(), 1);
+        let expected_date = cached_messages[0].date.clone();
+        cached_messages[0].date = "stale-cached-date".to_string();
+        let fingerprint = message_cache::SourceFingerprint::from_grok_path(&unified).unwrap();
+        let mut cache = message_cache::SourceMessageCache::load();
+        cache.insert(message_cache::CachedSourceEntry::new(
+            &unified,
+            fingerprint,
+            cached_messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        let clients = vec!["grok".to_string()];
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|message| message.date == expected_date,
+            &mut |message| streamed.push(message.clone()),
+        );
+
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].date, expected_date);
     }
 
     #[test]
