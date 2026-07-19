@@ -15,6 +15,7 @@
 
 use super::utils::{back_anchor_timestamp, file_modified_timestamp_ms, open_readonly_sqlite};
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
+use crate::provider_identity::{canonical_provider, inferred_provider_from_model};
 use crate::TokenBreakdown;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
@@ -32,10 +33,8 @@ struct ZcodeEntry {
     #[serde(rename = "type")]
     entry_type: Option<String>,
     content: Option<serde_json::Value>,
-    #[serde(default)]
-    usage: Option<ZcodeUsage>,
-    #[serde(default)]
-    token_usage: Option<ZcodeUsage>,
+    usage: Option<serde_json::Value>,
+    token_usage: Option<serde_json::Value>,
     #[serde(flatten)]
     direct_usage: ZcodeUsage,
     model: Option<String>,
@@ -85,12 +84,19 @@ impl<'de> Deserialize<'de> for ZcodeUsage {
         };
 
         Ok(Self {
-            input: first(&["input", "input_tokens", "prompt_tokens", "inputTokens"]),
+            input: first(&[
+                "input",
+                "input_tokens",
+                "prompt_tokens",
+                "inputTokens",
+                "promptTokens",
+            ]),
             output: first(&[
                 "output",
                 "output_tokens",
                 "completion_tokens",
                 "outputTokens",
+                "completionTokens",
             ]),
             cache_read: first(&[
                 "cache_read",
@@ -290,16 +296,8 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
         // Prefer authoritative token usage from the API. Choose the first block
         // that actually yields a breakdown, so an empty nested block does not
         // shadow a populated sibling or documented top-level token fields.
-        let breakdown_from_usage = entry
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.to_breakdown())
-            .or_else(|| {
-                entry
-                    .token_usage
-                    .as_ref()
-                    .and_then(|usage| usage.to_breakdown())
-            })
+        let breakdown_from_usage = breakdown_from_usage_value(entry.usage.as_ref())
+            .or_else(|| breakdown_from_usage_value(entry.token_usage.as_ref()))
             .or_else(|| entry.direct_usage.to_breakdown())
             .or_else(|| {
                 breakdown_from_usage_value(
@@ -359,10 +357,11 @@ pub fn parse_zcode_file(path: &Path) -> Vec<UnifiedMessage> {
                     .and_then(parse_rfc3339_ms)
                     .unwrap_or(fallback_timestamp);
 
+                let provider_id = provider_for_model(&resolved_model);
                 let mut message = UnifiedMessage::new_with_dedup(
                     CLIENT_ID,
                     resolved_model,
-                    PROVIDER_ID,
+                    provider_id,
                     resolved_session.clone(),
                     timestamp,
                     breakdown,
@@ -660,10 +659,11 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             .as_deref()
             .or(row.mode.as_deref())
             .map(str::to_string);
+        let provider_id = provider_for_model(&model_id);
         let mut message = UnifiedMessage::new_with_agent(
             CLIENT_ID,
             model_id,
-            PROVIDER_ID,
+            provider_id,
             session_id,
             timestamp,
             tokens,
@@ -783,6 +783,24 @@ struct ZcodeUsageRow {
 /// canonical form for pricing lookup.
 fn canonicalize_model(model: &str) -> String {
     model.to_lowercase()
+}
+
+fn provider_for_model(model: &str) -> String {
+    let scoped_provider = model.split_once('/').and_then(|(provider, _)| {
+        let provider = provider.trim();
+        if provider.is_empty()
+            || provider.eq_ignore_ascii_case("unknown")
+            || (provider.starts_with('<') && provider.ends_with('>'))
+        {
+            return None;
+        }
+
+        canonical_provider(provider).or_else(|| Some(provider.to_lowercase().replace('-', "_")))
+    });
+
+    scoped_provider
+        .or_else(|| inferred_provider_from_model(model).map(str::to_string))
+        .unwrap_or_else(|| PROVIDER_ID.to_string())
 }
 
 /// Char count of a message's `content` for token estimation.
@@ -955,6 +973,81 @@ mod tests {
     }
 
     #[test]
+    fn test_scoped_third_party_models_infer_provider_across_sources() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "third-party", "content": "hello"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "third-party",
+                "model": "anthropic/claude-sonnet-4-5",
+                "content": "reply",
+                "usage": {"input_tokens": 100, "output_tokens": 50}
+            }),
+        );
+        let path = write_session(&dir, "project", "third-party", &jsonl);
+        let mut legacy = parse_zcode_file(&path).pop().unwrap();
+        let pricing = crate::pricing::PricingService::new(
+            HashMap::from([(
+                "anthropic/claude-sonnet-4-5".into(),
+                crate::pricing::ModelPricing {
+                    input_cost_per_token: Some(0.001),
+                    output_cost_per_token: Some(0.002),
+                    ..Default::default()
+                },
+            )]),
+            HashMap::new(),
+        );
+
+        crate::apply_pricing_if_available(&mut legacy, Some(&pricing));
+
+        assert_eq!(legacy.provider_id, "anthropic");
+        assert!((legacy.cost - 0.2).abs() < f64::EPSILON);
+
+        let custom_path = write_session(
+            &dir,
+            "project",
+            "custom-provider",
+            &json!({
+                "role": "assistant",
+                "sessionId": "custom-provider",
+                "model": "acme2/my-model",
+                "usage": {"input_tokens": 10, "output_tokens": 1}
+            })
+            .to_string(),
+        );
+        let custom = parse_zcode_file(&custom_path).pop().unwrap();
+        assert_eq!(custom.provider_id, "acme2");
+
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at,
+                input_tokens, output_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "#,
+            params![
+                "third-party-db",
+                "third-party-db",
+                "openai/gpt-5",
+                1_000_i64,
+                10_i64,
+                1_i64,
+                11_i64,
+            ],
+        )
+        .unwrap();
+
+        let sqlite = parse_zcode_sqlite(&db_path).pop().unwrap();
+
+        assert_eq!(sqlite.model_id, "openai/gpt-5");
+        assert_eq!(sqlite.provider_id, "openai");
+    }
+
+    #[test]
     fn test_parse_with_estimated_tokens() {
         let dir = TempDir::new().unwrap();
         let user_content = json!([{"type": "text", "text": "12345678"}]);
@@ -1019,6 +1112,40 @@ mod tests {
         assert_eq!(message.tokens.cache_read, 20);
         assert_eq!(message.tokens.total(), 150);
         assert!(message.is_turn_start);
+    }
+
+    #[test]
+    fn test_malformed_top_level_usage_preserves_direct_and_estimated_tokens() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}\n{}\n{}",
+            json!({"role": "user", "sessionId": "top-malformed", "content": "hello"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "top-malformed",
+                "content": "direct",
+                "usage": "malformed",
+                "input_tokens": 123,
+                "output_tokens": 33
+            }),
+            json!({"role": "user", "sessionId": "top-malformed", "content": "next"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "top-malformed",
+                "content": "estimated",
+                "token_usage": ["malformed"]
+            }),
+        );
+        let path = write_session(&dir, "top", "top-malformed", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].tokens.input, 123);
+        assert_eq!(messages[0].tokens.output, 33);
+        assert!(messages[1].tokens.input > 0);
+        assert!(messages[1].tokens.output > 0);
+        assert!(messages.iter().all(|message| message.is_turn_start));
     }
 
     #[test]
@@ -1181,6 +1308,33 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 100);
+    }
+
+    #[test]
+    fn test_camel_case_prompt_and_completion_token_fields() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "camel", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "camel",
+                "content": "bye",
+                "usage": {
+                    "promptTokens": 200,
+                    "completionTokens": 100,
+                    "totalTokens": 300
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "camel", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 200);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.total(), 300);
     }
 
     #[test]
