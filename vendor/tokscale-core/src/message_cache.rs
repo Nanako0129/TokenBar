@@ -65,7 +65,12 @@ use std::time::UNIX_EPOCH;
 // already have a non-empty schema-29 cache containing only its v1 message rows;
 // because the database fingerprint is unchanged, that entry must be rejected so
 // the same source is rebuilt with both v1 and v2 output.)
-const CACHE_SCHEMA_VERSION: u32 = 30;
+// 31 (M16: existing Codex, Claude, Copilot, Jcode, provider, and Antigravity
+// sources now emit corrected fork boundaries, explicit-token handling, start
+// anchors, duration merges, provider identity, or model aliases. Schema-30
+// entries can replay stale output under unchanged fingerprints, so rebuild them
+// once instead of importing upstream's per-parser shard versions.)
+const CACHE_SCHEMA_VERSION: u32 = 31;
 const CACHE_FILENAME: &str = "source-message-cache.bin";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
 const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;

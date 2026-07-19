@@ -72,7 +72,7 @@ flowchart TD
 
 ## Schema and parser output
 
-The vendor owns its cache-schema counter. It is currently schema 29 after the Codex non-overlapping-duration parser change and incremental cursor addition. Do not mirror an upstream schema number merely because the same upstream commit is being ported. Bump the local schema when serialized message fields, parser output, dedup keys, attribution, or parser-resume state changes make old cached values semantically stale; do not bump for report-time-only arithmetic changes.
+The vendor owns its cache-schema counter. It is schema 31 at the M16 implementation checkpoint: M20 advanced 29 → 30 for OpenCode v2 hybrid databases, M15-B kept 30 for a new Kiro source, and M16 advances 30 → 31 because existing Codex, Claude, Copilot, Jcode, provider, and Antigravity outputs change under unchanged source fingerprints. Do not mirror an upstream schema number merely because the same upstream commit is being ported. Bump the local schema when serialized message fields, parser output, dedup keys, attribution, or parser-resume state changes make old cached values semantically stale; do not bump for report-time-only arithmetic changes.
 
 A parser-output change must include a same-fingerprint stale-cache regression. A test that only parses a fresh source does not prove that existing users receive the correction.
 

@@ -32,13 +32,13 @@ TokenBar follows upstream `tokscale` as a rolling source and selects bounded mil
 
 | Surface | Current value |
 |---|---|
-| TokenBar main baseline | [`1bc2fa76`](https://github.com/Nanako0129/TokenBar/commit/1bc2fa764f447e2f603950b0402903ebef9f81b5), the rebase-merge result of OpenCode v2 M20 PR #65 |
+| TokenBar main baseline | [`f5773ea0`](https://github.com/Nanako0129/TokenBar/commit/f5773ea06bf4e4c589fd1cd61e9cf557f71e15b4), the rebase-merge result of Kiro structured sessions M15-B PR #66 |
 | tokscale target | [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), OpenCode v2 PR #920 merge |
 | Audited set | 111 `crates/tokscale-core` commits from `0c820a5d..366ce643` |
-| M15-B implementation classification | `ALREADY_VENDORED 62`, `TAKE 26`, `ADAPT_FOR_STREAMING 0`, `DEFER 9`, `SKIP 13`, `SUPERSEDED 1` |
-| Cache | TokenBar main and the M15-B implementation checkpoint use monolithic schema 30 |
+| M16 implementation classification | `ALREADY_VENDORED 66`, `TAKE 21`, `ADAPT_FOR_STREAMING 0`, `DEFER 10`, `SKIP 13`, `SUPERSEDED 1` |
+| Cache | TokenBar main uses monolithic schema 30; the M16 implementation checkpoint advances to schema 31 |
 
-The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643` from `TAKE` to `ALREADY_VENDORED`; public issue #45 records that merged `60/28/0/9/13/1` state. M15-B moves `405ded4a` and `315549b4` to `ALREADY_VENDORED`, producing `62/26/0/9/13/1` after merge, while mixed `b64d861e` remains one `TAKE` row because selected Jcode, Junie/OpenCodeReview, and Zcode hunks still await later milestones. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
+The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643` from `TAKE` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`, and public issue #45 records the merged `62/26/0/9/13/1` state. M16 moves `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED`, moves mixed `34cfbb50` to `DEFER` after taking only provider hardening and excluding 9Router, and keeps mixed `b64d861e` as one `TAKE` row after taking its Jcode hunk because selected Junie/OpenCodeReview and Zcode hunks still await later milestones. The M16 implementation classification is therefore `66/21/0/10/13/1`. Mixed upstream commits remain one ledger row even when TokenBar takes selected hunks in several milestones. This includes `cd07bf78`: M26 takes its generic cache format-2 and related-file metadata hunks, while its Devin parser/discovery hunks remain deferred. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
 
 ## Product decision
 
@@ -88,8 +88,8 @@ The shared-parser critical path is `M15-T → M20 → M15-B → M16`. M16 then u
 |---|---|---|---|
 | M15-T | M15-A merged | Merged as PR #64 and published the complete 111-row classification, selected scope, DAG, and transition rules | Schema 29 |
 | M20 | M15-T merged | Merged as PR #65 at `1bc2fa76`: parse OpenCode v2 `session_message` data while preserving v1/JSON semantics, distinct embedded IDs, persisted primary/alias keys for overlaps without a v1 embedded id, same-ID SQLite rows whose timestamp/token identity is incompatible across every lane, and exact-deferred-first JSON authority replacement scoped by message id plus creation timestamp | Schema 29 → 30 |
-| M15-B | M20 merged | Active implementation checkpoint: add Kiro `sess_*` structured sessions; reuse one related-file helper across specialized fingerprinting, both active cache lanes, latest mtime, and sibling-aware pruning; preserve M15-A coexistence and existing CLI/SQLite model fallback | Keep schema 30 |
-| M16 | M15-B | Land the existing-client correctness wave and leave only the 9Router hunk of its mixed commit deferred | Schema 30 → 31 |
+| M15-B | M20 merged | Merged as PR #66 at `f5773ea0`: add Kiro `sess_*` structured sessions; reuse one related-file helper across specialized fingerprinting, both active cache lanes, latest mtime, and sibling-aware pruning; preserve M15-A coexistence and existing CLI/SQLite model fallback | Kept schema 30 |
+| M16 | M15-B merged | Active implementation checkpoint: land Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness; leave only the 9Router feature of mixed `34cfbb50` deferred and keep `b64d861e` in `TAKE` for later selected clients | Schema 30 → 31 |
 | M17 | M16 | Select Grok unified-over-legacy sessions once before any report fold | Keep schema 31 |
 | M21 | M17 | Add Kimi Code, Junie, and OpenCodeReview with append-only client IDs | Keep schema 31 |
 | M22 | M21 | Add Zcode legacy and v2 with one normalization/dedup authority | Keep schema 31 |
@@ -152,7 +152,7 @@ A milestone is complete only after its implementation and mandatory docs share o
 | Surface | Responsibility |
 |---|---|
 | [`vendor/README.md`](../../../vendor/README.md) | Exact 111-row classification, selected/mixed commit accounting, transition matrix, cache provenance, and local patch ledger |
-| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; current through merged M20 at `60/28/0/9/13/1` and updated to the M15-B transition only after M15-B merges |
+| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; current through merged M15-B at `62/26/0/9/13/1` and updated to the M16 transition only after M16 merges |
 | Private Project #1 | Executable milestone cards only; no duplicate commit-by-commit ledger and no parser-preparation branches |
 | This plan | Product decisions, dependency graph, ownership, cache schedule, and milestone completion contract |
 | [`current-state.md`](../current-state.md) | Concise current queue and maintenance handoff |

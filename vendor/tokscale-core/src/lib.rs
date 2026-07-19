@@ -6938,7 +6938,7 @@ mod tests {
             warm.iter()
                 .map(|message| (&message.dedup_key, &message.tokens))
                 .collect::<Vec<_>>(),
-            "the rebuilt schema-30 entry must preserve v1+v2 output on a warm hit"
+            "the rebuilt current-schema entry must preserve v1+v2 output on a warm hit"
         );
         let rebuilt_cache = message_cache::SourceMessageCache::load();
         assert_eq!(rebuilt_cache.get(&db_path).unwrap().messages.len(), 2);
@@ -7069,6 +7069,202 @@ mod tests {
             model.total_messages
         );
         assert_eq!(agents.total_messages, model.total_messages);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m16_schema_30_jcode_cache_rebuilds_start_anchor_across_lanes() {
+        #[derive(serde::Serialize)]
+        struct Schema30Store {
+            schema_version: u32,
+            entries: Vec<message_cache::CachedSourceEntry>,
+        }
+
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+        ]);
+        let _pricing_env =
+            EnvGuard::set(&[("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1"))]);
+
+        let sessions_dir = source_home.path().join(".jcode/sessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let source_path = sessions_dir.join("session_m16.json");
+        std::fs::write(
+            &source_path,
+            r#"{"id":"session_m16","provider_key":"cliproxyapi","model":"claude-sonnet-4","working_dir":"/workspace/m16","messages":[{"id":"u1","role":"user","timestamp":"2026-06-16T12:00:00Z"},{"id":"a1","role":"assistant","timestamp":"2026-06-16T12:00:01Z","token_usage":{"input_tokens":1200,"output_tokens":300},"tool_duration_ms":1000}]}"#,
+        )
+        .unwrap();
+
+        let start = sessions::utils::parse_timestamp_str("2026-06-16T12:00:00Z").unwrap();
+        let end = sessions::utils::parse_timestamp_str("2026-06-16T12:00:01Z").unwrap();
+        let fingerprint = message_cache::SourceFingerprint::from_jcode_path(&source_path).unwrap();
+        let mut stale_message = UnifiedMessage::new_with_dedup(
+            "jcode",
+            "claude-sonnet-4",
+            "cliproxyapi",
+            "session_m16",
+            end,
+            TokenBreakdown {
+                input: 1200,
+                output: 300,
+                ..Default::default()
+            },
+            0.0,
+            Some("stale-schema-30".to_string()),
+        );
+        stale_message.duration_ms = Some(end - start);
+        let stale_store = Schema30Store {
+            schema_version: 30,
+            entries: vec![message_cache::CachedSourceEntry::new(
+                &source_path,
+                fingerprint.clone(),
+                vec![stale_message],
+                Vec::new(),
+                None,
+            )],
+        };
+        let cache_file = crate::paths::get_cache_dir().join("source-message-cache.bin");
+        std::fs::create_dir_all(cache_file.parent().unwrap()).unwrap();
+        let writer = std::io::BufWriter::new(std::fs::File::create(&cache_file).unwrap());
+        bincode::options()
+            .serialize_into(writer, &stale_store)
+            .unwrap();
+
+        assert_eq!(
+            message_cache::SourceFingerprint::from_jcode_path(&source_path).unwrap(),
+            fingerprint,
+            "the source fingerprint must stay unchanged across the schema-only rebuild"
+        );
+        assert!(
+            message_cache::SourceMessageCache::load().entries.is_empty(),
+            "schema-30 entries must be rejected before corrected Jcode output is loaded"
+        );
+
+        let clients = vec!["jcode".to_string()];
+        let parse_materialized = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+            )
+        };
+        let cold = parse_materialized();
+        let warm = parse_materialized();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(
+            (
+                cold[0].timestamp,
+                cold[0].duration_ms,
+                cold[0].tokens.input,
+                cold[0].tokens.output,
+            ),
+            (start, Some(end - start), 1200, 300)
+        );
+        assert_eq!(
+            warm.iter()
+                .map(|message| (
+                    message.timestamp,
+                    message.duration_ms,
+                    message.tokens.clone()
+                ))
+                .collect::<Vec<_>>(),
+            cold.iter()
+                .map(|message| (
+                    message.timestamp,
+                    message.duration_ms,
+                    message.tokens.clone()
+                ))
+                .collect::<Vec<_>>()
+        );
+        let rebuilt_cache = message_cache::SourceMessageCache::load();
+        assert_eq!(rebuilt_cache.get(&source_path).unwrap().messages.len(), 1);
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(
+            (
+                streamed[0].timestamp,
+                streamed[0].duration_ms,
+                streamed[0].tokens.input,
+                streamed[0].tokens.output,
+            ),
+            (start, Some(end - start), 1200, 300)
+        );
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::Jcode), 1);
+        assert_eq!(counted.messages.len(), 1);
+        assert_eq!(
+            (counted.messages[0].input, counted.messages[0].output),
+            (1200, 300)
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let options = ReportOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients),
+            ..Default::default()
+        };
+        let model = runtime.block_on(get_model_report(options.clone())).unwrap();
+        let monthly = runtime
+            .block_on(get_monthly_report(options.clone()))
+            .unwrap();
+        let hourly = runtime
+            .block_on(get_hourly_report(options.clone()))
+            .unwrap();
+        let agents = runtime.block_on(get_agents_report(options)).unwrap();
+        assert_eq!(
+            (model.total_messages, model.total_input, model.total_output),
+            (1, 1200, 300)
+        );
+        assert_eq!(
+            monthly.entries.iter().fold((0, 0, 0), |totals, entry| (
+                totals.0 + entry.message_count,
+                totals.1 + entry.input,
+                totals.2 + entry.output,
+            )),
+            (1, 1200, 300)
+        );
+        assert_eq!(
+            hourly.entries.iter().fold((0, 0, 0), |totals, entry| (
+                totals.0 + entry.message_count,
+                totals.1 + entry.input,
+                totals.2 + entry.output,
+            )),
+            (1, 1200, 300)
+        );
+        assert_eq!(agents.total_messages, 1);
+        assert_eq!(
+            agents.entries.iter().fold((0, 0), |totals, entry| (
+                totals.0 + entry.input,
+                totals.1 + entry.output,
+            )),
+            (1200, 300)
+        );
     }
 
     #[test]

@@ -18,7 +18,7 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-This M15-B implementation checkpoint starts from audited TokenBar main [`1bc2fa76`](https://github.com/Nanako0129/TokenBar/commit/1bc2fa764f447e2f603950b0402903ebef9f81b5), the rebase-merge result of OpenCode v2 [PR #65](https://github.com/Nanako0129/TokenBar/pull/65), and selectively ports Kiro structured-session commits [`405ded4a`](https://github.com/junhoyeo/tokscale/commit/405ded4a529013ad6bc668ba519bbe9eb68e8ad4) and [`315549b4`](https://github.com/junhoyeo/tokscale/commit/315549b4bbaa53638672ff5977c0d6cb77e43793), plus only the Kiro start-anchor hunk from mixed commit [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The vendored tree remains on monolithic cache schema 30; public main and issue #45 remain at the merged M20 `60/28/0/9/13/1` state until this implementation PR merges.
+This M16 implementation checkpoint starts from audited TokenBar main [`f5773ea0`](https://github.com/Nanako0129/TokenBar/commit/f5773ea06bf4e4c589fd1cd61e9cf557f71e15b4), the rebase-merge result of Kiro structured sessions [PR #66](https://github.com/Nanako0129/TokenBar/pull/66), and selectively ports existing-parser correctness from [`6899ea03`](https://github.com/junhoyeo/tokscale/commit/6899ea03640b6de47bb3108c409be6fea7227bed), [`b59979c5`](https://github.com/junhoyeo/tokscale/commit/b59979c571d972418916df35df02f75f802d6b0b), [`9155018c`](https://github.com/junhoyeo/tokscale/commit/9155018c683fec78acf6c0ff9e77793ba02e34dc), and [`18cd13cc`](https://github.com/junhoyeo/tokscale/commit/18cd13cc921f42a309cab5a57b0331e1aebbda4c), plus only the provider-hardening hunks of mixed [`34cfbb50`](https://github.com/junhoyeo/tokscale/commit/34cfbb50796c5e084c55b595385f6fd3b48e802d) and the Jcode start-anchor hunk of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The 9Router feature remains excluded. The vendored tree advances the monolithic cache from schema 30 to 31 so unchanged existing sources cannot replay stale parser output; public main and issue #45 remain at merged M15-B `62/26/0/9/13/1` until this implementation PR merges.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -32,10 +32,10 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 62 |
-| `TAKE` | 26 |
+| `ALREADY_VENDORED` | 66 |
+| `TAKE` | 21 |
 | `ADAPT_FOR_STREAMING` | 0 |
-| `DEFER` | 9 |
+| `DEFER` | 10 |
 | `SKIP` | 13 |
 | `SUPERSEDED` | 1 |
 | **Total** | **111** |
@@ -43,7 +43,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 62</summary>
+<summary><code>ALREADY_VENDORED</code> — 66</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -53,20 +53,19 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 979b7015 7403dafa d5f2c6c4 59421da9 31deb7e6 b8156e64 dcb053e0 23cf62e0
 4cbc2f6b 0f84d174 da5e06d2 1752636f b7277d49 85669602 b49cec19 3587f745
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
-163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4
+163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
+9155018c 18cd13cc
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 26</summary>
+<summary><code>TAKE</code> — 21</summary>
 
 ```text
-63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d
-640e97b9 f7a124da 302d39c3 ed6f8b95 f6f7eced 0b454e60
-65f8f3e2 6c804711 9a5aeb65 074619f7
-c1aef5e9 ae36db5c cd07bf78 6899ea03 b59979c5 9155018c 18cd13cc b64d861e
-34cfbb50 a87f0ab6
+63a44d7c 839ce378 052f43de 633ea946 959cce84 77948d9d 640e97b9 f7a124da
+302d39c3 ed6f8b95 f6f7eced 0b454e60 65f8f3e2 6c804711 9a5aeb65 074619f7
+c1aef5e9 ae36db5c cd07bf78 b64d861e a87f0ab6
 ```
 
 </details>
@@ -81,11 +80,11 @@ c1aef5e9 ae36db5c cd07bf78 6899ea03 b59979c5 9155018c 18cd13cc b64d861e
 </details>
 
 <details>
-<summary><code>DEFER</code> — 9</summary>
+<summary><code>DEFER</code> — 10</summary>
 
 ```text
 18c7e87f db88138b 1c91cb34 6a1535d1 90d28ec0
-20f6d4dd b9b7d09f 0097ba7e ed64e77b
+20f6d4dd b9b7d09f 0097ba7e ed64e77b 34cfbb50
 ```
 
 </details>
@@ -111,13 +110,13 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B now moves `405ded4a` and `315549b4`, leaving 26 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Jcode, Junie/OpenCodeReview, and Zcode hunks still await later milestones.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 now moves `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moves to `DEFER` because only its excluded 9Router feature remains. This leaves 21 `TAKE` rows for the remaining selected correctness and feature set. Mixed commit `b64d861e` remains one `TAKE` row because its selected Junie/OpenCodeReview and Zcode hunks still await later milestones after M16 takes its Jcode hunk.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
 | M20 — merged in PR #65 | OpenCode v2 SQLite | `366ce643` |
-| M15-B — landed in this checkpoint | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
-| M16 | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc 34cfbb50` + `b64d861e` Jcode hunk |
+| M15-B — merged in PR #66 | Kiro structured sessions | `405ded4a 315549b4` + `b64d861e` Kiro hunk |
+| M16 — landed in this checkpoint | Codex, Claude, Copilot, Jcode, provider, and Antigravity correctness | `6899ea03 b59979c5 9155018c 18cd13cc` + `34cfbb50` provider hunks + `b64d861e` Jcode hunk |
 | M21 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 | Zcode legacy and v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
@@ -136,15 +135,15 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `DEFER` | Command Code | `18c7e87f db88138b` |
 | `DEFER` | CodeBuddy / WorkBuddy | `1c91cb34 6a1535d1 90d28ec0 20f6d4dd b9b7d09f` |
 | `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b`; the remaining `b64d861e` Devin hunk joins this group after M22, and the remaining `cd07bf78` Devin hunks join after M26 |
-| `DEFER` | 9Router | The remaining `34cfbb50` hunk becomes the sole reason for that row after M16 lands |
+| `DEFER` | 9Router | `34cfbb50`; M16 takes only its provider hardening, leaving the bridge and 9Router product integration excluded |
 | `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
 
 ### Mixed-commit bookkeeping
 
 | Commit | Current state | Terminal transition |
 |---|---|---|
-| `34cfbb50` | `TAKE` for M16 provider hardening; 9Router excluded | `TAKE → DEFER` after M16 |
-| `b64d861e` | Kiro start-anchor hunk is vendored in M15-B; selected Jcode, Junie/OpenCodeReview, and Zcode hunks remain `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
+| `34cfbb50` | `DEFER`; M16 vendors the provider hardening, while the remaining bridge and scanner hunks are 9Router-only | Remains `DEFER` |
+| `b64d861e` | Kiro and Jcode start-anchor hunks are vendored in M15-B/M16; selected Junie/OpenCodeReview and Zcode hunks remain `TAKE` | `TAKE → DEFER` after M22; only Devin remains |
 | `c1aef5e9` | macOS Hermes scope already vendored; Windows discovery selected | `TAKE → ALREADY_VENDORED` after M23 |
 | `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
 | `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
@@ -188,9 +187,9 @@ flowchart TD
 
 The expected terminal classification after every selected runtime milestone is `ALREADY_VENDORED 85`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 12`, `SKIP 13`, and `SUPERSEDED 1`, total 111. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
-The local cache remains schema 30 at this M15-B checkpoint, advances to schema 31 after M16, and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M15-B changes only a newly discovered `sess_*` source and reuses the existing related-file fingerprint seam for `messages.jsonl`, so cached output from existing Kiro CLI, globalStorage, and SQLite sources remains valid. The legacy schema-31 monolith remains untouched when M26 activates shards.
+The local cache advances from schema 30 to 31 at this M16 checkpoint and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep the then-current schema. M16 changes serialized output for existing Codex, Claude, Copilot, Jcode, and Antigravity sources, so one vendor-owned schema bump rejects every schema-30 entry before any unchanged fingerprint can replay stale timestamps, duration, token estimates, fork boundaries, or model aliases. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory and currently records merged M20 at `60/28/0/9/13/1`. After M15-B merges, its mandatory post-merge refresh records the actual PR, merge SHA, `405ded4a` / `315549b4` transitions, `62/26/0/9/13/1` counts, unchanged schema 30, verification evidence, and M16 as the next shared-parser checkpoint. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory and currently records merged M15-B at `62/26/0/9/13/1`. After M16 merges, its mandatory post-merge refresh records the actual PR, merge SHA, four `TAKE → ALREADY_VENDORED` transitions, the mixed `34cfbb50 TAKE → DEFER` transition, `66/21/0/10/13/1` counts, schema 31, verification evidence, and M17 plus M18 as the next independent lanes. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -260,6 +259,16 @@ The scanner already accepts `opencode-next.db` through the existing `opencode-<c
 M15-B selectively ports upstream [#836](https://github.com/junhoyeo/tokscale/pull/836) / [`405ded4a`](https://github.com/junhoyeo/tokscale/commit/405ded4a529013ad6bc668ba519bbe9eb68e8ad4), [#847](https://github.com/junhoyeo/tokscale/pull/847) / [`315549b4`](https://github.com/junhoyeo/tokscale/commit/315549b4bbaa53638672ff5977c0d6cb77e43793), and only the Kiro start-anchor hunk of mixed commit [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). The scanner discovers only `~/.kiro/sessions/<workspace>/sess_*/session.json` anchors; sibling `messages.jsonl` files are parser dependencies, not independent sessions. Structured `payload.type` records emit one message per completed turn: `contextUsage.usagePercentage` estimates input against a 200,000-token window, assistant text and tool-call arguments estimate output, `usage_summary.elapsedTime` supplies duration, and a missing prompt timestamp back-calculates the start anchor from `turn_end - elapsedTime`. Older flat role/content JSONL remains an aggregated fallback. Session metadata supplies model and workspace when present; only this new IDE source falls back to model `auto`, while existing CLI and SQLite sources retain their schema-30 `unknown` fallback.
 
 The existing `kiro_related_messages_path()` seam now identifies same-stem CLI JSONL or IDE sibling `messages.jsonl`, so one source of truth drives specialized fingerprints, materialized and shipping streaming cache loads, live latest-mtime detection, and sibling-aware fail-open pruning. Hermetic coverage proves absent-then-created and sibling-only rewritten files invalidate the specialized fingerprint without changing the primary fingerprint, warm cache rebuilds from one to two turns, `modified_after` retains a source whose sibling is newer, and materialized, streaming, count, model, monthly, hourly, and Agents results agree. M15-A globalStorage and M15-B structured messages keep distinct dedup identities, so coincident text does not suppress either cohort. This is a new discovery source rather than a changed existing parser output, so `CACHE_SCHEMA_VERSION` remains **30**; shard cache and per-client parser versions remain deferred to M26.
+
+## M16 existing-parser correctness completion
+
+M16 selectively ports upstream [#896](https://github.com/junhoyeo/tokscale/pull/896) / [`6899ea03`](https://github.com/junhoyeo/tokscale/commit/6899ea03640b6de47bb3108c409be6fea7227bed), [#892](https://github.com/junhoyeo/tokscale/pull/892) / [`b59979c5`](https://github.com/junhoyeo/tokscale/commit/b59979c571d972418916df35df02f75f802d6b0b), [#890](https://github.com/junhoyeo/tokscale/pull/890) / [`9155018c`](https://github.com/junhoyeo/tokscale/commit/9155018c683fec78acf6c0ff9e77793ba02e34dc), [#891](https://github.com/junhoyeo/tokscale/pull/891) / [`18cd13cc`](https://github.com/junhoyeo/tokscale/commit/18cd13cc921f42a309cab5a57b0331e1aebbda4c), only the provider-hardening hunks of [#887](https://github.com/junhoyeo/tokscale/pull/887) / mixed [`34cfbb50`](https://github.com/junhoyeo/tokscale/commit/34cfbb50796c5e084c55b595385f6fd3b48e802d), and only the Jcode hunk of [#898](https://github.com/junhoyeo/tokscale/pull/898) / mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e04824984fef2638df5db8df1d672cb2b). Every 9Router bridge, scanner, registry, filter, pricing, script, and service hunk remains excluded; `34cfbb50` therefore becomes `DEFER` rather than `ALREADY_VENDORED`.
+
+Codex leniently decodes numeric `task_started.started_at`, keeps legacy UUID-v4 ancestor replays behind the child boundary until a child-local task start is causally ordered, and start-anchors token snapshots at `turn_context` or a resumed human `user_message`. Claude bare files under `~/.claude/transcripts/` no longer synthesize char-estimated tool-result tokens when no project or cc-mirror identity exists, but explicit tool-result counts remain authoritative; normal project transcripts retain estimation. Claude request timestamps now remain at the activity start while duplicate chunks retain per-field token maxima and the longest observed duration. Copilot prefers OTEL `startTime`, back-calculates end-only records when duration exists, and collapses repeated span identities before every report fold with per-bucket maxima, earliest start, maximum duration, and missing-agent recovery. Jcode assistant completion timestamps with positive `tool_duration_ms` are back-calculated to the turn start while preserving the recorded duration.
+
+Provider identity is corrected before pricing and aggregation: delimited Kimi models infer `moonshotai`, MiMo infers `xiaomi`, GLM infers `zai`, and missing or empty GJC/Pi providers infer from the model before falling back to the client. Current Antigravity IDE placeholders and CLI response-model IDs resolve through single-hop machine aliases, including distinct Low/Medium tiers and the verified Gemini 3.5 Flash High mappings; hermetic synthetic-catalog tests prove representative aliases reach priced entries without changing forced-source or routed-pricing precedence.
+
+Because these are existing-source parser-output changes, TokenBar advances its monolithic `CACHE_SCHEMA_VERSION` **30→31** instead of importing upstream parser-version shards before M26. The integration fixture writes a real schema-30 Jcode entry with the unchanged specialized fingerprint and old completion timestamp, proves schema 31 rejects it, rebuilds the start-anchored message, and verifies cold/warm materialized, shipping streaming, count, model, monthly, hourly, and Agents parity. Parser-local fixtures cover each selected old-fail/new-pass behavior; no scanner, client registry, FFI, Swift, or C ABI change is required.
 
 ## Recovered Windows downstream commits
 
