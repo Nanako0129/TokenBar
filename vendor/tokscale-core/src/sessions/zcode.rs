@@ -57,6 +57,8 @@ struct ZcodeUsage {
         alias = "cacheReadTokens"
     )]
     cache_read: Option<serde_json::Value>,
+    #[serde(default, alias = "promptTokensDetails")]
+    prompt_tokens_details: Option<serde_json::Value>,
     #[serde(
         alias = "input_cache_creation",
         alias = "cache_write_tokens",
@@ -65,7 +67,7 @@ struct ZcodeUsage {
     cache_write: Option<serde_json::Value>,
     #[serde(default, alias = "reasoningTokens")]
     reasoning: Option<serde_json::Value>,
-    #[serde(default, alias = "totalTokens")]
+    #[serde(default, alias = "total_tokens", alias = "totalTokens")]
     total: Option<serde_json::Value>,
 }
 
@@ -99,7 +101,17 @@ impl ZcodeUsage {
     fn to_breakdown(&self) -> Option<TokenBreakdown> {
         let raw_input = non_negative_i64(self.input.as_ref());
         let raw_output = non_negative_i64(self.output.as_ref());
-        let raw_cache_read = non_negative_i64(self.cache_read.as_ref());
+        let nested_cache_read = self
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| {
+                details
+                    .get("cached_tokens")
+                    .or_else(|| details.get("cachedTokens"))
+            })
+            .map(|value| non_negative_i64(Some(value)))
+            .unwrap_or(0);
+        let raw_cache_read = non_negative_i64(self.cache_read.as_ref()).max(nested_cache_read);
         let raw_cache_write = non_negative_i64(self.cache_write.as_ref());
         let raw_reasoning = non_negative_i64(self.reasoning.as_ref());
 
@@ -858,6 +870,63 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 100);
+    }
+
+    #[test]
+    fn test_zai_nested_prompt_cache_usage() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s-cache", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s-cache",
+                "content": "bye",
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 100,
+                    "total_tokens": 300,
+                    "prompt_tokens_details": {"cached_tokens": 50}
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s-cache", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 150);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.cache_read, 50);
+        assert_eq!(messages[0].tokens.total(), 300);
+    }
+
+    #[test]
+    fn test_malformed_nested_cache_details_falls_back_to_flat_cache() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s-cache", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s-cache",
+                "content": "bye",
+                "usage": {
+                    "prompt_tokens": 200,
+                    "completion_tokens": 100,
+                    "total_tokens": 300,
+                    "cache_read_tokens": 40,
+                    "prompt_tokens_details": "bad"
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s-cache", &jsonl);
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 160);
+        assert_eq!(messages[0].tokens.output, 100);
+        assert_eq!(messages[0].tokens.cache_read, 40);
+        assert_eq!(messages[0].tokens.total(), 300);
     }
 
     #[test]
