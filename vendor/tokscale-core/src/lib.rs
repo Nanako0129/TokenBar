@@ -1943,11 +1943,13 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
+/// Cross-store usage identity. Duration, agent, workspace, message count, and
+/// turn-start metadata are source-specific: SQLite can provide them when the
+/// legacy transcript cannot, so they must not prevent one-to-one token dedup.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct ZcodeMessageIdentity {
     session_id: String,
     timestamp: i64,
-    duration_ms: Option<i64>,
     model_id: String,
     provider_id: String,
     input: i64,
@@ -1955,11 +1957,6 @@ struct ZcodeMessageIdentity {
     cache_read: i64,
     cache_write: i64,
     reasoning: i64,
-    message_count: i32,
-    is_turn_start: bool,
-    agent: Option<String>,
-    workspace_key: Option<String>,
-    workspace_label: Option<String>,
 }
 
 impl From<&UnifiedMessage> for ZcodeMessageIdentity {
@@ -1967,7 +1964,6 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
         Self {
             session_id: message.session_id.clone(),
             timestamp: message.timestamp,
-            duration_ms: message.duration_ms,
             model_id: message.model_id.clone(),
             provider_id: message.provider_id.clone(),
             input: message.tokens.input,
@@ -1975,11 +1971,6 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
             cache_read: message.tokens.cache_read,
             cache_write: message.tokens.cache_write,
             reasoning: message.tokens.reasoning,
-            message_count: message.message_count,
-            is_turn_start: message.is_turn_start,
-            agent: message.agent.clone(),
-            workspace_key: message.workspace_key.clone(),
-            workspace_label: message.workspace_label.clone(),
         }
     }
 }
@@ -11258,24 +11249,26 @@ mod tests {
         conn.execute(
             r#"
             INSERT INTO model_usage (
-                id, session_id, turn_id, model_id, started_at,
+                id, session_id, model_id, started_at, completed_at, duration_ms,
                 input_tokens, output_tokens, reasoning_tokens,
                 cache_read_input_tokens, cache_creation_input_tokens,
-                computed_total_tokens
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                computed_total_tokens, agent
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
             "#,
             rusqlite::params![
                 "db-shared",
                 "shared",
-                "turn-shared",
                 "GLM-5.2",
                 shared_timestamp,
+                shared_timestamp + 5_000,
+                5_000_i64,
                 100_i64,
                 20_i64,
                 3_i64,
                 10_i64,
                 5_i64,
                 120_i64,
+                "zcode-agent",
             ],
         )
         .unwrap();

@@ -356,6 +356,33 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
         ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
     "#;
+    let modern_without_session_query = r#"
+        SELECT
+            mu.id,
+            NULLIF(mu.session_id, ''),
+            NULLIF(mu.turn_id, ''),
+            NULLIF(mu.model_id, ''),
+            mu.started_at,
+            mu.completed_at,
+            mu.duration_ms,
+            mu.input_tokens,
+            mu.output_tokens,
+            mu.reasoning_tokens,
+            mu.cache_read_input_tokens,
+            mu.cache_creation_input_tokens,
+            mu.computed_total_tokens,
+            NULLIF(mu.agent, ''),
+            NULLIF(mu.mode, ''),
+            NULL,
+            NULL
+        FROM model_usage mu
+        WHERE COALESCE(mu.input_tokens, 0) > 0
+            OR COALESCE(mu.output_tokens, 0) > 0
+            OR COALESCE(mu.reasoning_tokens, 0) > 0
+            OR COALESCE(mu.cache_read_input_tokens, 0) > 0
+            OR COALESCE(mu.cache_creation_input_tokens, 0) > 0
+        ORDER BY COALESCE(mu.completed_at, mu.started_at, 0), mu.id
+    "#;
     let legacy_query = r#"
         SELECT
             mu.id,
@@ -395,9 +422,14 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         .prepare("SELECT computed_total_tokens FROM model_usage LIMIT 1")
         .is_err();
 
+    let fallback_query = if is_legacy_schema {
+        legacy_query
+    } else {
+        modern_without_session_query
+    };
     let mut stmt = match conn.prepare(modern_query) {
         Ok(stmt) => stmt,
-        Err(_) => match conn.prepare(legacy_query) {
+        Err(_) => match conn.prepare(fallback_query) {
             Ok(stmt) => stmt,
             Err(_) => return Vec::new(),
         },
@@ -1185,6 +1217,68 @@ mod tests {
                 10_i64,
                 80_i64,
                 5_i64,
+            ],
+        )
+        .unwrap();
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        let msg = &messages[0];
+        assert_eq!(msg.tokens.input, 15);
+        assert_eq!(msg.tokens.output, 40);
+        assert_eq!(msg.tokens.cache_read, 80);
+        assert_eq!(msg.tokens.cache_write, 5);
+        assert_eq!(msg.tokens.reasoning, 10);
+        assert_eq!(msg.tokens.total(), 150);
+    }
+
+    #[test]
+    fn test_parse_zcode_sqlite_modern_schema_without_session_preserves_computed_total() {
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("db.sqlite");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE model_usage (
+                id TEXT PRIMARY KEY,
+                session_id TEXT,
+                turn_id TEXT,
+                model_id TEXT,
+                started_at INTEGER,
+                completed_at INTEGER,
+                duration_ms INTEGER,
+                input_tokens INTEGER,
+                output_tokens INTEGER,
+                reasoning_tokens INTEGER,
+                cache_read_input_tokens INTEGER,
+                cache_creation_input_tokens INTEGER,
+                computed_total_tokens INTEGER,
+                agent TEXT,
+                mode TEXT
+            );
+            "#,
+        )
+        .unwrap();
+        conn.execute(
+            r#"
+            INSERT INTO model_usage (
+                id, session_id, model_id, completed_at,
+                input_tokens, output_tokens, reasoning_tokens,
+                cache_read_input_tokens, cache_creation_input_tokens, computed_total_tokens
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+            "#,
+            params![
+                "usage_modern_no_session",
+                "sess_modern",
+                "glm-5.2",
+                1_000_i64,
+                100_i64,
+                50_i64,
+                10_i64,
+                80_i64,
+                5_i64,
+                150_i64,
             ],
         )
         .unwrap();
