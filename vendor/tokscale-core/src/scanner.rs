@@ -711,9 +711,20 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     )
 }
 
-fn grok_unified_log_path(sessions_root: &Path) -> Option<PathBuf> {
-    sessions_root
-        .parent()
+fn push_grok_unified_log_candidates(candidates: &mut Vec<PathBuf>, scan_root: &Path) {
+    candidates.push(scan_root.join("logs/unified.jsonl"));
+    if scan_root.file_name().and_then(|name| name.to_str()) == Some("sessions") {
+        if let Some(grok_home) = scan_root.parent() {
+            candidates.push(grok_home.join("logs/unified.jsonl"));
+        }
+    }
+}
+
+fn grok_unified_log_path_from_updates(updates_path: &Path) -> Option<PathBuf> {
+    updates_path
+        .ancestors()
+        .find(|ancestor| ancestor.file_name().and_then(|name| name.to_str()) == Some("sessions"))
+        .and_then(Path::parent)
         .map(|grok_home| grok_home.join("logs/unified.jsonl"))
 }
 
@@ -894,9 +905,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 .data()
                 .resolve_path_with_env_strategy(home_dir, use_env_roots),
         );
-        if let Some(path) = grok_unified_log_path(&grok_sessions) {
-            grok_unified_paths.push(path);
-        }
+        push_grok_unified_log_candidates(&mut grok_unified_paths, &grok_sessions);
     }
 
     // Register built-in Kiro IDE roots before user-configured or environment
@@ -928,18 +937,14 @@ fn scan_all_clients_with_env_strategy_inner(
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
         if client_id == ClientId::Grok {
-            if let Some(unified_path) = grok_unified_log_path(&path) {
-                grok_unified_paths.push(unified_path);
-            }
+            push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
         }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
     for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
         if client_id == ClientId::Grok {
-            if let Some(unified_path) = grok_unified_log_path(&path) {
-                grok_unified_paths.push(unified_path);
-            }
+            push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
         }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
@@ -952,9 +957,7 @@ fn scan_all_clients_with_env_strategy_inner(
             let path = PathBuf::from(path);
             warn_if_escapes_home(Path::new(home_dir), client_id, &path);
             if client_id == ClientId::Grok {
-                if let Some(unified_path) = grok_unified_log_path(&path) {
-                    grok_unified_paths.push(unified_path);
-                }
+                push_grok_unified_log_candidates(&mut grok_unified_paths, &path);
             }
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
@@ -1339,6 +1342,13 @@ fn scan_all_clients_with_env_strategy_inner(
             }
         }
     }
+
+    grok_unified_paths.extend(
+        result
+            .get(ClientId::Grok)
+            .iter()
+            .filter_map(|path| grok_unified_log_path_from_updates(path)),
+    );
 
     for path in grok_unified_paths {
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
@@ -3353,18 +3363,18 @@ mod tests {
         let home = dir.path();
         let primary_home = home.join(".grok");
         let settings_home = home.join("settings-grok");
-        let env_home = home.join("env-grok");
+        let env_root = home.join("env-root");
+        let env_home = env_root.join("nested/.grok");
         setup_mock_grok_home(&primary_home);
         setup_mock_grok_home(&settings_home);
         setup_mock_grok_home(&env_home);
 
         let primary_sessions = primary_home.join("sessions");
         let settings_sessions = settings_home.join("sessions");
-        let env_sessions = env_home.join("sessions");
         let settings = ScannerSettings {
             extra_scan_paths: BTreeMap::from([(
                 "grok".to_string(),
-                vec![primary_sessions.clone(), settings_sessions.clone()],
+                vec![primary_sessions.clone(), settings_home.clone()],
             )]),
             ..Default::default()
         };
@@ -3373,7 +3383,7 @@ mod tests {
             format!(
                 "grok:{},grok:{}",
                 settings_sessions.display(),
-                env_sessions.display()
+                env_root.display()
             ),
         );
 

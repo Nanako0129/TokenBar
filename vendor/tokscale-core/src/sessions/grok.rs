@@ -272,6 +272,7 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
     let fallback_timestamp = file_modified_timestamp_ms(path);
     let mut fallback_model_by_pid = HashMap::new();
     let mut model_by_pid_and_session = HashMap::new();
+    let mut model_by_session = HashMap::new();
     let mut seen = HashSet::new();
     let mut messages = Vec::new();
 
@@ -285,10 +286,19 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
         };
 
         if let Some((pid, model_session_id, model_id)) = unified_log_model_change(&value) {
-            if let Some(model_session_id) = model_session_id {
-                model_by_pid_and_session.insert((pid, model_session_id), model_id);
-            } else {
-                fallback_model_by_pid.insert(pid, model_id);
+            match (pid, model_session_id) {
+                (Some(pid), Some(session_id)) => {
+                    model_by_pid_and_session.insert((pid, session_id), model_id);
+                }
+                (None, Some(session_id)) => {
+                    model_by_pid_and_session
+                        .retain(|(_, existing_session), _| existing_session != &session_id);
+                    model_by_session.insert(session_id, model_id);
+                }
+                (Some(pid), None) => {
+                    fallback_model_by_pid.insert(pid, model_id);
+                }
+                (None, None) => {}
             }
             continue;
         }
@@ -308,7 +318,7 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
         let Some(prompt_tokens) = required_non_negative_i64(context.get("prompt_tokens")) else {
             continue;
         };
-        let Some(cached_prompt_tokens) =
+        let Some(mut cached_prompt_tokens) =
             optional_non_negative_i64(context.get("cached_prompt_tokens"))
         else {
             continue;
@@ -321,9 +331,7 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
         else {
             continue;
         };
-        if cached_prompt_tokens > prompt_tokens {
-            continue;
-        }
+        cached_prompt_tokens = cached_prompt_tokens.min(prompt_tokens);
 
         let Some(loop_index) = optional_non_negative_i64(context.get("loop_index")) else {
             continue;
@@ -345,6 +353,7 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
 
         let model_id = model_by_pid_and_session
             .get(&(pid, session_id.clone()))
+            .or_else(|| model_by_session.get(&session_id))
             .or_else(|| fallback_model_by_pid.get(&pid))
             .cloned()
             .unwrap_or_else(|| UNKNOWN_MODEL.to_string());
@@ -471,8 +480,11 @@ fn is_unified_log_message(message: &UnifiedMessage) -> bool {
         .is_some_and(|key| key.starts_with(UNIFIED_LOG_DEDUP_PREFIX))
 }
 
-fn unified_log_model_change(value: &Value) -> Option<(i64, Option<String>, String)> {
-    let pid = required_non_negative_i64(value.get("pid"))?;
+fn unified_log_model_change(value: &Value) -> Option<(Option<i64>, Option<String>, String)> {
+    let pid = match value.get("pid") {
+        Some(value) => Some(required_non_negative_i64(Some(value))?),
+        None => None,
+    };
     let context = value.get("ctx")?;
     let model_id = match value.get("msg").and_then(Value::as_str)? {
         "model changed" => extract_string(context.get("model")),
@@ -488,7 +500,8 @@ fn unified_log_model_change(value: &Value) -> Option<(i64, Option<String>, Strin
 
     let session_id =
         extract_string(value.get("sid")).filter(|session_id| !session_id.trim().is_empty());
-    (!model_id.trim().is_empty()).then_some((pid, session_id, model_id))
+    (!model_id.trim().is_empty() && (pid.is_some() || session_id.is_some()))
+        .then_some((pid, session_id, model_id))
 }
 
 fn required_non_negative_i64(value: Option<&Value>) -> Option<i64> {
@@ -859,7 +872,7 @@ mod tests {
 
         let messages = parse_grok_unified_log_file(&path);
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].client, CLIENT_ID);
         assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
         assert_eq!(messages[0].session_id, "session-1");
@@ -874,6 +887,12 @@ mod tests {
         assert_eq!(messages[1].tokens.output, 12);
         assert_eq!(messages[1].message_count, 0);
         assert!(!messages[1].is_turn_start);
+        assert_eq!(messages[2].tokens.input, 0);
+        assert_eq!(messages[2].tokens.cache_read, 10);
+        assert_eq!(messages[2].tokens.output, 1);
+        assert_eq!(messages[2].tokens.total(), 11);
+        assert_eq!(messages[2].message_count, 0);
+        assert!(!messages[2].is_turn_start);
     }
 
     #[test]
@@ -898,19 +917,22 @@ mod tests {
     }
 
     #[test]
-    fn unified_log_prefers_session_model_over_pid_fallback() {
+    fn unified_log_applies_pidless_session_model_switch() {
         let (_temp, path) = write_unified_fixture(
-            r#"{"ts":"2023-11-14T22:13:19Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-4.5"}}
+            r#"{"ts":"2023-11-14T22:13:18Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-4.5"}}
 {"ts":"2023-11-14T22:13:19Z","pid":17,"sid":"session-with-model-event","msg":"model changed","ctx":{"model":"grok-composer-2.5-fast"}}
 {"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-with-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":1}}
-{"ts":"2023-11-14T22:13:21Z","pid":17,"sid":"session-without-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":20,"completion_tokens":2}}"#,
+{"ts":"2023-11-14T22:13:21Z","sid":"session-with-model-event","msg":"model changed","ctx":{"model":"grok-4.1-fast"}}
+{"ts":"2023-11-14T22:13:22Z","pid":17,"sid":"session-with-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":15,"completion_tokens":2}}
+{"ts":"2023-11-14T22:13:23Z","pid":17,"sid":"session-without-model-event","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":20,"completion_tokens":2}}"#,
         );
 
         let messages = parse_grok_unified_log_file(&path);
 
-        assert_eq!(messages.len(), 2);
+        assert_eq!(messages.len(), 3);
         assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
-        assert_eq!(messages[1].model_id, "grok-4.5");
+        assert_eq!(messages[1].model_id, "grok-4.1-fast");
+        assert_eq!(messages[2].model_id, "grok-4.5");
     }
 
     #[test]
