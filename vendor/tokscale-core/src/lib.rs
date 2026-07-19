@@ -24,7 +24,7 @@ pub use sessionize::{
 pub use sessions::{CostSource, UnifiedMessage};
 
 use rayon::prelude::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
@@ -1217,17 +1217,12 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let mut zcode_dedup = ZcodeDedupState::default();
+    let mut zcode_sqlite = Vec::new();
     if let Some(db_path) = &scan_result.zcode_db {
         let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
             sessions::zcode::parse_zcode_sqlite(path)
         });
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| zcode_dedup.should_keep(message, true)),
-        );
+        zcode_sqlite = outcome.messages;
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
@@ -1241,17 +1236,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             })
         })
         .collect();
+    let mut zcode_legacy = Vec::new();
     for outcome in zcode_outcomes {
-        all_messages.extend(
-            outcome
-                .messages
-                .into_iter()
-                .filter(|message| zcode_dedup.should_keep(message, false)),
-        );
+        zcode_legacy.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
         }
     }
+    all_messages.extend(select_zcode_messages(zcode_sqlite, zcode_legacy));
 
     // Parse Qwen files
     let qwen_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -1991,42 +1983,52 @@ impl From<&UnifiedMessage> for ZcodeMessageIdentity {
     }
 }
 
-#[derive(Default)]
-struct ZcodeDedupState {
-    seen_sqlite_keys: HashSet<String>,
-    seen_legacy_keys: HashSet<String>,
-    unmatched_sqlite_payloads: HashMap<ZcodeMessageIdentity, usize>,
-}
+fn select_zcode_messages(
+    sqlite_messages: Vec<UnifiedMessage>,
+    legacy_messages: Vec<UnifiedMessage>,
+) -> Vec<UnifiedMessage> {
+    let mut selected = Vec::with_capacity(sqlite_messages.len() + legacy_messages.len());
+    let mut seen_sqlite_keys = HashSet::new();
+    let mut seen_legacy_keys = HashSet::new();
+    let mut unmatched_sqlite_payloads: HashMap<ZcodeMessageIdentity, VecDeque<usize>> =
+        HashMap::new();
 
-impl ZcodeDedupState {
-    fn should_keep(&mut self, message: &UnifiedMessage, from_sqlite: bool) -> bool {
+    for message in sqlite_messages {
         if let Some(key) = message.dedup_key.as_deref().filter(|key| !key.is_empty()) {
-            let seen_keys = if from_sqlite {
-                &mut self.seen_sqlite_keys
-            } else {
-                &mut self.seen_legacy_keys
-            };
-            if !dedup_gate_passes(key, seen_keys) {
-                return false;
+            if !dedup_gate_passes(key, &mut seen_sqlite_keys) {
+                continue;
             }
         }
-
-        let identity = ZcodeMessageIdentity::from(message);
-        if from_sqlite {
-            let count = self.unmatched_sqlite_payloads.entry(identity).or_default();
-            *count = count.saturating_add(1);
-            return true;
-        }
-
-        let Some(count) = self.unmatched_sqlite_payloads.get_mut(&identity) else {
-            return true;
-        };
-        if *count == 0 {
-            return true;
-        }
-        *count -= 1;
-        false
+        let index = selected.len();
+        unmatched_sqlite_payloads
+            .entry(ZcodeMessageIdentity::from(&message))
+            .or_default()
+            .push_back(index);
+        selected.push(message);
     }
+
+    for legacy in legacy_messages {
+        if let Some(key) = legacy.dedup_key.as_deref().filter(|key| !key.is_empty()) {
+            if !dedup_gate_passes(key, &mut seen_legacy_keys) {
+                continue;
+            }
+        }
+        let identity = ZcodeMessageIdentity::from(&legacy);
+        let sqlite_index = unmatched_sqlite_payloads
+            .get_mut(&identity)
+            .and_then(VecDeque::pop_front);
+        let Some(sqlite_index) = sqlite_index else {
+            selected.push(legacy);
+            continue;
+        };
+
+        let sqlite = &mut selected[sqlite_index];
+        if sqlite.workspace_key.is_none() && legacy.workspace_key.is_some() {
+            sqlite.set_workspace(legacy.workspace_key, legacy.workspace_label);
+        }
+    }
+
+    selected
 }
 
 /// Cross-store OpenCode source identity. A migrated SQLite message can carry
@@ -3020,10 +3022,10 @@ where
     );
 
     // ---- ZCode v2 SQLite + legacy JSONL ----
-    // Cache each raw source independently, prefer the authoritative v2 database
-    // on an exact cross-store payload match, then price and emit once.
+    // Cache each raw source independently, then select the DB-first authority
+    // across the complete cohort before pricing or emitting any row.
     {
-        let mut dedup = ZcodeDedupState::default();
+        let mut zcode_sqlite = Vec::new();
         if let Some(db_path) = &scan_result.zcode_db {
             let fingerprint = message_cache::SourceFingerprint::from_sqlite_path(db_path);
             let cache_hit = fingerprint.as_ref().and_then(|fingerprint| {
@@ -3031,7 +3033,7 @@ where
                     cached.fingerprint == *fingerprint && !cached.messages.is_empty()
                 })
             });
-            let raw_messages = if let Some(cached) = cache_hit {
+            zcode_sqlite = if let Some(cached) = cache_hit {
                 cached.messages.clone()
             } else {
                 let messages = sessions::zcode::parse_zcode_sqlite(db_path);
@@ -3048,16 +3050,6 @@ where
                 }
                 messages
             };
-            for mut message in raw_messages {
-                message.refresh_derived_fields();
-                if !dedup.should_keep(&message, true) {
-                    continue;
-                }
-                apply_pricing_if_available(&mut message, pricing);
-                if passes_client(&message) && filter(&message) {
-                    sink(&message);
-                }
-            }
         }
 
         let legacy_paths = scan_result.get(ClientId::Zcode);
@@ -3095,11 +3087,9 @@ where
             }
             raw_by_path[index] = Some(messages);
         }
-        for mut message in raw_by_path.into_iter().flatten().flatten() {
+        let zcode_legacy = raw_by_path.into_iter().flatten().flatten().collect();
+        for mut message in select_zcode_messages(zcode_sqlite, zcode_legacy) {
             message.refresh_derived_fields();
-            if !dedup.should_keep(&message, false) {
-                continue;
-            }
             apply_pricing_if_available(&mut message, pricing);
             if passes_client(&message) && filter(&message) {
                 sink(&message);
@@ -4454,18 +4444,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::zcode::parse_zcode_file(path))
         .collect::<Vec<_>>();
-    let mut zcode_dedup = ZcodeDedupState::default();
-    let mut zcode_msgs: Vec<ParsedMessage> = zcode_sqlite
+    let zcode_msgs: Vec<ParsedMessage> = select_zcode_messages(zcode_sqlite, zcode_legacy)
         .into_iter()
-        .filter(|message| zcode_dedup.should_keep(message, true))
         .map(|message| unified_to_parsed(&message))
         .collect();
-    zcode_msgs.extend(
-        zcode_legacy
-            .into_iter()
-            .filter(|message| zcode_dedup.should_keep(message, false))
-            .map(|message| unified_to_parsed(&message)),
-    );
     let zcode_count = summed_parsed_message_count(&zcode_msgs);
     counts.set(ClientId::Zcode, zcode_count);
     messages.extend(zcode_msgs);
@@ -4909,15 +4891,14 @@ mod tests {
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
         dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
         get_model_report, get_monthly_report, latest_source_mtime_ms, local_source_change_token,
-        message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients,
-        parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
-        reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
-        select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
-        opencode_authoritative_sources, opencode_identity_group, CostSource, GroupBy,
+        message_cache, normalize_model_for_grouping, opencode_authoritative_sources,
+        opencode_identity_group, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
+        prune_scan_result_by_mtime, reprice_lane_message, retain_for_requested_clients,
+        scan_messages_streaming, scanner, select_local_parse_pricing, select_zcode_messages,
+        sessions, unified_to_parsed, AgentAccumulator, ClientId, CostSource, GroupBy,
         LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity, ReportOptions,
-        TokenBreakdown, UnifiedMessage, ZcodeDedupState, UNKNOWN_WORKSPACE_LABEL,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
     use std::collections::{HashMap, HashSet};
@@ -5148,26 +5129,69 @@ mod tests {
 
     #[test]
     fn test_zcode_cross_store_dedup_pairs_payloads_one_to_one() {
-        let mut dedup = ZcodeDedupState::default();
+        let selected = select_zcode_messages(
+            vec![make_zcode_dedup_message("zcode-sqlite:db-shared")],
+            vec![
+                make_zcode_dedup_message("shared:0"),
+                make_zcode_dedup_message("shared:1"),
+            ],
+        );
+        assert_eq!(selected.len(), 2);
+        assert_eq!(
+            selected[0].dedup_key.as_deref(),
+            Some("zcode-sqlite:db-shared")
+        );
+        assert_eq!(selected[1].dedup_key.as_deref(), Some("shared:1"));
 
-        assert!(dedup.should_keep(&make_zcode_dedup_message("zcode-sqlite:db-shared"), true));
-        assert!(!dedup.should_keep(&make_zcode_dedup_message("shared:0"), false));
-        assert!(dedup.should_keep(&make_zcode_dedup_message("shared:1"), false));
-
-        let mut key_collision = ZcodeDedupState::default();
         let shared_key = "zcode-sqlite:user-controlled:0";
-        assert!(key_collision.should_keep(&make_zcode_dedup_message(shared_key), true));
         let mut distinct_legacy = make_zcode_dedup_message(shared_key);
         distinct_legacy.tokens.input += 1;
-        assert!(key_collision.should_keep(&distinct_legacy, false));
+        let selected = select_zcode_messages(
+            vec![make_zcode_dedup_message(shared_key)],
+            vec![distinct_legacy],
+        );
+        assert_eq!(selected.len(), 2);
 
         for scoped_model in ["zai/glm-5.2", "z-ai/glm-5.2", "z_ai/glm-5.2"] {
-            let mut scoped = ZcodeDedupState::default();
             let mut sqlite = make_zcode_dedup_message("zcode-sqlite:scoped");
             sqlite.model_id = scoped_model.to_string();
-            assert!(scoped.should_keep(&sqlite, true));
-            assert!(!scoped.should_keep(&make_zcode_dedup_message("legacy:scoped"), false));
+            let selected = select_zcode_messages(
+                vec![sqlite],
+                vec![make_zcode_dedup_message("legacy:scoped")],
+            );
+            assert_eq!(selected.len(), 1);
         }
+
+        let mut unrelated_route = make_zcode_dedup_message("zcode-sqlite:openrouter");
+        unrelated_route.model_id = "openrouter/glm-5.2".to_string();
+        let selected = select_zcode_messages(
+            vec![unrelated_route],
+            vec![make_zcode_dedup_message("legacy:openrouter")],
+        );
+        assert_eq!(selected.len(), 2);
+    }
+
+    #[test]
+    fn test_zcode_cross_store_dedup_carries_legacy_workspace_to_sqlite() {
+        let sqlite = make_zcode_dedup_message("zcode-sqlite:workspace");
+        let mut legacy = make_zcode_dedup_message("legacy:workspace");
+        legacy.set_workspace(
+            Some("/Users/alice/work/project".to_string()),
+            Some("project".to_string()),
+        );
+
+        let selected = select_zcode_messages(vec![sqlite], vec![legacy]);
+
+        assert_eq!(selected.len(), 1);
+        assert_eq!(
+            selected[0].dedup_key.as_deref(),
+            Some("zcode-sqlite:workspace")
+        );
+        assert_eq!(
+            selected[0].workspace_key.as_deref(),
+            Some("/Users/alice/work/project")
+        );
+        assert_eq!(selected[0].workspace_label.as_deref(), Some("project"));
     }
 
     fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
@@ -11262,7 +11286,7 @@ mod tests {
                 path TEXT
             );
             INSERT INTO session (id, directory, path) VALUES
-                ('shared', 'demo', 'demo'),
+                ('shared', NULL, NULL),
                 ('v2-only', 'db-only', 'db-only');
             "#,
         )
@@ -11405,6 +11429,12 @@ mod tests {
             vec![Some("shared:1"), Some("zcode-sqlite:db-shared")],
             "SQLite must replace one cross-store match without dropping a second legacy source key"
         );
+        let selected_db = cold_materialized
+            .iter()
+            .find(|message| message.dedup_key.as_deref() == Some("zcode-sqlite:db-shared"))
+            .unwrap();
+        assert_eq!(selected_db.workspace_key.as_deref(), Some("demo"));
+        assert_eq!(selected_db.workspace_label.as_deref(), Some("demo"));
         let modern_null = cold_materialized
             .iter()
             .find(|message| message.session_id == "v2-only")
@@ -11443,6 +11473,12 @@ mod tests {
         .unwrap();
         assert_eq!(counted.counts.get(ClientId::Zcode), 4);
         assert_eq!(counted.messages.len(), 4);
+        assert!(
+            counted
+                .messages
+                .iter()
+                .all(|message| message.workspace_key.is_some())
+        );
         assert_eq!(
             counted
                 .messages
@@ -11461,6 +11497,7 @@ mod tests {
                 home_dir: Some(home),
                 use_env_roots: false,
                 clients: Some(clients),
+                group_by: GroupBy::WorkspaceModel,
                 ..Default::default()
             };
             let model = runtime.block_on(get_model_report(options.clone())).unwrap();
@@ -11476,6 +11513,12 @@ mod tests {
             assert_eq!(model.total_output, 47);
             assert_eq!(model.total_cache_read, 22);
             assert_eq!(model.total_cache_write, 10);
+            assert!(
+                model
+                    .entries
+                    .iter()
+                    .all(|entry| entry.workspace_key.is_some())
+            );
             assert_eq!(
                 monthly
                     .entries

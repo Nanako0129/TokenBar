@@ -56,6 +56,7 @@ struct ZcodeUsage {
     #[serde(
         alias = "input_cache_read",
         alias = "cache_read_tokens",
+        alias = "cache_read_input_tokens",
         alias = "cacheReadTokens"
     )]
     cache_read: Option<serde_json::Value>,
@@ -64,6 +65,7 @@ struct ZcodeUsage {
     #[serde(
         alias = "input_cache_creation",
         alias = "cache_write_tokens",
+        alias = "cache_creation_input_tokens",
         alias = "cacheCreationTokens"
     )]
     cache_write: Option<serde_json::Value>,
@@ -485,7 +487,7 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
     // Parallel to `messages`: each row's turn_id (if any), so is_turn_start
     // can be assigned in a second pass once every row's start-anchored
     // timestamp is known (see below).
-    let mut turn_ids: Vec<Option<String>> = Vec::new();
+    let mut turn_ids: Vec<Option<(String, String)>> = Vec::new();
 
     for row_result in rows {
         let row = match row_result {
@@ -585,24 +587,24 @@ pub fn parse_zcode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
             row.turn_id
                 .as_deref()
                 .filter(|id| !id.is_empty())
-                .map(str::to_string),
+                .map(|turn_id| (message.session_id.clone(), turn_id.to_string())),
         );
         messages.push(message);
     }
 
-    // Assign is_turn_start to the earliest-STARTED request per turn, not the
-    // first one encountered in query order (which is ordered by
+    // Assign is_turn_start to the earliest-STARTED request per session/turn,
+    // not the first one encountered in query order (which is ordered by
     // completed_at). Timestamps are now start-anchored (see above), so a
     // later-started-but-earlier-completed request could otherwise win the
     // flag and land the turn in the wrong hour/day bucket downstream (see
     // lib.rs's hourly turn_count aggregation).
-    let mut earliest_index_per_turn: HashMap<&str, usize> = HashMap::new();
-    for (index, turn_id) in turn_ids.iter().enumerate() {
-        let Some(turn_id) = turn_id.as_deref() else {
+    let mut earliest_index_per_turn: HashMap<(&str, &str), usize> = HashMap::new();
+    for (index, turn) in turn_ids.iter().enumerate() {
+        let Some((session_id, turn_id)) = turn.as_ref() else {
             continue;
         };
         earliest_index_per_turn
-            .entry(turn_id)
+            .entry((session_id.as_str(), turn_id.as_str()))
             .and_modify(|current| {
                 if messages[index].timestamp < messages[*current].timestamp {
                     *current = index;
@@ -947,6 +949,37 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].tokens.input, 200);
         assert_eq!(messages[0].tokens.output, 100);
+    }
+
+    #[test]
+    fn test_anthropic_cache_field_names() {
+        let dir = TempDir::new().unwrap();
+        let jsonl = format!(
+            "{}\n{}",
+            json!({"role": "user", "sessionId": "s-anthropic-cache", "content": "hi"}),
+            json!({
+                "role": "assistant",
+                "sessionId": "s-anthropic-cache",
+                "content": "bye",
+                "usage": {
+                    "input_tokens": 100,
+                    "output_tokens": 20,
+                    "cache_read_input_tokens": 30,
+                    "cache_creation_input_tokens": 10,
+                    "total_tokens": 120
+                }
+            }),
+        );
+        let path = write_session(&dir, "p", "s-anthropic-cache", &jsonl);
+
+        let messages = parse_zcode_file(&path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 60);
+        assert_eq!(messages[0].tokens.output, 20);
+        assert_eq!(messages[0].tokens.cache_read, 30);
+        assert_eq!(messages[0].tokens.cache_write, 10);
+        assert_eq!(messages[0].tokens.total(), 120);
     }
 
     #[test]
@@ -1785,6 +1818,33 @@ mod tests {
         );
         assert_eq!(messages[1].timestamp, 1_000);
         assert!(messages[1].is_turn_start);
+    }
+
+    #[test]
+    fn test_reused_turn_id_is_scoped_by_session() {
+        let dir = TempDir::new().unwrap();
+        let db_path = create_zcode_sqlite_db(&dir);
+        let conn = Connection::open(&db_path).unwrap();
+        for (id, session_id, started_at) in [
+            ("session-a-request", "session-a", 1_000_i64),
+            ("session-b-request", "session-b", 2_000_i64),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO model_usage (
+                    id, session_id, turn_id, model_id, started_at, completed_at,
+                    input_tokens, output_tokens
+                ) VALUES (?1, ?2, 'turn-1', ?3, ?4, ?4, ?5, ?6)
+                "#,
+                params![id, session_id, "glm-5.2", started_at, 1_i64, 1_i64],
+            )
+            .unwrap();
+        }
+
+        let messages = parse_zcode_sqlite(&db_path);
+
+        assert_eq!(messages.len(), 2);
+        assert!(messages.iter().all(|message| message.is_turn_start));
     }
 
     #[test]
