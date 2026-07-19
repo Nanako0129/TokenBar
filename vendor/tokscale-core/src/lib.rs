@@ -1318,9 +1318,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 
     // Grok Build has two representations of the same sessions: legacy
     // per-session updates and a global per-inference unified log. Collect both
-    // raw sets first and apply unified-over-legacy precedence exactly once before
-    // any report fold; a downstream aggregate cannot subtract covered legacy
-    // usage safely.
+    // raw sets without pricing and apply unified-over-legacy precedence exactly
+    // once before pricing or any report fold; a downstream aggregate cannot
+    // subtract covered legacy usage safely.
     let grok_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Grok)
         .par_iter()
@@ -1328,7 +1328,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             load_or_parse_source_with_fingerprint(
                 path,
                 &source_cache,
-                pricing,
+                None,
                 message_cache::SourceFingerprint::from_grok_path,
                 sessions::grok::parse_grok_file,
             )
@@ -1341,7 +1341,14 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
-    all_messages.extend(sessions::grok::prefer_unified_log_messages(grok_messages));
+    all_messages.extend(
+        sessions::grok::prefer_unified_log_messages(grok_messages)
+            .into_iter()
+            .map(|mut message| {
+                apply_pricing_if_available(&mut message, pricing);
+                message
+            }),
+    );
 
     let mux_outcomes: Vec<CachedParseOutcome> = scan_result
         .get(ClientId::Mux)
@@ -11784,6 +11791,87 @@ mod tests {
 
         assert_eq!(streamed.len(), 1);
         assert_eq!(streamed[0].date, expected_date);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn grok_materialized_reprices_after_legacy_model_carry_over() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+        ]);
+        let covered_dir = source_home
+            .path()
+            .join(".grok/sessions/%2Ftmp%2Fproject/covered");
+        std::fs::create_dir_all(&covered_dir).unwrap();
+        std::fs::write(
+            covered_dir.join("updates.jsonl"),
+            concat!(
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"covered\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"_meta\":{\"modelId\":\"grok-build\"}},\"_meta\":{\"agentTimestampMs\":1700000000000}}}\n",
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"covered\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\"},\"_meta\":{\"totalTokens\":999,\"agentTimestampMs\":1700000001000}}}\n",
+            ),
+        )
+        .unwrap();
+        let logs_dir = source_home.path().join(".grok/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        std::fs::write(
+            logs_dir.join("unified.jsonl"),
+            "{\"ts\":\"2023-11-14T22:13:20Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"loop_index\":1,\"prompt_tokens\":100,\"cached_prompt_tokens\":60,\"completion_tokens\":25,\"reasoning_tokens\":5}}\n",
+        )
+        .unwrap();
+
+        let mut litellm = HashMap::new();
+        litellm.insert(
+            "grok-build".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                cache_read_input_token_cost: Some(0.0005),
+                ..Default::default()
+            },
+        );
+        let pricing = pricing::PricingService::new(litellm, HashMap::new());
+        let clients = vec!["grok".to_string()];
+        let scanner_settings = scanner::ScannerSettings::default();
+        let materialized = || {
+            parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                Some(&pricing),
+                false,
+                &scanner_settings,
+            )
+        };
+        let streamed = || {
+            let mut messages = Vec::new();
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                Some(&pricing),
+                false,
+                &scanner_settings,
+                &|_| true,
+                &mut |message| messages.push(message.clone()),
+            );
+            messages
+        };
+
+        let cold = materialized();
+        assert_eq!(cold.len(), 1);
+        assert_eq!(cold[0].model_id, "grok-build");
+        let expected_cost = pricing.calculate_cost_with_provider(
+            &cold[0].model_id,
+            Some(&cold[0].provider_id),
+            &cold[0].tokens,
+        );
+        assert!(expected_cost > 0.0);
+        assert_eq!(cold[0].cost, expected_cost);
+        assert_eq!(cold[0].cost_source, CostSource::Estimated);
+        assert_eq!(streamed(), cold);
+        assert_eq!(materialized(), cold, "warm materialized cache must reprice");
+        assert_eq!(streamed(), cold, "warm streaming cache must stay in parity");
     }
 
     #[test]

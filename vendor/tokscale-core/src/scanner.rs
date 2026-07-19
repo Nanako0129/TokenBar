@@ -711,6 +711,12 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     )
 }
 
+fn grok_unified_log_path(sessions_root: &Path) -> Option<PathBuf> {
+    sessions_root
+        .parent()
+        .map(|grok_home| grok_home.join("logs/unified.jsonl"))
+}
+
 fn push_unique_scan_task(
     tasks: &mut Vec<(ClientId, String, &'static str)>,
     seen: &mut HashSet<(ClientId, PathBuf)>,
@@ -881,18 +887,17 @@ fn scan_all_clients_with_env_strategy_inner(
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, *client_id, path);
     }
 
-    let grok_unified_path = if enabled.contains(&ClientId::Grok) {
+    let mut grok_unified_paths = Vec::new();
+    if enabled.contains(&ClientId::Grok) {
         let grok_sessions = PathBuf::from(
             ClientId::Grok
                 .data()
                 .resolve_path_with_env_strategy(home_dir, use_env_roots),
         );
-        grok_sessions
-            .parent()
-            .map(|grok_home| grok_home.join("logs/unified.jsonl"))
-    } else {
-        None
-    };
+        if let Some(path) = grok_unified_log_path(&grok_sessions) {
+            grok_unified_paths.push(path);
+        }
+    }
 
     // Register built-in Kiro IDE roots before user-configured or environment
     // extras. Otherwise a default `*.json` task for an overlapping root can
@@ -922,10 +927,20 @@ fn scan_all_clients_with_env_strategy_inner(
 
     for (client_id, path) in extra_scan_paths_for(scanner_settings, &enabled) {
         warn_if_escapes_home(Path::new(home_dir), client_id, &path);
+        if client_id == ClientId::Grok {
+            if let Some(unified_path) = grok_unified_log_path(&path) {
+                grok_unified_paths.push(unified_path);
+            }
+        }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
     for (client_id, path) in built_in_extra_scan_paths_for(home_dir, &enabled) {
+        if client_id == ClientId::Grok {
+            if let Some(unified_path) = grok_unified_log_path(&path) {
+                grok_unified_paths.push(unified_path);
+            }
+        }
         push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
     }
 
@@ -934,7 +949,13 @@ fn scan_all_clients_with_env_strategy_inner(
     if use_env_roots {
         let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
         for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
-            warn_if_escapes_home(Path::new(home_dir), client_id, &PathBuf::from(&path));
+            let path = PathBuf::from(path);
+            warn_if_escapes_home(Path::new(home_dir), client_id, &path);
+            if client_id == ClientId::Grok {
+                if let Some(unified_path) = grok_unified_log_path(&path) {
+                    grok_unified_paths.push(unified_path);
+                }
+            }
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, client_id, path);
         }
     }
@@ -1319,13 +1340,13 @@ fn scan_all_clients_with_env_strategy_inner(
         }
     }
 
-    if let Some(path) = grok_unified_path {
+    for path in grok_unified_paths {
         let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
         if path.is_file() && seen.insert(key) {
             result.get_mut(ClientId::Grok).push(path);
-            result.get_mut(ClientId::Grok).sort_unstable();
         }
     }
+    result.get_mut(ClientId::Grok).sort_unstable();
 
     if enabled.contains(&ClientId::Copilot) {
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
@@ -1755,17 +1776,21 @@ mod tests {
             .unwrap();
     }
 
-    fn setup_mock_grok_dir(base: &std::path::Path) {
-        let grok_session = base.join(".grok/sessions/%2Ftmp%2Fproject/session-uuid-1");
+    fn setup_mock_grok_home(grok_home: &std::path::Path) {
+        let grok_session = grok_home.join("sessions/%2Ftmp%2Fproject/session-uuid-1");
         fs::create_dir_all(&grok_session).unwrap();
         let mut file = File::create(grok_session.join("updates.jsonl")).unwrap();
         file.write_all(b"{\"method\":\"session/update\"}\n")
             .unwrap();
 
-        let grok_logs = base.join(".grok/logs");
+        let grok_logs = grok_home.join("logs");
         fs::create_dir_all(grok_logs.join("archive")).unwrap();
         File::create(grok_logs.join("unified.jsonl")).unwrap();
         File::create(grok_logs.join("archive/unified.jsonl")).unwrap();
+    }
+
+    fn setup_mock_grok_dir(base: &std::path::Path) {
+        setup_mock_grok_home(&base.join(".grok"));
     }
 
     fn setup_mock_openclaw_dir(base: &std::path::Path) {
@@ -3316,6 +3341,67 @@ mod tests {
             .any(|path| path == &home.join(".grok/logs/archive/unified.jsonl")));
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_grok_discovers_configured_unified_logs_once() {
+        let mut env = EnvGuard::capture(&["GROK_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("GROK_HOME");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        let primary_home = home.join(".grok");
+        let settings_home = home.join("settings-grok");
+        let env_home = home.join("env-grok");
+        setup_mock_grok_home(&primary_home);
+        setup_mock_grok_home(&settings_home);
+        setup_mock_grok_home(&env_home);
+
+        let primary_sessions = primary_home.join("sessions");
+        let settings_sessions = settings_home.join("sessions");
+        let env_sessions = env_home.join("sessions");
+        let settings = ScannerSettings {
+            extra_scan_paths: BTreeMap::from([(
+                "grok".to_string(),
+                vec![primary_sessions.clone(), settings_sessions.clone()],
+            )]),
+            ..Default::default()
+        };
+        env.set(
+            "TOKSCALE_EXTRA_DIRS",
+            format!(
+                "grok:{},grok:{}",
+                settings_sessions.display(),
+                env_sessions.display()
+            ),
+        );
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["grok".to_string()],
+            true,
+            &settings,
+        );
+        let files = result.get(ClientId::Grok);
+        assert_eq!(files.len(), 6);
+
+        for grok_home in [&primary_home, &settings_home, &env_home] {
+            for expected in [
+                grok_home.join("sessions/%2Ftmp%2Fproject/session-uuid-1/updates.jsonl"),
+                grok_home.join("logs/unified.jsonl"),
+            ] {
+                assert_eq!(
+                    files.iter().filter(|path| *path == &expected).count(),
+                    1,
+                    "expected {} exactly once in {files:?}",
+                    expected.display()
+                );
+            }
+            assert!(!files
+                .iter()
+                .any(|path| path == &grok_home.join("logs/archive/unified.jsonl")));
+        }
     }
 
     #[test]
