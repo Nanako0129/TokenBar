@@ -1320,6 +1320,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_grok_path_treats_unified_log_as_self_contained() {
+        let dir = TempDir::new().unwrap();
+        let unified = dir.path().join("unified.jsonl");
+        let unrelated_signals = dir.path().join("signals.json");
+        std::fs::write(&unified, b"first\n").unwrap();
+        std::fs::write(&unrelated_signals, b"one\n").unwrap();
+
+        let before = SourceFingerprint::from_grok_path(&unified).unwrap();
+        std::fs::write(&unrelated_signals, b"unrelated sibling rewrite\n").unwrap();
+        assert_eq!(
+            before,
+            SourceFingerprint::from_grok_path(&unified).unwrap(),
+            "unified.jsonl must not inherit legacy session siblings"
+        );
+
+        std::fs::write(&unified, b"first\nsecond\n").unwrap();
+        assert_ne!(before, SourceFingerprint::from_grok_path(&unified).unwrap());
+    }
+
     struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
     impl EnvGuard {

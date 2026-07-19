@@ -3489,21 +3489,28 @@ fn parse_local_unified_messages_resolved(
     );
     Ok(filter_unified_messages(messages, &options))
 }
-/// Max mtime (unix ms) across every file the local scan would read — the
-/// cheapest "did anything change" probe for callers that cache reports
-/// derived from `parse_local_clients` / the unified-message parsers.
-/// Database-backed sources contribute both the db file and its `-wal`
-/// sidecar (WAL writes may leave the main db file's mtime untouched).
-/// Stat failures contribute nothing, so a vanished file alone never
-/// invalidates a caller's cache — its replacement or sibling will.
+/// Max mtime (unix ms) across every file the local scan would read. This
+/// remains the timestamp-shaped probe used by pruning and diagnostics;
+/// in-process report caches that must observe source deletion use
+/// `local_source_change_token` instead. Database-backed sources contribute both
+/// the db file and its `-wal` sidecar. Stat failures contribute nothing, so a
+/// vanished file alone does not change this max-mtime value.
 pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String> {
+    let scan_result = scan_local_sources(options)?;
+    Ok(latest_source_mtime_ms_from_scan(&scan_result))
+}
+
+fn scan_local_sources(options: &LocalParseOptions) -> Result<scanner::ScanResult, String> {
     let (home_dir, clients) = resolve_local_parse_request(options)?;
-    let scan_result = scanner::scan_all_clients_with_scanner_settings(
+    Ok(scanner::scan_all_clients_with_scanner_settings(
         &home_dir,
         &clients,
         options.use_env_roots,
         &options.scanner_settings,
-    );
+    ))
+}
+
+fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
     let mut latest: u64 = 0;
     for files in scan_result.files.iter() {
         for path in files {
@@ -3584,7 +3591,102 @@ pub fn latest_source_mtime_ms(options: &LocalParseOptions) -> Result<u64, String
     for session in scan_result.get(ClientId::Kiro) {
         latest = latest.max(kiro_source_mtime_ms(session).unwrap_or(0));
     }
-    Ok(latest)
+    latest
+}
+
+/// Opaque change token for in-process report caches. Hash the current source
+/// topology and each parser dependency's size and nanosecond mtime so creating,
+/// deleting, or rewriting a non-max source still invalidates cached graphs and
+/// the live tail.
+pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, String> {
+    use std::hash::{Hash, Hasher};
+
+    let scan_result = scan_local_sources(options)?;
+    let mut paths: Vec<PathBuf> = scan_result.files.iter().flatten().cloned().collect();
+
+    let mut dbs = scan_result.opencode_dbs.clone();
+    let single_dbs = [
+        &scan_result.synthetic_db,
+        &scan_result.kilo_db,
+        &scan_result.goose_db,
+        &scan_result.kiro_db,
+    ];
+    dbs.extend(single_dbs.into_iter().flatten().cloned());
+    dbs.extend(scan_result.hermes_db_paths());
+    dbs.extend(scan_result.zed_db_paths());
+    dbs.extend(
+        scan_result
+            .crush_dbs
+            .iter()
+            .map(|source| source.db_path.clone()),
+    );
+    dbs.extend(scan_result.get(ClientId::AntigravityCli).iter().cloned());
+    dbs.extend(scan_result.get(ClientId::MiMoCode).iter().cloned());
+    for db in dbs {
+        paths.push(db.clone());
+        let mut wal = db.into_os_string();
+        wal.push("-wal");
+        paths.push(PathBuf::from(wal));
+    }
+
+    for snapshot in scan_result.get(ClientId::Jcode) {
+        paths.push(message_cache::jcode_journal_path(snapshot));
+    }
+    for source in scan_result.get(ClientId::Grok) {
+        if source.file_name().and_then(|name| name.to_str()) == Some("updates.jsonl") {
+            if let Some(parent) = source.parent() {
+                paths.extend(
+                    message_cache::GROK_METADATA_SIBLINGS
+                        .into_iter()
+                        .map(|name| parent.join(name)),
+                );
+            }
+        }
+    }
+    for client in [ClientId::RooCode, ClientId::KiloCode, ClientId::Cline] {
+        paths.extend(
+            scan_result
+                .get(client)
+                .iter()
+                .map(|path| sessions::roocode::history_path_for_ui_messages(path)),
+        );
+    }
+    paths.extend(
+        scan_result
+            .get(ClientId::Droid)
+            .iter()
+            .filter_map(|path| sessions::droid::droid_jsonl_path(path)),
+    );
+    paths.extend(
+        scan_result
+            .get(ClientId::Kimi)
+            .iter()
+            .filter_map(|path| sessions::kimi::kimi_config_path(path)),
+    );
+    paths.extend(
+        scan_result
+            .get(ClientId::Kiro)
+            .iter()
+            .filter_map(|path| sessions::kiro::kiro_related_messages_path(path)),
+    );
+
+    paths.sort();
+    paths.dedup();
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for path in paths {
+        path.hash(&mut hasher);
+        let state = std::fs::metadata(&path).ok().map(|metadata| {
+            let modified = metadata
+                .modified()
+                .ok()
+                .and_then(|value| value.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| (duration.as_secs(), duration.subsec_nanos()));
+            (metadata.len(), modified)
+        });
+        state.hash(&mut hasher);
+    }
+    Ok(hasher.finish())
 }
 
 /// File mtime as unix ms; `None` on any stat failure.
@@ -4425,8 +4527,9 @@ mod tests {
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
         dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
-        get_model_report, get_monthly_report, latest_source_mtime_ms, message_cache,
-        normalize_model_for_grouping, parse_all_messages_with_pricing_with_env_strategy,
+        get_model_report, get_monthly_report, latest_source_mtime_ms, local_source_change_token,
+        message_cache, normalize_model_for_grouping,
+        parse_all_messages_with_pricing_with_env_strategy,
         parse_local_clients,
         parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
@@ -11533,6 +11636,299 @@ mod tests {
     #[serial_test::serial]
     fn test_latest_source_mtime_ms_probes_grok_events() {
         latest_source_mtime_ms_probes_grok_sibling("events.jsonl");
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn m17_grok_unified_precedence_tracks_source_lifecycle_across_all_lanes() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let clients = vec!["grok".to_string()];
+        let scanner_settings = scanner::ScannerSettings::default();
+
+        let covered_dir = source_home
+            .path()
+            .join(".grok/sessions/%2Ftmp%2Fproject/covered");
+        let legacy_only_dir = source_home
+            .path()
+            .join(".grok/sessions/%2Ftmp%2Fproject/legacy-only");
+        std::fs::create_dir_all(&covered_dir).unwrap();
+        std::fs::create_dir_all(&legacy_only_dir).unwrap();
+        let covered_updates = covered_dir.join("updates.jsonl");
+        let legacy_only_updates = legacy_only_dir.join("updates.jsonl");
+        std::fs::write(
+            &covered_updates,
+            concat!(
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"covered\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"_meta\":{\"modelId\":\"grok-build\"}},\"_meta\":{\"agentTimestampMs\":1700000000000}}}\n",
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"covered\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\"},\"_meta\":{\"totalTokens\":999,\"agentTimestampMs\":1700000001000}}}\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            &legacy_only_updates,
+            concat!(
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"legacy-only\",\"update\":{\"sessionUpdate\":\"user_message_chunk\",\"_meta\":{\"modelId\":\"grok-build\"}},\"_meta\":{\"agentTimestampMs\":1700000010000}}}\n",
+                "{\"method\":\"session/update\",\"params\":{\"sessionId\":\"legacy-only\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\"},\"_meta\":{\"totalTokens\":17,\"agentTimestampMs\":1700000011000}}}\n",
+            ),
+        )
+        .unwrap();
+        let legacy_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
+        for path in [&covered_updates, &legacy_only_updates] {
+            let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+            if file.set_modified(legacy_time).is_err() {
+                return;
+            }
+        }
+
+        let local_options = || LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            since: None,
+            until: None,
+            year: None,
+            scanner_settings: scanner_settings.clone(),
+            modified_after: None,
+        };
+        let report_options = || ReportOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            scanner_settings: scanner_settings.clone(),
+            ..Default::default()
+        };
+        let sorted = |mut messages: Vec<UnifiedMessage>| {
+            messages.sort_by(|left, right| left.dedup_key.cmp(&right.dedup_key));
+            messages
+        };
+        let materialized = || {
+            sorted(parse_all_messages_with_pricing_with_env_strategy(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner_settings,
+            ))
+        };
+        let streamed = || {
+            let mut messages = Vec::new();
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner_settings,
+                &|_| true,
+                &mut |message| messages.push(message.clone()),
+            );
+            sorted(messages)
+        };
+
+        let legacy = materialized();
+        assert_eq!(legacy.len(), 2);
+        assert_eq!(
+            legacy
+                .iter()
+                .map(|message| message.tokens.total())
+                .sum::<i64>(),
+            1_016
+        );
+        assert_eq!(materialized(), legacy, "legacy cache hits must stay stable");
+        let before_unified = latest_source_mtime_ms(&local_options()).unwrap();
+        let legacy_change_token = local_source_change_token(&local_options()).unwrap();
+        assert_eq!(before_unified, 1_700_086_400_000);
+
+        let logs_dir = source_home.path().join(".grok/logs");
+        std::fs::create_dir_all(&logs_dir).unwrap();
+        let unified = logs_dir.join("unified.jsonl");
+        std::fs::write(
+            &unified,
+            concat!(
+                "{\"ts\":\"2023-11-14T22:13:19Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"model changed\",\"ctx\":{\"model\":\"grok-build\"}}\n",
+                "{\"ts\":\"2023-11-14T22:13:20Z\",\"pid\":7,\"sid\":\"covered\",\"msg\":\"shell.turn.inference_done\",\"ctx\":{\"loop_index\":1,\"prompt_tokens\":100,\"cached_prompt_tokens\":60,\"completion_tokens\":25,\"reasoning_tokens\":5}}\n",
+            ),
+        )
+        .unwrap();
+        let unified_time =
+            std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        let unified_file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&unified)
+            .unwrap();
+        if unified_file.set_modified(unified_time).is_err() {
+            return;
+        }
+        assert_eq!(
+            latest_source_mtime_ms(&local_options()).unwrap(),
+            before_unified,
+            "the newer legacy mtime deliberately masks unified topology changes"
+        );
+        let selected_change_token = local_source_change_token(&local_options()).unwrap();
+        assert_ne!(selected_change_token, legacy_change_token);
+
+        let selected = materialized();
+        assert_eq!(selected.len(), 2);
+        let selected_tokens =
+            selected
+                .iter()
+                .fold(TokenBreakdown::default(), |mut total, message| {
+                    total.input += message.tokens.input;
+                    total.output += message.tokens.output;
+                    total.cache_read += message.tokens.cache_read;
+                    total.cache_write += message.tokens.cache_write;
+                    total.reasoning += message.tokens.reasoning;
+                    total
+                });
+        assert_eq!(
+            selected_tokens,
+            TokenBreakdown {
+                input: 57,
+                output: 20,
+                cache_read: 60,
+                cache_write: 0,
+                reasoning: 5,
+            }
+        );
+        assert!(selected.iter().any(|message| {
+            message.session_id == "covered"
+                && message
+                    .dedup_key
+                    .as_deref()
+                    .is_some_and(|key| key.starts_with("grok-unified:"))
+        }));
+        assert!(selected
+            .iter()
+            .any(|message| message.session_id == "legacy-only"));
+        assert_eq!(
+            materialized(),
+            selected,
+            "selected cache hits must stay stable"
+        );
+        assert_eq!(streamed(), selected);
+
+        let counted = parse_local_clients(local_options()).unwrap();
+        assert_eq!(counted.counts.get(ClientId::Grok), 2);
+        assert_eq!(counted.messages.len(), 2);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            57
+        );
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.cache_read)
+                .sum::<i64>(),
+            60
+        );
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let assert_reports = |expected: (i32, i64, i64, i64, i64, i64)| {
+            let (messages, input, output, cache_read, cache_write, reasoning) = expected;
+            let model = runtime
+                .block_on(get_model_report(report_options()))
+                .unwrap();
+            let monthly = runtime
+                .block_on(get_monthly_report(report_options()))
+                .unwrap();
+            let hourly = runtime
+                .block_on(get_hourly_report(report_options()))
+                .unwrap();
+            let agents = runtime
+                .block_on(get_agents_report(report_options()))
+                .unwrap();
+
+            assert_eq!(
+                (
+                    model.total_messages,
+                    model.total_input,
+                    model.total_output,
+                    model.total_cache_read,
+                    model.total_cache_write,
+                    model
+                        .entries
+                        .iter()
+                        .map(|entry| entry.reasoning)
+                        .sum::<i64>(),
+                ),
+                expected
+            );
+            assert_eq!(
+                monthly
+                    .entries
+                    .iter()
+                    .fold((0, 0, 0, 0, 0), |totals, entry| (
+                        totals.0 + entry.message_count,
+                        totals.1 + entry.input,
+                        totals.2 + entry.output,
+                        totals.3 + entry.cache_read,
+                        totals.4 + entry.cache_write,
+                    ),),
+                (messages, input, output, cache_read, cache_write)
+            );
+            assert_eq!(
+                hourly
+                    .entries
+                    .iter()
+                    .fold((0, 0, 0, 0, 0, 0), |totals, entry| (
+                        totals.0 + entry.message_count,
+                        totals.1 + entry.input,
+                        totals.2 + entry.output,
+                        totals.3 + entry.cache_read,
+                        totals.4 + entry.cache_write,
+                        totals.5 + entry.reasoning,
+                    ),),
+                expected
+            );
+            assert_eq!(
+                agents
+                    .entries
+                    .iter()
+                    .fold((0, 0, 0, 0, 0), |totals, entry| (
+                        totals.0 + entry.input,
+                        totals.1 + entry.output,
+                        totals.2 + entry.cache_read,
+                        totals.3 + entry.cache_write,
+                        totals.4 + entry.reasoning,
+                    ),),
+                (input, output, cache_read, cache_write, reasoning)
+            );
+            assert_eq!(agents.total_messages, messages);
+        };
+        assert_reports((2, 57, 20, 60, 0, 5));
+
+        std::fs::remove_file(&unified).unwrap();
+        assert_eq!(
+            latest_source_mtime_ms(&local_options()).unwrap(),
+            before_unified
+        );
+        assert_eq!(
+            local_source_change_token(&local_options()).unwrap(),
+            legacy_change_token,
+            "deleting a non-max authority source must still invalidate consumers"
+        );
+        let restored = materialized();
+        assert_eq!(restored, legacy);
+        assert_eq!(streamed(), legacy);
+        let restored_count = parse_local_clients(local_options()).unwrap();
+        assert_eq!(restored_count.counts.get(ClientId::Grok), 2);
+        assert_reports((2, 1_016, 0, 0, 0, 0));
+        assert!(message_cache::SourceMessageCache::load()
+            .get(&unified)
+            .is_none());
     }
 
     #[test]

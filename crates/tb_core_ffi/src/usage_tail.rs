@@ -55,8 +55,8 @@ pub struct TraceBucket {
 
 pub struct UsageTailer {
     events: Mutex<Vec<UsageEvent>>,
-    /// `latest_source_mtime_ms` token from the last parse; when it hasn't
-    /// moved, the event window is still correct (rate queries re-filter by
+    /// Topology-sensitive source token from the last parse; when it hasn't
+    /// changed, the event window is still correct (rate queries re-filter by
     /// timestamp on read) and the tick skips the parse entirely.
     last_source_token: Mutex<Option<u64>>,
 }
@@ -92,7 +92,7 @@ impl UsageTailer {
 
         // No source changed since the last parse → the window is already
         // correct; skip the parse. Probe failure falls through to a parse.
-        let token = tokscale_core::latest_source_mtime_ms(&options).ok();
+        let token = tokscale_core::local_source_change_token(&options).ok();
         if token.is_some() && *self.last_source_token.lock() == token {
             return self.events.lock().len();
         }

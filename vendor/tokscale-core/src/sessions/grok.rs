@@ -3,11 +3,11 @@
 //! Grok Build writes JSON-RPC session updates under
 //! `~/.grok/sessions/<urlencoded-workspace>/<session-id>/updates.jsonl`.
 //! Session rollups also land in sibling `signals.json` (including
-//! `totalTokensBeforeCompaction` and `contextTokensUsed`). Current update
-//! logs expose cumulative `totalTokens` counters without a stable
-//! input/output split, so this parser records per-turn positive total-token
-//! deltas as input tokens and reconciles any remaining `signals.json` total
-//! so compacted sessions are not under-counted.
+//! `totalTokensBeforeCompaction` and `contextTokensUsed`). Legacy update logs
+//! expose cumulative `totalTokens` counters without a stable input/output split,
+//! so this parser records positive deltas and reconciles `signals.json` totals.
+//! Recent releases also write per-inference token buckets to the global
+//! `~/.grok/logs/unified.jsonl`, which replaces legacy rows for covered sessions.
 
 use super::utils::{
     extract_i64, extract_string, file_modified_timestamp_ms, parse_timestamp_value,

@@ -70,9 +70,9 @@ static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
 
 /// year → (computed-at, source token, mapped graph payload). Same role as
 /// the Tauri AppState cache, plus a change token: when the cache entry ages
-/// past the oneshot window but `latest_source_mtime_ms` still matches the
-/// token, the entry is re-stamped and served — an idle machine never pays
-/// for a full re-aggregation just because time passed.
+/// past the oneshot window but the topology-sensitive token still matches,
+/// the entry is re-stamped and served — an idle machine never pays for a full
+/// re-aggregation just because time passed.
 type GraphCacheEntry = (Instant, u64, serde_json::Value);
 static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
@@ -175,9 +175,9 @@ unsafe fn clients_from(clients: *const c_char) -> Result<Option<Vec<String>>, St
 
 fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
     // Read the entry and release the lock before any filesystem I/O — never hold
-    // GRAPH_CACHE across the mtime stat sweep below (mirrors graph_compute, which
-    // probes outside the lock too), so concurrent tb_graph callers don't queue
-    // behind one another's stat.
+    // GRAPH_CACHE across the source-state probe below (mirrors graph_compute,
+    // which probes outside the lock too), so concurrent tb_graph callers don't
+    // queue behind one another's stat sweep.
     let (fresh_enough, token, data) = {
         let cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
         let (at, token, data) = cache.get(year)?;
@@ -186,12 +186,12 @@ fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
     if fresh_enough {
         return Some(data);
     }
-    // Aged out — but if no source file changed since the compute, the graph
+    // Aged out — but if no source state changed since the compute, the graph
     // cannot have changed either. Probe with the lock released, then re-acquire
     // briefly to re-stamp so the next calls inside the oneshot window skip the
     // probe entirely. A lost re-stamp (entry evicted/replaced meanwhile) just
     // degrades to the next call re-probing — benign.
-    let fresh = tokscale_core::latest_source_mtime_ms(&Default::default()).ok()?;
+    let fresh = tokscale_core::local_source_change_token(&Default::default()).ok()?;
     if fresh == token {
         let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = cache.get_mut(year) {
@@ -203,10 +203,10 @@ fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
 }
 
 fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
-    // Probe before parsing: a write that lands mid-compute moves the mtime
-    // past this token, so the next aged-out read recomputes rather than
-    // serving a graph that missed it.
-    let token = tokscale_core::latest_source_mtime_ms(&Default::default()).unwrap_or(0);
+    // Probe before parsing: a source write or topology change that lands
+    // mid-compute changes the token, so the next aged-out read recomputes
+    // rather than serving a graph that missed it.
+    let token = tokscale_core::local_source_change_token(&Default::default()).unwrap_or(0);
     let data = usage_graph::run(year)?;
     GRAPH_CACHE
         .lock()
