@@ -285,6 +285,14 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
             continue;
         };
 
+        if let Some(pid) = unified_log_process_start_pid(&value) {
+            // The unified log survives process restarts, so an OS-reused PID
+            // must not inherit model authority from the previous process.
+            fallback_model_by_pid.remove(&pid);
+            model_by_pid_and_session.retain(|(model_pid, _), _| *model_pid != pid);
+            continue;
+        }
+
         if let Some((pid, model_session_id, model_id)) = unified_log_model_change(&value) {
             match (pid, model_session_id) {
                 (Some(pid), Some(session_id)) => {
@@ -333,8 +341,14 @@ pub fn parse_grok_unified_log_file(path: &Path) -> Vec<UnifiedMessage> {
         };
         cached_prompt_tokens = cached_prompt_tokens.min(prompt_tokens);
 
-        let Some(loop_index) = optional_non_negative_i64(context.get("loop_index")) else {
-            continue;
+        let loop_index = match context.get("loop_index") {
+            Some(value) => {
+                let Some(loop_index) = required_non_negative_i64(Some(value)) else {
+                    continue;
+                };
+                loop_index
+            }
+            None => 1,
         };
         let Some(pid) = optional_non_negative_i64(value.get("pid")) else {
             continue;
@@ -478,6 +492,13 @@ fn is_unified_log_message(message: &UnifiedMessage) -> bool {
         .dedup_key
         .as_deref()
         .is_some_and(|key| key.starts_with(UNIFIED_LOG_DEDUP_PREFIX))
+}
+
+fn unified_log_process_start_pid(value: &Value) -> Option<i64> {
+    if value.get("msg").and_then(Value::as_str) != Some("AuthManager::new") {
+        return None;
+    }
+    required_non_negative_i64(value.get("pid"))
 }
 
 fn unified_log_model_change(value: &Value) -> Option<(Option<i64>, Option<String>, String)> {
@@ -896,6 +917,22 @@ mod tests {
     }
 
     #[test]
+    fn unified_log_counts_missing_loop_index_as_first_loop() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"prompt_tokens":100,"completion_tokens":25}}
+{"ts":"2023-11-14T22:13:21Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":80,"completion_tokens":12}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].message_count, 1);
+        assert!(messages[0].is_turn_start);
+        assert_eq!(messages[1].message_count, 0);
+        assert!(!messages[1].is_turn_start);
+    }
+
+    #[test]
     fn unified_log_keeps_distinct_inferences_that_share_base_identity() {
         let (_temp, path) = write_unified_fixture(
             r#"{"ts":"2023-11-14T22:13:20Z","pid":17,"sid":"session-1","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":100,"cached_prompt_tokens":60,"completion_tokens":25,"reasoning_tokens":5}}
@@ -933,6 +970,28 @@ mod tests {
         assert_eq!(messages[0].model_id, "grok-composer-2.5-fast");
         assert_eq!(messages[1].model_id, "grok-4.1-fast");
         assert_eq!(messages[2].model_id, "grok-4.5");
+    }
+
+    #[test]
+    fn unified_log_expires_pid_scoped_models_on_process_restart() {
+        let (_temp, path) = write_unified_fixture(
+            r#"{"ts":"2023-11-14T22:13:17Z","sid":"session-stable","msg":"model changed","ctx":{"model":"grok-session"}}
+{"ts":"2023-11-14T22:13:18Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-old"}}
+{"ts":"2023-11-14T22:13:19Z","pid":17,"sid":"session-old","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":10,"completion_tokens":1}}
+{"ts":"2023-11-14T22:13:20Z","pid":17,"msg":"AuthManager::new","src":"shell","ctx":{}}
+{"ts":"2023-11-14T22:13:21Z","pid":17,"sid":"session-stable","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":15,"completion_tokens":1}}
+{"ts":"2023-11-14T22:13:22Z","pid":17,"sid":"session-new","msg":"shell.turn.inference_done","ctx":{"loop_index":1,"prompt_tokens":20,"completion_tokens":2}}
+{"ts":"2023-11-14T22:13:23Z","pid":17,"msg":"model catalog: notifying clients","ctx":{"current_model_id":"grok-new"}}
+{"ts":"2023-11-14T22:13:24Z","pid":17,"sid":"session-new","msg":"shell.turn.inference_done","ctx":{"loop_index":2,"prompt_tokens":30,"completion_tokens":3}}"#,
+        );
+
+        let messages = parse_grok_unified_log_file(&path);
+
+        assert_eq!(messages.len(), 4);
+        assert_eq!(messages[0].model_id, "grok-old");
+        assert_eq!(messages[1].model_id, "grok-session");
+        assert_eq!(messages[2].model_id, UNKNOWN_MODEL);
+        assert_eq!(messages[3].model_id, "grok-new");
     }
 
     #[test]

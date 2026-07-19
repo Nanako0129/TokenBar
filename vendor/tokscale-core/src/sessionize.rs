@@ -98,7 +98,7 @@ pub fn sessionize(messages: &[UnifiedMessage], idle_gap_ms: i64) -> Vec<SessionI
             tokens.cache_write = tokens.cache_write.saturating_add(msg.tokens.cache_write);
             tokens.reasoning = tokens.reasoning.saturating_add(msg.tokens.reasoning);
             cost += msg.cost;
-            message_count += msg.message_count.max(1);
+            message_count = message_count.saturating_add(msg.message_count.max(0));
         }
 
         intervals.push(SessionInterval {
@@ -383,7 +383,7 @@ impl SessionizeAccumulator {
         acc.tokens.cache_write = acc.tokens.cache_write.saturating_add(msg.tokens.cache_write);
         acc.tokens.reasoning = acc.tokens.reasoning.saturating_add(msg.tokens.reasoning);
         acc.cost += msg.cost;
-        acc.message_count += msg.message_count.max(1);
+        acc.message_count = acc.message_count.saturating_add(msg.message_count.max(0));
     }
 
     /// Consume the accumulator and produce a sorted `Vec<SessionInterval>`.
@@ -873,6 +873,28 @@ mod tests {
         assert_eq!(reference[0].tokens.output, result[0].tokens.output, "output tokens");
         assert!((reference[0].cost - result[0].cost).abs() < 1e-9, "cost");
         assert_eq!(reference[0].message_count, result[0].message_count, "message_count");
+    }
+
+    #[test]
+    fn test_sessionize_preserves_explicit_zero_message_count() {
+        let msgs = vec![
+            make_msg_full("grok", "s1", 1_000_000, 100, 10, 0.01, 1),
+            make_msg_full("grok", "s1", 1_001_000, 200, 20, 0.02, 0),
+        ];
+
+        let result = sessionize(&msgs, DEFAULT_IDLE_GAP_MS);
+        assert_eq!(result[0].message_count, 1);
+        assert_eq!(result[0].tokens.total(), 330);
+        assert_eq!(result[0].wall_duration_ms, 1_000);
+
+        let mut acc = SessionizeAccumulator::new();
+        for message in &msgs {
+            acc.feed(message);
+        }
+        let acc_result = acc.finalize(DEFAULT_IDLE_GAP_MS);
+        assert_eq!(acc_result[0].message_count, 1);
+        assert_eq!(acc_result[0].tokens.total(), 330);
+        assert_eq!(acc_result[0].wall_duration_ms, 1_000);
     }
 
     #[test]
