@@ -87,7 +87,7 @@ The shared-parser critical path is `M15-T → M20 → M15-B → M16`. M16 then u
 | Milestone | Dependency | Outcome | Cache decision |
 |---|---|---|---|
 | M15-T | M15-A merged | Merged as PR #64 and published the complete 111-row classification, selected scope, DAG, and transition rules | Schema 29 |
-| M20 | M15-T merged | Implemented in this checkpoint: parse OpenCode v2 `session_message` data while preserving v1/JSON semantics, distinct embedded IDs, same-ID SQLite rows whose timestamp/token identity is incompatible across every lane, and one-at-a-time JSON authority replacement scoped by message id plus creation timestamp; merge/review gates remain | Schema 29 → 30 |
+| M20 | M15-T merged | Implemented in this checkpoint: parse OpenCode v2 `session_message` data while preserving v1/JSON semantics, distinct embedded IDs, persisted primary/alias keys for overlaps without a v1 embedded id, same-ID SQLite rows whose timestamp/token identity is incompatible across every lane, and exact-deferred-first JSON authority replacement scoped by message id plus creation timestamp; merge/review gates remain | Schema 29 → 30 |
 | M15-B | M20 | Add Kiro `sess_*` structured sessions and all four sibling-source observation sites without double-counting M15-A | Keep schema 30 |
 | M16 | M15-B | Land the existing-client correctness wave and leave only the 9Router hunk of its mixed commit deferred | Schema 30 → 31 |
 | M17 | M16 | Select Grok unified-over-legacy sessions once before any report fold | Keep schema 31 |

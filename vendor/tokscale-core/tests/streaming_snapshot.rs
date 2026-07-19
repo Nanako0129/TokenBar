@@ -44,6 +44,7 @@ fn snapshot_msg(
         message_count: 1,
         agent: None,
         dedup_key: dedup_key.map(|s| s.to_string()),
+        dedup_aliases: Vec::new(),
         is_turn_start: false,
     }
 }

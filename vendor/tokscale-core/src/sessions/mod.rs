@@ -67,6 +67,11 @@ pub struct UnifiedMessage {
     pub message_count: i32,
     pub agent: Option<String>,
     pub dedup_key: Option<String>,
+    /// Alternate source keys for the same logical message. OpenCode uses these
+    /// when one migrated copy has an embedded id and another only has a row/file
+    /// fallback; ordinary clients leave this empty.
+    #[serde(default)]
+    pub dedup_aliases: Vec<String>,
     /// True if this message is the first assistant response after a user turn.
     /// Used to count user interaction turns (as opposed to API message count).
     #[serde(default)]
@@ -346,6 +351,7 @@ impl UnifiedMessage {
             message_count: default_message_count(),
             agent,
             dedup_key,
+            dedup_aliases: Vec::new(),
             is_turn_start: false,
         }
     }

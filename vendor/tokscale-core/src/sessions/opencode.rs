@@ -6,7 +6,7 @@
 
 use super::utils::{open_readonly_sqlite, read_file_or_none};
 use super::{
-    normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key,
+    normalize_opencode_agent_name, normalize_workspace_key, workspace_label_from_key, CostSource,
     UnifiedMessage,
 };
 use crate::{provider_identity, TokenBreakdown};
@@ -135,7 +135,7 @@ struct OpenCodeSqliteFingerprint {
     reasoning: i64,
     cache_read: i64,
     cache_write: i64,
-    cost_bits: u64,
+    // Cost is deliberately absent: it changes authority, not payload identity.
     agent: Option<String>,
 }
 
@@ -146,6 +146,10 @@ struct OpenCodeSqliteDedupState {
     /// messages, not fork copies, and must not be merged. A fork copies the id,
     /// so equal ids (or an id absent on either side) still merge.
     message_id: Option<String>,
+    /// Whether an id-less v1 row has supplied its `message.id` fallback. It is
+    /// promoted when no embedded id exists, or retained as an alias when v2 did
+    /// carry one, so both JSON and sibling-database identities remain reachable.
+    has_v1_fallback_key: bool,
     has_workspace_conflict: bool,
 }
 
@@ -275,6 +279,29 @@ pub fn parse_opencode_file(path: &Path) -> Option<UnifiedMessage> {
 /// `(row_id, session_id, data_json, workspace_root)`.
 type OpenCodeSqliteRow = (String, String, String, Option<String>);
 
+fn merge_opencode_dedup_key(
+    message: &mut UnifiedMessage,
+    incoming_key: Option<String>,
+    prefer_incoming: bool,
+) {
+    let Some(incoming_key) = incoming_key else {
+        return;
+    };
+    if message.dedup_key.as_ref() == Some(&incoming_key) {
+        return;
+    }
+    if prefer_incoming {
+        if let Some(previous) = message.dedup_key.replace(incoming_key.clone()) {
+            if !message.dedup_aliases.contains(&previous) {
+                message.dedup_aliases.push(previous);
+            }
+        }
+        message.dedup_aliases.retain(|alias| alias != &incoming_key);
+    } else if !message.dedup_aliases.contains(&incoming_key) {
+        message.dedup_aliases.push(incoming_key);
+    }
+}
+
 /// Accumulates parsed assistant messages across OpenCode's v1 (`message`) and
 /// v2 (`session_message`) tables, applying fingerprint-based deduplication so
 /// forked-history copies — and any overlap between the two tables — collapse
@@ -291,7 +318,7 @@ struct OpenCodeSqliteAccumulator {
 impl OpenCodeSqliteAccumulator {
     /// Parse one SQLite row's JSON payload and merge it into the accumulator,
     /// deduplicating against previously ingested rows.
-    fn ingest_row(&mut self, row: OpenCodeSqliteRow) {
+    fn ingest_row(&mut self, row: OpenCodeSqliteRow, is_v1: bool) {
         let (row_id, session_id, data_json, row_workspace_root) = row;
 
         let mut bytes = data_json.into_bytes();
@@ -345,7 +372,6 @@ impl OpenCodeSqliteAccumulator {
             reasoning,
             cache_read,
             cache_write,
-            cost_bits: cost.to_bits(),
             agent: agent.clone(),
         };
 
@@ -396,9 +422,27 @@ impl OpenCodeSqliteAccumulator {
             let dedup_state = &mut self.dedup_states[index];
             // First copy carrying an embedded id promotes the entry's stable
             // dedup key (and records the id so later rows can be told apart).
-            if message_id.is_some() && dedup_state.message_id.is_none() {
+            let promote_embedded_id = message_id.is_some() && dedup_state.message_id.is_none();
+            if promote_embedded_id {
                 dedup_state.message_id = message_id.clone();
-                self.messages[index].dedup_key = unified.dedup_key.clone();
+            }
+            let promote_v1_fallback = message_id.is_none()
+                && is_v1
+                && dedup_state.message_id.is_none()
+                && !dedup_state.has_v1_fallback_key;
+            if message_id.is_none() && is_v1 {
+                dedup_state.has_v1_fallback_key = true;
+            }
+            merge_opencode_dedup_key(
+                &mut self.messages[index],
+                unified.dedup_key.clone(),
+                promote_embedded_id || promote_v1_fallback,
+            );
+            if self.messages[index].cost_source != CostSource::ProviderReported
+                && unified.cost_source == CostSource::ProviderReported
+            {
+                self.messages[index].cost = unified.cost;
+                self.messages[index].cost_source = unified.cost_source;
             }
             merge_duplicate_workspace(&mut self.messages[index], dedup_state, workspace_root);
             return;
@@ -407,6 +451,7 @@ impl OpenCodeSqliteAccumulator {
         let new_index = self.messages.len();
         self.dedup_states.push(OpenCodeSqliteDedupState {
             message_id: message_id.clone(),
+            has_v1_fallback_key: is_v1 && message_id.is_none(),
             has_workspace_conflict: false,
         });
         self.fingerprint_indices
@@ -426,6 +471,7 @@ fn collect_opencode_rows(
     conn: &rusqlite::Connection,
     query: &str,
     acc: &mut OpenCodeSqliteAccumulator,
+    is_v1: bool,
 ) {
     let mut stmt = match conn.prepare(query) {
         Ok(s) => s,
@@ -444,7 +490,7 @@ fn collect_opencode_rows(
     };
 
     for row_result in rows.flatten() {
-        acc.ingest_row(row_result);
+        acc.ingest_row(row_result, is_v1);
     }
 }
 
@@ -467,7 +513,7 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
           AND json_extract(sm.data, '$.tokens') IS NOT NULL
         ORDER BY sm.id, sm.session_id
     "#;
-    collect_opencode_rows(&conn, v2_query, &mut acc);
+    collect_opencode_rows(&conn, v2_query, &mut acc, false);
 
     // OpenCode v1 (`opencode.db`, 1.2+): per-message rows in `message`, role in
     // the JSON `$.role`. The `session` join supplies the workspace directory;
@@ -488,9 +534,9 @@ pub fn parse_opencode_sqlite(db_path: &Path) -> Vec<UnifiedMessage> {
         ORDER BY m.id, m.session_id
     "#;
     if conn.prepare(v1_modern_query).is_ok() {
-        collect_opencode_rows(&conn, v1_modern_query, &mut acc);
+        collect_opencode_rows(&conn, v1_modern_query, &mut acc, true);
     } else {
-        collect_opencode_rows(&conn, v1_legacy_query, &mut acc);
+        collect_opencode_rows(&conn, v1_legacy_query, &mut acc, true);
     }
 
     acc.messages
@@ -803,9 +849,10 @@ mod tests {
             rusqlite::params!["v1_row", "ses_overlap", v1_data],
         )
         .unwrap();
+        let v2_data = V2_ASSISTANT_DATA.replace("\"cost\": 0.0123", "\"cost\": 0.0");
         conn.execute(
             "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params!["v2_row", "ses_overlap", "assistant", V2_ASSISTANT_DATA],
+            rusqlite::params!["v2_row", "ses_overlap", "assistant", v2_data],
         )
         .unwrap();
         drop(conn);
@@ -813,6 +860,14 @@ mod tests {
         let messages = parse_opencode_sqlite(&db_path);
         assert_eq!(messages.len(), 1, "v1/v2 overlap should be counted once");
         assert_eq!(messages[0].tokens.input, 5519);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some("v1_row"),
+            "an id-less overlap must retain the v1 row key used by legacy JSON filenames"
+        );
+        assert_eq!(messages[0].dedup_aliases, vec!["v2_row"]);
+        assert_eq!(messages[0].cost, 0.0123);
+        assert_eq!(messages[0].cost_source, CostSource::ProviderReported);
     }
 
     #[test]

@@ -905,6 +905,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: None,
+            dedup_aliases: Vec::new(),
             is_turn_start: false,
         }
     }
@@ -1575,6 +1576,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: None,
+            dedup_aliases: Vec::new(),
             is_turn_start: false,
             duration_ms: None,
         }
@@ -1864,6 +1866,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: dedup_key.map(|s| s.to_string()),
+            dedup_aliases: Vec::new(),
             is_turn_start: false,
         }
     }

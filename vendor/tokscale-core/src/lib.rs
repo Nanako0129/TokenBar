@@ -878,13 +878,13 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             })
         })
         .collect();
-    let opencode_authoritative: HashSet<OpenCodeSourceIdentity> = opencode_sqlite_outcomes
-        .iter()
-        .chain(opencode_json_outcomes.iter())
-        .flat_map(|outcome| outcome.messages.iter())
-        .filter(|message| message.cost_source == CostSource::ProviderReported)
-        .filter_map(OpenCodeSourceIdentity::from_message)
-        .collect();
+    let opencode_authoritative = opencode_authoritative_sources(
+        opencode_sqlite_outcomes
+            .iter()
+            .chain(opencode_json_outcomes.iter())
+            .flat_map(|outcome| outcome.messages.iter())
+            .map(opencode_identity_group),
+    );
     let mut opencode_selection = OpenCodeSelection::new(opencode_authoritative);
 
     for outcome in opencode_sqlite_outcomes {
@@ -1832,9 +1832,9 @@ fn dedup_gate_passes(key: &str, seen: &mut HashSet<String>) -> bool {
     true
 }
 
-/// Cross-store OpenCode identity. Legacy JSON and SQLite may disagree on
-/// tokens or embedded cost for the same request, but retain the same message id
-/// and creation timestamp.
+/// Cross-store OpenCode source identity. A migrated SQLite message can carry
+/// both an embedded id and a v1 row/file fallback, so callers compare every
+/// primary and alternate key at the same creation timestamp.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct OpenCodeSourceIdentity {
     key: String,
@@ -1842,23 +1842,34 @@ struct OpenCodeSourceIdentity {
 }
 
 impl OpenCodeSourceIdentity {
-    fn from_message(message: &UnifiedMessage) -> Option<Self> {
-        Some(Self {
-            key: message.dedup_key.clone()?,
-            timestamp: message.timestamp,
-        })
+    fn all_from_message(message: &UnifiedMessage) -> Vec<Self> {
+        let mut identities = Vec::new();
+        let mut seen = HashSet::new();
+        for key in message
+            .dedup_key
+            .iter()
+            .chain(message.dedup_aliases.iter())
+        {
+            if !key.is_empty() && seen.insert(key.clone()) {
+                identities.push(Self {
+                    key: key.clone(),
+                    timestamp: message.timestamp,
+                });
+            }
+        }
+        identities
     }
 }
 
-/// Logical SQLite request identity used after parser-local fork collapse.
+/// Logical OpenCode payload identity used after parser-local fork collapse.
 ///
-/// The embedded message id alone is insufficient: OpenCode can reuse it for
-/// incompatible rows, which the parser correctly preserves. Session and
-/// workspace are excluded because true fork copies move between both. Cost is
-/// excluded so a provider-reported copy can still replace an estimated one.
+/// Source keys are indexed separately because one migrated request can have
+/// both an embedded id and a row/file fallback. Session and workspace remain
+/// excluded because true fork copies move between both. Cost is excluded so a
+/// provider-reported copy can still replace an estimated one.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct OpenCodeMessageIdentity {
-    source: OpenCodeSourceIdentity,
+struct OpenCodePayloadIdentity {
+    timestamp: i64,
     duration_ms: Option<i64>,
     model_id: String,
     provider_id: String,
@@ -1870,10 +1881,10 @@ struct OpenCodeMessageIdentity {
     agent: Option<String>,
 }
 
-impl OpenCodeMessageIdentity {
-    fn from_message(message: &UnifiedMessage) -> Option<Self> {
-        Some(Self {
-            source: OpenCodeSourceIdentity::from_message(message)?,
+impl OpenCodePayloadIdentity {
+    fn from_message(message: &UnifiedMessage) -> Self {
+        Self {
+            timestamp: message.timestamp,
             duration_ms: message.duration_ms,
             model_id: message.model_id.clone(),
             provider_id: message.provider_id.clone(),
@@ -1883,106 +1894,259 @@ impl OpenCodeMessageIdentity {
             cache_write: message.tokens.cache_write,
             reasoning: message.tokens.reasoning,
             agent: message.agent.clone(),
-        })
+        }
+    }
+}
+
+fn opencode_identity_group(
+    message: &UnifiedMessage,
+) -> (bool, Vec<OpenCodeSourceIdentity>) {
+    (
+        message.cost_source == CostSource::ProviderReported,
+        OpenCodeSourceIdentity::all_from_message(message),
+    )
+}
+
+fn opencode_authoritative_sources(
+    groups: impl IntoIterator<Item = (bool, Vec<OpenCodeSourceIdentity>)>,
+) -> HashSet<OpenCodeSourceIdentity> {
+    let groups: Vec<_> = groups.into_iter().collect();
+    let mut authoritative = HashSet::new();
+    for (is_provider_reported, sources) in &groups {
+        if *is_provider_reported {
+            authoritative.extend(sources.iter().cloned());
+        }
+    }
+    loop {
+        let previous_len = authoritative.len();
+        for (_, sources) in &groups {
+            if sources
+                .iter()
+                .any(|source| authoritative.contains(source))
+            {
+                authoritative.extend(sources.iter().cloned());
+            }
+        }
+        if authoritative.len() == previous_len {
+            return authoritative;
+        }
     }
 }
 
 /// Applies one OpenCode source-priority snapshot without requiring sink
-/// retraction. SQLite fork copies deduplicate by full logical identity, while
-/// legacy JSON overlap retains OpenCode's message-id source precedence.
+/// retraction. SQLite fork copies deduplicate only when a source key (primary or
+/// alias) and the full payload identity both match; distinct embedded ids remain
+/// separate even when every payload field collides.
 struct OpenCodeSelection {
     authoritative_snapshot: HashSet<OpenCodeSourceIdentity>,
-    seen_sqlite: HashSet<OpenCodeMessageIdentity>,
+    seen_sqlite: HashMap<OpenCodeSourceIdentity, HashSet<OpenCodePayloadIdentity>>,
     emitted_sources: HashSet<OpenCodeSourceIdentity>,
     deferred_sqlite: Vec<Option<UnifiedMessage>>,
-    deferred_by_source: HashMap<OpenCodeSourceIdentity, Vec<(OpenCodeMessageIdentity, usize)>>,
+    deferred_sources: Vec<Vec<OpenCodeSourceIdentity>>,
+    deferred_by_identity:
+        HashMap<OpenCodeSourceIdentity, HashMap<OpenCodePayloadIdentity, Vec<usize>>>,
+    deferred_by_source: HashMap<OpenCodeSourceIdentity, Vec<usize>>,
 }
 
 impl OpenCodeSelection {
     fn new(authoritative_snapshot: HashSet<OpenCodeSourceIdentity>) -> Self {
         Self {
             authoritative_snapshot,
-            seen_sqlite: HashSet::new(),
+            seen_sqlite: HashMap::new(),
             emitted_sources: HashSet::new(),
             deferred_sqlite: Vec::new(),
+            deferred_sources: Vec::new(),
+            deferred_by_identity: HashMap::new(),
             deferred_by_source: HashMap::new(),
         }
     }
 
-    fn select_sqlite(&mut self, message: UnifiedMessage) -> Option<UnifiedMessage> {
-        let Some(identity) = OpenCodeMessageIdentity::from_message(&message) else {
-            return Some(message);
-        };
-        let source = identity.source.clone();
-        if !self.seen_sqlite.insert(identity.clone()) {
-            if message.cost_source == CostSource::ProviderReported {
-                if let Some(entries) = self.deferred_by_source.get_mut(&source) {
-                    if let Some(position) = entries
-                        .iter()
-                        .position(|(deferred, _)| deferred == &identity)
-                    {
-                        let (_, index) = entries.swap_remove(position);
-                        self.deferred_sqlite[index] = None;
-                        let remove_source = entries.is_empty();
-                        self.emitted_sources.insert(source.clone());
-                        if remove_source {
-                            self.deferred_by_source.remove(&source);
-                        }
-                        return Some(message);
+    fn has_authority(&self, sources: &[OpenCodeSourceIdentity]) -> bool {
+        sources
+            .iter()
+            .any(|source| self.authoritative_snapshot.contains(source))
+    }
+
+    fn has_emitted(&self, sources: &[OpenCodeSourceIdentity]) -> bool {
+        sources
+            .iter()
+            .any(|source| self.emitted_sources.contains(source))
+    }
+
+    fn connected_deferred_sources(
+        &self,
+        sources: &[OpenCodeSourceIdentity],
+    ) -> Vec<OpenCodeSourceIdentity> {
+        let mut connected: HashSet<_> = sources.iter().cloned().collect();
+        let mut pending: Vec<_> = sources.to_vec();
+        while let Some(source) = pending.pop() {
+            let Some(indices) = self.deferred_by_source.get(&source) else {
+                continue;
+            };
+            for &index in indices {
+                for alias in &self.deferred_sources[index] {
+                    if connected.insert(alias.clone()) {
+                        pending.push(alias.clone());
                     }
                 }
             }
-            return None;
         }
-        if self.authoritative_snapshot.contains(&source)
-            && message.cost_source != CostSource::ProviderReported
-        {
-            let index = self.deferred_sqlite.len();
-            self.deferred_by_source
-                .entry(source)
+        connected.into_iter().collect()
+    }
+
+    fn mark_emitted(&mut self, sources: &[OpenCodeSourceIdentity]) {
+        let connected = self.connected_deferred_sources(sources);
+        self.emitted_sources.extend(connected);
+    }
+
+    fn mark_sqlite_seen(
+        &mut self,
+        sources: &[OpenCodeSourceIdentity],
+        payload: &OpenCodePayloadIdentity,
+    ) -> bool {
+        let duplicate = sources.iter().any(|source| {
+            self.seen_sqlite
+                .get(source)
+                .is_some_and(|payloads| payloads.contains(payload))
+        });
+        for source in sources {
+            self.seen_sqlite
+                .entry(source.clone())
                 .or_default()
-                .push((identity, index));
-            self.deferred_sqlite.push(Some(message));
+                .insert(payload.clone());
+        }
+        duplicate
+    }
+
+    fn index_deferred(
+        &mut self,
+        index: usize,
+        sources: &[OpenCodeSourceIdentity],
+        payload: &OpenCodePayloadIdentity,
+    ) {
+        for source in sources {
+            if !self.deferred_sources[index].contains(source) {
+                self.deferred_sources[index].push(source.clone());
+            }
+            let identity_indices = self
+                .deferred_by_identity
+                .entry(source.clone())
+                .or_default()
+                .entry(payload.clone())
+                .or_default();
+            if !identity_indices.contains(&index) {
+                identity_indices.push(index);
+            }
+            let source_indices = self.deferred_by_source.entry(source.clone()).or_default();
+            if !source_indices.contains(&index) {
+                source_indices.push(index);
+            }
+        }
+    }
+
+    fn defer_sqlite(
+        &mut self,
+        sources: &[OpenCodeSourceIdentity],
+        payload: &OpenCodePayloadIdentity,
+        message: UnifiedMessage,
+    ) {
+        let index = self.deferred_sqlite.len();
+        self.deferred_sqlite.push(Some(message));
+        self.deferred_sources.push(Vec::new());
+        self.index_deferred(index, sources, payload);
+    }
+
+    fn first_active(&self, indices: &[usize]) -> Option<usize> {
+        indices
+            .iter()
+            .copied()
+            .find(|&index| self.deferred_sqlite[index].is_some())
+    }
+
+    fn find_deferred_identity(
+        &self,
+        sources: &[OpenCodeSourceIdentity],
+        payload: &OpenCodePayloadIdentity,
+    ) -> Option<usize> {
+        sources.iter().find_map(|source| {
+            self.deferred_by_identity
+                .get(source)
+                .and_then(|payloads| payloads.get(payload))
+                .and_then(|indices| self.first_active(indices))
+        })
+    }
+
+    fn find_deferred_source(&self, sources: &[OpenCodeSourceIdentity]) -> Option<usize> {
+        sources.iter().find_map(|source| {
+            self.deferred_by_source
+                .get(source)
+                .and_then(|indices| self.first_active(indices))
+        })
+    }
+
+    fn take_deferred(&mut self, index: usize) -> Vec<OpenCodeSourceIdentity> {
+        self.deferred_sqlite[index] = None;
+        self.deferred_sources[index].clone()
+    }
+
+    fn select_sqlite(&mut self, message: UnifiedMessage) -> Option<UnifiedMessage> {
+        let sources = OpenCodeSourceIdentity::all_from_message(&message);
+        if sources.is_empty() {
+            return Some(message);
+        }
+        let payload = OpenCodePayloadIdentity::from_message(&message);
+        if self.mark_sqlite_seen(&sources, &payload) {
+            if let Some(index) = self.find_deferred_identity(&sources, &payload) {
+                self.index_deferred(index, &sources, &payload);
+                if message.cost_source == CostSource::ProviderReported {
+                    let deferred_sources = self.take_deferred(index);
+                    self.mark_emitted(&deferred_sources);
+                    self.mark_emitted(&sources);
+                    return Some(message);
+                }
+                return None;
+            }
+            if self.has_emitted(&sources) {
+                self.mark_emitted(&sources);
+            }
             return None;
         }
-        self.emitted_sources.insert(source);
+        if self.has_emitted(&sources) {
+            self.mark_emitted(&sources);
+        }
+        if self.has_authority(&sources) && message.cost_source != CostSource::ProviderReported {
+            self.defer_sqlite(&sources, &payload, message);
+            return None;
+        }
+        self.mark_emitted(&sources);
         Some(message)
     }
 
     fn select_json(&mut self, message: UnifiedMessage, will_emit: bool) -> Option<UnifiedMessage> {
-        let Some(source) = OpenCodeSourceIdentity::from_message(&message) else {
+        let sources = OpenCodeSourceIdentity::all_from_message(&message);
+        if sources.is_empty() {
             return will_emit.then_some(message);
-        };
-        if self.emitted_sources.contains(&source) {
-            return None;
         }
-        if self.authoritative_snapshot.contains(&source) {
+        if self.has_authority(&sources) {
             if message.cost_source != CostSource::ProviderReported || !will_emit {
                 return None;
             }
-            self.emitted_sources.insert(source.clone());
-            let json_identity = OpenCodeMessageIdentity::from_message(&message);
-            let remove_source = if let Some(entries) = self.deferred_by_source.get_mut(&source) {
-                let position = json_identity
-                    .as_ref()
-                    .and_then(|identity| {
-                        entries
-                            .iter()
-                            .position(|(deferred, _)| deferred == identity)
-                    })
-                    .unwrap_or(0);
-                let (_, index) = entries.swap_remove(position);
-                self.deferred_sqlite[index] = None;
-                entries.is_empty()
-            } else {
-                false
-            };
-            if remove_source {
-                self.deferred_by_source.remove(&source);
+            let payload = OpenCodePayloadIdentity::from_message(&message);
+            let exact = self.find_deferred_identity(&sources, &payload);
+            if exact.is_none() && self.has_emitted(&sources) {
+                return None;
             }
+            if let Some(index) = exact.or_else(|| self.find_deferred_source(&sources)) {
+                let deferred_sources = self.take_deferred(index);
+                self.mark_emitted(&deferred_sources);
+            }
+            self.mark_emitted(&sources);
             return Some(message);
         }
-        self.emitted_sources.insert(source);
+        if self.has_emitted(&sources) {
+            return None;
+        }
+        self.mark_emitted(&sources);
         will_emit.then_some(message)
     }
 
@@ -2458,24 +2622,23 @@ where
     let mut trae_latest: HashMap<String, UnifiedMessage> = HashMap::new();
 
     // ---- OpenCode SQLite + legacy JSON ----
-    // The sink cannot retract an estimated duplicate, so pre-scan only the
-    // authoritative identities before streaming the lane in its existing order.
-    // Legacy JSON is parsed again below so this pass never retains message bodies.
-    let mut opencode_authoritative: HashSet<OpenCodeSourceIdentity> = scan_result
+    // The sink cannot retract an estimated duplicate, so pre-scan source-key
+    // alias groups and expand provider authority across each connected group.
+    // Legacy JSON is parsed again below; this pass retains identities, not bodies.
+    let mut opencode_identity_groups: Vec<_> = scan_result
         .get(ClientId::OpenCode)
         .par_iter()
         .filter_map(|path| sessions::opencode::parse_opencode_file(path))
-        .filter(|message| message.cost_source == CostSource::ProviderReported)
-        .filter_map(|message| OpenCodeSourceIdentity::from_message(&message))
+        .map(|message| opencode_identity_group(&message))
         .collect();
     for db_path in &scan_result.opencode_dbs {
-        opencode_authoritative.extend(
+        opencode_identity_groups.extend(
             sessions::opencode::parse_opencode_sqlite(db_path)
                 .into_iter()
-                .filter(|message| message.cost_source == CostSource::ProviderReported)
-                .filter_map(|message| OpenCodeSourceIdentity::from_message(&message)),
+                .map(|message| opencode_identity_group(&message)),
         );
     }
+    let opencode_authoritative = opencode_authoritative_sources(opencode_identity_groups);
 
     let mut opencode_selection = OpenCodeSelection::new(opencode_authoritative);
     for db_path in &scan_result.opencode_dbs {
@@ -3571,12 +3734,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .par_iter()
             .filter_map(|path| sessions::opencode::parse_opencode_file(path))
             .collect();
-        let authoritative: HashSet<OpenCodeSourceIdentity> = sqlite_messages
-            .iter()
-            .chain(json_messages.iter())
-            .filter(|message| message.cost_source == CostSource::ProviderReported)
-            .filter_map(OpenCodeSourceIdentity::from_message)
-            .collect();
+        let authoritative = opencode_authoritative_sources(
+            sqlite_messages
+                .iter()
+                .chain(json_messages.iter())
+                .map(opencode_identity_group),
+        );
         let mut selection = OpenCodeSelection::new(authoritative);
         let mut selected: Vec<UnifiedMessage> = sqlite_messages
             .into_iter()
@@ -4190,6 +4353,7 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
         message_count: msg.message_count,
         agent: msg.agent.clone(),
         dedup_key: None,
+        dedup_aliases: Vec::new(),
         is_turn_start: false,
     }
 }
@@ -4205,8 +4369,9 @@ mod tests {
         parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
         reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
         select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
-        CostSource, GroupBy, LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity,
-        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        opencode_authoritative_sources, opencode_identity_group, CostSource, GroupBy,
+        LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity, ReportOptions,
+        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
     use std::collections::{HashMap, HashSet};
@@ -4418,7 +4583,9 @@ mod tests {
 
     fn opencode_authority_set(key: &str) -> HashSet<OpenCodeSourceIdentity> {
         let message = make_opencode_selection_message(key, 0.0, CostSource::ProviderReported);
-        HashSet::from([OpenCodeSourceIdentity::from_message(&message).unwrap()])
+        OpenCodeSourceIdentity::all_from_message(&message)
+            .into_iter()
+            .collect()
     }
 
     #[test]
@@ -4545,6 +4712,124 @@ mod tests {
         let deferred: Vec<_> = selection.finish().collect();
         assert_eq!(deferred.len(), 1);
         assert_eq!(deferred[0].tokens.input, 20);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_replaces_deferred_identity_after_other_emission() {
+        let key = "reused-authoritative-id";
+        let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
+        let first = make_opencode_selection_message(key, 0.25, CostSource::ProviderReported);
+        let mut second = make_opencode_selection_message(key, 0.50, CostSource::Estimated);
+        second.tokens.input = 20;
+        let mut json = make_opencode_selection_message(key, 0.75, CostSource::ProviderReported);
+        json.tokens.input = 20;
+
+        assert!(selection.select_sqlite(first).is_some());
+        assert!(selection.select_sqlite(second).is_none());
+        let selected = selection
+            .select_json(json, true)
+            .expect("JSON must replace its exact deferred identity");
+        assert_eq!(selected.tokens.input, 20);
+        assert_eq!(selected.cost_source, CostSource::ProviderReported);
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_expands_authority_through_aliases() {
+        let embedded = "shared-embedded";
+        let fallback = "legacy-message";
+        let pure = make_opencode_selection_message(embedded, 0.25, CostSource::Estimated);
+        let mut hybrid = make_opencode_selection_message(embedded, 0.50, CostSource::Estimated);
+        hybrid.dedup_aliases.push(fallback.to_string());
+        let json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        let duplicate =
+            make_opencode_selection_message(embedded, 1.0, CostSource::ProviderReported);
+        let authoritative = opencode_authoritative_sources(
+            [&pure, &hybrid, &json]
+                .into_iter()
+                .map(opencode_identity_group),
+        );
+        let mut selection = OpenCodeSelection::new(authoritative);
+
+        assert!(selection.select_sqlite(pure).is_none());
+        assert!(selection.select_sqlite(hybrid).is_none());
+        let selected = selection
+            .select_json(json, true)
+            .expect("JSON authority must replace the aliased SQLite identity");
+        assert_eq!(selected.cost, 0.75);
+        assert!(selection.select_json(duplicate, true).is_none());
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_keeps_aliases_on_sqlite_replacement() {
+        let embedded = "shared-embedded";
+        let fallback = "legacy-message";
+        let mut hybrid = make_opencode_selection_message(embedded, 0.25, CostSource::Estimated);
+        hybrid.dedup_aliases.push(fallback.to_string());
+        let sqlite = make_opencode_selection_message(embedded, 0.50, CostSource::ProviderReported);
+        let json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        let authoritative = opencode_authoritative_sources(
+            [&hybrid, &sqlite, &json]
+                .into_iter()
+                .map(opencode_identity_group),
+        );
+        let mut selection = OpenCodeSelection::new(authoritative);
+
+        assert!(selection.select_sqlite(hybrid).is_none());
+        assert!(selection.select_sqlite(sqlite).is_some());
+        assert!(selection.select_json(json, true).is_none());
+        assert_eq!(selection.finish().count(), 0);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_propagates_emitted_aliases_to_deferred_rows() {
+        let embedded = "shared-embedded";
+        let fallback = "legacy-message";
+        let first = make_opencode_selection_message(embedded, 0.25, CostSource::ProviderReported);
+        let mut deferred = make_opencode_selection_message(embedded, 0.50, CostSource::Estimated);
+        deferred.tokens.input = 20;
+        deferred.dedup_aliases.push(fallback.to_string());
+        let mut json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        json.tokens.input = 30;
+        let authoritative = opencode_authoritative_sources(
+            [&first, &deferred, &json]
+                .into_iter()
+                .map(opencode_identity_group),
+        );
+        let mut selection = OpenCodeSelection::new(authoritative);
+
+        assert!(selection.select_sqlite(first).is_some());
+        assert!(selection.select_sqlite(deferred).is_none());
+        assert!(selection.select_json(json, true).is_none());
+        let remaining: Vec<_> = selection.finish().collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].tokens.input, 20);
+    }
+
+    #[test]
+    fn test_opencode_streaming_selection_propagates_emitted_aliases_from_deferred_graph() {
+        let embedded = "shared-embedded";
+        let fallback = "legacy-message";
+        let mut deferred = make_opencode_selection_message(embedded, 0.25, CostSource::Estimated);
+        deferred.tokens.input = 20;
+        deferred.dedup_aliases.push(fallback.to_string());
+        let sqlite = make_opencode_selection_message(embedded, 0.50, CostSource::ProviderReported);
+        let mut json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        json.tokens.input = 30;
+        let authoritative = opencode_authoritative_sources(
+            [&deferred, &sqlite, &json]
+                .into_iter()
+                .map(opencode_identity_group),
+        );
+        let mut selection = OpenCodeSelection::new(authoritative);
+
+        assert!(selection.select_sqlite(deferred).is_none());
+        assert!(selection.select_sqlite(sqlite).is_some());
+        assert!(selection.select_json(json, true).is_none());
+        let remaining: Vec<_> = selection.finish().collect();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].tokens.input, 20);
     }
 
     #[test]
@@ -6287,6 +6572,220 @@ mod tests {
             let repaired_entry = loaded.get(&cache_path).unwrap();
             assert_eq!(repaired_entry.messages.len(), 1);
         }
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_opencode_aliases_preserve_cross_store_identity_across_lanes() {
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let source_home = tempfile::TempDir::new().unwrap();
+        let _env = opencode_test_env(cache_home.path(), source_home.path());
+
+        let db_dir = source_home.path().join(".local/share/opencode");
+        std::fs::create_dir_all(&db_dir).unwrap();
+        let db_path = db_dir.join("opencode-next.db");
+        let conn = create_opencode_v2_sqlite_db(&db_path);
+        let v1_payload = build_opencode_sqlite_payload(
+            1_700_000_000_000.0,
+            1_700_000_000_500.0,
+            100,
+            10,
+            1,
+            5,
+            2,
+            0.0,
+        );
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["legacy-message", "session-overlap", &v1_payload],
+        )
+        .unwrap();
+        let v2_payload = build_opencode_sqlite_payload(
+            1_700_000_000_000.0,
+            1_700_000_000_500.0,
+            100,
+            10,
+            1,
+            5,
+            2,
+            0.02,
+        )
+        .replacen('{', r#"{"id":"v2-embedded","#, 1);
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params!["v2-message", "session-overlap", "assistant", &v2_payload],
+        )
+        .unwrap();
+        let deferred_payload = build_opencode_sqlite_payload(
+            1_700_000_010_000.0,
+            1_700_000_010_500.0,
+            20,
+            5,
+            0,
+            0,
+            0,
+            0.0,
+        );
+        let deferred_v2_payload =
+            deferred_payload.replacen('{', r#"{"id":"shared-order","#, 1);
+        conn.execute(
+            "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["legacy-order", "session-order", &deferred_payload],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![
+                "v2-order",
+                "session-order",
+                "assistant",
+                &deferred_v2_payload
+            ],
+        )
+        .unwrap();
+        drop(conn);
+
+        let sibling_db = db_dir.join("opencode-stable.db");
+        let sibling_conn = create_opencode_v2_sqlite_db(&sibling_db);
+        sibling_conn
+            .execute(
+                "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    "v2-sibling",
+                    "session-overlap",
+                    "assistant",
+                    &v2_payload
+                ],
+            )
+            .unwrap();
+        let provider_payload = build_opencode_sqlite_payload(
+            1_700_000_010_000.0,
+            1_700_000_010_500.0,
+            10,
+            5,
+            0,
+            0,
+            0,
+            0.02,
+        )
+        .replacen('{', r#"{"id":"shared-order","#, 1);
+        sibling_conn
+            .execute(
+                "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![
+                    "v2-order-provider",
+                    "session-order",
+                    "assistant",
+                    &provider_payload
+                ],
+            )
+            .unwrap();
+        drop(sibling_conn);
+
+        let json_dir = db_dir.join("storage/message/project-overlap");
+        std::fs::create_dir_all(&json_dir).unwrap();
+        let migrated_json_payload = build_opencode_sqlite_payload(
+            1_700_000_000_000.0,
+            1_700_000_000_500.0,
+            100,
+            10,
+            1,
+            5,
+            2,
+            0.03,
+        );
+        std::fs::write(
+            json_dir.join("legacy-message.json"),
+            migrated_json_payload,
+        )
+        .unwrap();
+        let json_payload = build_opencode_sqlite_payload(
+            1_700_000_010_000.0,
+            1_700_000_010_500.0,
+            30,
+            5,
+            0,
+            0,
+            0,
+            0.03,
+        );
+        std::fs::write(json_dir.join("legacy-order.json"), json_payload).unwrap();
+
+        let clients = vec!["opencode".to_string()];
+        let materialized = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(materialized.len(), 3);
+        let mut materialized_inputs: Vec<_> = materialized
+            .iter()
+            .map(|message| message.tokens.input)
+            .collect();
+        materialized_inputs.sort_unstable();
+        assert_eq!(materialized_inputs, vec![10, 20, 100]);
+        let migrated = materialized
+            .iter()
+            .find(|message| message.tokens.input == 100)
+            .unwrap();
+        assert_eq!(migrated.dedup_key.as_deref(), Some("v2-embedded"));
+        assert_eq!(migrated.dedup_aliases, vec!["legacy-message"]);
+        assert_eq!(migrated.cost, 0.02);
+        assert_eq!(migrated.cost_source, CostSource::ProviderReported);
+        let warm = parse_all_messages_with_pricing_with_env_strategy(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+        );
+        assert_eq!(warm, materialized, "cache hits must retain OpenCode aliases");
+
+        let mut streamed = Vec::new();
+        scan_messages_streaming(
+            source_home.path().to_str().unwrap(),
+            &clients,
+            None,
+            false,
+            &scanner::ScannerSettings::default(),
+            &|_| true,
+            &mut |message| streamed.push(message.clone()),
+        );
+        assert_eq!(streamed.len(), 3);
+        let mut streamed_inputs: Vec<_> = streamed
+            .iter()
+            .map(|message| message.tokens.input)
+            .collect();
+        streamed_inputs.sort_unstable();
+        assert_eq!(streamed_inputs, vec![10, 20, 100]);
+        let migrated = streamed
+            .iter()
+            .find(|message| message.tokens.input == 100)
+            .unwrap();
+        assert_eq!(migrated.dedup_key.as_deref(), Some("v2-embedded"));
+        assert_eq!(migrated.dedup_aliases, vec!["legacy-message"]);
+        assert_eq!(migrated.cost, 0.02);
+        assert_eq!(migrated.cost_source, CostSource::ProviderReported);
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            use_env_roots: false,
+            clients: Some(clients),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::OpenCode), 3);
+        assert_eq!(counted.messages.len(), 3);
+        assert_eq!(
+            counted
+                .messages
+                .iter()
+                .map(|message| message.input)
+                .sum::<i64>(),
+            130
+        );
     }
 
     #[test]
@@ -11438,6 +11937,7 @@ mod tests {
             message_count: 1,
             agent: None,
             dedup_key: dedup_key.map(|s| s.to_string()),
+            dedup_aliases: Vec::new(),
             is_turn_start: false,
         }
     }
