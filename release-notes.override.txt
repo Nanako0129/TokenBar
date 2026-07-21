@@ -7,8 +7,3 @@ Improved:
 Fixes:
 - Resizing the popover height then hovering no longer leaves a fake tooltip dodge from a stale viewport.
 - Models tooltip overlay no longer steals hover from the row underneath.
-
-Not in this release:
-- Copilot Desktop / VS Code chatSessions / Hermes Windows (still open as PR 74)
-- Zcode
-- Model-alias settings UI
