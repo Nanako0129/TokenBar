@@ -1,6 +1,3 @@
-Improved:
-- Token Usage (2D) and Models popover tooltips clamp inside the visible scroll area, dodge the cursor again, and stay above liquid-glass cards so they no longer hide under the footer or neighboring cards.
-
 Fixes:
-- Resizing the popover height then hovering no longer leaves a fake tooltip dodge from a stale viewport.
-- Models tooltip overlay no longer steals hover from the row underneath.
+- Opening the popover no longer causes TokenBar to quit on some installations after v1.6.1.
+- Quota bars now keep a consistent thickness whether or not a pace marker is available.
