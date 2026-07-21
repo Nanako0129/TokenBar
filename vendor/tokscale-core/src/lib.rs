@@ -597,8 +597,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
 /// until / year), whole-session Desktop suppress is further relaxed: if the
 /// session has any usable VS Code data at all (not only in-window), prefer VS
 /// Code per-request rows and skip Desktop emit/session-suppress for the session.
-/// Any in-report OTEL row for a `session_id` is session-level authority over
-/// all VS Code rows for that id (millisecond skew must not double-count).
+/// In-report OTEL suppresses matching VS Code by `dedup_key`, exact
+/// `(session_id, timestamp)`, or same-session ±2s timestamp skew (not a
+/// whole-session wipe — later distinct turns still count).
 fn parse_all_messages_materialized(
     home_dir: &str,
     clients: &[String],
@@ -1073,7 +1074,7 @@ fn parse_all_messages_materialized(
     // suppress sets from OTEL (only rows that pass the active report date
     // filter — out-of-range OTEL must not suppress in-range Desktop), register
     // Desktop identities (policy depends on date-bounded vs unbounded), then
-    // filter VS Code by session-level OTEL authority, Desktop session-level
+    // filter VS Code by OTEL key / exact-ts / ±2s skew, Desktop session-level
     // coverage, and request-level self-dedup. Fingerprints cover session-state
     // events.jsonl and workspace.json so metadata-only rewrites invalidate.
     {
@@ -1086,21 +1087,27 @@ fn parse_all_messages_materialized(
         let date_bounded = date_filter
             .map(local_parse_date_bounded)
             .unwrap_or(false);
+        // Sessions with any in-report OTEL (Desktop whole-session suppress + diagnostics).
         let otel_sessions: HashSet<String> = all_messages
             .iter()
             .filter(|m| otel_in_report(m))
             .map(|message| message.session_id.clone())
             .collect();
-        let mut existing_dedup_keys: HashSet<String> = all_messages
-            .iter()
-            .filter(|m| otel_in_report(m))
-            .filter_map(|m| m.dedup_key.clone())
-            .collect();
-        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
-            .iter()
-            .filter(|m| otel_in_report(m))
-            .map(|m| (m.session_id.clone(), m.timestamp))
-            .collect();
+        // Per-session OTEL timestamps for ±2s VS Code skew matching only.
+        let mut otel_session_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut existing_dedup_keys: HashSet<String> = HashSet::new();
+        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = HashSet::new();
+        for message in all_messages.iter().filter(|m| otel_in_report(m)) {
+            otel_session_timestamps
+                .entry(message.session_id.clone())
+                .or_default()
+                .push(message.timestamp);
+            if let Some(key) = message.dedup_key.clone() {
+                existing_dedup_keys.insert(key);
+            }
+            existing_copilot_session_timestamps
+                .insert((message.session_id.clone(), message.timestamp));
+        }
         // Desktop emits one aggregate at created_at while VS Code has many
         // request timestamps. Unbounded: any in-range Desktop session_id
         // suppresses ALL VS Code for that id. Date-bounded: if the session has
@@ -1177,12 +1184,6 @@ fn parse_all_messages_materialized(
 
         for outcome in vscode_outcomes {
             for message in outcome.messages {
-                // Session-level OTEL authority: any in-report OTEL row for this
-                // session_id suppresses ALL VS Code rows (ms skew must not
-                // double-count when dedup_key / exact ts differ).
-                if otel_sessions.contains(&message.session_id) {
-                    continue;
-                }
                 // Session-level: Desktop covers the whole VS Code session when
                 // registered (unbounded, or bounded with no VS Code data).
                 if desktop_session_ids.contains(&message.session_id) {
@@ -1193,13 +1194,19 @@ fn parse_all_messages_materialized(
                     .as_deref()
                     .map(|k| !existing_dedup_keys.contains(k))
                     .unwrap_or(true);
-                // Cross-source suppress against Desktop exact-ts / keys when
-                // Desktop did not whole-session register. Do not fold VS Code
-                // rows into session_timestamps so two distinct requestIds that
-                // share a millisecond both count (VS Code self-dedup is key-only).
+                // Cross-source suppress: exact dedup_key, exact (session, ts),
+                // or OTEL ±2s skew. Do not whole-session wipe all VS Code merely
+                // because the session has some OTEL. Do not fold VS Code rows
+                // into session_timestamps so two distinct requestIds that share
+                // a millisecond both count (VS Code self-dedup is key-only).
                 let session_ts_unique = !existing_copilot_session_timestamps
                     .contains(&(message.session_id.clone(), message.timestamp));
-                if !(key_unique && session_ts_unique) {
+                let otel_skew = copilot_vscode_matches_otel_skew(
+                    &message.session_id,
+                    message.timestamp,
+                    &otel_session_timestamps,
+                );
+                if !key_unique || !session_ts_unique || otel_skew {
                     continue;
                 }
                 // Self-dedup via dedup_key (includes requestId when present).
@@ -1885,6 +1892,26 @@ fn unified_message_passes_date_filter(
 /// leak day2 spend into a day1 window while day2 still counts VS Code.
 fn local_parse_date_bounded(options: &LocalParseOptions) -> bool {
     options.since.is_some() || options.until.is_some() || options.year.is_some()
+}
+
+/// Max |vscode.timestamp − otel.timestamp| (ms) for same-session OTEL→VS Code
+/// suppress. Covers millisecond clock skew without whole-session wiping later
+/// distinct turns (e.g. a VS Code request 60s after a partial OTEL cohort).
+const COPILOT_OTEL_VSCODE_SKEW_MS: i64 = 2000;
+
+/// True when any in-report OTEL timestamp for `session_id` is within
+/// ±[`COPILOT_OTEL_VSCODE_SKEW_MS`] of the VS Code request timestamp.
+fn copilot_vscode_matches_otel_skew(
+    session_id: &str,
+    timestamp_ms: i64,
+    otel_session_timestamps: &HashMap<String, Vec<i64>>,
+) -> bool {
+    let Some(times) = otel_session_timestamps.get(session_id) else {
+        return false;
+    };
+    times
+        .iter()
+        .any(|&ots| (timestamp_ms - ots).abs() <= COPILOT_OTEL_VSCODE_SKEW_MS)
 }
 
 fn report_options_date_bounded(options: &ReportOptions) -> bool {
@@ -3297,10 +3324,11 @@ fn scan_messages_streaming_dated<F, S>(
     // OTEL suppress sets once (only messages that pass the active report
     // filter — out-of-range OTEL must not suppress in-range Desktop), emit
     // Desktop (session_id suppress policy depends on date_bounded), then VS
-    // Code (session-level OTEL authority + Desktop session-level coverage +
+    // Code (OTEL key / exact-ts / ±2s skew + Desktop session-level coverage +
     // request-level self-dedup).
     {
         let mut otel_sessions: HashSet<String> = HashSet::new();
+        let mut otel_session_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
         let mut existing_dedup_keys: HashSet<String> = HashSet::new();
         let mut existing_session_timestamps: HashSet<(String, i64)> = HashSet::new();
         let mut desktop_session_ids: HashSet<String> = HashSet::new();
@@ -3312,6 +3340,10 @@ fn scan_messages_streaming_dated<F, S>(
                     continue;
                 }
                 otel_sessions.insert(message.session_id.clone());
+                otel_session_timestamps
+                    .entry(message.session_id.clone())
+                    .or_default()
+                    .push(message.timestamp);
                 if let Some(key) = message.dedup_key.clone() {
                     existing_dedup_keys.insert(key);
                 }
@@ -3425,12 +3457,6 @@ fn scan_messages_streaming_dated<F, S>(
 
         for (_path, msgs) in vscode_msgs_by_path {
             for mut m in msgs {
-                // Session-level OTEL authority: any in-report OTEL row for this
-                // session_id suppresses ALL VS Code rows (ms skew must not
-                // double-count when dedup_key / exact ts differ).
-                if otel_sessions.contains(&m.session_id) {
-                    continue;
-                }
                 if desktop_session_ids.contains(&m.session_id) {
                     continue;
                 }
@@ -3439,13 +3465,19 @@ fn scan_messages_streaming_dated<F, S>(
                     .as_deref()
                     .map(|k| !existing_dedup_keys.contains(k))
                     .unwrap_or(true);
-                // Cross-source suppress against Desktop exact-ts / keys when
-                // Desktop did not whole-session register. Do not fold VS Code
-                // rows into session_timestamps so two distinct requestIds that
-                // share a millisecond both count (VS Code self-dedup is key-only).
+                // Cross-source suppress: exact dedup_key, exact (session, ts),
+                // or OTEL ±2s skew — not whole-session wipe for partial OTEL.
+                // Do not fold VS Code rows into session_timestamps so two
+                // distinct requestIds that share a millisecond both count
+                // (VS Code self-dedup is key-only).
                 let session_ts_unique =
                     !existing_session_timestamps.contains(&(m.session_id.clone(), m.timestamp));
-                if !(key_unique && session_ts_unique) {
+                let otel_skew = copilot_vscode_matches_otel_skew(
+                    &m.session_id,
+                    m.timestamp,
+                    &otel_session_timestamps,
+                );
+                if !key_unique || !session_ts_unique || otel_skew {
                     continue;
                 }
                 // Self-dedup via dedup_key (includes requestId when present).
@@ -4875,21 +4907,25 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         // Date-gate OTEL suppress identities: out-of-range OTEL must not
         // session-suppress in-range Desktop (parity with streaming/materialized).
         let date_bounded = local_parse_date_bounded(&options);
-        let otel_sessions: HashSet<String> = copilot_unified_msgs
+        let mut otel_sessions: HashSet<String> = HashSet::new();
+        let mut otel_session_timestamps: HashMap<String, Vec<i64>> = HashMap::new();
+        let mut existing_dedup_keys: HashSet<String> = HashSet::new();
+        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = HashSet::new();
+        for message in copilot_unified_msgs
             .iter()
             .filter(|m| unified_message_passes_date_filter(m, &options))
-            .map(|message| message.session_id.clone())
-            .collect();
-        let mut existing_dedup_keys: HashSet<String> = copilot_unified_msgs
-            .iter()
-            .filter(|m| unified_message_passes_date_filter(m, &options))
-            .filter_map(|m| m.dedup_key.clone())
-            .collect();
-        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
-            .iter()
-            .filter(|m| unified_message_passes_date_filter(m, &options))
-            .map(|m| (m.session_id.clone(), m.timestamp))
-            .collect();
+        {
+            otel_sessions.insert(message.session_id.clone());
+            otel_session_timestamps
+                .entry(message.session_id.clone())
+                .or_default()
+                .push(message.timestamp);
+            if let Some(key) = message.dedup_key.clone() {
+                existing_dedup_keys.insert(key);
+            }
+            existing_copilot_session_timestamps
+                .insert((message.session_id.clone(), message.timestamp));
+        }
         let mut desktop_session_ids: HashSet<String> = HashSet::new();
 
         // Parse VS Code first so date-bounded reports can prefer VS Code
@@ -4930,12 +4966,6 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             }
         }
         for message in vscode_msgs {
-            // Session-level OTEL authority: any in-report OTEL row for this
-            // session_id suppresses ALL VS Code rows (ms skew must not
-            // double-count when dedup_key / exact ts differ).
-            if otel_sessions.contains(&message.session_id) {
-                continue;
-            }
             // Session-level: Desktop covers every VS Code row for the session_id
             // when registered (unbounded, or bounded with no VS Code data).
             if desktop_session_ids.contains(&message.session_id) {
@@ -4946,11 +4976,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 .as_deref()
                 .map(|k| !existing_dedup_keys.contains(k))
                 .unwrap_or(true);
-            // Cross-source suppress against Desktop exact-ts / keys when
-            // Desktop did not whole-session register.
+            // Cross-source suppress: exact dedup_key, exact (session, ts), or
+            // OTEL ±2s skew — not whole-session wipe for partial OTEL cohorts.
             let session_ts_unique = !existing_copilot_session_timestamps
                 .contains(&(message.session_id.clone(), message.timestamp));
-            if !(key_unique && session_ts_unique) {
+            let otel_skew = copilot_vscode_matches_otel_skew(
+                &message.session_id,
+                message.timestamp,
+                &otel_session_timestamps,
+            );
+            if !key_unique || !session_ts_unique || otel_skew {
                 continue;
             }
             if let Some(key) = message.dedup_key.clone() {
@@ -13356,9 +13391,9 @@ mod tests {
         assert_eq!(messages[0].session_id, "shared-old-otel");
     }
 
-    /// HIGH residual: OTEL session authority over VS Code. Same session_id with
-    /// OTEL at t and VS Code at t+1ms must count once (OTEL only) on all three
-    /// lanes — exact (session_id, timestamp) match is insufficient under ms skew.
+    /// Codex P2: OTEL→VS Code suppress uses key / exact ts / ±2s skew (not
+    /// whole-session wipe). Same session_id with OTEL at t and VS Code at
+    /// t+1ms must count once (OTEL only) on all three lanes.
     #[test]
     #[serial_test::serial]
     fn m23_otel_session_authority_suppresses_vscode_ms_skew_all_lanes() {
@@ -13402,7 +13437,7 @@ mod tests {
         assert_eq!(
             mat.len(),
             1,
-            "OTEL session authority must suppress VS Code at t+1ms: {:?}",
+            "OTEL ±2s skew must suppress VS Code at t+1ms: {:?}",
             mat.iter()
                 .map(|m| (&m.session_id, m.timestamp, m.dedup_key.as_deref()))
                 .collect::<Vec<_>>()
@@ -13438,7 +13473,7 @@ mod tests {
         assert_eq!(
             streaming.len(),
             1,
-            "streaming OTEL session authority: {:?}",
+            "streaming OTEL ±2s skew suppress: {:?}",
             streaming
                 .iter()
                 .map(|m| m.dedup_key.as_deref())
@@ -13465,6 +13500,112 @@ mod tests {
             counted.counts.get(ClientId::Copilot),
             1,
             "count lane must not double-count OTEL+VS Code under ms skew"
+        );
+    }
+
+    /// Codex P2: partial OTEL must not whole-session wipe VS Code. OTEL covers
+    /// request A at t; VS Code request B at t+60s same session → both count.
+    #[test]
+    #[serial_test::serial]
+    fn m23_otel_partial_does_not_wipe_distant_vscode_all_lanes() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mat_cache = tempfile::TempDir::new().unwrap();
+        let stream_cache = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        // OTEL only for turn A at t = 1782909296.000s.
+        let otel = home.join(".copilot/otel/copilot.jsonl");
+        std::fs::create_dir_all(otel.parent().unwrap()).unwrap();
+        std::fs::write(
+            &otel,
+            r#"{"type":"span","traceId":"trace-partial","spanId":"span-a","name":"chat gpt-4o","startTime":[1782909296,0],"endTime":[1782909297,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"partial-session","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":40}}
+"#,
+        )
+        .unwrap();
+
+        // VS Code: turn A at t+1ms (should suppress via skew) + turn B at t+60s
+        // (must count — outside ±2s window).
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("partial-session.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r-a","timestamp":1782909296001,"modelId":"copilot/gpt-4o","completionTokens":40,"promptTokens":100,"result":{"metadata":{"promptTokens":100,"outputTokens":40,"resolvedModel":"gpt-4o"}}},{"requestId":"r-b","timestamp":1782909356000,"modelId":"copilot/gpt-4o","completionTokens":25,"promptTokens":70,"result":{"metadata":{"promptTokens":70,"outputTokens":25,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+
+        let mat = with_isolated_tokscale_cache(mat_cache.path(), || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                &home_s, &clients, None, false, &settings,
+            );
+            messages.retain(|m| m.client == "copilot");
+            messages.sort_by_key(|m| m.timestamp);
+            messages
+        });
+        assert_eq!(
+            mat.len(),
+            2,
+            "OTEL turn A + distant VS Code turn B must both count: {:?}",
+            mat.iter()
+                .map(|m| (&m.session_id, m.timestamp, m.tokens.input, m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mat[0].tokens.input, 100, "OTEL turn A");
+        assert!(
+            !mat[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-vscode:")),
+            "near VS Code turn must be suppressed by OTEL skew"
+        );
+        assert_eq!(mat[1].tokens.input, 70, "VS Code turn B at t+60s");
+        assert!(
+            mat[1]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-vscode:") && k.contains("r-b")),
+            "distant VS Code turn must survive: {:?}",
+            mat[1].dedup_key
+        );
+
+        let streaming = with_isolated_tokscale_cache(stream_cache.path(), || {
+            let mut out = Vec::new();
+            scan_messages_streaming(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                &|_| true,
+                &mut |m: &UnifiedMessage| {
+                    if m.client == "copilot" {
+                        out.push(m.clone());
+                    }
+                },
+            );
+            out.sort_by_key(|m| m.timestamp);
+            out
+        });
+        assert_eq!(streaming.len(), 2, "streaming partial OTEL: {:?}", streaming.len());
+        assert_eq!(streaming[1].tokens.input, 70);
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home_s),
+            use_env_roots: false,
+            clients: Some(clients),
+            scanner_settings: settings,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            counted.counts.get(ClientId::Copilot),
+            2,
+            "count lane: partial OTEL must not wipe distant VS Code"
         );
     }
 

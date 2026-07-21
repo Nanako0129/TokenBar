@@ -298,11 +298,11 @@ fn request_to_message(
         &["/modelId", "/response/modelId", "/result/modelId"],
     );
 
-    // Strict Copilot marker: do not treat bare `resolvedModel` as sufficient.
-    // Accept only when modelId is under the `copilot/` provider namespace, or a
-    // participant/agent metadata field clearly names Copilot. Generic chat
-    // providers that only carry tokens + resolvedModel must be rejected.
-    if !is_copilot_request(req, model_id_raw) {
+    // Strict Copilot marker: do not treat bare `resolvedModel` alone as
+    // sufficient when modelId is a foreign `vendor/model`. Accept `copilot/`
+    // modelId, copilot-ish participant/agent, or (empty/auto modelId + bare
+    // resolvedModel) for Copilot CLI IDs that omit the provider prefix.
+    if !is_copilot_request(req, model_id_raw, resolved_model) {
         return None;
     }
 
@@ -757,7 +757,20 @@ fn parse_decimal_at(s: &str, start: usize) -> Option<(f64, usize)> {
 }
 
 /// True when the request is clearly Copilot-originated.
-fn is_copilot_request(req: &Value, model_id_raw: Option<&str>) -> bool {
+///
+/// Accepts:
+/// - `modelId` under the `copilot/` provider namespace
+/// - participant/agent metadata that clearly names Copilot
+/// - bare CLI model IDs: `modelId` empty / absent / `auto` (or `copilot/auto`)
+///   **and** a real bare `resolvedModel` (no foreign `vendor/model` slash prefix)
+///
+/// Rejects generic chat rows with only tokens + resolvedModel under a foreign
+/// provider `modelId` (e.g. `other-provider/gpt-4o`).
+fn is_copilot_request(
+    req: &Value,
+    model_id_raw: Option<&str>,
+    resolved_model: Option<&str>,
+) -> bool {
     if model_id_raw.is_some_and(|m| m.starts_with("copilot/")) {
         return true;
     }
@@ -775,15 +788,67 @@ fn is_copilot_request(req: &Value, model_id_raw: Option<&str>) -> bool {
         "/response/result/metadata/agent",
         "/response/metadata/agent",
     ];
+    let mut participant_copilot = false;
     for path in PARTICIPANT_PATHS {
         if let Some(value) = req.pointer(path).and_then(Value::as_str) {
             if value.to_ascii_lowercase().contains("copilot") {
+                participant_copilot = true;
+                break;
+            }
+        }
+    }
+    if participant_copilot {
+        return true;
+    }
+
+    // Copilot CLI often emits bare model ids (`gpt-5.4`, `claude-opus-4.7`)
+    // either as modelId itself or as resolvedModel when modelId is empty/auto.
+    // Only accept bare shapes (no foreign `vendor/model` slash prefix).
+    if model_id_raw.is_some_and(is_bare_copilot_model_id) {
+        return true;
+    }
+    if model_id_is_absent_or_auto(model_id_raw) {
+        if let Some(resolved) = resolved_model {
+            if is_bare_copilot_model_id(resolved) {
                 return true;
             }
         }
     }
 
     false
+}
+
+/// `modelId` missing, blank, or the synthetic `auto` selector (not a real model).
+fn model_id_is_absent_or_auto(model_id_raw: Option<&str>) -> bool {
+    match model_id_raw {
+        None => true,
+        Some(m) => {
+            let t = m.trim();
+            t.is_empty()
+                || t.eq_ignore_ascii_case("auto")
+                || t.eq_ignore_ascii_case("copilot/auto")
+        }
+    }
+}
+
+/// Real bare model id suitable as a Copilot CLI marker: non-empty, and either
+/// no `/` at all or only the `copilot/` provider prefix. Foreign
+/// `other-provider/gpt-4o` shapes are rejected.
+fn is_bare_copilot_model_id(id: &str) -> bool {
+    let t = id.trim();
+    if t.is_empty() {
+        return false;
+    }
+    // `auto` alone is a selector, not a resolved model identity.
+    if t.eq_ignore_ascii_case("auto") {
+        return false;
+    }
+    if let Some(rest) = t.strip_prefix("copilot/") {
+        let rest = rest.trim();
+        return !rest.is_empty() && !rest.contains('/');
+    }
+    // Foreign vendor/model — do not treat as Copilot.
+    !t.contains('/')
 }
 
 /// Workspace metadata sibling for a VS Code chatSessions JSONL path:
@@ -1182,6 +1247,74 @@ mod tests {
         let messages = parse_copilot_vscode_sessions(&[path]);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o");
+    }
+
+    /// Codex P2: Copilot CLI emits bare model ids (`gpt-5.4`) with modelId empty
+    /// or `auto` and a bare resolvedModel — must count without requiring
+    /// `copilot/` prefix or participant metadata.
+    #[test]
+    fn bare_cli_resolved_model_accepted_when_model_id_empty_or_auto() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let empty_model_id = sessions_dir.join("bare-empty-0000-0000-0000-000000000001.jsonl");
+        write_jsonl(
+            &empty_model_id,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-bare-empty","timestamp":7000,"completionTokens":20,"promptTokens":80,"result":{"metadata":{"resolvedModel":"gpt-5.4","promptTokens":80,"outputTokens":20}}}]}"#,
+            ],
+        );
+        let auto_model_id = sessions_dir.join("bare-auto-0000-0000-0000-000000000002.jsonl");
+        write_jsonl(
+            &auto_model_id,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-bare-auto","timestamp":7001,"modelId":"auto","completionTokens":30,"promptTokens":90,"result":{"metadata":{"resolvedModel":"claude-opus-4.7","promptTokens":90,"outputTokens":30}}}]}"#,
+            ],
+        );
+        let bare_model_id = sessions_dir.join("bare-mid-0000-0000-0000-000000000003.jsonl");
+        write_jsonl(
+            &bare_model_id,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-bare-mid","timestamp":7002,"modelId":"gpt-5.4","completionTokens":40,"promptTokens":100}]}"#,
+            ],
+        );
+
+        let empty_msgs = parse_copilot_vscode_sessions(&[empty_model_id]);
+        assert_eq!(empty_msgs.len(), 1, "empty modelId + bare resolvedModel");
+        assert_eq!(empty_msgs[0].model_id, "gpt-5.4");
+        assert_eq!(empty_msgs[0].tokens.input, 80);
+        assert_eq!(empty_msgs[0].tokens.output, 20);
+
+        let auto_msgs = parse_copilot_vscode_sessions(&[auto_model_id]);
+        assert_eq!(auto_msgs.len(), 1, "auto modelId + bare resolvedModel");
+        assert_eq!(auto_msgs[0].model_id, "claude-opus-4.7");
+
+        let bare_msgs = parse_copilot_vscode_sessions(&[bare_model_id]);
+        assert_eq!(bare_msgs.len(), 1, "bare modelId without copilot/ prefix");
+        assert_eq!(bare_msgs[0].model_id, "gpt-5.4");
+    }
+
+    /// Foreign `vendor/model` modelId must still be rejected even with a bare
+    /// resolvedModel (narrow guard — do not re-accept non-Copilot chat).
+    #[test]
+    fn foreign_provider_model_id_still_skipped_with_bare_resolved() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("foreign-0000-0000-0000-000000000004.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-foreign","timestamp":8000,"modelId":"other-provider/gpt-4o","completionTokens":50,"promptTokens":300,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}"#,
+            ],
+        );
+
+        assert!(
+            parse_copilot_vscode_sessions(&[path]).is_empty(),
+            "other-provider/gpt-4o must remain non-Copilot"
+        );
     }
 
     #[test]
