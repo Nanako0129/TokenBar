@@ -242,41 +242,56 @@ fn request_to_message(
     session_id: &str,
     workspace: &Option<(String, Option<String>)>,
 ) -> Option<UnifiedMessage> {
-    let prompt_tokens = req
-        .get("promptTokens")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            req.pointer("/result/metadata/promptTokens")
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or(0);
+    // Usage may live at request root, under `result.*` (common snapshot shape),
+    // or under `response.result.*` / `response.*` after kind:1/2 deep-sets of
+    // `k:["requests",N,"response"]`. Prefer root/`result` first.
+    let prompt_tokens = request_i64_first(
+        req,
+        &[
+            "/promptTokens",
+            "/result/metadata/promptTokens",
+            "/response/result/metadata/promptTokens",
+            "/response/metadata/promptTokens",
+            "/response/promptTokens",
+        ],
+    );
 
-    let completion_tokens = req
-        .get("completionTokens")
-        .and_then(Value::as_i64)
-        .or_else(|| {
-            req.pointer("/result/metadata/outputTokens")
-                .and_then(Value::as_i64)
-        })
-        .unwrap_or(0);
+    let completion_tokens = request_i64_first(
+        req,
+        &[
+            "/completionTokens",
+            "/result/metadata/outputTokens",
+            "/result/metadata/completionTokens",
+            "/response/result/metadata/outputTokens",
+            "/response/result/metadata/completionTokens",
+            "/response/metadata/outputTokens",
+            "/response/completionTokens",
+        ],
+    );
 
     if prompt_tokens == 0 && completion_tokens == 0 {
         return None;
     }
 
-    let timestamp_ms = req.get("timestamp").and_then(Value::as_i64).unwrap_or(0);
+    let timestamp_ms = request_i64_first(
+        req,
+        &["/timestamp", "/response/timestamp", "/result/timestamp"],
+    );
 
-    let resolved_model = req
-        .pointer("/result/metadata/resolvedModel")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let resolved_model = request_str_first(
+        req,
+        &[
+            "/result/metadata/resolvedModel",
+            "/response/result/metadata/resolvedModel",
+            "/response/metadata/resolvedModel",
+            "/response/resolvedModel",
+        ],
+    );
 
-    let model_id_raw = req
-        .get("modelId")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let model_id_raw = request_str_first(
+        req,
+        &["/modelId", "/response/modelId", "/result/modelId"],
+    );
 
     // Strict Copilot marker: do not treat bare `resolvedModel` as sufficient.
     // Accept only when modelId is under the `copilot/` provider namespace, or a
@@ -295,16 +310,7 @@ fn request_to_message(
         .unwrap_or("github-copilot")
         .to_string();
 
-    let reasoning_tokens: i64 = req
-        .pointer("/result/metadata/toolCallRounds")
-        .and_then(Value::as_array)
-        .map(|rounds| {
-            rounds
-                .iter()
-                .filter_map(|r| r.pointer("/thinking/tokens").and_then(Value::as_i64))
-                .sum()
-        })
-        .unwrap_or(0);
+    let reasoning_tokens = request_reasoning_tokens(req);
 
     // Cache buckets: align with OTEL/Desktop via shared normalize_input_tokens
     // (OTEL reports cache-inclusive input; same netting applies here when
@@ -356,7 +362,53 @@ fn request_to_message(
     Some(message)
 }
 
-/// Read cache-read tokens from common request / result.metadata key shapes.
+/// First present i64 at any JSON pointer (order = priority). Missing → 0.
+fn request_i64_first(req: &Value, paths: &[&str]) -> i64 {
+    for path in paths {
+        if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
+            return n;
+        }
+    }
+    0
+}
+
+/// First non-empty string at any JSON pointer.
+fn request_str_first<'a>(req: &'a Value, paths: &[&str]) -> Option<&'a str> {
+    for path in paths {
+        if let Some(s) = req
+            .pointer(path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            return Some(s);
+        }
+    }
+    None
+}
+
+/// Reasoning tokens from toolCallRounds under result / response.result.
+fn request_reasoning_tokens(req: &Value) -> i64 {
+    const PATHS: &[&str] = &[
+        "/result/metadata/toolCallRounds",
+        "/response/result/metadata/toolCallRounds",
+        "/response/metadata/toolCallRounds",
+    ];
+    for path in PATHS {
+        if let Some(rounds) = req.pointer(path).and_then(Value::as_array) {
+            let sum: i64 = rounds
+                .iter()
+                .filter_map(|r| r.pointer("/thinking/tokens").and_then(Value::as_i64))
+                .sum();
+            if sum > 0 {
+                return sum;
+            }
+        }
+    }
+    0
+}
+
+/// Read cache-read tokens from common request / result / response key shapes.
 fn request_cache_read_tokens(req: &Value) -> i64 {
     const KEYS: &[&str] = &[
         "/cacheReadTokens",
@@ -365,6 +417,11 @@ fn request_cache_read_tokens(req: &Value) -> i64 {
         "/result/metadata/cacheReadTokens",
         "/result/metadata/cache_read_tokens",
         "/result/metadata/cacheRead",
+        "/response/result/metadata/cacheReadTokens",
+        "/response/result/metadata/cache_read_tokens",
+        "/response/result/metadata/cacheRead",
+        "/response/metadata/cacheReadTokens",
+        "/response/cacheReadTokens",
     ];
     for path in KEYS {
         if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
@@ -389,6 +446,12 @@ fn request_cache_write_tokens(req: &Value) -> i64 {
         "/result/metadata/cacheWrite",
         "/result/metadata/cacheCreationTokens",
         "/result/metadata/cache_creation_tokens",
+        "/response/result/metadata/cacheWriteTokens",
+        "/response/result/metadata/cache_write_tokens",
+        "/response/result/metadata/cacheWrite",
+        "/response/result/metadata/cacheCreationTokens",
+        "/response/metadata/cacheWriteTokens",
+        "/response/cacheWriteTokens",
     ];
     for path in KEYS {
         if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
@@ -419,6 +482,11 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
         "/result/copilotUsageNanoAiu",
         "/result/metadata/nanoAiu",
         "/result/metadata/copilotUsageNanoAiu",
+        "/response/nanoAiu",
+        "/response/result/nanoAiu",
+        "/response/result/metadata/nanoAiu",
+        "/response/result/metadata/copilotUsageNanoAiu",
+        "/response/metadata/nanoAiu",
     ];
     for path in NANO_PATHS {
         if let Some(nano) = req.pointer(path).and_then(json_number_as_i64) {
@@ -431,6 +499,7 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
 
     // Labeled credit/USD under result.details when numeric nano fields are absent.
     // Nested credit-named numeric fields are AI credits; `…/cost` is treated as USD.
+    // Also try `response.result.details` after kind:1/2 response deep-sets.
     const DETAIL_PATHS: &[&str] = &[
         "/result/details",
         "/result/details/credit",
@@ -438,6 +507,11 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
         "/result/details/cost",
         "/result/details/billedCredit",
         "/result/details/billed_credit",
+        "/response/result/details",
+        "/response/result/details/credit",
+        "/response/result/details/credits",
+        "/response/result/details/cost",
+        "/response/details",
     ];
     for path in DETAIL_PATHS {
         if let Some(raw) = req.pointer(path).and_then(Value::as_str) {
@@ -664,9 +738,13 @@ fn is_copilot_request(req: &Value, model_id_raw: Option<&str>) -> bool {
         "/participant",
         "/result/metadata/participant",
         "/response/participant",
+        "/response/result/metadata/participant",
+        "/response/metadata/participant",
         "/agent",
         "/result/metadata/agent",
         "/response/agent",
+        "/response/result/metadata/agent",
+        "/response/metadata/agent",
     ];
     for path in PARTICIPANT_PATHS {
         if let Some(value) = req.pointer(path).and_then(Value::as_str) {
@@ -1455,5 +1533,44 @@ mod tests {
         assert_eq!(m.tokens.output, 20);
         assert_eq!(m.tokens.cache_read, 30);
         assert_eq!(m.tokens.cache_write, 5);
+    }
+
+    /// After kind:1/2 deep-set of `k:["requests",N,"response"]`, usage lives
+    /// under `response.result` (not root / `result`). Must still yield non-zero
+    /// tokens and resolved model.
+    #[test]
+    fn usage_under_response_result_after_response_deep_set() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-resp-0000-0000-000000000003.jsonl");
+
+        // Stub request with only modelId at root; tokens + resolved model arrive
+        // solely under response.result via a deep-set patch.
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-resp","timestamp":1782909300000,"modelId":"copilot/auto"}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"result":{"metadata":{"promptTokens":90,"outputTokens":25,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(
+            messages.len(),
+            1,
+            "usage under response.result must produce a message: {messages:?}"
+        );
+        let m = &messages[0];
+        assert_eq!(m.tokens.input, 90);
+        assert_eq!(m.tokens.output, 25);
+        assert_eq!(m.model_id, "gpt-4o");
+        assert!(
+            m.dedup_key
+                .as_deref()
+                .is_some_and(|k| k.contains("r-resp")),
+            "dedup_key {:?}",
+            m.dedup_key
+        );
     }
 }
