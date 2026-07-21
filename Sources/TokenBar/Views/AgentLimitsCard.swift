@@ -570,10 +570,14 @@ struct AgentLimitsCard: View {
     ) -> some View {
         GeometryReader { geo in
             ZStack(alignment: .leading) {
-                Capsule().fill(.quaternary.opacity(0.6))
+                Capsule()
+                    .fill(.quaternary.opacity(0.6))
+                    .frame(height: geo.size.height)
                 Capsule()
                     .fill(color.opacity(0.85))
-                    .frame(width: geo.size.width * fillPercent / 100)
+                    .frame(
+                        width: geo.size.width * fillPercent / 100,
+                        height: geo.size.height)
                 if let paceLeft {
                     RoundedRectangle(cornerRadius: 0.75)
                         .fill(paceIsDeficit ? Color.orange : Color.secondary)
