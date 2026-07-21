@@ -18,7 +18,8 @@ pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
 pub use model_alias::{
     clear_model_aliases, model_alias_generation, model_aliases,
-    register_usage_data_invalidation_hook, set_model_aliases, ModelAliasMap,
+    register_usage_data_invalidation_hook, set_model_aliases, snapshot_grouping_aliases,
+    GroupingAliasSnapshot, ModelAliasMap,
 };
 pub use parser::*;
 pub use scanner::*;
@@ -1725,9 +1726,12 @@ fn aggregate_model_usage_entries(
     group_by: &GroupBy,
 ) -> Vec<ModelUsage> {
     let mut model_map: HashMap<String, ModelUsage> = HashMap::new();
+    // One alias snapshot for the whole fold so a mid-fold set_model_aliases
+    // cannot split messages across two grouping configs.
+    let aliases = model_alias::snapshot_grouping_aliases();
 
     for msg in messages {
-        let normalized = normalize_model_for_grouping(&msg.model_id);
+        let normalized = aliases.fold(normalize_syntactic(&msg.model_id));
         let (workspace_group_key, workspace_key, workspace_label) = workspace_bucket(&msg);
         let key = match group_by {
             GroupBy::Model => normalized.clone(),
@@ -2346,6 +2350,9 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     };
 
     let mut month_map: HashMap<String, MonthAggregator> = HashMap::new();
+    // One alias snapshot for the whole fold so a mid-fold set_model_aliases
+    // cannot split messages across two grouping configs.
+    let aliases = model_alias::snapshot_grouping_aliases();
 
     scan_messages_streaming(
         &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
@@ -2361,7 +2368,7 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
 
             entry
                 .models
-                .insert(normalize_model_for_grouping(&msg.model_id));
+                .insert(aliases.fold(normalize_syntactic(&msg.model_id)));
             // saturating_add so clamped (i64::MAX) buckets from a corrupt source
             // can't overflow the fold.
             entry.input = entry.input.saturating_add(msg.tokens.input);
@@ -2606,6 +2613,9 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     };
 
     let mut hour_map: HashMap<String, HourAggregator> = HashMap::new();
+    // One alias snapshot for the whole fold so a mid-fold set_model_aliases
+    // cannot split messages across two grouping configs.
+    let aliases = model_alias::snapshot_grouping_aliases();
 
     scan_messages_streaming(
         &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
@@ -2626,7 +2636,7 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
             entry.clients.insert(msg.client.clone());
             entry
                 .models
-                .insert(normalize_model_for_grouping(&msg.model_id));
+                .insert(aliases.fold(normalize_syntactic(&msg.model_id)));
             // saturating_add so clamped (i64::MAX) buckets from a corrupt source
             // can't overflow the fold.
             entry.input = entry.input.saturating_add(msg.tokens.input);
@@ -4714,12 +4724,13 @@ mod tests {
         canonical_model_id, clear_model_aliases, dedupe_latest_trae_messages,
         fold_messages_streaming, get_agents_report, get_hourly_report, get_model_report,
         get_monthly_report, latest_source_mtime_ms, local_source_change_token, message_cache,
-        model_alias_generation, normalize_model_for_grouping, opencode_authoritative_sources,
-        opencode_identity_group, parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
-        prune_scan_result_by_mtime, register_usage_data_invalidation_hook, reprice_lane_message,
-        retain_for_requested_clients, scan_messages_streaming, scanner, select_local_parse_pricing,
-        sessions, set_model_aliases, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
+        model_alias_generation, normalize_model_for_grouping, normalize_syntactic,
+        opencode_authoritative_sources, opencode_identity_group,
+        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
+        parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
+        register_usage_data_invalidation_hook, reprice_lane_message, retain_for_requested_clients,
+        scan_messages_streaming, scanner, select_local_parse_pricing, sessions, set_model_aliases,
+        snapshot_grouping_aliases, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
         GroupBy, LocalParseOptions, ModelAliasMap, OpenCodeSelection, OpenCodeSourceIdentity,
         ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
@@ -5683,6 +5694,78 @@ mod tests {
             "set/reload/clear must each fire the usage-data invalidation hook \
              (baseline={baseline_fires}, after={after_fires})"
         );
+    }
+
+    #[test]
+    fn aggregate_model_usage_entries_uses_fold_start_alias_snapshot() {
+        // Codex P2: multi-message report folds must keep one alias config for
+        // the whole fold. `aggregate_model_usage_entries` snapshots at start;
+        // prove the snapshot pattern it uses is stable under mid-fold reload,
+        // then that the real aggregator still merges under the fold-start map.
+        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_model_aliases();
+        set_model_aliases(&test_alias_map(&[("alias-a", "canonical-b")]));
+
+        // Same capture point as aggregate_model_usage_entries.
+        let aliases = snapshot_grouping_aliases();
+        assert_eq!(
+            aliases.fold(normalize_syntactic("alias-a")),
+            "canonical-b",
+            "fold start sees A→B"
+        );
+
+        // Mid-fold mutation of the process-wide map.
+        set_model_aliases(&test_alias_map(&[("alias-a", "canonical-other")]));
+        assert_eq!(
+            normalize_model_for_grouping("alias-a"),
+            "canonical-other",
+            "live per-call path sees the reloaded map"
+        );
+        // Every message in the fold keeps the snapshotted label.
+        for _ in 0..3 {
+            assert_eq!(
+                aliases.fold(normalize_syntactic("alias-a")),
+                "canonical-b",
+                "snapshot must ignore mid-fold reload for the rest of the fold"
+            );
+        }
+
+        // Re-install fold-start aliases and run the real aggregator: both
+        // channel variants merge under the snapshotted canonical label.
+        set_model_aliases(&test_alias_map(&[("alias-a", "canonical-b")]));
+        let tokens = TokenBreakdown {
+            input: 10,
+            output: 5,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let msg_a = UnifiedMessage::new(
+            "claude",
+            "alias-a",
+            "anthropic",
+            "s1",
+            1_733_011_200_000,
+            tokens.clone(),
+            1.0,
+        );
+        let msg_b = UnifiedMessage::new(
+            "claude",
+            "canonical-b",
+            "anthropic",
+            "s2",
+            1_733_011_200_001,
+            tokens,
+            2.0,
+        );
+        let entries = aggregate_model_usage_entries(vec![msg_a, msg_b], &GroupBy::Model);
+        assert_eq!(entries.len(), 1, "fold-start alias must merge both variants");
+        assert_eq!(entries[0].model, "canonical-b");
+        assert!((entries[0].cost - 3.0).abs() < 1e-12);
+
+        clear_model_aliases();
     }
 
     #[test]

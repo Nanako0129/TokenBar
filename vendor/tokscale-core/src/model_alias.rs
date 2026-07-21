@@ -23,8 +23,10 @@
 //! **reloadable** (not load-once). Changing aliases bumps
 //! [`model_alias_generation`] and runs every registered
 //! [`register_usage_data_invalidation_hook`] so usage-data consumers (reports,
-//! later M24 Warp) can refresh. Message-cache schema stays 31 because aliases
-//! are report-time only.
+//! later M24 Warp) can refresh. Multi-message report folds take one
+//! [`snapshot_grouping_aliases`] at the start and reuse it for every message so
+//! a concurrent reload cannot split one report across two alias maps.
+//! Message-cache schema stays 31 because aliases are report-time only.
 
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
@@ -76,8 +78,9 @@ impl<'de> Deserialize<'de> for ModelAliasMap {
 /// through [`crate::normalize_syntactic`] so lookups match regardless of case,
 /// dated suffix, or `.`-vs-`-` spelling, and canonical values land in the same
 /// space the grouping key uses. Empty keys/values and self-maps are dropped; the
-/// number of entries is capped.
-#[derive(Debug, Default)]
+/// number of entries is capped. `Clone` clones the HashMap so a report fold can
+/// hold a stable [`GroupingAliasSnapshot`] while the process-wide map reloads.
+#[derive(Debug, Default, Clone)]
 struct ModelAliasResolver {
     map: HashMap<String, String>,
 }
@@ -225,12 +228,50 @@ pub fn register_usage_data_invalidation_hook(hook: impl Fn() + Send + Sync + 'st
 }
 
 /// Apply the installed resolver to an already-`normalize_syntactic`'d name.
+///
+/// Reads the process-wide map on every call. Prefer
+/// [`snapshot_grouping_aliases`] + [`GroupingAliasSnapshot::fold`] for any
+/// multi-message report fold so a mid-fold reload cannot split grouping.
 pub(crate) fn apply_global(name: String) -> String {
     state()
         .read()
         .unwrap_or_else(|e| e.into_inner())
         .resolver
         .apply(name)
+}
+
+/// Point-in-time clone of the process-wide grouping-alias resolver.
+///
+/// Report folds (model / monthly / hourly) take one snapshot at the start and
+/// call [`Self::fold`] for every message. A concurrent [`set_model_aliases`] or
+/// [`clear_model_aliases`] updates only the live map; the snapshotted HashMap is
+/// independent and keeps the whole report on one alias config.
+#[derive(Debug, Clone)]
+pub struct GroupingAliasSnapshot {
+    resolver: ModelAliasResolver,
+}
+
+impl GroupingAliasSnapshot {
+    /// Single-hop alias fold for an already-[`crate::normalize_syntactic`]'d
+    /// model name. Misses are identity. Canonical values are returned verbatim
+    /// (never re-resolved), matching [`apply_global`].
+    pub fn fold(&self, syntactic_name: String) -> String {
+        self.resolver.apply(syntactic_name)
+    }
+}
+
+/// Clone the currently installed grouping-alias resolver for one report fold.
+///
+/// Cheap relative to scanning messages: one `RwLock` read and a HashMap clone
+/// (capped at [`MAX_MODEL_ALIASES`] entries). Empty/unset aliases yield an
+/// identity snapshot.
+pub fn snapshot_grouping_aliases() -> GroupingAliasSnapshot {
+    let resolver = state()
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .resolver
+        .clone();
+    GroupingAliasSnapshot { resolver }
 }
 
 #[cfg(test)]
@@ -458,6 +499,54 @@ mod tests {
         assert!(
             after >= baseline + 2,
             "set + clear must each fire the invalidation hook (baseline={baseline}, after={after})"
+        );
+    }
+
+    #[test]
+    fn grouping_alias_snapshot_stable_across_mid_fold_reload() {
+        // Codex P2: a multi-message report must not split across two alias maps
+        // when set_model_aliases runs mid-fold. Snapshot at fold start; mutate
+        // the live map; prove the snapshot keeps folding with the old config.
+        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_model_aliases();
+        set_model_aliases(&alias_map(&[("alias-a", "canonical-b")]));
+
+        let snap = snapshot_grouping_aliases();
+        // First half of a report fold under the snapshotted map.
+        assert_eq!(
+            snap.fold(crate::normalize_syntactic("alias-a")),
+            "canonical-b"
+        );
+
+        // Mid-fold reload replaces the process-wide map.
+        set_model_aliases(&alias_map(&[("alias-a", "canonical-other")]));
+        assert_eq!(
+            apply_global(crate::normalize_syntactic("alias-a")),
+            "canonical-other",
+            "live path must see the reloaded map"
+        );
+        // Snapshot remains on the fold-start config for every later message.
+        assert_eq!(
+            snap.fold(crate::normalize_syntactic("alias-a")),
+            "canonical-b",
+            "report-fold snapshot must ignore mid-fold reload"
+        );
+        assert_eq!(
+            snap.fold(crate::normalize_syntactic("alias-a")),
+            "canonical-b",
+            "second half of the fold must stay consistent with the first"
+        );
+
+        clear_model_aliases();
+        assert_eq!(
+            snap.fold(crate::normalize_syntactic("alias-a")),
+            "canonical-b",
+            "clear must not poison an already-taken snapshot"
+        );
+        assert_eq!(
+            apply_global(crate::normalize_syntactic("alias-a")),
+            "alias-a",
+            "live path after clear is identity"
         );
     }
 }
