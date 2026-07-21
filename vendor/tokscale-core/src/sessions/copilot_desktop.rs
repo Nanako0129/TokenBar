@@ -228,7 +228,10 @@ fn read_events_metadata(events_path: &Path) -> SessionStateMetadata {
                     .filter(|cwd| !cwd.is_empty())
                     .map(str::to_string);
             }
-            "session.model_change" => {
+            // Prefer the first non-empty model_change: session token totals are
+            // whole-session aggregates, so the last mid-session switch must not
+            // claim the entire session.
+            "session.model_change" if metadata.model.is_none() => {
                 if let Some(model) = event
                     .pointer("/data/newModel")
                     .and_then(Value::as_str)
@@ -434,6 +437,32 @@ mod tests {
 
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].provider_id, "github-copilot");
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_prefers_first_model_change() {
+        // Whole-session token totals must not be attributed to a mid-session
+        // model switch; keep the first non-empty model_change.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session(&conn, "session-1", "auto", 100, 50, 0, 0);
+        drop(conn);
+        write_events(
+            dir.path(),
+            "session-1",
+            &[
+                r#"{"type":"session.start","data":{"context":{"cwd":"/Users/alice/project"}}}"#,
+                r#"{"type":"session.model_change","data":{"newModel":"claude-sonnet-4-5"}}"#,
+                r#"{"type":"session.model_change","data":{"newModel":"gpt-5.1-codex"}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_desktop_db(&db_path);
+
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-5");
+        assert_eq!(messages[0].provider_id, "anthropic");
     }
 
     #[test]

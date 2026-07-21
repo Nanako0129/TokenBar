@@ -140,7 +140,17 @@ fn request_to_message(
         reasoning: reasoning_tokens.max(0),
     };
 
-    let dedup_key = format!("copilot-vscode:{}:{}", session_id, timestamp_ms);
+    // Include requestId when present so two distinct requests that share a
+    // session_id and millisecond timestamp do not collapse into one key.
+    let request_id = req
+        .get("requestId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let dedup_key = match request_id {
+        Some(rid) => format!("copilot-vscode:{session_id}:{timestamp_ms}:{rid}"),
+        None => format!("copilot-vscode:{session_id}:{timestamp_ms}"),
+    };
 
     let mut message = UnifiedMessage::new_with_dedup(
         "copilot",
@@ -219,8 +229,15 @@ fn read_workspace_for_file(jsonl_path: &Path) -> Option<(String, Option<String>)
 /// - strips `file://` or bare `file:`
 /// - percent-decodes path segments (`%20` → space, etc.)
 /// - Windows drive form: `/C:/Users/...` → `C:/Users/...`
-/// - UNC: keeps `//server/share` form after decode
+/// - UNC authority form: `file://server/share/repo` → `//server/share/repo`
+/// - UNC path form: `file:////server/share/repo` → `//server/share/repo`
 fn decode_file_uri(folder: &str) -> String {
+    // Detect authority-form UNC before strip: `file://host/...` has no third
+    // slash after the scheme (contrast `file:///abs` and `file:////unc`).
+    let authority_unc = folder
+        .strip_prefix("file://")
+        .is_some_and(|rest| !rest.is_empty() && !rest.starts_with('/'));
+
     let without_scheme = if let Some(rest) = folder.strip_prefix("file://") {
         rest
     } else if let Some(rest) = folder.strip_prefix("file:") {
@@ -243,10 +260,12 @@ fn decode_file_uri(folder: &str) -> String {
         }
     }
 
-    // UNC after stripping file://: //server/share or ///server/share variants.
-    // `file://server/share` → `server/share` (no leading //); restore UNC form
-    // only when the original had the authority-style host.
-    // `file:////server/share` → `//server/share` after strip — keep as-is.
+    // `file://server/share/repo` strips to `server/share/repo`; restore `//`.
+    // `file:////server/share` already yields `//server/share` — leave as-is.
+    if authority_unc && !decoded.starts_with("//") {
+        return format!("//{decoded}");
+    }
+
     decoded
 }
 
@@ -317,8 +336,36 @@ mod tests {
         assert_eq!(m.tokens.reasoning, 0);
         assert_eq!(
             m.dedup_key.as_deref(),
-            Some(format!("copilot-vscode:{}:1783918304896", uuid).as_str())
+            Some(format!("copilot-vscode:{}:1783918304896:r1", uuid).as_str())
         );
+    }
+
+    #[test]
+    fn distinct_request_ids_same_timestamp_yield_distinct_dedup_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let uuid = "550e8400-e29b-41d4-a716-446655440099";
+        let path = sessions_dir.join(format!("{}.jsonl", uuid));
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-a","timestamp":1783918304896,"modelId":"copilot/auto","completionTokens":10,"promptTokens":100,"result":{"metadata":{"resolvedModel":"gpt-4o"}}},{"requestId":"r-b","timestamp":1783918304896,"modelId":"copilot/auto","completionTokens":20,"promptTokens":200,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some(format!("copilot-vscode:{uuid}:1783918304896:r-a").as_str())
+        );
+        assert_eq!(
+            messages[1].dedup_key.as_deref(),
+            Some(format!("copilot-vscode:{uuid}:1783918304896:r-b").as_str())
+        );
+        assert_ne!(messages[0].dedup_key, messages[1].dedup_key);
     }
 
     #[test]
@@ -477,10 +524,19 @@ mod tests {
         );
         // bare file: prefix
         assert_eq!(decode_file_uri("file:/Users/alice/repo"), "/Users/alice/repo");
-        // UNC kept after decode
+        // UNC path form kept after decode
         assert_eq!(
             decode_file_uri("file:////server/share/repo"),
             "//server/share/repo"
+        );
+        // UNC authority form: host is authority, restore leading //
+        assert_eq!(
+            decode_file_uri("file://server/share/repo"),
+            "//server/share/repo"
+        );
+        assert_eq!(
+            decode_file_uri("file://fileserver/projects/My%20Repo"),
+            "//fileserver/projects/My Repo"
         );
     }
 
