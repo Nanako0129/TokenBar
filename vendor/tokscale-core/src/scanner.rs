@@ -536,6 +536,77 @@ fn hermes_home_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     homes
 }
 
+/// True when `path` is a VS Code Copilot Chat session JSONL:
+/// `…/chatSessions/<session>.jsonl`.
+///
+/// Used to reclassify generic `files[Copilot]` hits (extra roots scan with the
+/// OTEL `*.jsonl` pattern) into the dedicated VS Code lane.
+fn is_copilot_vscode_session_path(path: &Path) -> bool {
+    let is_jsonl = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+    if !is_jsonl {
+        return false;
+    }
+    path.parent()
+        .and_then(|parent| parent.file_name())
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name == "chatSessions")
+}
+
+/// Move VS Code chatSessions JSONL out of the generic Copilot OTEL file bucket
+/// into `copilot_vscode_sessions`.
+///
+/// `scanner.extraScanPaths.copilot` and `TOKSCALE_EXTRA_DIRS=copilot:…` roots
+/// are walked with the OTEL `*.jsonl` pattern and would otherwise stay in
+/// `files[Copilot]`, where the OTEL parser ignores chatSessions layout. Paths
+/// whose parent directory is `chatSessions` are the VS Code source of truth.
+fn reclassify_copilot_vscode_sessions_from_files(result: &mut ScanResult) {
+    let mut remaining = Vec::new();
+    let mut promoted = Vec::new();
+    let mut seen: HashSet<PathBuf> = result
+        .copilot_vscode_sessions
+        .iter()
+        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        .collect();
+
+    for path in std::mem::take(result.get_mut(ClientId::Copilot)) {
+        if is_copilot_vscode_session_path(&path) {
+            let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if seen.insert(key) {
+                promoted.push(path);
+            }
+        } else {
+            remaining.push(path);
+        }
+    }
+
+    remaining.sort_unstable();
+    *result.get_mut(ClientId::Copilot) = remaining;
+    result.copilot_vscode_sessions.extend(promoted);
+    result.copilot_vscode_sessions.sort_unstable();
+}
+
+/// Resolve Copilot Desktop `data.db` candidates.
+///
+/// When `use_env_roots` and `COPILOT_HOME` is set, prefer `$COPILOT_HOME/data.db`
+/// (session-state lives under the same home as a sibling of `data.db`). Fall
+/// back to `$HOME/.copilot/data.db` when the env home has no database.
+fn copilot_desktop_db_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if use_env_roots {
+        if let Ok(copilot_home) = std::env::var("COPILOT_HOME") {
+            let trimmed = copilot_home.trim();
+            if !trimmed.is_empty() {
+                candidates.push(PathBuf::from(trimmed).join("data.db"));
+            }
+        }
+    }
+    candidates.push(PathBuf::from(format!("{}/.copilot/data.db", home_dir)));
+    candidates
+}
+
 /// Discover VS Code Copilot Chat `chatSessions/*.jsonl` under workspaceStorage.
 fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
@@ -548,9 +619,16 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         "{}/.config/Code/User/workspaceStorage",
         home_dir
     )));
+    // Always probe the default VSCodium config root alongside Code. Do not
+    // gate this on XDG_CONFIG_HOME — many Linux installs keep VSCodium under
+    // $HOME/.config without setting that env var.
+    roots.push(PathBuf::from(format!(
+        "{}/.config/VSCodium/User/workspaceStorage",
+        home_dir
+    )));
 
     // When env roots are enabled, also honour $XDG_CONFIG_HOME (may differ from
-    // $HOME/.config on Linux) and common VSCodium config layout.
+    // $HOME/.config on Linux) for Code and VSCodium.
     if use_env_roots {
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
             let xdg = PathBuf::from(xdg);
@@ -1500,9 +1578,11 @@ fn scan_all_clients_with_env_strategy_inner(
     result.get_mut(ClientId::Grok).sort_unstable();
 
     if enabled.contains(&ClientId::Copilot) {
-        let desktop_db = PathBuf::from(format!("{}/.copilot/data.db", home_dir));
-        if desktop_db.is_file() {
-            result.copilot_desktop_db = Some(desktop_db);
+        for desktop_db in copilot_desktop_db_candidates(home_dir, use_env_roots) {
+            if desktop_db.is_file() {
+                result.copilot_desktop_db = Some(desktop_db);
+                break;
+            }
         }
 
         result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
@@ -1515,6 +1595,10 @@ fn scan_all_clients_with_env_strategy_inner(
                 copilot_files.sort_unstable();
             }
         }
+
+        // Extra copilot roots land in files[Copilot] via the OTEL *.jsonl
+        // pattern; reclassify chatSessions layout into the VS Code lane.
+        reclassify_copilot_vscode_sessions_from_files(&mut result);
     }
 
     result
@@ -2728,6 +2812,114 @@ mod tests {
             result.copilot_vscode_sessions.contains(&codium_session),
             "expected XDG VSCodium session, got {:?}",
             result.copilot_vscode_sessions
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_discovers_vscodium_under_default_home_config() {
+        // VSCodium under $HOME/.config must be discovered without XDG_CONFIG_HOME.
+        let home_dir = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&["XDG_CONFIG_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("XDG_CONFIG_HOME");
+        env.remove("TOKSCALE_EXTRA_DIRS");
+
+        let codium_dir = home_dir
+            .path()
+            .join(".config/VSCodium/User/workspaceStorage/hash-default/chatSessions");
+        fs::create_dir_all(&codium_dir).unwrap();
+        let codium_session = codium_dir.join("session-default-codium.jsonl");
+        File::create(&codium_session).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home_dir.path().to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert!(
+            result.copilot_vscode_sessions.contains(&codium_session),
+            "expected default $HOME/.config/VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_discovers_copilot_desktop_under_copilot_home() {
+        let home_dir = TempDir::new().unwrap();
+        let copilot_home = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&["COPILOT_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("TOKSCALE_EXTRA_DIRS");
+        env.set("COPILOT_HOME", copilot_home.path());
+
+        let env_db = copilot_home.path().join("data.db");
+        File::create(&env_db).unwrap();
+
+        // Default home db must not win when COPILOT_HOME has data.db.
+        let default_db = home_dir.path().join(".copilot/data.db");
+        fs::create_dir_all(default_db.parent().unwrap()).unwrap();
+        File::create(&default_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home_dir.path().to_str().unwrap(),
+            &["copilot".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.copilot_desktop_db.as_ref(), Some(&env_db));
+        assert_ne!(result.copilot_desktop_db.as_ref(), Some(&default_db));
+    }
+
+    #[test]
+    fn test_extra_scan_path_copilot_chat_sessions_routed_to_vscode_lane() {
+        let home = TempDir::new().unwrap();
+        let extra_root = TempDir::new().unwrap();
+
+        // ChatSessions layout under an extra copilot root (not a default Code path).
+        let chat_dir = extra_root
+            .path()
+            .join("workspaceStorage/hash-extra/chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        let vscode_session = chat_dir.join("extra-session.jsonl");
+        File::create(&vscode_session).unwrap();
+
+        // A sibling OTEL-style jsonl under the same extra root must stay in files[].
+        let otel_dir = extra_root.path().join("otel");
+        fs::create_dir_all(&otel_dir).unwrap();
+        let otel_file = otel_dir.join("copilot-otel.jsonl");
+        File::create(&otel_file).unwrap();
+
+        let settings = ScannerSettings {
+            extra_scan_paths: BTreeMap::from([(
+                "copilot".to_string(),
+                vec![extra_root.path().to_path_buf()],
+            )]),
+            ..ScannerSettings::default()
+        };
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+            &settings,
+        );
+
+        assert!(
+            result.copilot_vscode_sessions.contains(&vscode_session),
+            "extra-root chatSessions must reach the VS Code lane, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            !result.get(ClientId::Copilot).contains(&vscode_session),
+            "chatSessions must not remain in the generic OTEL files bucket"
+        );
+        assert!(
+            result.get(ClientId::Copilot).contains(&otel_file),
+            "non-chatSessions jsonl under the extra root must stay as OTEL files, got {:?}",
+            result.get(ClientId::Copilot)
         );
     }
 
