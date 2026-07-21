@@ -1,19 +1,14 @@
 New:
-- Count more local usage: expanded sources on existing clients (OpenCode v2 databases, Kiro IDE globalStorage and structured sessions, Kimi Code beside legacy Kimi) plus new first-class clients Junie and OpenCodeReview.
-- Grok Agent Limits shows weekly SuperGrok credits and, best-effort, monthly included allowance only when the API returns used/limit; a monthly miss does not sink weekly.
-- Historical quota pace can learn on eligible recurring windows for Codex, Claude, Grok, Antigravity, and Copilot (not every % card; not only Codex Weekly).
+- (none — patch release)
 
 Improved:
-- Grok Build multi-turn usage now follows real turn_completed API usage and unified logs when present, so totals match the product more closely than context counters did. Totals may rise versus 1.5.0 — accuracy correction, not new spend.
-- Long-context and routed pricing paths resolve cost more carefully for verified Sakana and LiteLLM-style requests.
-- Usage cache schema advances 29→32 (via 30/31); first launch after this update rebuilds the local usage cache once so new parsers and Grok fixes are not mixed with stale rows; later refreshes stay fast.
+- Token Usage (2D) and Models popover tooltips clamp inside the visible scroll area, dodge the cursor again, and stay above liquid-glass cards so they no longer hide under the footer or neighboring cards.
 
 Fixes:
-- Grok weekly quota no longer fails the whole card right after a weekly reset when percent fields are omitted.
-- Quota card selections keep internal "|" characters so model-scoped windows are not mis-parsed.
-- Existing Codex, Claude, Copilot, and related parsers tighten duration anchoring and dedup so shared sessions are less likely to double-count.
+- Resizing the popover height then hovering no longer leaves a fake tooltip dodge from a stale viewport.
+- Models tooltip overlay no longer steals hover from the row underneath.
 
 Not in this release:
-- Copilot Desktop / VS Code chatSessions / Hermes Windows (still in progress)
+- Copilot Desktop / VS Code chatSessions / Hermes Windows (still open as PR 74)
 - Zcode
 - Model-alias settings UI
