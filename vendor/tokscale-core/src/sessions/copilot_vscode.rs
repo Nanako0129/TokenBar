@@ -1,6 +1,5 @@
 use super::{normalize_workspace_key, workspace_label_from_key, UnifiedMessage};
 use crate::provider_identity::inferred_provider_from_model;
-use crate::TokenBreakdown;
 use serde_json::Value;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -15,12 +14,41 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         None => return Vec::new(),
     };
 
+    let workspace = read_workspace_for_file(path);
+
+    // Legacy full-session JSON (older VS Code shape): whole file is one object
+    // with a `requests` array. Prefer this when the extension is `.json` (not
+    // `.jsonl`). If the file is JSONL-shaped multi-line despite `.json`, fall
+    // back to the mutation-log path below.
+    let is_legacy_json = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+
+    if is_legacy_json {
+        if let Ok(raw) = std::fs::read_to_string(path) {
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                if let Ok(obj) = serde_json::from_str::<Value>(trimmed) {
+                    if let Some(requests) = extract_requests_array(&obj) {
+                        return requests
+                            .iter()
+                            .filter_map(|req| request_to_message(req, &session_id, &workspace))
+                            .collect();
+                    }
+                    // Whole-file JSON without a requests array: not a chat
+                    // session payload (config/junk). Do not line-scan.
+                    return Vec::new();
+                }
+                // Not a single JSON object — may be JSONL misnamed as .json.
+            }
+        }
+    }
+
     let file = match std::fs::File::open(path) {
         Ok(f) => f,
         Err(_) => return Vec::new(),
     };
-
-    let workspace = read_workspace_for_file(path);
 
     // Replay the VS Code chatSessions mutation log into a final requests array.
     // kind:0 snapshots set the whole list; kind:2 patches set paths under
@@ -56,6 +84,20 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         .iter()
         .filter_map(|req| request_to_message(req, &session_id, &workspace))
         .collect()
+}
+
+/// Extract a `requests` array from a legacy full-session JSON object.
+/// Accepts top-level `requests`, nested `v.requests`, or snapshot-style
+/// pointers already used by the mutation-log path. Unrelated JSON without a
+/// requests array returns `None` so junk is not treated as a session.
+fn extract_requests_array(obj: &Value) -> Option<Vec<Value>> {
+    const PATHS: &[&str] = &["/requests", "/v/requests"];
+    for path in PATHS {
+        if let Some(arr) = obj.pointer(path).and_then(Value::as_array) {
+            return Some(arr.clone());
+        }
+    }
+    None
 }
 
 /// Apply a kind:2 mutation-log entry whose path starts at `"requests"`.
@@ -260,13 +302,18 @@ fn request_to_message(
         })
         .unwrap_or(0);
 
-    let tokens = TokenBreakdown {
-        input: prompt_tokens.max(0),
-        output: completion_tokens.max(0),
-        cache_read: 0,
-        cache_write: 0,
-        reasoning: reasoning_tokens.max(0),
-    };
+    // Cache buckets: align with OTEL/Desktop via shared normalize_input_tokens
+    // (OTEL reports cache-inclusive input; same netting applies here when
+    // promptTokens already includes cacheRead).
+    let cache_read = request_cache_read_tokens(req);
+    let cache_write = request_cache_write_tokens(req);
+    let tokens = super::copilot::normalize_input_tokens(
+        prompt_tokens,
+        completion_tokens,
+        cache_read,
+        cache_write,
+        reasoning_tokens,
+    );
 
     // Include requestId when present so two distinct requests that share a
     // session_id and millisecond timestamp do not collapse into one key.
@@ -303,6 +350,50 @@ fn request_to_message(
     }
 
     Some(message)
+}
+
+/// Read cache-read tokens from common request / result.metadata key shapes.
+fn request_cache_read_tokens(req: &Value) -> i64 {
+    const KEYS: &[&str] = &[
+        "/cacheReadTokens",
+        "/cache_read_tokens",
+        "/cacheRead",
+        "/result/metadata/cacheReadTokens",
+        "/result/metadata/cache_read_tokens",
+        "/result/metadata/cacheRead",
+    ];
+    for path in KEYS {
+        if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    0
+}
+
+/// Read cache-write / cache-creation tokens from common key shapes.
+fn request_cache_write_tokens(req: &Value) -> i64 {
+    const KEYS: &[&str] = &[
+        "/cacheWriteTokens",
+        "/cache_write_tokens",
+        "/cacheWrite",
+        "/cacheCreationTokens",
+        "/cache_creation_tokens",
+        "/result/metadata/cacheWriteTokens",
+        "/result/metadata/cache_write_tokens",
+        "/result/metadata/cacheWrite",
+        "/result/metadata/cacheCreationTokens",
+        "/result/metadata/cache_creation_tokens",
+    ];
+    for path in KEYS {
+        if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
+            if n > 0 {
+                return n;
+            }
+        }
+    }
+    0
 }
 
 /// Extract provider-billed cost from a VS Code chat request, if present.
@@ -1079,5 +1170,66 @@ mod tests {
             messages[0].workspace_label.as_deref(),
             Some("proj.code-workspace")
         );
+    }
+
+    #[test]
+    fn legacy_full_session_json_parses_requests() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let uuid = "aaaaaaaa-legacy-0000-0000-000000000001";
+        let path = sessions_dir.join(format!("{}.json", uuid));
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"requests":[{"requestId":"r-legacy","timestamp":1782909300000,"modelId":"copilot/gpt-4o","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}"#,
+        )
+        .unwrap();
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].session_id, uuid);
+        assert_eq!(messages[0].tokens.input, 60);
+        assert_eq!(messages[0].tokens.output, 15);
+        assert_eq!(messages[0].model_id, "gpt-4o");
+        assert_eq!(
+            messages[0].dedup_key.as_deref(),
+            Some(format!("copilot-vscode:{}:1782909300000:r-legacy", uuid).as_str())
+        );
+    }
+
+    #[test]
+    fn legacy_json_without_requests_is_ignored() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("not-a-session.json");
+        std::fs::write(&path, r#"{"version":1,"settings":{"theme":"dark"}}"#).unwrap();
+        assert!(parse_copilot_vscode_sessions(&[path]).is_empty());
+    }
+
+    #[test]
+    fn cache_read_tokens_normalized_out_of_input() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("bbbbbbbb-cache-0000-0000-000000000002.jsonl");
+
+        // promptTokens includes cacheRead (OTEL-style); normalize_input_tokens
+        // nets cache_read out of input and preserves the cache bucket.
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-cache","timestamp":1782909300000,"modelId":"copilot/gpt-4o","completionTokens":20,"promptTokens":100,"cacheReadTokens":30,"cacheWriteTokens":5,"result":{"metadata":{"promptTokens":100,"outputTokens":20,"resolvedModel":"gpt-4o"}}}]}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m.tokens.input, 70, "input must net cache_read: 100-30");
+        assert_eq!(m.tokens.output, 20);
+        assert_eq!(m.tokens.cache_read, 30);
+        assert_eq!(m.tokens.cache_write, 5);
     }
 }

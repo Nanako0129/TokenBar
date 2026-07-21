@@ -536,23 +536,31 @@ fn hermes_home_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     homes
 }
 
-/// True when `path` is a VS Code Copilot Chat session JSONL:
-/// `…/chatSessions/<session>.jsonl`.
+/// True when a filename is a VS Code chat session payload (JSONL mutation log
+/// or legacy full-session JSON).
+fn is_copilot_vscode_session_filename(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".jsonl") || lower.ends_with(".json")
+}
+
+/// True when `path` is a VS Code Copilot Chat session file:
+/// `…/chatSessions/<session>.{jsonl,json}` or
+/// `…/emptyWindowChatSessions/<session>.{jsonl,json}`.
 ///
 /// Used to reclassify generic `files[Copilot]` hits (extra roots scan with the
 /// OTEL `*.jsonl` pattern) into the dedicated VS Code lane.
 fn is_copilot_vscode_session_path(path: &Path) -> bool {
-    let is_jsonl = path
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
-    if !is_jsonl {
+    let name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("");
+    if !is_copilot_vscode_session_filename(name) {
         return false;
     }
     path.parent()
         .and_then(|parent| parent.file_name())
         .and_then(|name| name.to_str())
-        .is_some_and(|name| name == "chatSessions")
+        .is_some_and(|name| name == "chatSessions" || name == "emptyWindowChatSessions")
 }
 
 /// Move VS Code chatSessions JSONL out of the generic Copilot OTEL file bucket
@@ -607,7 +615,39 @@ fn copilot_desktop_db_candidates(home_dir: &str, use_env_roots: bool) -> Vec<Pat
     candidates
 }
 
-/// Discover VS Code Copilot Chat `chatSessions/*.jsonl` under workspaceStorage.
+/// Collect `*.{jsonl,json}` session files from a flat directory into `files`,
+/// deduping by canonicalize into `seen`.
+fn collect_copilot_vscode_session_files(
+    dir: &Path,
+    files: &mut Vec<PathBuf>,
+    seen: &mut HashSet<PathBuf>,
+) {
+    if !dir.is_dir() {
+        return;
+    }
+    let entries = match std::fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(_) => return,
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if !is_copilot_vscode_session_filename(name) {
+            continue;
+        }
+        if !path.is_file() {
+            continue;
+        }
+        let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if seen.insert(key) {
+            files.push(path);
+        }
+    }
+}
+
+/// Discover VS Code Copilot Chat sessions under workspaceStorage
+/// (`*/chatSessions/*.{jsonl,json}`) and the sibling empty-window layout
+/// (`User/globalStorage/emptyWindowChatSessions/*.{jsonl,json}`).
 fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = Vec::new();
 
@@ -672,33 +712,37 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
     for workspace_storage in &roots {
+        // workspaceStorage/{hash}/chatSessions/*.{jsonl,json}
         let hash_dirs = match std::fs::read_dir(workspace_storage) {
             Ok(rd) => rd,
-            Err(_) => continue,
-        };
-        for entry in hash_dirs.filter_map(|e| e.ok()) {
-            let chat_sessions_dir = entry.path().join("chatSessions");
-            if !chat_sessions_dir.is_dir() {
+            Err(_) => {
+                // Still try empty-window sibling even when workspaceStorage is absent.
+                if let Some(user_dir) = workspace_storage.parent() {
+                    collect_copilot_vscode_session_files(
+                        &user_dir.join("globalStorage/emptyWindowChatSessions"),
+                        &mut files,
+                        &mut seen,
+                    );
+                }
                 continue;
             }
-            let chat_entries = match std::fs::read_dir(&chat_sessions_dir) {
-                Ok(rd) => rd,
-                Err(_) => continue,
-            };
-            for chat_entry in chat_entries.filter_map(|e| e.ok()) {
-                let path = chat_entry.path();
-                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                if !name.ends_with(".jsonl") {
-                    continue;
-                }
-                if !path.is_file() {
-                    continue;
-                }
-                let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
-                if seen.insert(key) {
-                    files.push(path);
-                }
-            }
+        };
+        for entry in hash_dirs.filter_map(|e| e.ok()) {
+            collect_copilot_vscode_session_files(
+                &entry.path().join("chatSessions"),
+                &mut files,
+                &mut seen,
+            );
+        }
+        // Sibling of workspaceStorage: User/globalStorage/emptyWindowChatSessions
+        // (flat dir, not hash/chatSessions nesting). Upstream #875 is workspace-
+        // Storage only; this is additive discovery for empty-window chats.
+        if let Some(user_dir) = workspace_storage.parent() {
+            collect_copilot_vscode_session_files(
+                &user_dir.join("globalStorage/emptyWindowChatSessions"),
+                &mut files,
+                &mut seen,
+            );
         }
     }
 
@@ -2782,8 +2826,20 @@ mod tests {
         fs::create_dir_all(&vscode_dir).unwrap();
         let vscode_session = vscode_dir.join("550e8400-e29b-41d4-a716-446655440000.jsonl");
         File::create(&vscode_session).unwrap();
-        // Non-jsonl files must be ignored.
+        // Non-session files must be ignored.
         File::create(vscode_dir.join("notes.txt")).unwrap();
+        // Legacy full-session JSON under chatSessions.
+        let vscode_legacy_json = vscode_dir.join("legacy-session.json");
+        File::create(&vscode_legacy_json).unwrap();
+        // Empty-window chats live under User/globalStorage (sibling of workspaceStorage).
+        let empty_window_dir = home.join(
+            "Library/Application Support/Code/User/globalStorage/emptyWindowChatSessions",
+        );
+        fs::create_dir_all(&empty_window_dir).unwrap();
+        let empty_window_session = empty_window_dir.join("empty-window-1.jsonl");
+        File::create(&empty_window_session).unwrap();
+        let empty_window_json = empty_window_dir.join("empty-window-legacy.json");
+        File::create(&empty_window_json).unwrap();
 
         // macOS VSCodium Application Support root (alongside Code).
         let codium_dir = home.join(
@@ -2835,6 +2891,23 @@ mod tests {
         assert!(
             result.copilot_vscode_sessions.contains(&vscode_session),
             "expected Code session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&vscode_legacy_json),
+            "expected legacy chatSessions .json, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result
+                .copilot_vscode_sessions
+                .contains(&empty_window_session),
+            "expected emptyWindowChatSessions .jsonl, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&empty_window_json),
+            "expected emptyWindowChatSessions .json, got {:?}",
             result.copilot_vscode_sessions
         );
         assert!(

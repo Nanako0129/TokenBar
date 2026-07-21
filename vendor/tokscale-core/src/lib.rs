@@ -1065,25 +1065,33 @@ fn parse_all_messages_materialized(
         }
     }
     // Copilot Desktop + VS Code share ClientId::Copilot with OTEL. Build
-    // suppress sets from OTEL, register every Desktop identity (including
-    // OTEL-covered sessions that are not re-emitted), then filter VS Code by
-    // Desktop session-level coverage + dedup_key + (session_id, timestamp)
-    // against OTEL. Fingerprints cover session-state events.jsonl and
-    // workspace.json so metadata-only rewrites invalidate.
+    // suppress sets from OTEL (only rows that pass the active report date
+    // filter — out-of-range OTEL must not suppress in-range Desktop), register
+    // every in-range Desktop identity (including OTEL-covered sessions that are
+    // not re-emitted), then filter VS Code by Desktop session-level coverage +
+    // dedup_key + (session_id, timestamp) against OTEL. Fingerprints cover
+    // session-state events.jsonl and workspace.json so metadata-only rewrites
+    // invalidate.
     {
+        let otel_in_report = |m: &UnifiedMessage| {
+            m.client == "copilot"
+                && date_filter
+                    .map(|opts| unified_message_passes_date_filter(m, opts))
+                    .unwrap_or(true)
+        };
         let otel_sessions: HashSet<String> = all_messages
             .iter()
-            .filter(|message| message.client == "copilot")
+            .filter(|m| otel_in_report(m))
             .map(|message| message.session_id.clone())
             .collect();
         let mut existing_dedup_keys: HashSet<String> = all_messages
             .iter()
-            .filter(|m| m.client == "copilot")
+            .filter(|m| otel_in_report(m))
             .filter_map(|m| m.dedup_key.clone())
             .collect();
         let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
             .iter()
-            .filter(|m| m.client == "copilot")
+            .filter(|m| otel_in_report(m))
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
         // Desktop emits one aggregate at created_at while VS Code has many
@@ -3201,8 +3209,10 @@ fn scan_messages_streaming<F, S>(
     }
     simple_lane!(ClientId::Copilot, sessions::copilot::parse_copilot_file);
     // Copilot Desktop + VS Code chatSessions reuse ClientId::Copilot. Build the
-    // OTEL suppress sets once, emit Desktop (session_id suppress), then VS Code
-    // (Desktop session-level coverage + dedup_key / timestamp against OTEL).
+    // OTEL suppress sets once (only messages that pass the active report
+    // filter — out-of-range OTEL must not suppress in-range Desktop), emit
+    // Desktop (session_id suppress), then VS Code (Desktop session-level
+    // coverage + dedup_key / timestamp against OTEL).
     {
         let mut otel_sessions: HashSet<String> = HashSet::new();
         let mut existing_dedup_keys: HashSet<String> = HashSet::new();
@@ -3210,6 +3220,11 @@ fn scan_messages_streaming<F, S>(
         let mut desktop_session_ids: HashSet<String> = HashSet::new();
         for path in scan_result.get(ClientId::Copilot) {
             for message in sessions::copilot::parse_copilot_file(path) {
+                // Date-gate OTEL suppress identities to match Desktop→VS Code
+                // and multi-lane report correctness.
+                if !filter(&message) {
+                    continue;
+                }
                 otel_sessions.insert(message.session_id.clone());
                 if let Some(key) = message.dedup_key.clone() {
                     existing_dedup_keys.insert(key);
@@ -4735,16 +4750,21 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         })
         .collect();
     {
+        // Date-gate OTEL suppress identities: out-of-range OTEL must not
+        // session-suppress in-range Desktop (parity with streaming/materialized).
         let otel_sessions: HashSet<String> = copilot_unified_msgs
             .iter()
+            .filter(|m| unified_message_passes_date_filter(m, &options))
             .map(|message| message.session_id.clone())
             .collect();
         let mut existing_dedup_keys: HashSet<String> = copilot_unified_msgs
             .iter()
+            .filter(|m| unified_message_passes_date_filter(m, &options))
             .filter_map(|m| m.dedup_key.clone())
             .collect();
         let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
             .iter()
+            .filter(|m| unified_message_passes_date_filter(m, &options))
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
         let mut desktop_session_ids: HashSet<String> = HashSet::new();
@@ -12469,6 +12489,188 @@ mod tests {
             messages[0].dedup_key
         );
         assert_eq!(messages[0].session_id, "shared-old-desktop");
+    }
+
+    /// Out-of-range OTEL must not session-suppress in-range Desktop on the
+    /// streaming path (OTEL suppress identities are date-gated like Desktop→VS Code).
+    #[test]
+    #[serial_test::serial]
+    fn m23_streaming_otel_suppress_respects_report_date_filter() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        // In-range Desktop session (2026-07-01).
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 80, 20, 0, 0, 0,
+                          '2026-07-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["shared-old-otel"],
+            )
+            .unwrap();
+        }
+
+        // Out-of-range OTEL span (2025-01-01) sharing Desktop session_id.
+        // startTime unix seconds: 1735732800 = 2025-01-01T12:00:00Z
+        let otel = home.join(".copilot/otel/copilot.jsonl");
+        std::fs::create_dir_all(otel.parent().unwrap()).unwrap();
+        std::fs::write(
+            &otel,
+            r#"{"type":"span","traceId":"trace-old","spanId":"span-old","name":"chat gpt-4o","startTime":[1735732800,0],"endTime":[1735732801,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"shared-old-otel","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":40}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let since = "2026-07-01".to_string();
+        let messages = with_isolated_tokscale_cache(cache_home.path(), || {
+            let mut out = Vec::new();
+            scan_messages_streaming(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                &|m: &UnifiedMessage| m.date.as_str() >= since.as_str(),
+                &mut |m: &UnifiedMessage| {
+                    if m.client == "copilot" {
+                        out.push(m.clone());
+                    }
+                },
+            );
+            out
+        });
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "in-range Desktop must survive when OTEL is out of report range: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-desktop:")),
+            "expected Desktop row, got {:?}",
+            messages[0].dedup_key
+        );
+        assert_eq!(messages[0].session_id, "shared-old-otel");
+    }
+
+    /// Materialized path: out-of-range OTEL must not suppress in-range Desktop.
+    #[test]
+    #[serial_test::serial]
+    fn m23_materialized_otel_suppress_respects_report_date_filter() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 80, 20, 0, 0, 0,
+                          '2026-07-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["shared-old-otel"],
+            )
+            .unwrap();
+        }
+
+        let otel = home.join(".copilot/otel/copilot.jsonl");
+        std::fs::create_dir_all(otel.parent().unwrap()).unwrap();
+        std::fs::write(
+            &otel,
+            r#"{"type":"span","traceId":"trace-old","spanId":"span-old","name":"chat gpt-4o","startTime":[1735732800,0],"endTime":[1735732801,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"shared-old-otel","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":40}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let messages = with_isolated_tokscale_cache(cache_home.path(), || {
+            let options = LocalParseOptions {
+                home_dir: Some(home_s.clone()),
+                use_env_roots: false,
+                clients: Some(vec!["copilot".to_string()]),
+                since: Some("2026-07-01".to_string()),
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(parse_local_unified_messages(options))
+                .expect("materialized parse")
+        });
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "in-range Desktop must survive materialized path when OTEL is out of range: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-desktop:")),
+            "expected Desktop row, got {:?}",
+            messages[0].dedup_key
+        );
+        assert_eq!(messages[0].session_id, "shared-old-otel");
     }
 
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered
