@@ -51,8 +51,10 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
     };
 
     // Replay the VS Code chatSessions mutation log into a final requests array.
-    // kind:0 snapshots set the whole list; kind:2 patches set paths under
-    // "requests" (full array replace, index replace, or nested field set).
+    // kind:0 snapshots set the whole list; kind:1 and kind:2 set-at-path patches
+    // under "requests" (full array replace, index replace, or nested field set).
+    // Outside `requests`, other kind:1 payloads are ignored — we do not invent
+    // non-requests kind:1 semantics.
     let mut requests: Vec<Value> = Vec::new();
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -71,7 +73,9 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
                     requests = arr.clone();
                 }
             }
-            2 => {
+            // kind:1 and kind:2 both carry set-at-path patches. Real sessions use
+            // either form for `k:["requests",N,"completionTokens"]`-style updates.
+            1 | 2 => {
                 if let Some(k) = obj.get("k").and_then(Value::as_array) {
                     apply_requests_patch(&mut requests, k, obj.get("v"));
                 }
@@ -100,7 +104,7 @@ fn extract_requests_array(obj: &Value) -> Option<Vec<Value>> {
     None
 }
 
-/// Apply a kind:2 mutation-log entry whose path starts at `"requests"`.
+/// Apply a kind:1 or kind:2 mutation-log entry whose path starts at `"requests"`.
 ///
 /// Supported path shapes (minimal correct subset):
 /// - `k == ["requests"]` — full array replace when `v` is an array
@@ -1090,6 +1094,35 @@ mod tests {
         assert_eq!(m.tokens.output, 40);
         assert_eq!(m.model_id, "gpt-4o");
         assert_eq!(m.timestamp, 9000);
+    }
+
+    #[test]
+    fn kind0_stub_plus_kind1_request_path_patches_yield_tokens() {
+        // Some chatSessions emit kind:1 set-at-path patches under requests
+        // (same shape as kind:2). Ignoring kind:1 would leave zero usage after
+        // a kind:0 stub.
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-kind1-0000-0000-000000000001.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-kind1","timestamp":9500,"modelId":"copilot/auto"}]}}"#,
+                r#"{"kind":1,"k":["requests",0,"promptTokens"],"v":80}"#,
+                r#"{"kind":1,"k":["requests",0,"completionTokens"],"v":30}"#,
+                r#"{"kind":1,"k":["requests",0,"result","metadata","resolvedModel"],"v":"gpt-4o"}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m.tokens.input, 80);
+        assert_eq!(m.tokens.output, 30);
+        assert_eq!(m.model_id, "gpt-4o");
+        assert_eq!(m.timestamp, 9500);
     }
 
     #[test]

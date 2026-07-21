@@ -32,6 +32,23 @@ struct SessionStateMetadata {
     cwd: Option<String>,
 }
 
+/// True when `sessions.total_nano_aiu` exists (newer Desktop schema).
+/// Older installs omit the column; treat missing as 0 rather than failing prepare.
+fn sessions_has_total_nano_aiu(conn: &Connection) -> bool {
+    let Ok(mut stmt) = conn.prepare("PRAGMA table_info(sessions)") else {
+        return false;
+    };
+    let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(1)) else {
+        return false;
+    };
+    for name in rows.flatten() {
+        if name == "total_nano_aiu" {
+            return true;
+        }
+    }
+    false
+}
+
 pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
     let conn = match Connection::open_with_flags(
         db_path,
@@ -48,7 +65,10 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
         }
     };
 
-    let mut stmt = match conn.prepare(
+    // Older Desktop DBs predate total_nano_aiu. Probe columns so prepare does
+    // not fail and zero out the whole Desktop lane.
+    let has_nano_aiu = sessions_has_total_nano_aiu(&conn);
+    let sql = if has_nano_aiu {
         r#"
         SELECT
             id,
@@ -65,8 +85,27 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
            OR total_output_tokens > 0
            OR total_cached_tokens > 0
            OR total_reasoning_tokens > 0
-        "#,
-    ) {
+        "#
+    } else {
+        r#"
+        SELECT
+            id,
+            title,
+            model,
+            total_input_tokens,
+            total_output_tokens,
+            total_cached_tokens,
+            total_reasoning_tokens,
+            created_at
+        FROM sessions
+        WHERE total_input_tokens > 0
+           OR total_output_tokens > 0
+           OR total_cached_tokens > 0
+           OR total_reasoning_tokens > 0
+        "#
+    };
+
+    let mut stmt = match conn.prepare(sql) {
         Ok(stmt) => stmt,
         Err(err) => {
             warn!(
@@ -86,8 +125,16 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
             total_output_tokens: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
             total_cached_tokens: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
             total_reasoning_tokens: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
-            total_nano_aiu: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
-            created_at: row.get(8)?,
+            total_nano_aiu: if has_nano_aiu {
+                row.get::<_, Option<i64>>(7)?.unwrap_or(0)
+            } else {
+                0
+            },
+            created_at: if has_nano_aiu {
+                row.get(8)?
+            } else {
+                row.get(7)?
+            },
         })
     }) {
         Ok(rows) => rows,
@@ -558,5 +605,53 @@ mod tests {
         assert_eq!(messages[0].cost, 0.0);
         assert!(!messages[0].has_authoritative_cost());
         assert_eq!(messages[0].cost_source, crate::CostSource::Unknown);
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_without_total_nano_aiu_column_still_reads_tokens() {
+        // Older Desktop schema predates total_nano_aiu; prepare must not fail
+        // and token rows must still surface (AIU defaults to 0).
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (
+                id TEXT,
+                title TEXT,
+                session_type TEXT,
+                mode TEXT,
+                model TEXT,
+                total_input_tokens INTEGER,
+                total_output_tokens INTEGER,
+                total_cached_tokens INTEGER,
+                total_reasoning_tokens INTEGER,
+                created_at TEXT,
+                agent TEXT,
+                provider_id TEXT
+            );
+            INSERT INTO sessions (
+                id, title, session_type, mode, model,
+                total_input_tokens, total_output_tokens, total_cached_tokens,
+                total_reasoning_tokens, created_at, agent, provider_id
+            ) VALUES (
+                'session-legacy', 'Legacy', 'chat', 'agent', 'gpt-5.1-codex',
+                100, 50, 0, 0, '2026-07-01T12:34:56Z',
+                'github.copilot.default', 'github-copilot'
+            );
+            "#,
+        )
+        .unwrap();
+        drop(conn);
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert_eq!(message.session_id, "session-legacy");
+        assert_eq!(message.tokens.input, 100);
+        assert_eq!(message.tokens.output, 50);
+        assert_eq!(message.cost, 0.0);
+        assert!(!message.has_authoritative_cost());
+        assert_eq!(message.cost_source, crate::CostSource::Unknown);
     }
 }

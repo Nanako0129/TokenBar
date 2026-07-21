@@ -569,7 +569,10 @@ fn is_copilot_vscode_session_path(path: &Path) -> bool {
 /// `scanner.extraScanPaths.copilot` and `TOKSCALE_EXTRA_DIRS=copilot:…` roots
 /// are walked with the OTEL `*.jsonl` pattern and would otherwise stay in
 /// `files[Copilot]`, where the OTEL parser ignores chatSessions layout. Paths
-/// whose parent directory is `chatSessions` are the VS Code source of truth.
+/// whose parent directory is `chatSessions` / `emptyWindowChatSessions` are
+/// the VS Code source of truth. Pure-legacy `*.json` under those dirs never
+/// enter `files[Copilot]` — see
+/// [`promote_copilot_vscode_sessions_from_extra_roots`].
 fn reclassify_copilot_vscode_sessions_from_files(result: &mut ScanResult) {
     let mut remaining = Vec::new();
     let mut promoted = Vec::new();
@@ -593,6 +596,41 @@ fn reclassify_copilot_vscode_sessions_from_files(result: &mut ScanResult) {
     remaining.sort_unstable();
     *result.get_mut(ClientId::Copilot) = remaining;
     result.copilot_vscode_sessions.extend(promoted);
+    result.copilot_vscode_sessions.sort_unstable();
+}
+
+/// Walk Copilot extra roots for `chatSessions` / `emptyWindowChatSessions`
+/// session files (`*.{jsonl,json}`) and merge into `copilot_vscode_sessions`.
+///
+/// Extra roots are scanned with the generic OTEL `*.jsonl` pattern, so
+/// pure-legacy `*.json` chatSessions never land in `files[Copilot]` and cannot
+/// be reclassified. This pass closes that discovery gap without widening the
+/// OTEL file bucket to arbitrary JSON.
+fn promote_copilot_vscode_sessions_from_extra_roots(
+    result: &mut ScanResult,
+    extra_roots: impl IntoIterator<Item = PathBuf>,
+) {
+    let mut seen: HashSet<PathBuf> = result
+        .copilot_vscode_sessions
+        .iter()
+        .map(|path| std::fs::canonicalize(path).unwrap_or_else(|_| path.clone()))
+        .collect();
+
+    for root in extra_roots {
+        if !root.exists() {
+            continue;
+        }
+        for entry in WalkDir::new(&root).into_iter().filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if !path.is_file() || !is_copilot_vscode_session_path(path) {
+                continue;
+            }
+            let key = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+            if seen.insert(key) {
+                result.copilot_vscode_sessions.push(path.to_path_buf());
+            }
+        }
+    }
     result.copilot_vscode_sessions.sort_unstable();
 }
 
@@ -1667,6 +1705,24 @@ fn scan_all_clients_with_env_strategy_inner(
         // Extra copilot roots land in files[Copilot] via the OTEL *.jsonl
         // pattern; reclassify chatSessions layout into the VS Code lane.
         reclassify_copilot_vscode_sessions_from_files(&mut result);
+
+        // OTEL `*.jsonl` never discovers pure-legacy `chatSessions/*.json` under
+        // extra roots. Walk those roots and promote session-layout files of
+        // either extension into the VS Code lane (deduped against defaults).
+        let mut extra_copilot_roots: Vec<PathBuf> = extra_scan_paths_for(scanner_settings, &enabled)
+            .into_iter()
+            .filter(|(id, _)| *id == ClientId::Copilot)
+            .map(|(_, path)| path)
+            .collect();
+        if use_env_roots {
+            let extra_dirs_val = std::env::var("TOKSCALE_EXTRA_DIRS").unwrap_or_default();
+            for (client_id, path) in parse_extra_dirs(&extra_dirs_val, &enabled) {
+                if client_id == ClientId::Copilot {
+                    extra_copilot_roots.push(PathBuf::from(path));
+                }
+            }
+        }
+        promote_copilot_vscode_sessions_from_extra_roots(&mut result, extra_copilot_roots);
     }
 
     result
@@ -3103,6 +3159,68 @@ mod tests {
             result.get(ClientId::Copilot).contains(&otel_file),
             "non-chatSessions jsonl under the extra root must stay as OTEL files, got {:?}",
             result.get(ClientId::Copilot)
+        );
+    }
+
+    #[test]
+    fn test_extra_scan_path_copilot_legacy_json_only_chat_sessions_promoted() {
+        // Pure-legacy chatSessions/*.json under an extra root never match the
+        // OTEL *.jsonl walk; they must still land in copilot_vscode_sessions.
+        let home = TempDir::new().unwrap();
+        let extra_root = TempDir::new().unwrap();
+
+        let chat_dir = extra_root
+            .path()
+            .join("workspaceStorage/hash-legacy/chatSessions");
+        fs::create_dir_all(&chat_dir).unwrap();
+        let legacy_json = chat_dir.join("legacy-only-session.json");
+        File::create(&legacy_json).unwrap();
+
+        let empty_window_dir = extra_root
+            .path()
+            .join("User/globalStorage/emptyWindowChatSessions");
+        fs::create_dir_all(&empty_window_dir).unwrap();
+        let empty_window_json = empty_window_dir.join("empty-legacy.json");
+        File::create(&empty_window_json).unwrap();
+
+        // Unrelated .json under the extra root must not be promoted.
+        let junk_dir = extra_root.path().join("misc");
+        fs::create_dir_all(&junk_dir).unwrap();
+        let junk_json = junk_dir.join("settings.json");
+        File::create(&junk_json).unwrap();
+
+        let settings = ScannerSettings {
+            extra_scan_paths: BTreeMap::from([(
+                "copilot".to_string(),
+                vec![extra_root.path().to_path_buf()],
+            )]),
+            ..ScannerSettings::default()
+        };
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+            &settings,
+        );
+
+        assert!(
+            result.copilot_vscode_sessions.contains(&legacy_json),
+            "extra-root pure-legacy chatSessions .json must reach VS Code lane, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&empty_window_json),
+            "extra-root emptyWindowChatSessions .json must reach VS Code lane, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            !result.copilot_vscode_sessions.contains(&junk_json),
+            "non-session .json under extra root must not be promoted"
+        );
+        assert!(
+            !result.get(ClientId::Copilot).contains(&legacy_json),
+            "legacy json must not land in the generic OTEL files bucket"
         );
     }
 
