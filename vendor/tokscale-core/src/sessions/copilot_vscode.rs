@@ -306,6 +306,15 @@ fn request_to_message(
         return None;
     }
 
+    // After acceptance: never trust a foreign `vendor/model` resolvedModel for
+    // display/pricing (e.g. modelId `copilot/auto` + resolvedModel
+    // `other-provider/gpt-4o`). Reject the row rather than mis-group/price.
+    if let Some(resolved) = resolved_model {
+        if is_foreign_vendor_model(resolved) {
+            return None;
+        }
+    }
+
     let model_id = resolved_model
         .or_else(|| model_id_raw.map(|m| m.strip_prefix("copilot/").unwrap_or(m)))
         .unwrap_or("auto")
@@ -362,6 +371,13 @@ fn request_to_message(
 
     if let Some((key, label)) = workspace {
         message.set_workspace(Some(key.clone()), label.clone());
+    }
+
+    // Agent attribution: prefer agent over participant when present and
+    // non-empty (parity with OTEL gen_ai.agent.id — store raw; Agents report
+    // normalizes via normalize_copilot_agent_name at bucket time).
+    if let Some(agent) = request_copilot_agent(req) {
+        message.agent = Some(agent);
     }
 
     Some(message)
@@ -851,6 +867,56 @@ fn is_bare_copilot_model_id(id: &str) -> bool {
     !t.contains('/')
 }
 
+/// True when `id` is a foreign `vendor/model` slash form (not bare, not
+/// `copilot/...`). Used after `is_copilot_request` to reject rows whose
+/// resolvedModel would poison display/pricing grouping.
+fn is_foreign_vendor_model(id: &str) -> bool {
+    let t = id.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with("copilot/") {
+        return false;
+    }
+    t.contains('/')
+}
+
+/// First non-empty agent (preferred) or participant string on the request.
+/// Paths mirror the participant/agent probe in `is_copilot_request`.
+fn request_copilot_agent(req: &Value) -> Option<String> {
+    const AGENT_PATHS: &[&str] = &[
+        "/agent",
+        "/result/metadata/agent",
+        "/response/agent",
+        "/response/result/metadata/agent",
+        "/response/metadata/agent",
+    ];
+    const PARTICIPANT_PATHS: &[&str] = &[
+        "/participant",
+        "/result/metadata/participant",
+        "/response/participant",
+        "/response/result/metadata/participant",
+        "/response/metadata/participant",
+    ];
+    for path in AGENT_PATHS {
+        if let Some(value) = req.pointer(path).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    for path in PARTICIPANT_PATHS {
+        if let Some(value) = req.pointer(path).and_then(Value::as_str) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
 /// Workspace metadata sibling for a VS Code chatSessions JSONL path:
 /// `workspaceStorage/{hash}/chatSessions/{uuid}.jsonl` →
 /// `workspaceStorage/{hash}/workspace.json`.
@@ -1247,6 +1313,88 @@ mod tests {
         let messages = parse_copilot_vscode_sessions(&[path]);
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0].model_id, "gpt-4o");
+        // P2-4: participant/agent metadata populates message.agent (raw OTEL-style).
+        assert_eq!(
+            messages[0].agent.as_deref(),
+            Some("github.copilot.default"),
+            "participant must set message.agent for Agents report attribution"
+        );
+    }
+
+    /// Codex P2-2: modelId `copilot/auto` must not accept a foreign
+    /// `vendor/model` resolvedModel for display/pricing — reject the row.
+    #[test]
+    fn foreign_resolved_model_rejected_even_with_copilot_auto_model_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("foreign-resolved-0000-0000-0000-000000000005.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-foreign-resolved","timestamp":9000,"modelId":"copilot/auto","completionTokens":15,"promptTokens":60,"result":{"metadata":{"resolvedModel":"other-provider/gpt-4o","promptTokens":60,"outputTokens":15}}}]}"#,
+            ],
+        );
+
+        assert!(
+            parse_copilot_vscode_sessions(&[path]).is_empty(),
+            "copilot/auto + foreign resolvedModel must be skipped"
+        );
+    }
+
+    /// Codex P2-4: agent metadata preferred over participant; both non-empty
+    /// agent fields set message.agent (raw; report normalizes later).
+    #[test]
+    fn agent_metadata_preferred_over_participant_for_message_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        let agent_only = sessions_dir.join("agent-only-0000-0000-0000-000000000006.jsonl");
+        write_jsonl(
+            &agent_only,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-agent","timestamp":9100,"modelId":"copilot/gpt-4o","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o","agent":"github.copilot.reviewer"}}}]}"#,
+            ],
+        );
+        let both = sessions_dir.join("agent-both-0000-0000-0000-000000000007.jsonl");
+        write_jsonl(
+            &both,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-both","timestamp":9200,"modelId":"copilot/gpt-4o","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o","agent":"github.copilot.reviewer","participant":"github.copilot.default"}}}]}"#,
+            ],
+        );
+        let empty_agent = sessions_dir.join("agent-empty-0000-0000-0000-000000000008.jsonl");
+        write_jsonl(
+            &empty_agent,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-empty","timestamp":9300,"modelId":"copilot/gpt-4o","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o","agent":"  ","participant":"github.copilot.default"}}}]}"#,
+            ],
+        );
+
+        let agent_msgs = parse_copilot_vscode_sessions(&[agent_only]);
+        assert_eq!(agent_msgs.len(), 1);
+        assert_eq!(
+            agent_msgs[0].agent.as_deref(),
+            Some("github.copilot.reviewer")
+        );
+
+        let both_msgs = parse_copilot_vscode_sessions(&[both]);
+        assert_eq!(both_msgs.len(), 1);
+        assert_eq!(
+            both_msgs[0].agent.as_deref(),
+            Some("github.copilot.reviewer"),
+            "agent must win over participant"
+        );
+
+        let empty_msgs = parse_copilot_vscode_sessions(&[empty_agent]);
+        assert_eq!(empty_msgs.len(), 1);
+        assert_eq!(
+            empty_msgs[0].agent.as_deref(),
+            Some("github.copilot.default"),
+            "blank agent falls through to participant"
+        );
     }
 
     /// Codex P2: Copilot CLI emits bare model ids (`gpt-5.4`) with modelId empty

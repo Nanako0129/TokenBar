@@ -1157,23 +1157,28 @@ fn parse_all_messages_materialized(
                 // session-suppress VS Code. Out-of-range Desktop must not wipe
                 // in-range VS Code. Date-bounded + any VS Code data for the
                 // session → prefer VS Code (skip Desktop emit + session suppress).
+                // When OTEL already owns the session, do NOT register Desktop
+                // whole-session suppress: Desktop is dropped, and VS Code must
+                // use turn-matching (dedup_key / exact ts / ±2s) so partial OTEL
+                // does not erase non-overlapping VS Code turns.
                 let in_report = date_filter
                     .map(|opts| unified_message_passes_date_filter(&message, opts))
                     .unwrap_or(true);
                 let prefer_vscode =
                     date_bounded && vscode_any_sessions.contains(&message.session_id);
-                if in_report && !prefer_vscode {
+                if prefer_vscode {
+                    continue;
+                }
+                if otel_sessions.contains(&message.session_id) {
+                    continue;
+                }
+                if in_report {
                     desktop_session_ids.insert(message.session_id.clone());
                     if let Some(key) = message.dedup_key.clone() {
                         existing_dedup_keys.insert(key);
                     }
                     existing_copilot_session_timestamps
                         .insert((message.session_id.clone(), message.timestamp));
-                }
-                if prefer_vscode {
-                    continue;
-                }
-                if !otel_sessions.contains(&message.session_id) {
                     all_messages.push(message);
                 }
             }
@@ -3432,17 +3437,13 @@ fn scan_messages_streaming_dated<F, S>(
                 // date range) may suppress VS Code. Out-of-range Desktop must
                 // not wipe in-range VS Code requests. Date-bounded + any VS
                 // Code data for the session → prefer VS Code (skip Desktop
-                // emit + whole-session suppress).
+                // emit + whole-session suppress). When OTEL already owns the
+                // session, do NOT register Desktop whole-session suppress —
+                // Desktop is dropped and VS Code uses turn-matching so partial
+                // OTEL does not erase non-overlapping VS Code turns.
                 let in_report = filter(&m);
                 let prefer_vscode =
                     date_bounded && vscode_any_sessions.contains(&m.session_id);
-                if in_report && !prefer_vscode {
-                    desktop_session_ids.insert(m.session_id.clone());
-                    if let Some(key) = m.dedup_key.clone() {
-                        existing_dedup_keys.insert(key);
-                    }
-                    existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
-                }
                 if prefer_vscode {
                     continue;
                 }
@@ -3450,6 +3451,11 @@ fn scan_messages_streaming_dated<F, S>(
                     continue;
                 }
                 if in_report {
+                    desktop_session_ids.insert(m.session_id.clone());
+                    if let Some(key) = m.dedup_key.clone() {
+                        existing_dedup_keys.insert(key);
+                    }
+                    existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
                     sink(&m);
                 }
             }
@@ -4643,8 +4649,12 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
     // chatSessions path survives, live-tail still needs Desktop + OTEL to build
     // cross-source suppress sets — otherwise a fresh VS Code file re-emits rows
     // that a full scan would suppress against a stale Desktop/OTEL cohort.
+    // Inverse: when Desktop survives while older VS Code paths prune, restore
+    // those VS Code paths so date-bounded live-tail keeps vscode_any_sessions
+    // and does not emit Desktop whole-session where full scan prefers VS Code.
     let pre_prune_desktop_db = scan_result.copilot_desktop_db.clone();
     let pre_prune_copilot_files = scan_result.get(ClientId::Copilot).clone();
+    let pre_prune_vscode_sessions = scan_result.copilot_vscode_sessions.clone();
 
     // Lanes whose scanned file's mtime does not reflect a sibling write
     // (SQLite `-wal` or jcode's `.journal.jsonl`); kept in lockstep with the
@@ -4768,6 +4778,18 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
             }
         }
         *scan_result.get_mut(ClientId::Copilot) = pre_prune_copilot_files;
+    }
+
+    // Inverse force-retain: when Desktop survives prune and pre-prune VS Code
+    // was non-empty, restore those VS Code session paths that still exist on
+    // disk. Otherwise live-tail loses vscode_any_sessions and emits Desktop
+    // whole-session where a full scan would prefer VS Code per-request.
+    if scan_result.copilot_desktop_db.is_some() && !pre_prune_vscode_sessions.is_empty() {
+        for path in pre_prune_vscode_sessions {
+            if path.exists() && !scan_result.copilot_vscode_sessions.contains(&path) {
+                scan_result.copilot_vscode_sessions.push(path);
+            }
+        }
     }
 }
 
@@ -4945,22 +4967,27 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
                 // Mirror streaming: only Desktop rows that pass the active
                 // report date filter may session-suppress VS Code. Out-of-range
                 // Desktop must not wipe in-range VS Code. Date-bounded + any
-                // VS Code data for the session → prefer VS Code.
+                // VS Code data for the session → prefer VS Code. When OTEL
+                // already owns the session, do NOT register Desktop whole-
+                // session suppress — Desktop is dropped and VS Code uses
+                // turn-matching so partial OTEL does not erase non-overlapping
+                // VS Code turns.
                 let in_report = unified_message_passes_date_filter(&message, &options);
                 let prefer_vscode =
                     date_bounded && vscode_any_sessions.contains(&message.session_id);
-                if in_report && !prefer_vscode {
+                if prefer_vscode {
+                    continue;
+                }
+                if otel_sessions.contains(&message.session_id) {
+                    continue;
+                }
+                if in_report {
                     desktop_session_ids.insert(message.session_id.clone());
                     if let Some(key) = message.dedup_key.clone() {
                         existing_dedup_keys.insert(key);
                     }
                     existing_copilot_session_timestamps
                         .insert((message.session_id.clone(), message.timestamp));
-                }
-                if prefer_vscode {
-                    continue;
-                }
-                if !otel_sessions.contains(&message.session_id) {
                     copilot_unified_msgs.push(message);
                 }
             }
@@ -12448,6 +12475,8 @@ mod tests {
 
         // Fresh VS Code retained → stale Desktop + OTEL force-retained as
         // suppressors (would otherwise reopen VS Code rows live-tail shouldn't).
+        // Inverse: with Desktop present after that force-retain, pre-prune VS
+        // Code paths still on disk are also restored (over-parse is safe).
         let mut scan_result = scanner::ScanResult::default();
         scan_result.copilot_vscode_sessions = vec![stale_vscode.clone(), fresh_vscode.clone()];
         scan_result.copilot_desktop_db = Some(desktop_db.clone());
@@ -12455,10 +12484,17 @@ mod tests {
             .get_mut(ClientId::Copilot)
             .push(stale_otel.clone());
         prune_scan_result_by_mtime(&mut scan_result, threshold_ms);
-        assert_eq!(
-            scan_result.copilot_vscode_sessions,
-            vec![fresh_vscode.clone()],
-            "stale VS Code session must be pruned; fresh retained"
+        assert!(
+            scan_result
+                .copilot_vscode_sessions
+                .contains(&fresh_vscode),
+            "fresh VS Code session must be retained"
+        );
+        assert!(
+            scan_result
+                .copilot_vscode_sessions
+                .contains(&stale_vscode),
+            "stale VS Code must be inverse force-retained once Desktop survives (suppressor completeness)"
         );
         assert_eq!(
             scan_result.copilot_desktop_db.as_ref(),
@@ -12486,6 +12522,27 @@ mod tests {
             scan_fresh_desktop.copilot_desktop_db.as_ref(),
             Some(&fresh_desktop_db),
             "desktop db must be kept when session-state events are fresh"
+        );
+
+        // Codex P2-3 inverse: fresh Desktop survives while stale VS Code would
+        // prune → force-retain VS Code paths that still exist on disk so
+        // date-bounded live-tail keeps vscode_any_sessions suppressors.
+        let mut scan_fresh_desktop_stale_vscode = scanner::ScanResult::default();
+        scan_fresh_desktop_stale_vscode.copilot_desktop_db = Some(fresh_desktop_db.clone());
+        scan_fresh_desktop_stale_vscode.copilot_vscode_sessions = vec![stale_vscode.clone()];
+        prune_scan_result_by_mtime(&mut scan_fresh_desktop_stale_vscode, threshold_ms);
+        assert_eq!(
+            scan_fresh_desktop_stale_vscode
+                .copilot_desktop_db
+                .as_ref(),
+            Some(&fresh_desktop_db),
+            "fresh desktop must survive"
+        );
+        assert!(
+            scan_fresh_desktop_stale_vscode
+                .copilot_vscode_sessions
+                .contains(&stale_vscode),
+            "stale VS Code must be force-retained when Desktop survives prune (inverse of Desktop force-retain when VS Code survives)"
         );
     }
 
@@ -13606,6 +13663,171 @@ mod tests {
             counted.counts.get(ClientId::Copilot),
             2,
             "count lane: partial OTEL must not wipe distant VS Code"
+        );
+    }
+
+    /// Codex P2-1: partial OTEL + Desktop aggregate + multi-turn VS Code on the
+    /// same session_id (unbounded). Desktop must not register whole-session
+    /// suppress when OTEL already owns the session; VS Code non-overlapping
+    /// turns survive via turn-matching (not OTEL-only undercount).
+    #[test]
+    #[serial_test::serial]
+    fn m23_partial_otel_desktop_does_not_erase_vscode_all_lanes() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let mat_cache = tempfile::TempDir::new().unwrap();
+        let stream_cache = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        // OTEL: one turn at t for shared-session.
+        let otel = home.join(".copilot/otel/copilot.jsonl");
+        std::fs::create_dir_all(otel.parent().unwrap()).unwrap();
+        std::fs::write(
+            &otel,
+            r#"{"type":"span","traceId":"trace-p2-1","spanId":"span-a","name":"chat gpt-4o","startTime":[1782909296,0],"endTime":[1782909297,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"shared-otel-desktop","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":40}}
+"#,
+        )
+        .unwrap();
+
+        // Desktop aggregate for the same session_id (would wipe all VS Code if
+        // incorrectly registered into desktop_session_ids while OTEL owns it).
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 500, 100, 0, 0, 0,
+                          '2026-07-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["shared-otel-desktop"],
+            )
+            .unwrap();
+        }
+
+        // VS Code multi-turn: near OTEL (suppress via ±2s) + distant (must keep).
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("shared-otel-desktop.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r-near","timestamp":1782909296001,"modelId":"copilot/gpt-4o","completionTokens":40,"promptTokens":100,"result":{"metadata":{"promptTokens":100,"outputTokens":40,"resolvedModel":"gpt-4o"}}},{"requestId":"r-far","timestamp":1782909356000,"modelId":"copilot/gpt-4o","completionTokens":25,"promptTokens":70,"result":{"metadata":{"promptTokens":70,"outputTokens":25,"resolvedModel":"gpt-4o"}}},{"requestId":"r-far2","timestamp":1782909416000,"modelId":"copilot/gpt-4o","completionTokens":10,"promptTokens":30,"result":{"metadata":{"promptTokens":30,"outputTokens":10,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+
+        let mat = with_isolated_tokscale_cache(mat_cache.path(), || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                &home_s, &clients, None, false, &settings,
+            );
+            messages.retain(|m| m.client == "copilot");
+            messages.sort_by_key(|m| m.timestamp);
+            messages
+        });
+        assert_eq!(
+            mat.len(),
+            3,
+            "OTEL turn + two non-overlapping VS Code turns (Desktop dropped, no whole-session wipe): {:?}",
+            mat.iter()
+                .map(|m| (
+                    m.session_id.as_str(),
+                    m.timestamp,
+                    m.tokens.input,
+                    m.dedup_key.as_deref()
+                ))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(mat[0].tokens.input, 100, "OTEL turn");
+        assert!(
+            !mat[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-vscode:") || k.starts_with("copilot-desktop:")),
+            "first row must be OTEL, not Desktop/VS Code: {:?}",
+            mat[0].dedup_key
+        );
+        assert!(
+            mat.iter().any(|m| {
+                m.dedup_key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("copilot-vscode:") && k.contains("r-far"))
+            }),
+            "distant VS Code r-far must survive"
+        );
+        assert!(
+            mat.iter().any(|m| {
+                m.dedup_key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("copilot-vscode:") && k.contains("r-far2"))
+            }),
+            "distant VS Code r-far2 must survive"
+        );
+        assert!(
+            !mat.iter().any(|m| {
+                m.dedup_key
+                    .as_deref()
+                    .is_some_and(|k| k.starts_with("copilot-desktop:"))
+            }),
+            "Desktop must not emit when OTEL owns the session"
+        );
+
+        let streaming = with_isolated_tokscale_cache(stream_cache.path(), || {
+            let mut out = Vec::new();
+            scan_messages_streaming(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                &|_| true,
+                &mut |m: &UnifiedMessage| {
+                    if m.client == "copilot" {
+                        out.push(m.clone());
+                    }
+                },
+            );
+            out.sort_by_key(|m| m.timestamp);
+            out
+        });
+        assert_eq!(
+            streaming.len(),
+            3,
+            "streaming partial OTEL+Desktop must keep VS Code turns: {:?}",
+            streaming.len()
+        );
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home_s),
+            use_env_roots: false,
+            clients: Some(clients),
+            scanner_settings: settings,
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(
+            counted.counts.get(ClientId::Copilot),
+            3,
+            "count lane: OTEL + non-overlapping VS Code (Desktop dropped)"
         );
     }
 
