@@ -308,9 +308,10 @@ fn merge_refreshed_scope(
     })
 }
 
-/// Assemble the card's windows from the weekly credits view (required path) and
-/// the monthly unified view (best-effort). Errors only when neither yields a
-/// window.
+/// Assemble the card's windows from the weekly credits view (required) and the
+/// monthly unified view (additive only). Success requires a weekly window —
+/// monthly-only is not enough to show the card, so a missing/unusable weekly
+/// meter errors even when monthly parsed cleanly.
 fn build_grok_data(
     credits_body: &str,
     monthly_body: Option<&str>,
@@ -321,12 +322,15 @@ fn build_grok_data(
     let credits: BillingResponse = serde_json::from_str(credits_body)
         .map_err(|e| format!("decode Grok billing response: {e}"))?;
 
-    let mut windows = Vec::new();
-    if let Some(config) = credits.config.as_ref() {
-        if let Some(window) = weekly_window(config, now) {
-            windows.push(window);
-        }
-    }
+    let weekly = credits
+        .config
+        .as_ref()
+        .and_then(|config| weekly_window(config, now))
+        .ok_or_else(|| {
+            "Grok billing response had no usable weekly usage.".to_string()
+        })?;
+
+    let mut windows = vec![weekly];
     if let Some(body) = monthly_body {
         if let Ok(monthly) = serde_json::from_str::<BillingResponse>(body) {
             if let Some(config) = monthly.config.as_ref() {
@@ -335,10 +339,6 @@ fn build_grok_data(
                 }
             }
         }
-    }
-
-    if windows.is_empty() {
-        return Err("Grok billing response had no usable weekly or monthly usage.".to_string());
     }
 
     Ok(GrokData {
@@ -354,21 +354,21 @@ fn build_grok_data(
     })
 }
 
-/// Weekly SuperGrok credits window. When the credits view reports a percent, use
-/// it. When it omits the percent, that is only a genuine 0% if the meter's
-/// period is *well-formed* — an explicit weekly `currentPeriod` with a positive
-/// start→end window (a freshly reset week with no usage yet). A malformed,
-/// partial, or non-weekly period is "unknown", not zero, and must not be
-/// fabricated into a Weekly 0%/100%-remaining across the FFI, so return `None`.
+/// Weekly SuperGrok credits window. When the credits view reports a valid
+/// percent, use it. Empty-week 0% is allowed only when percent fields are truly
+/// *absent* and a self-contained weekly `currentPeriod` proves the meter exists
+/// (fresh reset, no usage yet). Present-but-unparsable or out-of-range percent
+/// is a failed reading — never synthesize 0% for bad data. A malformed, partial,
+/// or non-weekly period with no usable percent is "unknown", not zero.
 fn weekly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWindow> {
     let used_percent = match weekly_used_percent(config) {
-        Some(pct) => pct,
+        WeeklyPercent::Value(pct) => pct,
         // Absent percent is a genuine 0% ONLY when a self-contained weekly
         // `currentPeriod` proves the meter exists: the weekly type AND a
         // positive start→end window must come from that same object, not a mix
         // of a weekly-typed period and unrelated flat billing dates.
-        None if self_contained_weekly_period(config).is_some() => 0.0,
-        None => return None,
+        WeeklyPercent::Absent if self_contained_weekly_period(config).is_some() => 0.0,
+        WeeklyPercent::Absent | WeeklyPercent::Invalid => return None,
     };
     let period = period_bounds(config);
     let mut window = UsageWindow::from_provider_used_percent(
@@ -405,28 +405,49 @@ fn self_contained_weekly_period(config: &BillingConfig) -> Option<(DateTime<Utc>
     (end > start).then_some((start, end))
 }
 
-fn weekly_used_percent(config: &BillingConfig) -> Option<f64> {
+/// Result of reading weekly percent fields. Distinguishes true omission (empty
+/// week may be 0%) from a present-but-bad value (must not become 0%).
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum WeeklyPercent {
+    Value(f64),
+    Absent,
+    Invalid,
+}
+
+/// Prefer `GrokBuild.usagePercent`; only when that field is absent (product
+/// missing or key omitted) fall through to `creditUsagePercent`. A present but
+/// unparsable/out-of-range value on the chosen field is `Invalid`, not `Absent`.
+fn weekly_used_percent(config: &BillingConfig) -> WeeklyPercent {
     if let Some(products) = config.product_usage.as_ref() {
         for product in products {
             let name = product.product.as_deref().unwrap_or("");
             if name.eq_ignore_ascii_case("GrokBuild") {
                 if let Some(usage_percent) = product.usage_percent.as_deref() {
-                    return valid_percentage(usage_percent);
+                    return match valid_percentage(usage_percent) {
+                        Some(pct) => WeeklyPercent::Value(pct),
+                        None => WeeklyPercent::Invalid,
+                    };
                 }
+                // GrokBuild row present but usagePercent key omitted — try overall.
+                break;
             }
         }
     }
-    config
-        .credit_usage_percent
-        .as_deref()
-        .and_then(valid_percentage)
+    match config.credit_usage_percent.as_deref() {
+        Some(raw) => match valid_percentage(raw) {
+            Some(pct) => WeeklyPercent::Value(pct),
+            None => WeeklyPercent::Invalid,
+        },
+        None => WeeklyPercent::Absent,
+    }
 }
 
 /// Monthly included-allowance window: percent = used / monthlyLimit. Only
-/// emitted when the consumed amount is *explicitly present* — xAI reports a
-/// genuine zero as `{ "val": 0 }` (the `history` cycles do exactly this), so an
-/// absent `used`/`usage.totalUsed` means "unknown", not zero, and must not
-/// fabricate a misleading 100%-remaining across the FFI.
+/// emitted when the consumed amount is *explicitly present* and non-negative —
+/// xAI reports a genuine zero as `{ "val": 0 }` (the `history` cycles do
+/// exactly this), so an absent `used`/`usage.totalUsed` means "unknown", not
+/// zero. A negative consumption is invalid meter data and must not clamp into
+/// a healthy 0%-used window.
 fn monthly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWindow> {
     let limit = config
         .monthly_limit
@@ -443,7 +464,8 @@ fn monthly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWin
                 .as_ref()
                 .and_then(|u| u.total_used.as_ref())
                 .and_then(|c| c.val)
-        })?;
+        })
+        .filter(|v| *v >= 0)?;
     let used_percent = (used as f64 / limit as f64 * 100.0).clamp(0.0, 100.0);
     let period = period_bounds(config);
     let mut window = UsageWindow::from_provider_used_percent(
@@ -1024,6 +1046,46 @@ mod tests {
     }
 
     #[test]
+    fn monthly_only_without_weekly_is_an_error() {
+        // Monthly is additive after weekly succeeds. A credits body that cannot
+        // build a weekly window must not produce a monthly-only card.
+        let err = match build_grok_data(
+            r#"{ "config": {} }"#,
+            Some(MONTHLY_BODY),
+            &test_credentials(),
+            now(),
+            scope_none(),
+        ) {
+            Err(e) => e,
+            Ok(_) => panic!("monthly-only must not succeed"),
+        };
+        assert!(
+            err.contains("weekly"),
+            "error should name the missing weekly meter: {err}"
+        );
+
+        // Non-weekly period on the credits view is also insufficient, even with
+        // a clean monthly body.
+        let credits_monthly_period = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_MONTHLY",
+                    "start": "2026-07-01T00:00:00+00:00",
+                    "end": "2026-08-01T00:00:00+00:00"
+                }
+            }
+        }"#;
+        assert!(build_grok_data(
+            credits_monthly_period,
+            Some(MONTHLY_BODY),
+            &test_credentials(),
+            now(),
+            scope_none(),
+        )
+        .is_err());
+    }
+
+    #[test]
     fn prefers_grok_build_product_percent() {
         let config: BillingConfig = serde_json::from_str(
             r#"{
@@ -1035,7 +1097,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!((weekly_used_percent(&config).unwrap() - 4.0).abs() < 0.01);
+        match weekly_used_percent(&config) {
+            WeeklyPercent::Value(pct) => assert!((pct - 4.0).abs() < 0.01),
+            other => panic!("expected Value(4.0), got {other:?}"),
+        }
     }
 
     #[test]
@@ -1050,7 +1115,10 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!((weekly_used_percent(&config).unwrap() - 12.5).abs() < 0.01);
+        match weekly_used_percent(&config) {
+            WeeklyPercent::Value(pct) => assert!((pct - 12.5).abs() < 0.01),
+            other => panic!("expected Value(12.5), got {other:?}"),
+        }
     }
 
     #[test]
@@ -1064,7 +1132,11 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(weekly_used_percent(&invalid_product).is_none());
+        // Present-but-out-of-range GrokBuild fails that field; do not fall back.
+        assert_eq!(
+            weekly_used_percent(&invalid_product),
+            WeeklyPercent::Invalid
+        );
 
         for invalid in ["1e400", r#""NaN""#] {
             let malformed_product: BillingConfig = serde_json::from_str(&format!(
@@ -1076,7 +1148,10 @@ mod tests {
                 }}"#
             ))
             .unwrap();
-            assert!(weekly_used_percent(&malformed_product).is_none());
+            assert_eq!(
+                weekly_used_percent(&malformed_product),
+                WeeklyPercent::Invalid
+            );
         }
 
         let invalid: BillingConfig = serde_json::from_str(
@@ -1088,7 +1163,69 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(weekly_used_percent(&invalid).is_none());
+        assert_eq!(weekly_used_percent(&invalid), WeeklyPercent::Invalid);
+
+        // Overall credit present but invalid, with no GrokBuild percent key.
+        let bad_credit: BillingConfig = serde_json::from_str(
+            r#"{
+                "creditUsagePercent": -1.0,
+                "productUsage": [ { "product": "GrokBuild" } ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&bad_credit), WeeklyPercent::Invalid);
+
+        // Truly absent percent fields.
+        let absent: BillingConfig = serde_json::from_str(
+            r#"{ "productUsage": [ { "product": "GrokChat" } ] }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&absent), WeeklyPercent::Absent);
+    }
+
+    #[test]
+    fn malformed_weekly_percent_with_valid_period_is_not_zero() {
+        // Invalid percent must not take the empty-week 0% path just because a
+        // self-contained weekly period is present.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "creditUsagePercent": 150.0,
+                "productUsage": [
+                    { "product": "GrokBuild", "usagePercent": "NaN" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(weekly_used_percent(&config), WeeklyPercent::Invalid);
+        assert!(
+            weekly_window(&config, now()).is_none(),
+            "invalid percent must not synthesize Weekly 0%"
+        );
+
+        // Card-level: invalid weekly + valid monthly still errors (weekly required).
+        let credits = r#"{
+            "config": {
+                "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                    "start": "2026-07-15T00:00:00+00:00",
+                    "end": "2026-07-22T00:00:00+00:00"
+                },
+                "creditUsagePercent": -5.0
+            }
+        }"#;
+        assert!(build_grok_data(
+            credits,
+            Some(MONTHLY_BODY),
+            &test_credentials(),
+            now(),
+            scope_none(),
+        )
+        .is_err());
     }
 
     #[test]
@@ -1226,6 +1363,31 @@ mod tests {
         // An empty `{ }` wrapper (val absent) is treated the same as absent.
         let config: BillingConfig = serde_json::from_str(
             r#"{ "monthlyLimit": { "val": 15000 }, "used": {}, "usage": {} }"#,
+        )
+        .unwrap();
+        assert!(monthly_window(&config, now()).is_none());
+    }
+
+    #[test]
+    fn monthly_window_rejects_negative_used() {
+        // Negative consumption is invalid meter data — do not clamp to 0% healthy.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 15000 }, "used": { "val": -1 } }"#,
+        )
+        .unwrap();
+        assert!(monthly_window(&config, now()).is_none());
+
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 15000 }, "usage": { "totalUsed": { "val": -10 } } }"#,
+        )
+        .unwrap();
+        assert!(monthly_window(&config, now()).is_none());
+
+        // Flat used wins over usage.totalUsed; a negative flat used still rejects
+        // even when nested totalUsed is non-negative.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 200 }, "used": { "val": -5 },
+                 "usage": { "totalUsed": { "val": 50 } } }"#,
         )
         .unwrap();
         assert!(monthly_window(&config, now()).is_none());
