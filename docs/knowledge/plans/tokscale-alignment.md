@@ -52,8 +52,17 @@ The audited range and all referenced trees are readable from a clean upstream cl
 | M21 | Production `1.056x`, parser net `99.8%`; integration adds `+39` net lines for necessary TokenBar seams | Faithful |
 | M19-A | Local production net `44` versus upstream `23` (`~1.91x`), explained by the injected retry test seam | Runtime behavior remains faithful |
 | M22 | Production drift about `2.1–2.5x` upstream and total drift about `3.1–3.5x`, with 15 review-driven fixes and about 520 lines of custom cross-store matching | Failed the fidelity threshold; PR #72 closed unmerged and Zcode moved to `DEFER` |
+| M25 | Upstream `9a5aeb65` is a small grouping-alias map; local production keeps that fold and adds a **reloadable** process-wide map (`set_model_aliases` / `clear_model_aliases` + `model_alias_generation` + usage-data invalidation hooks) instead of upstream load-once `OnceLock` | Intentional TokenBar adaptation; parser/pricing identity unchanged; not an upstream fidelity stop |
+| M23 (PR #74 open) | Parser production LOC ~`1.44x` upstream Desktop+VS Code parsers (`649` vs `451`); total vendor-src churn higher (~`4x` including hermetic fixtures, multi-lane suppress, scanner/fingerprint, and six Codex review rounds). Named local seams: OTEL/Desktop/VS Code suppress on streaming+count+materialized with **date-filter before Desktop session suppress**, force-retain Desktop+OTEL suppressors when VS Code survives mtime prune, VSCodium/COPILOT_HOME/extra-root routing, UNC `file://` authority decode | Within adoption threshold: growth is TokenBar multi-lane/cache parity, not a new authority algorithm. Keep selected; freeze parser scope; do not re-open Zcode-class invention |
 
 Churn ratio is a volume signal, not a fidelity percentage. The fidelity rule remains the stop condition for future ports.
+
+### Parallel non-ledger product fixes (recorded for schema/bookkeeping only)
+
+| Work | Relation to 111-row ledger | Drift / schema note |
+|---|---|---|
+| Grok billing two-meter (#76) | Outside audited tokscale range (TokenBar `agent_grok` quota card) | Weekly credits + monthly used/limit; no vendor ledger transition |
+| Grok `turn_completed.usage` (#77) | Outside audited range; touches vendored Grok session accounting | Monolithic cache schema **31 → 32** so same-fingerprint context-only rows rebuild; main tip after merge `7b67bb20` |
 
 ## Product decision
 
@@ -109,8 +118,8 @@ The shared-parser critical path through M17, the money-correctness M18 checkpoin
 | M22 | M21 | PR #72 closed unmerged; DEFER until upstream converges because its Zcode cross-store/parser/schema/provider/scanner scope exceeded the fidelity threshold | Keep schema 31; no rollback because it never merged |
 | M23 | M21 | Landed in this worktree on main+M25+Grok#77: Copilot Desktop SQLite + VS Code `chatSessions` + Hermes Windows fallback discovery; reuses Copilot=17 / Hermes=16; no `ClientId::Zcode` or `COUNT=34` | Keep schema 32 (no change); ledger `79/3/0/15/13/1` |
 | M18 | M16 | Merged as PR #70 at `0735fd2b`: add `fugu-ultra` regular/long rates, select one whole-request tier only for verified Sakana and LiteLLM GPT-5.4/GPT-5.5 when `input + cache_read > 272,000`, preserve bare `fugu` as unpriced, and enforce exact raw/custom first refusal, parenthesized validation, provider-scoped fail-closed behavior, bounded path/terminal fallbacks, case-insensitive forced-source isolation, provider ranking/cache backfill, and one Claude never-degrade guard | Kept schema 31 |
-| M25 | M18 | Merged as PR #75 at `97c68d12`: reloadable grouping aliases (`set_model_aliases` / `clear_model_aliases`), alias-free `canonical_model_id`, and process-wide usage-data invalidation (`model_alias_generation` + hooks); Swift/FFI settings wiring deferred | Keep schema 31; post-M25-only ledger `75/7/0/15/13/1` |
-| M24 | M25 | Add explicit-credential Warp fetching/local reporting through the shared invalidation seam; no automatic credential harvesting | Keep schema 31 |
+| M25 | M18 | Merged as PR #75 at `97c68d12`: reloadable grouping aliases (`set_model_aliases` / `clear_model_aliases`), alias-free `canonical_model_id`, and process-wide usage-data invalidation (`model_alias_generation` + hooks); Swift/FFI settings wiring deferred | Post-M25 ledger `75/7/0/15/13/1` at schema 31; main later schema 32 via Grok #77 |
+| M24 | M25 | Add explicit-credential Warp fetching/local reporting through the shared invalidation seam; no automatic credential harvesting | Keep schema 32 (no change) |
 | M19-A | M15-T | Merged as PR #68 at `11ae1bed`: retry only Windows atomic-replacement errors 5/32 for at most five attempts with exact bounded backoff; preserve non-Windows rename and exclude TUI signal behavior | Keep schema 31 |
 | M26 | M23 + M24 + M19-A | Activate 256 identity-aware cache shards across every materialized, streaming, count, and report lane, including `cd07bf78` generic related-file path/existence metadata while excluding Devin behavior | Active shard format 2; leave legacy schema-31 monolith untouched |
 | M19-B | M26 merged | Reconcile Windows-only residuals and perform one final Rust/header/registry re-sync with parity gates | Sync shard format 2 and legacy schema-31 provenance |
@@ -138,7 +147,7 @@ Prepared parser/specialist patches must not carry shared registry, scanner, cach
 | M20 | Monolithic schema 30, rejecting same-fingerprint hybrid-DB entries that cached only non-empty v1 output before v2 rows were understood |
 | M15-B | Schema 30 unchanged; sibling-aware identity handles new structured sources |
 | M16 | Monolithic schema 31, rebuilding all changed existing-parser outputs once |
-| M17, M18, M21, M22, M23, M24, M25, and M19-A | Schema 31 unchanged; M22 has no runtime rollback because PR #72 never merged |
+| M17, M18, M21, M22, M23, M24, M25, and M19-A | No milestone-local schema bump; main is schema **32** after Grok PR #77; M22 has no runtime rollback because PR #72 never merged |
 | M26 | `source-message-cache-v2/<client>/<00..ff>.bin`, format 2; legacy schema-31 monolith is not read, changed, deleted, or migrated |
 | M19-B | Windows consumer matches format 2 and the preserved legacy schema-31 boundary |
 
