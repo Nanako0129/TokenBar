@@ -88,6 +88,11 @@ pub struct ScanResult {
     pub crush_dbs: Vec<CrushDbSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
+    /// GitHub Copilot Desktop SQLite database (`~/.copilot/data.db`).
+    pub copilot_desktop_db: Option<PathBuf>,
+    /// VS Code Copilot chat session JSONL files under
+    /// `workspaceStorage/*/chatSessions/*.jsonl`.
+    pub copilot_vscode_sessions: Vec<PathBuf>,
 }
 
 impl Default for ScanResult {
@@ -103,6 +108,8 @@ impl Default for ScanResult {
             kiro_db: None,
             crush_dbs: Vec::new(),
             opencode_json_dir: None,
+            copilot_desktop_db: None,
+            copilot_vscode_sessions: Vec::new(),
         }
     }
 }
@@ -487,6 +494,104 @@ pub(crate) fn discover_hermes_profile_state_dbs(hermes_home: &Path) -> Vec<PathB
     dbs.sort_unstable();
     dbs.dedup();
     dbs
+}
+
+/// Candidate Hermes home directories to scan for `state.db` and profiles.
+///
+/// Resolution order mirrors Crush's Windows rigor:
+/// 1. `HERMES_HOME` when set, otherwise `~/.hermes` — the `PathRoot::EnvVar`
+///    strategy for [`ClientId::Hermes`].
+/// 2. `%LOCALAPPDATA%\hermes` on native Windows (env roots enabled).
+/// 3. `<home>/AppData/Local/hermes` — the literal Windows fallback, always
+///    appended so it is exercised cross-platform (matching Crush's
+///    `AppData/Local` fallback).
+///
+/// Native Windows roots are only consulted when `HERMES_HOME` is *not* set: an
+/// explicit `HERMES_HOME` is authoritative and may be profile-scoped for data
+/// isolation, so widening discovery to the default Windows home would reintroduce
+/// the isolation leak that the profile-scoping rule prevents.
+fn hermes_home_candidates(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut homes = vec![PathBuf::from(
+        ClientId::Hermes
+            .data()
+            .root
+            .resolve_with_env_strategy(home_dir, use_env_roots),
+    )];
+
+    let hermes_home_set = use_env_roots
+        && std::env::var("HERMES_HOME")
+            .map(|value| !value.trim().is_empty())
+            .unwrap_or(false);
+    if !hermes_home_set {
+        if cfg!(target_os = "windows") && use_env_roots {
+            if let Some(local_app_data) =
+                std::env::var_os("LOCALAPPDATA").filter(|value| !value.is_empty())
+            {
+                homes.push(PathBuf::from(local_app_data).join("hermes"));
+            }
+        }
+        homes.push(PathBuf::from(home_dir).join("AppData/Local/hermes"));
+    }
+
+    homes
+}
+
+/// Discover VS Code Copilot Chat `chatSessions/*.jsonl` under workspaceStorage.
+fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<PathBuf> {
+    let mut roots: Vec<PathBuf> = Vec::new();
+
+    roots.push(PathBuf::from(format!(
+        "{}/Library/Application Support/Code/User/workspaceStorage",
+        home_dir
+    )));
+    roots.push(PathBuf::from(format!(
+        "{}/.config/Code/User/workspaceStorage",
+        home_dir
+    )));
+
+    if cfg!(target_os = "windows") && use_env_roots {
+        if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
+            roots.push(PathBuf::from(app_data).join("Code/User/workspaceStorage"));
+        }
+    }
+    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Code/User/workspaceStorage"));
+
+    let mut files: Vec<PathBuf> = Vec::new();
+    let mut seen: HashSet<PathBuf> = HashSet::new();
+
+    for workspace_storage in &roots {
+        let hash_dirs = match std::fs::read_dir(workspace_storage) {
+            Ok(rd) => rd,
+            Err(_) => continue,
+        };
+        for entry in hash_dirs.filter_map(|e| e.ok()) {
+            let chat_sessions_dir = entry.path().join("chatSessions");
+            if !chat_sessions_dir.is_dir() {
+                continue;
+            }
+            let chat_entries = match std::fs::read_dir(&chat_sessions_dir) {
+                Ok(rd) => rd,
+                Err(_) => continue,
+            };
+            for chat_entry in chat_entries.filter_map(|e| e.ok()) {
+                let path = chat_entry.path();
+                let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                if !name.ends_with(".jsonl") {
+                    continue;
+                }
+                if !path.is_file() {
+                    continue;
+                }
+                let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+                if seen.insert(key) {
+                    files.push(path);
+                }
+            }
+        }
+    }
+
+    files.sort_unstable();
+    files
 }
 
 /// Claude desktop "Cowork" (local-agent-mode) writes standard Claude Code
@@ -1166,7 +1271,12 @@ fn scan_all_clients_with_env_strategy_inner(
         let local_path = ClientId::Cline
             .data()
             .resolve_path_with_env_strategy(home_dir, use_env_roots);
-        push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, local_path);
+        push_unique_scan_task(
+            &mut tasks,
+            &mut seen_scan_roots,
+            ClientId::Cline,
+            local_path,
+        );
 
         for root in cline_additional_vscode_task_roots(home_dir, use_env_roots) {
             push_unique_scan_task(&mut tasks, &mut seen_scan_roots, ClientId::Cline, root);
@@ -1183,20 +1293,26 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::Hermes) {
-        let hermes_db_path = PathBuf::from(
-            ClientId::Hermes
-                .data()
-                .resolve_path_with_env_strategy(home_dir, use_env_roots),
-        );
-        let hermes_home = hermes_db_path.parent().map(Path::to_path_buf);
-        if hermes_db_path.is_file() {
-            result.hermes_db = Some(hermes_db_path);
+        // Scan each candidate Hermes home (primary root plus native Windows
+        // fallbacks). The first candidate whose `state.db` exists becomes the
+        // primary `hermes_db`; every other default/profile db is collected as an
+        // extra path. Profile-scoped homes contribute only their own profile
+        // (see `discover_hermes_profile_state_dbs`).
+        let mut extra_dbs: Vec<PathBuf> = Vec::new();
+        for hermes_home in hermes_home_candidates(home_dir, use_env_roots) {
+            let default_db = hermes_home.join("state.db");
+            if default_db.is_file() {
+                if result.hermes_db.is_none() {
+                    result.hermes_db = Some(default_db);
+                } else if result.hermes_db.as_ref() != Some(&default_db) {
+                    extra_dbs.push(default_db);
+                }
+            }
+            extra_dbs.extend(discover_hermes_profile_state_dbs(&hermes_home));
         }
-        if let Some(hermes_home) = hermes_home {
-            result
-                .get_mut(ClientId::Hermes)
-                .extend(discover_hermes_profile_state_dbs(&hermes_home));
-        }
+        extra_dbs.sort_unstable();
+        extra_dbs.dedup();
+        result.get_mut(ClientId::Hermes).extend(extra_dbs);
     }
 
     if enabled.contains(&ClientId::Goose) {
@@ -1374,6 +1490,13 @@ fn scan_all_clients_with_env_strategy_inner(
     result.get_mut(ClientId::Grok).sort_unstable();
 
     if enabled.contains(&ClientId::Copilot) {
+        let desktop_db = PathBuf::from(format!("{}/.copilot/data.db", home_dir));
+        if desktop_db.is_file() {
+            result.copilot_desktop_db = Some(desktop_db);
+        }
+
+        result.copilot_vscode_sessions = discover_copilot_vscode_sessions(home_dir, use_env_roots);
+
         if let Some(path) = copilot_exporter_path_with_env_strategy(use_env_roots) {
             let key = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
             if path.is_file() && seen.insert(key) {
@@ -2454,6 +2577,108 @@ mod tests {
     }
 
     #[test]
+    #[serial]
+    fn test_scan_discovers_hermes_windows_local_appdata_home() {
+        // Cross-platform AppData/Local fallback: Hermes stores its home under
+        // `%LOCALAPPDATA%\hermes` (literal `<home>/AppData/Local/hermes`). Run
+        // with env roots disabled so this exercises the fallback only when
+        // HERMES_HOME is unset.
+        let mut _env = EnvGuard::capture(&["HERMES_HOME", "LOCALAPPDATA", "TOKSCALE_EXTRA_DIRS"]);
+        _env.remove("HERMES_HOME");
+        _env.remove("LOCALAPPDATA");
+        _env.remove("TOKSCALE_EXTRA_DIRS");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let windows_home = home.join("AppData/Local/hermes");
+        fs::create_dir_all(&windows_home).unwrap();
+        let default_db = windows_home.join("state.db");
+        File::create(&default_db).unwrap();
+
+        let profile_dir = windows_home.join("profiles/research");
+        fs::create_dir_all(&profile_dir).unwrap();
+        let profile_db = profile_dir.join("state.db");
+        File::create(&profile_db).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&default_db));
+        assert_eq!(result.hermes_db_paths(), vec![default_db, profile_db]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_hermes_home_set_does_not_widen_to_windows_fallback() {
+        // Explicit HERMES_HOME must not pull in AppData/Local/hermes.
+        let mut _env = EnvGuard::capture(&["HERMES_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        _env.remove("TOKSCALE_EXTRA_DIRS");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let scoped = home.join("scoped-hermes");
+        fs::create_dir_all(&scoped).unwrap();
+        let scoped_db = scoped.join("state.db");
+        File::create(&scoped_db).unwrap();
+
+        let windows_home = home.join("AppData/Local/hermes");
+        fs::create_dir_all(&windows_home).unwrap();
+        File::create(windows_home.join("state.db")).unwrap();
+
+        _env.set("HERMES_HOME", &scoped);
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["hermes".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.hermes_db.as_ref(), Some(&scoped_db));
+        assert_eq!(result.hermes_db_paths(), vec![scoped_db]);
+        assert!(
+            !result
+                .hermes_db_paths()
+                .iter()
+                .any(|path| path.starts_with(&windows_home)),
+            "explicit HERMES_HOME must not widen into the Windows fallback home"
+        );
+    }
+
+    #[test]
+    fn test_scan_discovers_copilot_desktop_and_vscode_sessions() {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+
+        let desktop_db = home.join(".copilot/data.db");
+        fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        File::create(&desktop_db).unwrap();
+
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        fs::create_dir_all(&vscode_dir).unwrap();
+        let vscode_session = vscode_dir.join("550e8400-e29b-41d4-a716-446655440000.jsonl");
+        File::create(&vscode_session).unwrap();
+        // Non-jsonl files must be ignored.
+        File::create(vscode_dir.join("notes.txt")).unwrap();
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.to_str().unwrap(),
+            &["copilot".to_string()],
+            false,
+            &ScannerSettings::default(),
+        );
+
+        assert_eq!(result.copilot_desktop_db.as_ref(), Some(&desktop_db));
+        assert_eq!(result.copilot_vscode_sessions, vec![vscode_session]);
+    }
+
+    #[test]
     fn test_scan_all_clients_with_scanner_settings_discovers_zed_windows_local_appdata_home() {
         let dir = TempDir::new().unwrap();
         let home = dir.path();
@@ -2552,8 +2777,8 @@ mod tests {
         File::create(extra_root.join("extra.jsonl")).unwrap();
 
         _extra.set(
-                "TOKSCALE_EXTRA_DIRS",
-                format!("codex:{}", extra_root.join("..").join("sessions").display()),
+            "TOKSCALE_EXTRA_DIRS",
+            format!("codex:{}", extra_root.join("..").join("sessions").display()),
         );
 
         let settings: ScannerSettings = serde_json::from_value(serde_json::json!({
@@ -2710,11 +2935,8 @@ mod tests {
         let home = dir.path();
         setup_mock_pi_dir(home);
 
-        let result = scan_all_clients_with_env_strategy(
-            home.to_str().unwrap(),
-            &["pi".to_string()],
-            false,
-        );
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::OpenCode).is_empty());
         assert!(result.get(ClientId::Claude).is_empty());
@@ -2726,11 +2948,8 @@ mod tests {
         let home = dir.path();
         setup_mock_omp_dir(home);
 
-        let result = scan_all_clients_with_env_strategy(
-            home.to_str().unwrap(),
-            &["pi".to_string()],
-            false,
-        );
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 1);
         assert!(result.get(ClientId::Pi)[0].ends_with("2026-04-06T03-04-28Z_omp_ses_001.jsonl"));
         assert!(result.get(ClientId::OpenCode).is_empty());
@@ -2743,11 +2962,8 @@ mod tests {
         setup_mock_pi_dir(home);
         setup_mock_omp_dir(home);
 
-        let result = scan_all_clients_with_env_strategy(
-            home.to_str().unwrap(),
-            &["pi".to_string()],
-            false,
-        );
+        let result =
+            scan_all_clients_with_env_strategy(home.to_str().unwrap(), &["pi".to_string()], false);
         assert_eq!(result.get(ClientId::Pi).len(), 2);
     }
 
@@ -3091,18 +3307,18 @@ mod tests {
 
         let registry_path = dir.path().join("projects.json");
         let projects_json = serde_json::json!({
-  "projects": [
-                { "path": project_a, "data_dir": ".crush" },
-                {
-                    "path": dir.path().join("project-b"),
-                    "data_dir": project_b_data,
-                },
-                {
-                    "path": dir.path().join("missing-project"),
-                    "data_dir": ".crush",
-                },
-            ],
-        })
+        "projects": [
+                      { "path": project_a, "data_dir": ".crush" },
+                      {
+                          "path": dir.path().join("project-b"),
+                          "data_dir": project_b_data,
+                      },
+                      {
+                          "path": dir.path().join("missing-project"),
+                          "data_dir": ".crush",
+                      },
+                  ],
+              })
         .to_string();
         setup_mock_crush_registry(&registry_path, &projects_json);
 
@@ -3117,7 +3333,9 @@ mod tests {
                 },
                 CrushDbSource {
                     db_path: project_b_data.join("crush.db"),
-                    workspace_key: normalize_workspace_key(&dir.path().join("project-b").display().to_string()),
+                    workspace_key: normalize_workspace_key(
+                        &dir.path().join("project-b").display().to_string()
+                    ),
                     workspace_label: Some("project-b".to_string()),
                 },
             ]
@@ -3133,13 +3351,13 @@ mod tests {
 
         let registry_path = dir.path().join("projects.json");
         let projects_json = serde_json::json!({
-  "projects": [
-                { "path": valid_project, "data_dir": ".crush" },
-                { "path": 123, "data_dir": ".crush" },
-                { "data_dir": ".crush" },
-                "not-an-object",
-            ],
-        })
+        "projects": [
+                      { "path": valid_project, "data_dir": ".crush" },
+                      { "path": 123, "data_dir": ".crush" },
+                      { "data_dir": ".crush" },
+                      "not-an-object",
+                  ],
+              })
         .to_string();
         setup_mock_crush_registry(&registry_path, &projects_json);
 
@@ -3221,11 +3439,8 @@ mod tests {
     #[test]
     #[serial]
     fn test_scan_all_clients_headless_paths() {
-        let mut _headless = EnvGuard::capture(&[
-            "TOKSCALE_HEADLESS_DIR",
-            "CODEX_HOME",
-            "GEMINI_CLI_HOME",
-        ]);
+        let mut _headless =
+            EnvGuard::capture(&["TOKSCALE_HEADLESS_DIR", "CODEX_HOME", "GEMINI_CLI_HOME"]);
         _headless.remove("TOKSCALE_HEADLESS_DIR");
         _headless.remove("CODEX_HOME");
         _headless.remove("GEMINI_CLI_HOME");
@@ -3631,8 +3846,8 @@ mod tests {
         File::create(extra_project.join("extra-session.jsonl")).unwrap();
 
         _extra.set(
-                "TOKSCALE_EXTRA_DIRS",
-                format!("claude:{}", extra_dir.path().to_string_lossy()),
+            "TOKSCALE_EXTRA_DIRS",
+            format!("claude:{}", extra_dir.path().to_string_lossy()),
         );
 
         let result = scan_all_clients(home.to_str().unwrap(), &["claude".to_string()]);
@@ -3731,8 +3946,8 @@ mod tests {
         File::create(extra_project.join("extra-session.jsonl")).unwrap();
 
         _extra.set(
-                "TOKSCALE_EXTRA_DIRS",
-                format!("claude:{}", extra_dir.path().to_string_lossy()),
+            "TOKSCALE_EXTRA_DIRS",
+            format!("claude:{}", extra_dir.path().to_string_lossy()),
         );
 
         let result = scan_all_clients_with_env_strategy(
@@ -3761,8 +3976,8 @@ mod tests {
         // Set TOKSCALE_EXTRA_DIRS to point claude at the outside path.
         let mut _extra = EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS"]);
         _extra.set(
-                "TOKSCALE_EXTRA_DIRS",
-                format!("claude:{}", outside_path.to_string_lossy()),
+            "TOKSCALE_EXTRA_DIRS",
+            format!("claude:{}", outside_path.to_string_lossy()),
         );
 
         // The scan must complete without panicking.

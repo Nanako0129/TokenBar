@@ -24,8 +24,8 @@ pub use model_alias::{
 pub use parser::*;
 pub use scanner::*;
 pub use sessionize::{
-    compute_daily_active_time, compute_time_metrics, sessionize, SessionizeAccumulator,
-    SessionInterval, TimeMetrics, DEFAULT_IDLE_GAP_MS,
+    compute_daily_active_time, compute_time_metrics, sessionize, SessionInterval,
+    SessionizeAccumulator, TimeMetrics, DEFAULT_IDLE_GAP_MS,
 };
 pub use sessions::{CostSource, UnifiedMessage};
 
@@ -1041,6 +1041,67 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             source_cache.insert(entry);
         }
     }
+    // Copilot Desktop SQLite: session totals enriched from session-state events.
+    // Suppress sessions already present from OTEL so dual-source users are not
+    // double-counted.
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        let otel_sessions: HashSet<String> = all_messages
+            .iter()
+            .filter(|message| message.client == "copilot")
+            .map(|message| message.session_id.clone())
+            .collect();
+        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
+            sessions::copilot_desktop::parse_copilot_desktop_db(path)
+        });
+        all_messages.extend(
+            outcome
+                .messages
+                .into_iter()
+                .filter(|message| !otel_sessions.contains(&message.session_id)),
+        );
+        if let Some(entry) = outcome.cache_entry {
+            source_cache.insert(entry);
+        }
+    }
+    // VS Code chatSessions: per-request JSONL. Dedup against OTEL + Desktop by
+    // dedup_key and (session_id, timestamp) so the three sources never
+    // triple-count the same request.
+    {
+        let existing_dedup_keys: HashSet<String> = all_messages
+            .iter()
+            .filter(|m| m.client == "copilot")
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        let existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
+            .iter()
+            .filter(|m| m.client == "copilot")
+            .map(|m| (m.session_id.clone(), m.timestamp))
+            .collect();
+        let vscode_outcomes: Vec<CachedParseOutcome> = scan_result
+            .copilot_vscode_sessions
+            .par_iter()
+            .map(|path| {
+                load_or_parse_source(path, &source_cache, pricing, |path| {
+                    sessions::copilot_vscode::parse_copilot_vscode_sessions(&[path.to_path_buf()])
+                })
+            })
+            .collect();
+        for outcome in vscode_outcomes {
+            all_messages.extend(outcome.messages.into_iter().filter(|m| {
+                let key_unique = m
+                    .dedup_key
+                    .as_deref()
+                    .map(|k| !existing_dedup_keys.contains(k))
+                    .unwrap_or(true);
+                let session_ts_unique = !existing_copilot_session_timestamps
+                    .contains(&(m.session_id.clone(), m.timestamp));
+                key_unique && session_ts_unique
+            }));
+            if let Some(entry) = outcome.cache_entry {
+                source_cache.insert(entry);
+            }
+        }
+    }
 
     let gemini_outcomes: Vec<(PathBuf, CachedParseOutcome)> = scan_result
         .get(ClientId::Gemini)
@@ -1967,11 +2028,7 @@ impl OpenCodeSourceIdentity {
     fn all_from_message(message: &UnifiedMessage) -> Vec<Self> {
         let mut identities = Vec::new();
         let mut seen = HashSet::new();
-        for key in message
-            .dedup_key
-            .iter()
-            .chain(message.dedup_aliases.iter())
-        {
+        for key in message.dedup_key.iter().chain(message.dedup_aliases.iter()) {
             if !key.is_empty() && seen.insert(key.clone()) {
                 identities.push(Self {
                     key: key.clone(),
@@ -2020,9 +2077,7 @@ impl OpenCodePayloadIdentity {
     }
 }
 
-fn opencode_identity_group(
-    message: &UnifiedMessage,
-) -> (bool, Vec<OpenCodeSourceIdentity>) {
+fn opencode_identity_group(message: &UnifiedMessage) -> (bool, Vec<OpenCodeSourceIdentity>) {
     (
         message.cost_source == CostSource::ProviderReported,
         OpenCodeSourceIdentity::all_from_message(message),
@@ -2042,10 +2097,7 @@ fn opencode_authoritative_sources(
     loop {
         let previous_len = authoritative.len();
         for (_, sources) in &groups {
-            if sources
-                .iter()
-                .any(|source| authoritative.contains(source))
-            {
+            if sources.iter().any(|source| authoritative.contains(source)) {
                 authoritative.extend(sources.iter().cloned());
             }
         }
@@ -2288,16 +2340,34 @@ pub async fn get_model_report(options: ReportOptions) -> Result<ModelReport, Str
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
-        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
-        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
-        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
+        }
         true
     };
     let mut model_msgs: Vec<UnifiedMessage> = Vec::new();
     scan_messages_streaming(
-        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
         &msg_filter,
-        &mut |m: &UnifiedMessage| { model_msgs.push(m.clone()); },
+        &mut |m: &UnifiedMessage| {
+            model_msgs.push(m.clone());
+        },
     );
     let entries = aggregate_model_usage_entries(model_msgs, &options.group_by);
 
@@ -2343,9 +2413,21 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
-        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
-        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
-        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
+        }
         true
     };
 
@@ -2355,7 +2437,11 @@ pub async fn get_monthly_report(options: ReportOptions) -> Result<MonthlyReport,
     let aliases = model_alias::snapshot_grouping_aliases();
 
     scan_messages_streaming(
-        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
         &msg_filter,
         &mut |msg: &UnifiedMessage| {
             let month = if msg.date.len() >= 7 {
@@ -2501,17 +2587,35 @@ pub async fn get_agents_report(options: ReportOptions) -> Result<AgentReport, St
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
-        if !report_message_client_passes(&exact, m) { return false; }
-        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
-        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
-        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        if !report_message_client_passes(&exact, m) {
+            return false;
+        }
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
+        }
         true
     };
 
     let mut by_agent: HashMap<String, AgentAccumulator> = HashMap::new();
 
     scan_messages_streaming(
-        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
         &msg_filter,
         &mut |msg: &UnifiedMessage| {
             by_agent.entry(agent_bucket_key(msg)).or_default().add(msg);
@@ -2605,10 +2709,24 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
-        if !report_message_client_passes(&exact, m) { return false; }
-        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
-        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
-        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        if !report_message_client_passes(&exact, m) {
+            return false;
+        }
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
+        }
         true
     };
 
@@ -2618,7 +2736,11 @@ pub async fn get_hourly_report(options: ReportOptions) -> Result<HourlyReport, S
     let aliases = model_alias::snapshot_grouping_aliases();
 
     scan_messages_streaming(
-        &home_dir, &clients, pricing.as_deref(), options.use_env_roots, &options.scanner_settings,
+        &home_dir,
+        &clients,
+        pricing.as_deref(),
+        options.use_env_roots,
+        &options.scanner_settings,
         &msg_filter,
         &mut |msg: &UnifiedMessage| {
             let hour_key = if msg.timestamp > 0 {
@@ -2714,8 +2836,7 @@ fn scan_messages_streaming<F, S>(
     scanner_settings: &scanner::ScannerSettings,
     filter: &F,
     sink: &mut S,
-)
-where
+) where
     F: Fn(&UnifiedMessage) -> bool,
     S: FnMut(&UnifiedMessage),
 {
@@ -2773,7 +2894,9 @@ where
         for mut message in sessions::opencode::parse_opencode_sqlite(db_path) {
             apply_pricing_if_available(&mut message, pricing);
             if let Some(message) = opencode_selection.select_sqlite(message) {
-                if passes_client(&message) && filter(&message) { sink(&message); }
+                if passes_client(&message) && filter(&message) {
+                    sink(&message);
+                }
             }
         }
     }
@@ -2787,31 +2910,54 @@ where
         }
     }
     for message in opencode_selection.finish() {
-        if passes_client(&message) && filter(&message) { sink(&message); }
+        if passes_client(&message) && filter(&message) {
+            sink(&message);
+        }
     }
 
     // ---- Claude Code JSONL (cache-aware, reference-iterate on hit) ----
     let claude_home = PathBuf::from(home_dir);
     let mut claude_seen: HashSet<String> = HashSet::new();
     for path in scan_result.get(ClientId::Claude) {
-        let fp = message_cache::SourceFingerprint::from_claude_code_path_with_home(path, Some(&claude_home));
-        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(path).filter(|c| &c.fingerprint == fp && !c.messages.is_empty()));
+        let fp = message_cache::SourceFingerprint::from_claude_code_path_with_home(
+            path,
+            Some(&claude_home),
+        );
+        let cache_hit = fp.as_ref().and_then(|fp| {
+            source_cache
+                .get(path)
+                .filter(|c| &c.fingerprint == fp && !c.messages.is_empty())
+        });
         if let Some(cached) = cache_hit {
             for msg in cached.messages.iter() {
                 let mut m = msg.clone();
                 m.refresh_derived_fields();
                 apply_pricing_if_available(&mut m, pricing);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         } else {
             let msgs = sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home));
             for mut m in msgs {
                 apply_pricing_if_available(&mut m, pricing);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut claude_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -2820,36 +2966,60 @@ where
     let mut codex_seen: HashSet<String> = HashSet::new();
     for path in scan_result.get(ClientId::Codex) {
         let fp = message_cache::SourceFingerprint::from_path(path);
-        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(path).filter(|c| &c.fingerprint == fp));
+        let cache_hit = fp
+            .as_ref()
+            .and_then(|fp| source_cache.get(path).filter(|c| &c.fingerprint == fp));
         if let Some(cached) = cache_hit {
             let is_headless = is_headless_path(path, &headless_roots);
             let fallback_ts = sessions::utils::file_modified_timestamp_ms(path);
             let fti = &cached.fallback_timestamp_indices;
             for (idx, msg) in cached.messages.iter().enumerate() {
                 let mut m = msg.clone();
-                if fti.contains(&idx) { m.set_timestamp(fallback_ts); } else { m.refresh_derived_fields(); }
+                if fti.contains(&idx) {
+                    m.set_timestamp(fallback_ts);
+                } else {
+                    m.refresh_derived_fields();
+                }
                 apply_pricing_if_available(&mut m, pricing);
                 apply_headless_agent(&mut m, is_headless);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         } else {
             let is_headless = is_headless_path(path, &headless_roots);
             let fallback_ts = sessions::utils::file_modified_timestamp_ms(path);
             let parsed = sessions::codex::parse_codex_file_incremental(
-                path, 0, sessions::codex::CodexParseState::default(),
+                path,
+                0,
+                sessions::codex::CodexParseState::default(),
             );
             let mut msgs = parsed.messages;
             for idx in &parsed.fallback_timestamp_indices {
-                if let Some(m) = msgs.get_mut(*idx) { m.set_timestamp(fallback_ts); }
+                if let Some(m) = msgs.get_mut(*idx) {
+                    m.set_timestamp(fallback_ts);
+                }
             }
             for mut m in msgs {
                 apply_pricing_if_available(&mut m, pricing);
                 apply_headless_agent(&mut m, is_headless);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut codex_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -2889,16 +3059,25 @@ where
             for path in scan_result.get($client_id) {
                 let fp = $fingerprint_fn(path);
                 let cache_hit = fp.as_ref().and_then(|fp| {
-                    source_cache.get(path).filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
+                    source_cache
+                        .get(path)
+                        .filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
                 });
                 if let Some(cached) = cache_hit {
                     for msg in cached.messages.iter() {
                         let mut m = msg.clone();
                         m.refresh_derived_fields();
                         reprice_lane_message(&mut m, pricing, $guard_cost);
-                        if !passes_client(&m) { continue; }
-                        let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
-                        if keep && filter(&m) { sink(&m); }
+                        if !passes_client(&m) {
+                            continue;
+                        }
+                        let keep = m
+                            .dedup_key
+                            .as_ref()
+                            .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                        if keep && filter(&m) {
+                            sink(&m);
+                        }
                     }
                 } else {
                     miss_paths.push(path);
@@ -2913,32 +3092,156 @@ where
                 if !msgs.is_empty() {
                     if let Some(fp) = $fingerprint_fn(path) {
                         let entry = message_cache::CachedSourceEntry::new(
-                            path, fp, msgs.clone(), Vec::new(), None,
+                            path,
+                            fp,
+                            msgs.clone(),
+                            Vec::new(),
+                            None,
                         );
                         source_cache.insert(entry);
                     }
                 }
                 for mut m in msgs {
                     reprice_lane_message(&mut m, pricing, $guard_cost);
-                    if !passes_client(&m) { continue; }
-                    let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
-                    if keep && filter(&m) { sink(&m); }
+                    if !passes_client(&m) {
+                        continue;
+                    }
+                    let keep = m
+                        .dedup_key
+                        .as_ref()
+                        .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                    if keep && filter(&m) {
+                        sink(&m);
+                    }
                 }
             }
         }};
     }
-    simple_lane!(ClientId::Copilot,   sessions::copilot::parse_copilot_file);
-    simple_lane!(ClientId::Cursor,    sessions::cursor::parse_cursor_file);
-    simple_lane!(ClientId::Warp,      sessions::warp::parse_warp_file);
-    simple_lane!(ClientId::Amp,       sessions::amp::parse_amp_file);
-    simple_lane!(ClientId::Codebuff,  sessions::codebuff::parse_codebuff_file);
+    simple_lane!(ClientId::Copilot, sessions::copilot::parse_copilot_file);
+    // Copilot Desktop + VS Code chatSessions reuse ClientId::Copilot. Build the
+    // OTEL suppress sets once, emit Desktop (session_id suppress), then VS Code
+    // (dedup_key + session_id/timestamp suppress against OTEL + Desktop).
+    {
+        let mut otel_sessions: HashSet<String> = HashSet::new();
+        let mut existing_dedup_keys: HashSet<String> = HashSet::new();
+        let mut existing_session_timestamps: HashSet<(String, i64)> = HashSet::new();
+        for path in scan_result.get(ClientId::Copilot) {
+            for message in sessions::copilot::parse_copilot_file(path) {
+                otel_sessions.insert(message.session_id.clone());
+                if let Some(key) = message.dedup_key.clone() {
+                    existing_dedup_keys.insert(key);
+                }
+                existing_session_timestamps.insert((message.session_id.clone(), message.timestamp));
+            }
+        }
+
+        if let Some(db_path) = &scan_result.copilot_desktop_db {
+            let fp = message_cache::SourceFingerprint::from_sqlite_path(db_path);
+            let cache_hit = fp.as_ref().and_then(|fp| {
+                source_cache
+                    .get(db_path)
+                    .filter(|cached| &cached.fingerprint == fp && !cached.messages.is_empty())
+            });
+            let msgs = if let Some(cached) = cache_hit {
+                cached.messages.clone()
+            } else {
+                let msgs = sessions::copilot_desktop::parse_copilot_desktop_db(db_path);
+                if !msgs.is_empty() {
+                    if let Some(fp) = fp {
+                        source_cache.insert(message_cache::CachedSourceEntry::new(
+                            db_path,
+                            fp,
+                            msgs.clone(),
+                            Vec::new(),
+                            None,
+                        ));
+                    }
+                }
+                msgs
+            };
+            for mut m in msgs {
+                // Always register Desktop identities for VS Code suppression,
+                // even when the session is OTEL-covered and not re-emitted.
+                if let Some(key) = m.dedup_key.clone() {
+                    existing_dedup_keys.insert(key);
+                }
+                existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
+                if otel_sessions.contains(&m.session_id) {
+                    continue;
+                }
+                m.refresh_derived_fields();
+                reprice_lane_message(&mut m, pricing, false);
+                if !passes_client(&m) {
+                    continue;
+                }
+                if filter(&m) {
+                    sink(&m);
+                }
+            }
+        }
+
+        for path in &scan_result.copilot_vscode_sessions {
+            let fp = message_cache::SourceFingerprint::from_path(path);
+            let cache_hit = fp.as_ref().and_then(|fp| {
+                source_cache
+                    .get(path)
+                    .filter(|cached| &cached.fingerprint == fp && !cached.messages.is_empty())
+            });
+            let msgs = if let Some(cached) = cache_hit {
+                cached.messages.clone()
+            } else {
+                let msgs = sessions::copilot_vscode::parse_copilot_vscode_sessions(
+                    std::slice::from_ref(path),
+                );
+                if !msgs.is_empty() {
+                    if let Some(fp) = fp {
+                        source_cache.insert(message_cache::CachedSourceEntry::new(
+                            path,
+                            fp,
+                            msgs.clone(),
+                            Vec::new(),
+                            None,
+                        ));
+                    }
+                }
+                msgs
+            };
+            for mut m in msgs {
+                let key_unique = m
+                    .dedup_key
+                    .as_deref()
+                    .map(|k| !existing_dedup_keys.contains(k))
+                    .unwrap_or(true);
+                let session_ts_unique =
+                    !existing_session_timestamps.contains(&(m.session_id.clone(), m.timestamp));
+                if !(key_unique && session_ts_unique) {
+                    continue;
+                }
+                m.refresh_derived_fields();
+                reprice_lane_message(&mut m, pricing, false);
+                if !passes_client(&m) {
+                    continue;
+                }
+                if filter(&m) {
+                    sink(&m);
+                }
+            }
+        }
+    }
+    simple_lane!(ClientId::Cursor, sessions::cursor::parse_cursor_file);
+    simple_lane!(ClientId::Warp, sessions::warp::parse_warp_file);
+    simple_lane!(ClientId::Amp, sessions::amp::parse_amp_file);
+    simple_lane!(ClientId::Codebuff, sessions::codebuff::parse_codebuff_file);
     simple_lane!(
         ClientId::Droid,
         sessions::droid::parse_droid_file,
         message_cache::SourceFingerprint::from_droid_path
     );
-    simple_lane!(ClientId::OpenClaw,  sessions::openclaw::parse_openclaw_transcript);
-    simple_lane!(ClientId::Pi,        sessions::pi::parse_pi_file);
+    simple_lane!(
+        ClientId::OpenClaw,
+        sessions::openclaw::parse_openclaw_transcript
+    );
+    simple_lane!(ClientId::Pi, sessions::pi::parse_pi_file);
     simple_lane!(
         ClientId::Kimi,
         parse_kimi_source,
@@ -2949,7 +3252,7 @@ where
         ClientId::OpenCodeReview,
         sessions::opencodereview::parse_opencodereview_file
     );
-    simple_lane!(ClientId::Qwen,      sessions::qwen::parse_qwen_file);
+    simple_lane!(ClientId::Qwen, sessions::qwen::parse_qwen_file);
     // roo family: fingerprint via from_roo_path so a history-only rewrite of the
     // sibling api_conversation_history.json (which parse_roo_kilo_file reads for
     // model/agent) invalidates the cached lane (#741).
@@ -3002,9 +3305,7 @@ where
             .collect();
         for (index, path, messages) in parsed_misses {
             if !messages.is_empty() {
-                if let Some(fingerprint) =
-                    message_cache::SourceFingerprint::from_grok_path(path)
-                {
+                if let Some(fingerprint) = message_cache::SourceFingerprint::from_grok_path(path) {
                     source_cache.insert(message_cache::CachedSourceEntry::new(
                         path,
                         fingerprint,
@@ -3054,7 +3355,7 @@ where
         message_cache::SourceFingerprint::from_sqlite_path,
         true
     );
-    simple_lane!(ClientId::Mux,       sessions::mux::parse_mux_file);
+    simple_lane!(ClientId::Mux, sessions::mux::parse_mux_file);
 
     // ---- Kiro globalStorage files (raw cache + batch suppression) ----
     // Snapshots and successful executions can describe the same conversation.
@@ -3134,16 +3435,25 @@ where
         for path in scan_result.get(ClientId::Gemini) {
             let fp = message_cache::SourceFingerprint::from_path(path);
             let cache_hit = fp.as_ref().and_then(|fp| {
-                source_cache.get(path).filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
+                source_cache
+                    .get(path)
+                    .filter(|c| c.fingerprint == *fp && !c.messages.is_empty())
             });
             if let Some(cached) = cache_hit {
                 for msg in cached.messages.iter() {
                     let mut m = msg.clone();
                     m.refresh_derived_fields();
                     apply_pricing_if_available(&mut m, pricing);
-                    if !passes_client(&m) { continue; }
-                    let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
-                    if keep && filter(&m) { sink(&m); }
+                    if !passes_client(&m) {
+                        continue;
+                    }
+                    let keep = m
+                        .dedup_key
+                        .as_ref()
+                        .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                    if keep && filter(&m) {
+                        sink(&m);
+                    }
                 }
             } else {
                 gemini_miss_paths.push(path);
@@ -3151,13 +3461,22 @@ where
         }
         let gemini_parsed: Vec<(&PathBuf, sessions::gemini::GeminiParseResult)> = gemini_miss_paths
             .par_iter()
-            .map(|path| (*path, sessions::gemini::parse_gemini_file_with_cache_status(path)))
+            .map(|path| {
+                (
+                    *path,
+                    sessions::gemini::parse_gemini_file_with_cache_status(path),
+                )
+            })
             .collect();
         for (path, parsed) in gemini_parsed {
             if parsed.cacheable && !parsed.messages.is_empty() {
                 if let Some(fp) = message_cache::SourceFingerprint::from_path(path) {
                     let entry = message_cache::CachedSourceEntry::new(
-                        path, fp, parsed.messages.clone(), Vec::new(), None,
+                        path,
+                        fp,
+                        parsed.messages.clone(),
+                        Vec::new(),
+                        None,
                     );
                     source_cache.insert(entry);
                 }
@@ -3166,9 +3485,16 @@ where
             }
             for mut m in parsed.messages {
                 apply_pricing_if_available(&mut m, pricing);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut seen_keys));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3177,7 +3503,9 @@ where
     if let Some(db_path) = &scan_result.kilo_db {
         for mut m in sessions::kilo::parse_kilo_sqlite(db_path) {
             apply_pricing_if_available(&mut m, pricing);
-            if passes_client(&m) && filter(&m) { sink(&m); }
+            if passes_client(&m) && filter(&m) {
+                sink(&m);
+            }
         }
     }
 
@@ -3186,9 +3514,16 @@ where
         let mut hermes_seen: HashSet<String> = HashSet::new();
         for db_path in scan_result.hermes_db_paths() {
             for m in parse_hermes_sqlite_with_pricing(&db_path, pricing) {
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut hermes_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut hermes_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3199,7 +3534,9 @@ where
         for path in scan_result.get(ClientId::AntigravityCli) {
             for mut m in sessions::antigravity_cli::parse_antigravity_cli_file(path) {
                 apply_pricing_if_available(&mut m, pricing);
-                if !passes_client(&m) { continue; }
+                if !passes_client(&m) {
+                    continue;
+                }
                 // A responseId is unique only within a conversation DB (the
                 // parser already drops repeats per-file), so namespace the
                 // cross-file gate by session to avoid collapsing two independent
@@ -3213,7 +3550,9 @@ where
                             &mut antigravity_cli_seen,
                         )
                 });
-                if keep && filter(&m) { sink(&m); }
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3226,9 +3565,16 @@ where
         for path in scan_result.get(ClientId::Gjc) {
             for mut m in sessions::gjc::parse_gjc_file(path) {
                 apply_pricing_if_available(&mut m, pricing);
-                if !passes_client(&m) { continue; }
-                let keep = m.dedup_key.as_ref().is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut gjc_seen));
-                if keep && filter(&m) { sink(&m); }
+                if !passes_client(&m) {
+                    continue;
+                }
+                let keep = m
+                    .dedup_key
+                    .as_ref()
+                    .is_none_or(|k| k.is_empty() || dedup_gate_passes(k, &mut gjc_seen));
+                if keep && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3237,25 +3583,33 @@ where
     if let Some(db_path) = &scan_result.goose_db {
         for mut m in sessions::goose::parse_goose_sqlite(db_path) {
             apply_pricing_if_available(&mut m, pricing);
-            if passes_client(&m) && filter(&m) { sink(&m); }
+            if passes_client(&m) && filter(&m) {
+                sink(&m);
+            }
         }
     }
 
     // ---- Zed SQLite (cache-aware reference-iterate) ----
     for db_path in scan_result.zed_db_paths() {
         let fp = message_cache::SourceFingerprint::from_sqlite_path(&db_path);
-        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(&db_path).filter(|c| &c.fingerprint == fp));
+        let cache_hit = fp
+            .as_ref()
+            .and_then(|fp| source_cache.get(&db_path).filter(|c| &c.fingerprint == fp));
         if let Some(cached) = cache_hit {
             for msg in cached.messages.iter() {
                 let mut m = msg.clone();
                 m.refresh_derived_fields();
                 apply_pricing_if_available(&mut m, pricing);
-                if passes_client(&m) && filter(&m) { sink(&m); }
+                if passes_client(&m) && filter(&m) {
+                    sink(&m);
+                }
             }
         } else {
             for mut m in sessions::zed::parse_zed_sqlite(&db_path) {
                 apply_pricing_if_available(&mut m, pricing);
-                if passes_client(&m) && filter(&m) { sink(&m); }
+                if passes_client(&m) && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3264,7 +3618,9 @@ where
     if let Some(db_path) = &scan_result.kiro_db {
         for mut m in sessions::kiro::parse_kiro_sqlite(db_path) {
             apply_pricing_if_available(&mut m, pricing);
-            if passes_client(&m) && filter(&m) { sink(&m); }
+            if passes_client(&m) && filter(&m) {
+                sink(&m);
+            }
         }
     }
 
@@ -3273,7 +3629,9 @@ where
         for mut m in sessions::crush::parse_crush_sqlite(&source.db_path) {
             m.set_workspace(source.workspace_key.clone(), source.workspace_label.clone());
             apply_pricing_if_available(&mut m, pricing);
-            if passes_client(&m) && filter(&m) { sink(&m); }
+            if passes_client(&m) && filter(&m) {
+                sink(&m);
+            }
         }
     }
 
@@ -3287,7 +3645,9 @@ where
         for msgs in parsed {
             for mut m in msgs {
                 apply_pricing_if_available(&mut m, pricing);
-                if passes_client(&m) && filter(&m) { sink(&m); }
+                if passes_client(&m) && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
@@ -3307,44 +3667,68 @@ where
                     let replace = m.timestamp > existing.timestamp
                         || (m.timestamp == existing.timestamp
                             && m.dedup_key.as_ref().is_some_and(|k| {
-                                existing.dedup_key.as_ref().is_none_or(|ek| k.as_str() > ek.as_str())
+                                existing
+                                    .dedup_key
+                                    .as_ref()
+                                    .is_none_or(|ek| k.as_str() > ek.as_str())
                             }));
-                    if replace { *slot.get_mut() = m; }
+                    if replace {
+                        *slot.get_mut() = m;
+                    }
                 }
-                std::collections::hash_map::Entry::Vacant(slot) => { slot.insert(m); }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(m);
+                }
             }
         }
     }
 
     // ---- Synthetic ----
-    if let Some(db_path) = scan_result.synthetic_db.as_ref().filter(|_| include_synthetic) {
+    if let Some(db_path) = scan_result
+        .synthetic_db
+        .as_ref()
+        .filter(|_| include_synthetic)
+    {
         let fp = message_cache::SourceFingerprint::from_sqlite_path(db_path);
-        let cache_hit = fp.as_ref().and_then(|fp| source_cache.get(db_path).filter(|c| &c.fingerprint == fp));
+        let cache_hit = fp
+            .as_ref()
+            .and_then(|fp| source_cache.get(db_path).filter(|c| &c.fingerprint == fp));
         if let Some(cached) = cache_hit {
             for msg in cached.messages.iter() {
                 let mut m = msg.clone();
                 m.refresh_derived_fields();
                 apply_pricing_if_available(&mut m, pricing);
-                sessions::synthetic::normalize_synthetic_gateway_fields(&mut m.model_id, &mut m.provider_id);
-                if passes_client(&m) && filter(&m) { sink(&m); }
+                sessions::synthetic::normalize_synthetic_gateway_fields(
+                    &mut m.model_id,
+                    &mut m.provider_id,
+                );
+                if passes_client(&m) && filter(&m) {
+                    sink(&m);
+                }
             }
         } else {
             for mut m in sessions::synthetic::parse_octofriend_sqlite(db_path) {
                 apply_pricing_if_available(&mut m, pricing);
-                sessions::synthetic::normalize_synthetic_gateway_fields(&mut m.model_id, &mut m.provider_id);
-                if passes_client(&m) && filter(&m) { sink(&m); }
+                sessions::synthetic::normalize_synthetic_gateway_fields(
+                    &mut m.model_id,
+                    &mut m.provider_id,
+                );
+                if passes_client(&m) && filter(&m) {
+                    sink(&m);
+                }
             }
         }
     }
 
     // ---- Flush trae keep-latest (after all other lanes) ----
     for m in trae_latest.into_values() {
-        if passes_client(&m) && filter(&m) { sink(&m); }
+        if passes_client(&m) && filter(&m) {
+            sink(&m);
+        }
     }
 
     source_cache.save_if_dirty();
 }
-
 
 async fn generate_graph_with_loaded_pricing(
     options: ReportOptions,
@@ -3361,13 +3745,19 @@ async fn generate_graph_with_loaded_pricing(
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
         if let Some(ref yp) = year_prefix {
-            if !m.date.starts_with(yp.as_str()) { return false; }
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
         }
         if let Some(ref s) = since_s {
-            if m.date.as_str() < s.as_str() { return false; }
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
         }
         if let Some(ref u) = until_s {
-            if m.date.as_str() > u.as_str() { return false; }
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
         }
         true
     };
@@ -3427,16 +3817,34 @@ pub async fn get_time_metrics_report(options: ReportOptions) -> Result<TimeMetri
     let since_s = options.since.clone();
     let until_s = options.until.clone();
     let msg_filter = |m: &UnifiedMessage| -> bool {
-        if let Some(ref yp) = year_prefix { if !m.date.starts_with(yp.as_str()) { return false; } }
-        if let Some(ref s) = since_s { if m.date.as_str() < s.as_str() { return false; } }
-        if let Some(ref u) = until_s { if m.date.as_str() > u.as_str() { return false; } }
+        if let Some(ref yp) = year_prefix {
+            if !m.date.starts_with(yp.as_str()) {
+                return false;
+            }
+        }
+        if let Some(ref s) = since_s {
+            if m.date.as_str() < s.as_str() {
+                return false;
+            }
+        }
+        if let Some(ref u) = until_s {
+            if m.date.as_str() > u.as_str() {
+                return false;
+            }
+        }
         true
     };
     let mut sess_agg = sessionize::SessionizeAccumulator::new();
     scan_messages_streaming(
-        &home_dir, &clients, None, options.use_env_roots, &options.scanner_settings,
+        &home_dir,
+        &clients,
+        None,
+        options.use_env_roots,
+        &options.scanner_settings,
         &msg_filter,
-        &mut |m: &UnifiedMessage| { sess_agg.feed(m); },
+        &mut |m: &UnifiedMessage| {
+            sess_agg.feed(m);
+        },
     );
     let intervals = sess_agg.finalize(sessionize::DEFAULT_IDLE_GAP_MS);
     let metrics = sessionize::compute_time_metrics(&intervals, sessionize::DEFAULT_IDLE_GAP_MS);
@@ -3467,9 +3875,9 @@ pub fn build_graph_result_from_messages(
     messages: &[UnifiedMessage],
     since: Option<&str>,
 ) -> GraphResult {
-    let iter = messages.iter().filter(|msg| {
-        since.is_none_or(|s| msg.date.as_str() >= s)
-    });
+    let iter = messages
+        .iter()
+        .filter(|msg| since.is_none_or(|s| msg.date.as_str() >= s));
     let contributions = aggregator::fold_messages_iter(iter);
     aggregator::generate_graph_result(contributions, 0)
 }
@@ -3654,6 +4062,7 @@ fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
+        &scan_result.copilot_desktop_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
     // Hermes/Zed dbs may also be auto-discovered or supplied through extra
@@ -3676,6 +4085,22 @@ fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
         let mut wal = db.into_os_string();
         wal.push("-wal");
         latest = latest.max(file_mtime_ms(Path::new(&wal)).unwrap_or(0));
+    }
+    // Copilot Desktop enriches model/workspace from session-state events.jsonl;
+    // probe those so a metadata-only rewrite moves the change token.
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        for events in sessions::copilot_desktop::copilot_desktop_related_event_paths(db_path) {
+            latest = latest.max(file_mtime_ms(&events).unwrap_or(0));
+        }
+    }
+    // VS Code chatSessions live on a dedicated ScanResult field (not files[]);
+    // include them plus their workspace.json sibling.
+    for path in &scan_result.copilot_vscode_sessions {
+        latest = latest.max(file_mtime_ms(path).unwrap_or(0));
+        if let Some(workspace) = sessions::copilot_vscode::copilot_vscode_workspace_json_path(path)
+        {
+            latest = latest.max(file_mtime_ms(&workspace).unwrap_or(0));
+        }
     }
     // jcode snapshots (`session_*.json`) carry a sibling `.journal.jsonl`
     // append-log; jcode writes new turns there between snapshot rewrites,
@@ -3741,6 +4166,7 @@ pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, Str
         &scan_result.kilo_db,
         &scan_result.goose_db,
         &scan_result.kiro_db,
+        &scan_result.copilot_desktop_db,
     ];
     dbs.extend(single_dbs.into_iter().flatten().cloned());
     dbs.extend(scan_result.hermes_db_paths());
@@ -3758,6 +4184,16 @@ pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, Str
         let mut wal = db.into_os_string();
         wal.push("-wal");
         paths.push(PathBuf::from(wal));
+    }
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        paths.extend(sessions::copilot_desktop::copilot_desktop_related_event_paths(db_path));
+    }
+    for path in &scan_result.copilot_vscode_sessions {
+        paths.push(path.clone());
+        if let Some(workspace) = sessions::copilot_vscode::copilot_vscode_workspace_json_path(path)
+        {
+            paths.push(workspace);
+        }
     }
 
     for snapshot in scan_result.get(ClientId::Jcode) {
@@ -4127,16 +4563,54 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     counts.set(ClientId::Codex, codex_count);
     messages.extend(codex_msgs);
 
-    let copilot_msgs: Vec<ParsedMessage> = scan_result
+    let mut copilot_unified_msgs: Vec<_> = scan_result
         .get(ClientId::Copilot)
         .par_iter()
         .flat_map(|path| {
             sessions::copilot::parse_copilot_file(path)
                 .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
                 .collect::<Vec<_>>()
         })
         .collect();
+    if let Some(db_path) = &scan_result.copilot_desktop_db {
+        let otel_sessions: HashSet<String> = copilot_unified_msgs
+            .iter()
+            .map(|message| message.session_id.clone())
+            .collect();
+        copilot_unified_msgs.extend(
+            sessions::copilot_desktop::parse_copilot_desktop_db(db_path)
+                .into_iter()
+                .filter(|message| !otel_sessions.contains(&message.session_id)),
+        );
+    }
+    {
+        let existing_dedup_keys: HashSet<String> = copilot_unified_msgs
+            .iter()
+            .filter_map(|m| m.dedup_key.clone())
+            .collect();
+        let existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
+            .iter()
+            .map(|m| (m.session_id.clone(), m.timestamp))
+            .collect();
+        copilot_unified_msgs.extend(
+            sessions::copilot_vscode::parse_copilot_vscode_sessions(
+                &scan_result.copilot_vscode_sessions,
+            )
+            .into_iter()
+            .filter(|m| {
+                let key_unique = m
+                    .dedup_key
+                    .as_deref()
+                    .map(|k| !existing_dedup_keys.contains(k))
+                    .unwrap_or(true);
+                let session_ts_unique = !existing_copilot_session_timestamps
+                    .contains(&(m.session_id.clone(), m.timestamp));
+                key_unique && session_ts_unique
+            }),
+        );
+    }
+    let copilot_msgs: Vec<ParsedMessage> =
+        copilot_unified_msgs.iter().map(unified_to_parsed).collect();
     let copilot_count = copilot_msgs.len() as i32;
     counts.set(ClientId::Copilot, copilot_count);
     messages.extend(copilot_msgs);
@@ -4275,9 +4749,7 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     let mut opencodereview_seen: HashSet<String> = HashSet::new();
     let opencodereview_msgs: Vec<ParsedMessage> = opencodereview_msgs_raw
         .into_iter()
-        .filter(|message| {
-            should_keep_deduped_message(&mut opencodereview_seen, message)
-        })
+        .filter(|message| should_keep_deduped_message(&mut opencodereview_seen, message))
         .map(|message| unified_to_parsed(&message))
         .collect();
     let opencodereview_count = summed_parsed_message_count(&opencodereview_msgs);
@@ -4396,11 +4868,10 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         .par_iter()
         .flat_map(|path| sessions::grok::parse_grok_file(path))
         .collect();
-    let grok_msgs: Vec<ParsedMessage> =
-        sessions::grok::prefer_unified_log_messages(grok_messages)
-            .into_iter()
-            .map(|message| unified_to_parsed(&message))
-            .collect();
+    let grok_msgs: Vec<ParsedMessage> = sessions::grok::prefer_unified_log_messages(grok_messages)
+        .into_iter()
+        .map(|message| unified_to_parsed(&message))
+        .collect();
     let grok_count = summed_parsed_message_count(&grok_msgs);
     counts.set(ClientId::Grok, grok_count);
     messages.extend(grok_msgs);
@@ -4931,9 +5402,20 @@ mod tests {
 
     fn make_opencode_selection_message(key: &str, cost: f64, source: CostSource) -> UnifiedMessage {
         let mut message = UnifiedMessage::new_with_dedup(
-            "opencode", "gpt-4o", "openai", "oc-session", 1_733_011_200_000,
-            TokenBreakdown { input: 10, output: 5, cache_read: 0, cache_write: 0, reasoning: 0 },
-            cost, Some(key.to_string()),
+            "opencode",
+            "gpt-4o",
+            "openai",
+            "oc-session",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            cost,
+            Some(key.to_string()),
         );
         match source {
             CostSource::ProviderReported => message.mark_provider_reported_cost(),
@@ -4957,13 +5439,17 @@ mod tests {
         for second_pass in [None, None, Some(CostSource::Estimated)] {
             let key = "snapshot-authoritative";
             let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
-            assert!(selection.select_sqlite(make_opencode_selection_message(
-                key, 0.25, CostSource::Estimated,
-            )).is_none());
+            assert!(selection
+                .select_sqlite(make_opencode_selection_message(
+                    key,
+                    0.25,
+                    CostSource::Estimated,
+                ))
+                .is_none());
             if let Some(source) = second_pass {
-                assert!(selection.select_json(make_opencode_selection_message(
-                    key, 0.0, source,
-                ), true).is_none());
+                assert!(selection
+                    .select_json(make_opencode_selection_message(key, 0.0, source,), true)
+                    .is_none());
             }
             let selected: Vec<_> = selection.finish().collect();
             assert_eq!(selected.len(), 1);
@@ -4978,13 +5464,17 @@ mod tests {
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.25, CostSource::Estimated,
+                key,
+                0.25,
+                CostSource::Estimated,
             ))
             .is_none());
 
         let selected = selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.50, CostSource::ProviderReported,
+                key,
+                0.50,
+                CostSource::ProviderReported,
             ))
             .expect("a later authoritative SQLite message must replace the fallback");
         assert_eq!(selected.cost, 0.50);
@@ -4998,12 +5488,16 @@ mod tests {
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.25, CostSource::Estimated,
+                key,
+                0.25,
+                CostSource::Estimated,
             ))
             .is_none());
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.50, CostSource::Estimated,
+                key,
+                0.50,
+                CostSource::Estimated,
             ))
             .is_none());
 
@@ -5019,13 +5513,17 @@ mod tests {
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
         let first = selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.50, CostSource::ProviderReported,
+                key,
+                0.50,
+                CostSource::ProviderReported,
             ))
             .expect("the first authoritative SQLite message must be selected");
         assert_eq!(first.cost, 0.50);
         assert!(selection
             .select_sqlite(make_opencode_selection_message(
-                key, 0.75, CostSource::ProviderReported,
+                key,
+                0.75,
+                CostSource::ProviderReported,
             ))
             .is_none());
         assert_eq!(selection.finish().count(), 0);
@@ -5035,12 +5533,19 @@ mod tests {
     fn test_opencode_streaming_selection_keeps_fallback_until_json_is_emitted() {
         let key = "filtered-authoritative";
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
-        assert!(selection.select_sqlite(make_opencode_selection_message(
-            key, 0.25, CostSource::Estimated,
-        )).is_none());
-        assert!(selection.select_json(make_opencode_selection_message(
-            key, 0.50, CostSource::ProviderReported,
-        ), false).is_none());
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key,
+                0.25,
+                CostSource::Estimated,
+            ))
+            .is_none());
+        assert!(selection
+            .select_json(
+                make_opencode_selection_message(key, 0.50, CostSource::ProviderReported,),
+                false
+            )
+            .is_none());
         let selected: Vec<_> = selection.finish().collect();
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].cost, 0.25);
@@ -5050,12 +5555,19 @@ mod tests {
     fn test_opencode_streaming_selection_does_not_double_count_new_authority() {
         let key = "newly-authoritative";
         let mut selection = OpenCodeSelection::new(HashSet::new());
-        assert!(selection.select_sqlite(make_opencode_selection_message(
-            key, 0.25, CostSource::Estimated,
-        )).is_some());
-        assert!(selection.select_json(make_opencode_selection_message(
-            key, 0.50, CostSource::ProviderReported,
-        ), true).is_none());
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key,
+                0.25,
+                CostSource::Estimated,
+            ))
+            .is_some());
+        assert!(selection
+            .select_json(
+                make_opencode_selection_message(key, 0.50, CostSource::ProviderReported,),
+                true
+            )
+            .is_none());
         assert_eq!(selection.finish().count(), 0);
     }
 
@@ -5152,7 +5664,8 @@ mod tests {
         let mut deferred = make_opencode_selection_message(embedded, 0.50, CostSource::Estimated);
         deferred.tokens.input = 20;
         deferred.dedup_aliases.push(fallback.to_string());
-        let mut json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        let mut json =
+            make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
         json.tokens.input = 30;
         let authoritative = opencode_authoritative_sources(
             [&first, &deferred, &json]
@@ -5177,7 +5690,8 @@ mod tests {
         deferred.tokens.input = 20;
         deferred.dedup_aliases.push(fallback.to_string());
         let sqlite = make_opencode_selection_message(embedded, 0.50, CostSource::ProviderReported);
-        let mut json = make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
+        let mut json =
+            make_opencode_selection_message(fallback, 0.75, CostSource::ProviderReported);
         json.tokens.input = 30;
         let authoritative = opencode_authoritative_sources(
             [&deferred, &sqlite, &json]
@@ -5198,12 +5712,19 @@ mod tests {
     fn test_opencode_streaming_selection_prefers_snapshot_authority() {
         let key = "stable-authoritative";
         let mut selection = OpenCodeSelection::new(opencode_authority_set(key));
-        assert!(selection.select_sqlite(make_opencode_selection_message(
-            key, 0.25, CostSource::Estimated,
-        )).is_none());
-        let json = selection.select_json(make_opencode_selection_message(
-            key, 0.50, CostSource::ProviderReported,
-        ), true).unwrap();
+        assert!(selection
+            .select_sqlite(make_opencode_selection_message(
+                key,
+                0.25,
+                CostSource::Estimated,
+            ))
+            .is_none());
+        let json = selection
+            .select_json(
+                make_opencode_selection_message(key, 0.50, CostSource::ProviderReported),
+                true,
+            )
+            .unwrap();
         assert_eq!(json.cost, 0.50);
         assert_eq!(json.cost_source, CostSource::ProviderReported);
         assert_eq!(selection.finish().count(), 0);
@@ -6608,9 +7129,15 @@ mod tests {
                 .unwrap();
             let old_total: i32 = old.iter().map(|m| m.message_count.max(0)).sum();
 
-            assert_eq!(old_total, 2, "old materialized path must NOT dedup codebuff");
+            assert_eq!(
+                old_total, 2,
+                "old materialized path must NOT dedup codebuff"
+            );
             assert_eq!(model.total_messages, 1, "model report dedups codebuff");
-            assert_eq!(agents.total_messages, 1, "agents report must dedup codebuff");
+            assert_eq!(
+                agents.total_messages, 1,
+                "agents report must dedup codebuff"
+            );
             assert_eq!(
                 agents.total_messages, model.total_messages,
                 "issue #6: agents must agree with the model report"
@@ -6684,7 +7211,10 @@ mod tests {
             assert_eq!(main.agent, "Main");
             assert_eq!(main.messages, 2);
             // BTreeSet → sorted, both clients fold into Main.
-            assert_eq!(main.clients, vec!["codebuff".to_string(), "kimi".to_string()]);
+            assert_eq!(
+                main.clients,
+                vec!["codebuff".to_string(), "kimi".to_string()]
+            );
 
             // Byte-for-byte equivalence with the old materialized path for the
             // non-duplicate case (both parse identically; only dedup differs).
@@ -6772,7 +7302,11 @@ mod tests {
 
             // All clients: one shared "Main" bucket carrying the mixed total.
             let all = run(None);
-            assert_eq!(all.entries.len(), 1, "codebuff + kimi share one Main bucket");
+            assert_eq!(
+                all.entries.len(),
+                1,
+                "codebuff + kimi share one Main bucket"
+            );
             assert_eq!(all.entries[0].agent, "Main");
             assert_eq!(all.entries[0].input, 300, "mixed bucket = 200 + 100");
             assert_eq!(all.entries[0].output, 130, "mixed bucket = 80 + 50");
@@ -7231,8 +7765,7 @@ mod tests {
             0,
             0.0,
         );
-        let deferred_v2_payload =
-            deferred_payload.replacen('{', r#"{"id":"shared-order","#, 1);
+        let deferred_v2_payload = deferred_payload.replacen('{', r#"{"id":"shared-order","#, 1);
         conn.execute(
             "INSERT INTO message (id, session_id, data) VALUES (?1, ?2, ?3)",
             rusqlite::params!["legacy-order", "session-order", &deferred_payload],
@@ -7255,12 +7788,7 @@ mod tests {
         sibling_conn
             .execute(
                 "INSERT INTO session_message (id, session_id, type, data) VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![
-                    "v2-sibling",
-                    "session-overlap",
-                    "assistant",
-                    &v2_payload
-                ],
+                rusqlite::params!["v2-sibling", "session-overlap", "assistant", &v2_payload],
             )
             .unwrap();
         let provider_payload = build_opencode_sqlite_payload(
@@ -7299,11 +7827,7 @@ mod tests {
             2,
             0.03,
         );
-        std::fs::write(
-            json_dir.join("legacy-message.json"),
-            migrated_json_payload,
-        )
-        .unwrap();
+        std::fs::write(json_dir.join("legacy-message.json"), migrated_json_payload).unwrap();
         let json_payload = build_opencode_sqlite_payload(
             1_700_000_010_000.0,
             1_700_000_010_500.0,
@@ -7346,7 +7870,10 @@ mod tests {
             false,
             &scanner::ScannerSettings::default(),
         );
-        assert_eq!(warm, materialized, "cache hits must retain OpenCode aliases");
+        assert_eq!(
+            warm, materialized,
+            "cache hits must retain OpenCode aliases"
+        );
 
         let mut streamed = Vec::new();
         scan_messages_streaming(
@@ -8721,11 +9248,13 @@ mod tests {
                 .iter()
                 .map(|message| message.session_id.as_str())
                 .collect();
-            assert!(session_ids.contains(
-                "rollout-2026-01-02T03-10-00-22222222-2222-7222-8222-222222222222"
-            ));
+            assert!(session_ids
+                .contains("rollout-2026-01-02T03-10-00-22222222-2222-7222-8222-222222222222"));
             assert_eq!(messages.iter().map(|m| m.tokens.input).sum::<i64>(), 1000);
-            assert_eq!(messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(), 500);
+            assert_eq!(
+                messages.iter().map(|m| m.tokens.cache_read).sum::<i64>(),
+                500
+            );
             assert_eq!(messages.iter().map(|m| m.tokens.output).sum::<i64>(), 150);
         }
     }
@@ -10933,7 +11462,10 @@ mod tests {
                 },
             );
 
-            assert_eq!(count, 1, "the jcode assistant message must flow through the streaming lane");
+            assert_eq!(
+                count, 1,
+                "the jcode assistant message must flow through the streaming lane"
+            );
             assert_eq!(input_sum, 1200);
         }
     }
@@ -11164,6 +11696,205 @@ mod tests {
         });
     }
 
+    /// M23: Copilot Desktop + VS Code chatSessions share ClientId::Copilot with
+    /// OTEL. Prove discovery, no triple-count, and materialized/streaming/count
+    /// parity on a hermetic fixture home.
+    #[test]
+    #[serial_test::serial]
+    fn m23_copilot_desktop_vscode_no_triple_count_all_lanes() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        // Desktop SQLite: one session shared with OTEL, one desktop-only.
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        let conn = Connection::open(&desktop_db).unwrap();
+        conn.execute_batch(
+            r#"
+            CREATE TABLE sessions (
+                id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                total_input_tokens INTEGER, total_output_tokens INTEGER,
+                total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+            );
+            "#,
+        )
+        .unwrap();
+        for (id, input, output) in [
+            ("shared-session", 100_i64, 40_i64),
+            ("desktop-only", 80_i64, 20_i64),
+        ] {
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', ?2, ?3, 0, 0, 0,
+                          '2026-07-01T12:34:56Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params![id, input, output],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        // OTEL chat span for shared-session (desktop must suppress by session_id).
+        let otel = home.join(".copilot/otel/copilot.jsonl");
+        std::fs::create_dir_all(otel.parent().unwrap()).unwrap();
+        std::fs::write(
+            &otel,
+            r#"{"type":"span","traceId":"trace-shared","spanId":"span-shared","name":"chat gpt-4o","startTime":[1782909296,0],"endTime":[1782909297,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.request.model":"gpt-4o","gen_ai.response.model":"gpt-4o","gen_ai.conversation.id":"shared-session","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":40}}
+"#,
+        )
+        .unwrap();
+
+        // VS Code: unique session + collision against desktop-only session_id+ts.
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("vscode-session.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r1","timestamp":1782909300000,"modelId":"copilot/auto","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+        // created_at 2026-07-01T12:34:56Z == 1782909296000 ms
+        std::fs::write(
+            vscode_dir.join("desktop-only.jsonl"),
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r2","timestamp":1782909296000,"modelId":"copilot/gpt-4o","completionTokens":20,"promptTokens":80}]}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let scan =
+            scanner::scan_all_clients_with_scanner_settings(&home_s, &clients, false, &settings);
+        assert_eq!(scan.copilot_desktop_db.as_ref(), Some(&desktop_db));
+        assert_eq!(
+            scan.get(ClientId::Copilot).len(),
+            1,
+            "OTEL jsonl must be scanned"
+        );
+        assert_eq!(scan.copilot_vscode_sessions.len(), 2);
+
+        let run_materialized = || {
+            with_isolated_tokscale_cache(materialized_cache.path(), || {
+                let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                    &home_s, &clients, None, false, &settings,
+                );
+                messages.retain(|m| m.client == "copilot");
+                messages.sort_by(|a, b| {
+                    (&a.session_id, a.timestamp, &a.dedup_key).cmp(&(
+                        &b.session_id,
+                        b.timestamp,
+                        &b.dedup_key,
+                    ))
+                });
+                messages
+            })
+        };
+        let run_streaming = || {
+            with_isolated_tokscale_cache(streaming_cache.path(), || {
+                let mut messages = Vec::new();
+                scan_messages_streaming(
+                    &home_s,
+                    &clients,
+                    None,
+                    false,
+                    &settings,
+                    &|_| true,
+                    &mut |message| {
+                        if message.client == "copilot" {
+                            messages.push(message.clone());
+                        }
+                    },
+                );
+                messages.sort_by(|a, b| {
+                    (&a.session_id, a.timestamp, &a.dedup_key).cmp(&(
+                        &b.session_id,
+                        b.timestamp,
+                        &b.dedup_key,
+                    ))
+                });
+                messages
+            })
+        };
+
+        let cold = run_materialized();
+        let streaming = run_streaming();
+        assert_eq!(
+            cold.len(),
+            streaming.len(),
+            "materialized/streaming length parity: mat={:?} stream={:?}",
+            cold.iter()
+                .map(|m| (&m.session_id, m.tokens.input, m.dedup_key.as_deref()))
+                .collect::<Vec<_>>(),
+            streaming
+                .iter()
+                .map(|m| (&m.session_id, m.tokens.input, m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+
+        // Expect exactly three: OTEL shared-session, desktop-only, vscode unique.
+        // Desktop shared-session suppressed by OTEL; VS Code collision suppressed
+        // by desktop-only session_id+timestamp.
+        assert_eq!(
+            cold.len(),
+            3,
+            "expected 3 copilot messages after dedup, got {}: {:?}",
+            cold.len(),
+            cold.iter()
+                .map(|m| (&m.session_id, m.tokens.input, m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            cold.iter()
+                .filter(|m| m.session_id == "shared-session")
+                .count(),
+            1
+        );
+        assert_eq!(
+            cold.iter()
+                .filter(|m| m.session_id == "desktop-only")
+                .count(),
+            1
+        );
+        assert_eq!(
+            cold.iter()
+                .filter(|m| m.session_id == "vscode-session")
+                .count(),
+            1
+        );
+        // Desktop shared-session must not leak through with its desktop dedup key.
+        assert!(
+            !cold.iter().any(|m| {
+                m.dedup_key
+                    .as_deref()
+                    .is_some_and(|k| k == "copilot-desktop:shared-session")
+            }),
+            "desktop row for shared-session must be suppressed by OTEL"
+        );
+
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home_s.clone()),
+            use_env_roots: false,
+            clients: Some(clients.clone()),
+            scanner_settings: settings.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(counted.counts.get(ClientId::Copilot), 3);
+        assert_eq!(run_materialized().len(), 3);
+        assert_eq!(run_streaming().len(), 3);
+    }
+
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered
     // via the generic `*.db` glob and flow through the streaming lane, keeping
     // its authoritative per-message cost intact (MiMo models are unpriced, so
@@ -11214,7 +11945,10 @@ mod tests {
                 },
             );
 
-            assert_eq!(count, 1, "the micode assistant message must flow through the streaming lane");
+            assert_eq!(
+                count, 1,
+                "the micode assistant message must flow through the streaming lane"
+            );
             assert!(
                 (cost_sum - 0.05).abs() < 1e-9,
                 "authoritative micode cost must survive pricing (got {cost_sum})"
@@ -12076,7 +12810,10 @@ mod tests {
                 },
             );
 
-            assert_eq!(count, 1, "the gjc assistant message must flow through the streaming lane");
+            assert_eq!(
+                count, 1,
+                "the gjc assistant message must flow through the streaming lane"
+            );
             assert!(
                 (cost_sum - 0.3).abs() < 1e-9,
                 "authoritative gjc cost must reach the sink (got {cost_sum})"
@@ -12135,7 +12872,12 @@ mod tests {
         let stale_signals = stale_dir.join("signals.json");
         let active_updates = active_dir.join("updates.jsonl");
         let active_signals = active_dir.join("signals.json");
-        for path in [&stale_updates, &stale_signals, &active_updates, &active_signals] {
+        for path in [
+            &stale_updates,
+            &stale_signals,
+            &active_updates,
+            &active_signals,
+        ] {
             std::fs::File::create(path).unwrap();
         }
 
@@ -12873,12 +13615,18 @@ mod tests {
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let journal_time =
             std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
-        let sf = std::fs::OpenOptions::new().write(true).open(&snapshot).unwrap();
+        let sf = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&snapshot)
+            .unwrap();
         let Ok(()) = sf.set_modified(snapshot_time) else {
             return;
         };
         drop(sf);
-        let jf = std::fs::OpenOptions::new().write(true).open(&journal).unwrap();
+        let jf = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&journal)
+            .unwrap();
         let Ok(()) = jf.set_modified(journal_time) else {
             return;
         };
@@ -13480,12 +14228,39 @@ mod tests {
     #[test]
     fn test_fold_messages_streaming_parity_with_aggregate_by_date_no_dedup() {
         let messages = vec![
-            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
-                1_748_000_000_000, 100, 50, 0.01),
-            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
-                1_748_000_001_000, 200, 100, 0.02),
-            parity_msg("2025-06-02", "codex", "gpt-5", "s3", None,
-                1_748_086_400_000, 400, 200, 0.04),
+            parity_msg(
+                "2025-06-01",
+                "claude",
+                "claude-sonnet-4-5",
+                "s1",
+                None,
+                1_748_000_000_000,
+                100,
+                50,
+                0.01,
+            ),
+            parity_msg(
+                "2025-06-01",
+                "opencode",
+                "gpt-4o",
+                "s2",
+                None,
+                1_748_000_001_000,
+                200,
+                100,
+                0.02,
+            ),
+            parity_msg(
+                "2025-06-02",
+                "codex",
+                "gpt-5",
+                "s3",
+                None,
+                1_748_086_400_000,
+                400,
+                200,
+                0.04,
+            ),
         ];
 
         // Reference: existing aggregate_by_date (clone-based)
@@ -13495,22 +14270,26 @@ mod tests {
         let streaming = fold_messages_streaming(&messages);
 
         assert_eq!(
-            reference.len(), streaming.len(),
+            reference.len(),
+            streaming.len(),
             "parity: day bucket count must match"
         );
         for (ref_day, stream_day) in reference.iter().zip(streaming.iter()) {
             assert_eq!(ref_day.date, stream_day.date, "parity: date must match");
             assert_eq!(
                 ref_day.totals.tokens, stream_day.totals.tokens,
-                "parity: tokens must match for date {}", ref_day.date
+                "parity: tokens must match for date {}",
+                ref_day.date
             );
             assert!(
                 (ref_day.totals.cost - stream_day.totals.cost).abs() < 1e-9,
-                "parity: cost must match for date {}", ref_day.date
+                "parity: cost must match for date {}",
+                ref_day.date
             );
             assert_eq!(
                 ref_day.totals.messages, stream_day.totals.messages,
-                "parity: message_count must match for date {}", ref_day.date
+                "parity: message_count must match for date {}",
+                ref_day.date
             );
         }
     }
@@ -13522,12 +14301,39 @@ mod tests {
         // Construct messages that include a duplicated dedup_key pair.
         // The existing pipeline filters duplicates via the seen_keys HashSet.
         // fold_messages_streaming must produce the same counts.
-        let unique = parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "u1",
-            Some("unique-key-1"), 1_749_000_000_000, 300, 150, 0.06);
-        let dup_first = parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "d1",
-            Some("dup-key-shared"), 1_749_000_001_000, 200, 100, 0.04);
-        let dup_second = parity_msg("2025-06-10", "claude", "claude-haiku-4-5", "d2",
-            Some("dup-key-shared"), 1_749_000_002_000, 200, 100, 0.04);
+        let unique = parity_msg(
+            "2025-06-10",
+            "claude",
+            "claude-sonnet-4-5",
+            "u1",
+            Some("unique-key-1"),
+            1_749_000_000_000,
+            300,
+            150,
+            0.06,
+        );
+        let dup_first = parity_msg(
+            "2025-06-10",
+            "claude",
+            "claude-sonnet-4-5",
+            "d1",
+            Some("dup-key-shared"),
+            1_749_000_001_000,
+            200,
+            100,
+            0.04,
+        );
+        let dup_second = parity_msg(
+            "2025-06-10",
+            "claude",
+            "claude-haiku-4-5",
+            "d2",
+            Some("dup-key-shared"),
+            1_749_000_002_000,
+            200,
+            100,
+            0.04,
+        );
 
         // The reference pipeline keeps only the first occurrence of dup-key-shared
         // (seen_keys.insert returns false on second) — 2 messages total.
@@ -13588,71 +14394,146 @@ mod tests {
     fn test_build_graph_result_from_messages_matches_aggregate_by_date() {
         let messages = vec![
             // Day 2025-06-01: two clients, no dedup
-            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
-                1_748_736_000_000, 500, 250, 0.05),
-            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
-                1_748_736_001_000, 300, 150, 0.03),
+            parity_msg(
+                "2025-06-01",
+                "claude",
+                "claude-sonnet-4-5",
+                "s1",
+                None,
+                1_748_736_000_000,
+                500,
+                250,
+                0.05,
+            ),
+            parity_msg(
+                "2025-06-01",
+                "opencode",
+                "gpt-4o",
+                "s2",
+                None,
+                1_748_736_001_000,
+                300,
+                150,
+                0.03,
+            ),
             // Day 2025-06-02: trae dedup by session_id — two entries same session, keep latest
-            parity_msg("2025-06-02", "trae", "gpt-5.2", "trae-sess", Some("trae-k1"),
-                1_748_822_400_000, 100, 50, 0.01),
-            parity_msg("2025-06-02", "trae", "gpt-5.2", "trae-sess", Some("trae-k2"),
-                1_748_822_500_000, 200, 100, 0.02),   // newer timestamp -> wins
+            parity_msg(
+                "2025-06-02",
+                "trae",
+                "gpt-5.2",
+                "trae-sess",
+                Some("trae-k1"),
+                1_748_822_400_000,
+                100,
+                50,
+                0.01,
+            ),
+            parity_msg(
+                "2025-06-02",
+                "trae",
+                "gpt-5.2",
+                "trae-sess",
+                Some("trae-k2"),
+                1_748_822_500_000,
+                200,
+                100,
+                0.02,
+            ), // newer timestamp -> wins
             // Day 2025-06-03: cross-file dedup pair — same dedup_key, second dropped
-            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "d1",
-                Some("dup-phase2"), 1_748_908_800_000, 400, 200, 0.04),
-            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "d2",
-                Some("dup-phase2"), 1_748_908_801_000, 400, 200, 0.04), // same dedup_key -> discarded
+            parity_msg(
+                "2025-06-03",
+                "claude",
+                "claude-haiku-4-5",
+                "d1",
+                Some("dup-phase2"),
+                1_748_908_800_000,
+                400,
+                200,
+                0.04,
+            ),
+            parity_msg(
+                "2025-06-03",
+                "claude",
+                "claude-haiku-4-5",
+                "d2",
+                Some("dup-phase2"),
+                1_748_908_801_000,
+                400,
+                200,
+                0.04,
+            ), // same dedup_key -> discarded
         ];
 
         // Subject: new streaming entry-point
-        let result: GraphResult =
-            crate::build_graph_result_from_messages(&messages, None);
+        let result: GraphResult = crate::build_graph_result_from_messages(&messages, None);
 
         // Verify bucket count: 3 distinct dates
         assert_eq!(
-            result.contributions.len(), 3,
+            result.contributions.len(),
+            3,
             "phase2 streaming: must produce exactly 3 daily buckets"
         );
 
         // Locate each day bucket by date (sort order: ascending)
-        let day1 = result.contributions.iter().find(|c| c.date == "2025-06-01")
+        let day1 = result
+            .contributions
+            .iter()
+            .find(|c| c.date == "2025-06-01")
             .expect("phase2: 2025-06-01 bucket must exist");
-        let day2 = result.contributions.iter().find(|c| c.date == "2025-06-02")
+        let day2 = result
+            .contributions
+            .iter()
+            .find(|c| c.date == "2025-06-02")
             .expect("phase2: 2025-06-02 bucket must exist");
-        let day3 = result.contributions.iter().find(|c| c.date == "2025-06-03")
+        let day3 = result
+            .contributions
+            .iter()
+            .find(|c| c.date == "2025-06-03")
             .expect("phase2: 2025-06-03 bucket must exist");
 
         // 2025-06-01: s1 (750) + s2 (450) = 1200 tokens, 0.05+0.03=0.08 cost, 2 messages
-        assert_eq!(day1.totals.tokens, 1200,
-            "2025-06-01: tokens must be 750+450=1200");
+        assert_eq!(
+            day1.totals.tokens, 1200,
+            "2025-06-01: tokens must be 750+450=1200"
+        );
         assert!(
             (day1.totals.cost - 0.08).abs() < 1e-9,
             "2025-06-01: cost must be 0.05+0.03=0.08"
         );
-        assert_eq!(day1.totals.messages, 2,
-            "2025-06-01: both non-trae non-dedup messages must be counted");
+        assert_eq!(
+            day1.totals.messages, 2,
+            "2025-06-01: both non-trae non-dedup messages must be counted"
+        );
 
         // 2025-06-02: trae session dedup — trae-k2 wins (larger timestamp)
         // trae-k2: input=200, output=100 -> tokens=300, cost=0.02
-        assert_eq!(day2.totals.tokens, 300,
-            "2025-06-02: trae dedup — only winner (trae-k2, tokens=300) counted");
+        assert_eq!(
+            day2.totals.tokens, 300,
+            "2025-06-02: trae dedup — only winner (trae-k2, tokens=300) counted"
+        );
         assert!(
             (day2.totals.cost - 0.02).abs() < 1e-9,
             "2025-06-02: trae dedup — cost must be 0.02 (trae-k2 only)"
         );
-        assert_eq!(day2.totals.messages, 1,
-            "2025-06-02: trae dedup collapses 2 entries to 1 per session_id");
+        assert_eq!(
+            day2.totals.messages, 1,
+            "2025-06-02: trae dedup collapses 2 entries to 1 per session_id"
+        );
 
         // 2025-06-03: cross-file dedup — d1 kept, d2 dropped (same dedup_key)
         // d1: input=400, output=200 -> tokens=600, cost=0.04
-        assert_eq!(day3.totals.tokens, 600,
-            "2025-06-03: cross-file dedup — only d1 (tokens=600) counted, d2 dropped");
+        assert_eq!(
+            day3.totals.tokens, 600,
+            "2025-06-03: cross-file dedup — only d1 (tokens=600) counted, d2 dropped"
+        );
         assert!(
             (day3.totals.cost - 0.04).abs() < 1e-9,
             "2025-06-03: cross-file dedup — cost must be 0.04 (d1 only)"
         );
-        assert_eq!(day3.totals.messages, 1,
-            "2025-06-03: duplicate dedup_key dropped, 1 message retained");
+        assert_eq!(
+            day3.totals.messages, 1,
+            "2025-06-03: duplicate dedup_key dropped, 1 message retained"
+        );
     }
 
     /// `since` filter semantics: same fixture with `since = "2025-06-02"` must
@@ -13661,14 +14542,50 @@ mod tests {
     #[test]
     fn test_build_graph_result_from_messages_since_filter_excludes_earlier_dates() {
         let messages = vec![
-            parity_msg("2025-06-01", "claude", "claude-sonnet-4-5", "s1", None,
-                1_748_736_000_000, 500, 250, 0.05),
-            parity_msg("2025-06-01", "opencode", "gpt-4o", "s2", None,
-                1_748_736_001_000, 300, 150, 0.03),
-            parity_msg("2025-06-02", "codex", "gpt-5", "s3", None,
-                1_748_822_400_000, 400, 200, 0.04),
-            parity_msg("2025-06-03", "claude", "claude-haiku-4-5", "s4", None,
-                1_748_908_800_000, 200, 100, 0.02),
+            parity_msg(
+                "2025-06-01",
+                "claude",
+                "claude-sonnet-4-5",
+                "s1",
+                None,
+                1_748_736_000_000,
+                500,
+                250,
+                0.05,
+            ),
+            parity_msg(
+                "2025-06-01",
+                "opencode",
+                "gpt-4o",
+                "s2",
+                None,
+                1_748_736_001_000,
+                300,
+                150,
+                0.03,
+            ),
+            parity_msg(
+                "2025-06-02",
+                "codex",
+                "gpt-5",
+                "s3",
+                None,
+                1_748_822_400_000,
+                400,
+                200,
+                0.04,
+            ),
+            parity_msg(
+                "2025-06-03",
+                "claude",
+                "claude-haiku-4-5",
+                "s4",
+                None,
+                1_748_908_800_000,
+                200,
+                100,
+                0.02,
+            ),
         ];
 
         // Subject: streaming entry with since = "2025-06-02"
@@ -13678,22 +14595,39 @@ mod tests {
 
         // Only 2025-06-02 and 2025-06-03 must be present
         assert_eq!(
-            result.contributions.len(), 2,
+            result.contributions.len(),
+            2,
             "since filter: must exclude 2025-06-01, leaving 2 buckets"
         );
 
-        let dates: Vec<&str> = result.contributions.iter().map(|c| c.date.as_str()).collect();
-        assert!(dates.contains(&"2025-06-02"),
-            "since filter: 2025-06-02 bucket must be present");
-        assert!(dates.contains(&"2025-06-03"),
-            "since filter: 2025-06-03 bucket must be present");
-        assert!(!dates.contains(&"2025-06-01"),
-            "since filter: 2025-06-01 bucket must be absent");
+        let dates: Vec<&str> = result
+            .contributions
+            .iter()
+            .map(|c| c.date.as_str())
+            .collect();
+        assert!(
+            dates.contains(&"2025-06-02"),
+            "since filter: 2025-06-02 bucket must be present"
+        );
+        assert!(
+            dates.contains(&"2025-06-03"),
+            "since filter: 2025-06-03 bucket must be present"
+        );
+        assert!(
+            !dates.contains(&"2025-06-01"),
+            "since filter: 2025-06-01 bucket must be absent"
+        );
 
         // 2025-06-02 token total: input 400 + output 200 = 600
-        let day2 = result.contributions.iter().find(|c| c.date == "2025-06-02").unwrap();
-        assert_eq!(day2.totals.tokens, 600,
-            "since filter: 2025-06-02 token total must be 600");
+        let day2 = result
+            .contributions
+            .iter()
+            .find(|c| c.date == "2025-06-02")
+            .unwrap();
+        assert_eq!(
+            day2.totals.tokens, 600,
+            "since filter: 2025-06-02 token total must be 600"
+        );
         assert!(
             (day2.totals.cost - 0.04).abs() < 1e-9,
             "since filter: 2025-06-02 cost must be 0.04"
@@ -13707,33 +14641,66 @@ mod tests {
     fn test_build_graph_result_from_messages_trae_session_dedup_keeps_latest() {
         let messages = vec![
             // Earlier trae message (should be dropped)
-            parity_msg("2025-06-10", "trae", "gpt-5.2", "trae-sess-a", Some("trae-early"),
-                1_749_513_600_000, 100, 50, 0.01),
+            parity_msg(
+                "2025-06-10",
+                "trae",
+                "gpt-5.2",
+                "trae-sess-a",
+                Some("trae-early"),
+                1_749_513_600_000,
+                100,
+                50,
+                0.01,
+            ),
             // Later trae message for same session_id (should win)
-            parity_msg("2025-06-10", "trae", "gpt-5.2", "trae-sess-a", Some("trae-late"),
-                1_749_513_700_000, 300, 150, 0.03),
+            parity_msg(
+                "2025-06-10",
+                "trae",
+                "gpt-5.2",
+                "trae-sess-a",
+                Some("trae-late"),
+                1_749_513_700_000,
+                300,
+                150,
+                0.03,
+            ),
             // Non-trae message (should be included as-is)
-            parity_msg("2025-06-10", "claude", "claude-sonnet-4-5", "c1", None,
-                1_749_513_800_000, 200, 100, 0.02),
+            parity_msg(
+                "2025-06-10",
+                "claude",
+                "claude-sonnet-4-5",
+                "c1",
+                None,
+                1_749_513_800_000,
+                200,
+                100,
+                0.02,
+            ),
         ];
 
         // Subject: streaming entry (does not exist yet -> RED compile error)
-        let result: GraphResult =
-            crate::build_graph_result_from_messages(&messages, None);
+        let result: GraphResult = crate::build_graph_result_from_messages(&messages, None);
 
-        assert_eq!(result.contributions.len(), 1,
-            "trae dedup: all messages on same date -> 1 bucket");
+        assert_eq!(
+            result.contributions.len(),
+            1,
+            "trae dedup: all messages on same date -> 1 bucket"
+        );
 
         let day = &result.contributions[0];
         // Kept messages: trae-late (tokens=450) + claude (tokens=300) = 750 total tokens
-        assert_eq!(day.totals.tokens, 750,
-            "trae dedup: token total must reflect only the winning trae entry (450) + claude (300)");
+        assert_eq!(
+            day.totals.tokens, 750,
+            "trae dedup: token total must reflect only the winning trae entry (450) + claude (300)"
+        );
         assert!(
             (day.totals.cost - 0.05).abs() < 1e-9,
             "trae dedup: cost must be 0.03 (latest trae) + 0.02 (claude) = 0.05"
         );
-        assert_eq!(day.totals.messages, 2,
-            "trae dedup: message count must be 2 (1 trae winner + 1 claude)");
+        assert_eq!(
+            day.totals.messages, 2,
+            "trae dedup: message count must be 2 (1 trae winner + 1 claude)"
+        );
     }
 
     #[test]

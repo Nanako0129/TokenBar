@@ -732,7 +732,7 @@ fn attr_i64_first(attributes: &Map<String, Value>, keys: &[&str]) -> i64 {
         .unwrap_or(0)
 }
 
-fn normalize_input_tokens(
+pub(crate) fn normalize_input_tokens(
     input: i64,
     output: i64,
     cache_read: i64,
