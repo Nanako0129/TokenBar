@@ -615,6 +615,11 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         "{}/Library/Application Support/Code/User/workspaceStorage",
         home_dir
     )));
+    // macOS VSCodium Application Support root (mirrors Code).
+    roots.push(PathBuf::from(format!(
+        "{}/Library/Application Support/VSCodium/User/workspaceStorage",
+        home_dir
+    )));
     roots.push(PathBuf::from(format!(
         "{}/.config/Code/User/workspaceStorage",
         home_dir
@@ -639,11 +644,14 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
 
     if cfg!(target_os = "windows") && use_env_roots {
         if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
-            roots.push(PathBuf::from(app_data).join("Code/User/workspaceStorage"));
+            let app_data = PathBuf::from(app_data);
+            roots.push(app_data.join("Code/User/workspaceStorage"));
+            roots.push(app_data.join("VSCodium/User/workspaceStorage"));
         }
     }
     roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Code/User/workspaceStorage"));
-
+    // Windows home-relative VSCodium (mirrors Code AppData/Roaming layout).
+    roots.push(PathBuf::from(home_dir).join("AppData/Roaming/VSCodium/User/workspaceStorage"));
     let mut files: Vec<PathBuf> = Vec::new();
     let mut seen: HashSet<PathBuf> = HashSet::new();
 
@@ -2761,6 +2769,21 @@ mod tests {
         // Non-jsonl files must be ignored.
         File::create(vscode_dir.join("notes.txt")).unwrap();
 
+        // macOS VSCodium Application Support root (alongside Code).
+        let codium_dir = home.join(
+            "Library/Application Support/VSCodium/User/workspaceStorage/hash-codium/chatSessions",
+        );
+        fs::create_dir_all(&codium_dir).unwrap();
+        let codium_session = codium_dir.join("session-macos-codium.jsonl");
+        File::create(&codium_session).unwrap();
+
+        // Windows home-relative VSCodium (always probed; works on any host OS).
+        let win_codium_dir =
+            home.join("AppData/Roaming/VSCodium/User/workspaceStorage/hash-win/chatSessions");
+        fs::create_dir_all(&win_codium_dir).unwrap();
+        let win_codium_session = win_codium_dir.join("session-win-codium.jsonl");
+        File::create(&win_codium_session).unwrap();
+
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
             &["copilot".to_string()],
@@ -2769,7 +2792,23 @@ mod tests {
         );
 
         assert_eq!(result.copilot_desktop_db.as_ref(), Some(&desktop_db));
-        assert_eq!(result.copilot_vscode_sessions, vec![vscode_session]);
+        assert!(
+            result.copilot_vscode_sessions.contains(&vscode_session),
+            "expected Code session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&codium_session),
+            "expected macOS VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result
+                .copilot_vscode_sessions
+                .contains(&win_codium_session),
+            "expected Windows VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
     }
 
     #[test]

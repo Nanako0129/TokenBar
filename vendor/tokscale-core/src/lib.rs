@@ -1783,26 +1783,37 @@ fn dedupe_latest_trae_messages(mut messages: Vec<UnifiedMessage>) -> Vec<Unified
     deduped
 }
 
+fn unified_message_passes_date_filter(
+    message: &UnifiedMessage,
+    options: &LocalParseOptions,
+) -> bool {
+    if let Some(year) = &options.year {
+        let year_prefix = format!("{}-", year);
+        if !message.date.starts_with(&year_prefix) {
+            return false;
+        }
+    }
+    if let Some(since) = &options.since {
+        if message.date.as_str() < since.as_str() {
+            return false;
+        }
+    }
+    if let Some(until) = &options.until {
+        if message.date.as_str() > until.as_str() {
+            return false;
+        }
+    }
+    true
+}
+
 fn filter_unified_messages(
     messages: Vec<UnifiedMessage>,
     options: &LocalParseOptions,
 ) -> Vec<UnifiedMessage> {
-    let mut filtered = messages;
-
-    if let Some(year) = &options.year {
-        let year_prefix = format!("{}-", year);
-        filtered.retain(|m| m.date.starts_with(&year_prefix));
-    }
-
-    if let Some(since) = &options.since {
-        filtered.retain(|m| m.date.as_str() >= since.as_str());
-    }
-
-    if let Some(until) = &options.until {
-        filtered.retain(|m| m.date.as_str() <= until.as_str());
-    }
-
-    filtered
+    messages
+        .into_iter()
+        .filter(|m| unified_message_passes_date_filter(m, options))
+        .collect()
 }
 
 fn workspace_bucket(msg: &UnifiedMessage) -> (String, Option<String>, String) {
@@ -3201,22 +3212,28 @@ fn scan_messages_streaming<F, S>(
                 msgs
             };
             for mut m in msgs {
-                // Always register Desktop identities for VS Code suppression,
-                // even when the session is OTEL-covered and not re-emitted.
-                desktop_session_ids.insert(m.session_id.clone());
-                if let Some(key) = m.dedup_key.clone() {
-                    existing_dedup_keys.insert(key);
-                }
-                existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
-                if otel_sessions.contains(&m.session_id) {
-                    continue;
-                }
                 m.refresh_derived_fields();
                 reprice_lane_message(&mut m, pricing, false);
                 if !passes_client(&m) {
                     continue;
                 }
-                if filter(&m) {
+                // Only Desktop rows that pass the active report filter (e.g.
+                // date range) may suppress VS Code. Out-of-range Desktop must
+                // not wipe in-range VS Code requests. Still register when the
+                // session is OTEL-covered and not re-emitted, as long as the
+                // Desktop row itself is in-range.
+                let in_report = filter(&m);
+                if in_report {
+                    desktop_session_ids.insert(m.session_id.clone());
+                    if let Some(key) = m.dedup_key.clone() {
+                        existing_dedup_keys.insert(key);
+                    }
+                    existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
+                }
+                if otel_sessions.contains(&m.session_id) {
+                    continue;
+                }
+                if in_report {
                     sink(&m);
                 }
             }
@@ -4418,6 +4435,13 @@ fn grok_source_mtime_ms(source_path: &Path) -> Option<u64> {
 /// Any stat failure keeps the file — over-parsing is safe, silently skipping is
 /// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
+    // Snapshot Copilot suppressors before any mtime prune. When a VS Code
+    // chatSessions path survives, live-tail still needs Desktop + OTEL to build
+    // cross-source suppress sets — otherwise a fresh VS Code file re-emits rows
+    // that a full scan would suppress against a stale Desktop/OTEL cohort.
+    let pre_prune_desktop_db = scan_result.copilot_desktop_db.clone();
+    let pre_prune_copilot_files = scan_result.get(ClientId::Copilot).clone();
+
     // Lanes whose scanned file's mtime does not reflect a sibling write
     // (SQLite `-wal` or jcode's `.journal.jsonl`); kept in lockstep with the
     // sibling probes in `latest_source_mtime_ms`.
@@ -4526,6 +4550,20 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
         if !keep {
             scan_result.copilot_desktop_db = None;
         }
+    }
+
+    // Force-retain Desktop + OTEL copilot files whenever any VS Code session
+    // survived prune, so session-level / key-level suppress still matches a
+    // full scan. Over-parsing stale suppressors is safe; dropping them is not.
+    if !scan_result.copilot_vscode_sessions.is_empty() {
+        if scan_result.copilot_desktop_db.is_none() {
+            if let Some(db_path) = pre_prune_desktop_db {
+                if db_path.exists() {
+                    scan_result.copilot_desktop_db = Some(db_path);
+                }
+            }
+        }
+        *scan_result.get_mut(ClientId::Copilot) = pre_prune_copilot_files;
     }
 }
 
@@ -4677,14 +4715,19 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         let mut desktop_session_ids: HashSet<String> = HashSet::new();
         if let Some(db_path) = &scan_result.copilot_desktop_db {
             for message in sessions::copilot_desktop::parse_copilot_desktop_db(db_path) {
-                // Always register Desktop identities for VS Code suppression,
-                // even when the session is OTEL-covered and not re-emitted.
-                desktop_session_ids.insert(message.session_id.clone());
-                if let Some(key) = message.dedup_key.clone() {
-                    existing_dedup_keys.insert(key);
+                // Mirror streaming: only Desktop rows that pass the active
+                // report date filter may session-suppress VS Code. Out-of-range
+                // Desktop must not wipe in-range VS Code requests. OTEL-covered
+                // Desktop still registers when in-range (not re-emitted).
+                let in_report = unified_message_passes_date_filter(&message, &options);
+                if in_report {
+                    desktop_session_ids.insert(message.session_id.clone());
+                    if let Some(key) = message.dedup_key.clone() {
+                        existing_dedup_keys.insert(key);
+                    }
+                    existing_copilot_session_timestamps
+                        .insert((message.session_id.clone(), message.timestamp));
                 }
-                existing_copilot_session_timestamps
-                    .insert((message.session_id.clone(), message.timestamp));
                 if !otel_sessions.contains(&message.session_id) {
                     copilot_unified_msgs.push(message);
                 }
@@ -12098,6 +12141,8 @@ mod tests {
 
     /// M23 Codex review: prune_scan_result_by_mtime must drop stale VS Code
     /// chatSessions and Desktop db paths (with related events), not only files[].
+    /// When any VS Code session survives, Desktop + OTEL suppressors are force-
+    /// retained so live-tail dedup matches a full scan.
     #[test]
     fn m23_prune_scan_result_drops_stale_copilot_vscode_and_desktop() {
         use rusqlite::Connection;
@@ -12134,6 +12179,11 @@ mod tests {
         let events = fresh_desktop_root.join("session-state/s1/events.jsonl");
         std::fs::write(&events, b"{\"type\":\"session.start\"}\n").unwrap();
 
+        // Stale OTEL copilot file used only as a suppressor cohort member.
+        let stale_otel = root.join(".copilot/otel/stale.jsonl");
+        std::fs::create_dir_all(stale_otel.parent().unwrap()).unwrap();
+        std::fs::write(&stale_otel, b"{}\n").unwrap();
+
         // Force stale mtimes into the past and fresh into the future relative
         // to a fixed threshold. Skip on platforms that reject set_modified.
         let threshold_ms = 1_700_000_000_000u64; // ~2023-11-14
@@ -12152,26 +12202,45 @@ mod tests {
             && set_mtime(&fresh_vscode, future)
             && set_mtime(&desktop_db, past)
             && set_mtime(&fresh_desktop_db, past)
-            && set_mtime(&events, future))
+            && set_mtime(&events, future)
+            && set_mtime(&stale_otel, past))
         {
             return;
         }
 
+        // Fresh VS Code retained → stale Desktop + OTEL force-retained as
+        // suppressors (would otherwise reopen VS Code rows live-tail shouldn't).
         let mut scan_result = scanner::ScanResult::default();
         scan_result.copilot_vscode_sessions = vec![stale_vscode.clone(), fresh_vscode.clone()];
         scan_result.copilot_desktop_db = Some(desktop_db.clone());
+        scan_result
+            .get_mut(ClientId::Copilot)
+            .push(stale_otel.clone());
         prune_scan_result_by_mtime(&mut scan_result, threshold_ms);
         assert_eq!(
             scan_result.copilot_vscode_sessions,
             vec![fresh_vscode.clone()],
             "stale VS Code session must be pruned; fresh retained"
         );
+        assert_eq!(
+            scan_result.copilot_desktop_db.as_ref(),
+            Some(&desktop_db),
+            "stale desktop db must be force-retained while any VS Code session survives"
+        );
         assert!(
-            scan_result.copilot_desktop_db.is_none(),
-            "stale desktop db with no fresh related events must be pruned"
+            scan_result.get(ClientId::Copilot).contains(&stale_otel),
+            "stale OTEL copilot file must be force-retained while any VS Code session survives"
         );
 
-        // Desktop kept when related events are fresher than threshold.
+        // No VS Code survivors: stale Desktop is free to prune; fresh events keep Desktop.
+        let mut scan_desktop_only = scanner::ScanResult::default();
+        scan_desktop_only.copilot_desktop_db = Some(desktop_db.clone());
+        prune_scan_result_by_mtime(&mut scan_desktop_only, threshold_ms);
+        assert!(
+            scan_desktop_only.copilot_desktop_db.is_none(),
+            "stale desktop db with no VS Code survivors and no fresh related events must be pruned"
+        );
+
         let mut scan_fresh_desktop = scanner::ScanResult::default();
         scan_fresh_desktop.copilot_desktop_db = Some(fresh_desktop_db.clone());
         prune_scan_result_by_mtime(&mut scan_fresh_desktop, threshold_ms);
@@ -12180,6 +12249,101 @@ mod tests {
             Some(&fresh_desktop_db),
             "desktop db must be kept when session-state events are fresh"
         );
+    }
+
+    /// Out-of-range Desktop must not session-suppress in-range VS Code requests
+    /// on the streaming report path (date filter applied before suppress).
+    #[test]
+    #[serial_test::serial]
+    fn m23_streaming_desktop_suppress_respects_report_date_filter() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        // Desktop session created 2025-01-01 — outside a "since 2026-07-01" report.
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 80, 20, 0, 0, 0,
+                          '2025-01-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["shared-old-desktop"],
+            )
+            .unwrap();
+        }
+
+        // VS Code request in-range (2026-07-01) sharing the Desktop session_id.
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        // 1782909300000 ms ≈ 2026-07-01T12:35:00Z
+        std::fs::write(
+            vscode_dir.join("shared-old-desktop.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r-in-range","timestamp":1782909300000,"modelId":"copilot/gpt-4o","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let since = "2026-07-01".to_string();
+        let messages = with_isolated_tokscale_cache(cache_home.path(), || {
+            let mut out = Vec::new();
+            scan_messages_streaming(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                &|m: &UnifiedMessage| m.date.as_str() >= since.as_str(),
+                &mut |m: &UnifiedMessage| {
+                    if m.client == "copilot" {
+                        out.push(m.clone());
+                    }
+                },
+            );
+            out
+        });
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "in-range VS Code must survive when Desktop is out of report range: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-vscode:")),
+            "expected VS Code row, got {:?}",
+            messages[0].dedup_key
+        );
+        assert_eq!(messages[0].session_id, "shared-old-desktop");
     }
 
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered
