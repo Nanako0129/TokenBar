@@ -3323,7 +3323,16 @@ fn scan_messages_streaming_dated<F, S>(
                     .filter(|cached| &cached.fingerprint == fp && !cached.messages.is_empty())
             });
             let msgs = if let Some(cached) = cache_hit {
-                cached.messages.clone()
+                // Warm-cache hits may carry a stale local-calendar `date` (e.g.
+                // written under a different TZ offset). Refresh (+ reprice)
+                // before any date-based prefer-VS Code decision so
+                // `vscode_in_range_sessions` matches the later emit filter.
+                let mut msgs = cached.messages.clone();
+                for m in &mut msgs {
+                    m.refresh_derived_fields();
+                    reprice_lane_message(m, pricing, false);
+                }
+                msgs
             } else {
                 let msgs = sessions::copilot_vscode::parse_copilot_vscode_sessions(
                     std::slice::from_ref(path),
@@ -12910,6 +12919,151 @@ mod tests {
         assert_eq!(day1_msgs[0].date.as_str(), "2026-07-01");
         assert_eq!(day1_msgs[0].input, 60);
         assert_eq!(day1_msgs[0].output, 15);
+    }
+
+    /// Warm-cache VS Code rows with a deliberately stale `date` must still
+    /// enter `vscode_in_range_sessions` after refresh_derived_fields, so
+    /// date-bounded prefer-VS Code works on cache hits (not only cold parse).
+    #[test]
+    #[serial_test::serial]
+    fn m23_streaming_warm_cache_refreshes_vscode_date_before_prefer() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 200, 50, 0, 0, 0,
+                          '2026-07-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["warm-cache-session"],
+            )
+            .unwrap();
+        }
+
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        let vscode_path = vscode_dir.join("warm-cache-session.jsonl");
+        // day1 request only (1782909300000 ≈ 2026-07-01).
+        std::fs::write(
+            &vscode_path,
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r-warm","timestamp":1782909300000,"modelId":"copilot/gpt-4o","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let day1 = "2026-07-01".to_string();
+
+        let messages = with_isolated_tokscale_cache(cache_home.path(), || {
+            // Pass 1: cold parse warms the source cache (correct dates).
+            {
+                let mut out = Vec::new();
+                scan_messages_streaming_dated(
+                    &home_s,
+                    &clients,
+                    None,
+                    false,
+                    &settings,
+                    true,
+                    &|m: &UnifiedMessage| m.date.as_str() == day1.as_str(),
+                    &mut |m: &UnifiedMessage| {
+                        if m.client == "copilot" {
+                            out.push(m.clone());
+                        }
+                    },
+                );
+                assert_eq!(out.len(), 1, "cold pass prefers VS Code: {:?}", out);
+            }
+
+            // Corrupt cached VS Code `date` while keeping the true timestamp.
+            // Without refresh_derived_fields before vscode_in_range_sessions,
+            // day1 filter would miss the row and Desktop would win incorrectly.
+            {
+                let mut cache = message_cache::SourceMessageCache::load();
+                let mut corrupted = false;
+                let entries: Vec<_> = cache
+                    .entries
+                    .values()
+                    .map(|e| e.as_ref().clone())
+                    .collect();
+                for mut entry in entries {
+                    let path_str = entry.path.to_path_buf().to_string_lossy().into_owned();
+                    if !path_str.contains("chatSessions") {
+                        continue;
+                    }
+                    for m in &mut entry.messages {
+                        m.date = "1999-01-01".to_string();
+                    }
+                    cache.insert(entry);
+                    corrupted = true;
+                }
+                assert!(corrupted, "expected a warm VS Code cache entry to corrupt");
+                cache.save_if_dirty();
+            }
+
+            // Pass 2: warm cache hit with stale dates must still prefer VS Code.
+            let mut out = Vec::new();
+            scan_messages_streaming_dated(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                true,
+                &|m: &UnifiedMessage| m.date.as_str() == day1.as_str(),
+                &mut |m: &UnifiedMessage| {
+                    if m.client == "copilot" {
+                        out.push(m.clone());
+                    }
+                },
+            );
+            out
+        });
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "warm-cache stale date must refresh before prefer-VS Code: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.contains("r-warm")),
+            "expected VS Code r-warm after refresh, got {:?}",
+            messages[0].dedup_key
+        );
+        assert_eq!(messages[0].date.as_str(), "2026-07-01");
+        assert_eq!(messages[0].tokens.input, 60);
     }
 
     /// Unbounded reports still whole-session suppress VS Code when Desktop

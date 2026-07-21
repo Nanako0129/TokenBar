@@ -362,14 +362,27 @@ fn request_to_message(
     Some(message)
 }
 
-/// First present i64 at any JSON pointer (order = priority). Missing → 0.
+/// Prefer the first **positive** i64 among JSON pointers (order = priority).
+///
+/// If every candidate is missing or non-positive, returns the first present
+/// non-positive value, or `0` when all paths are absent.
+///
+/// Root placeholder zeros must not shadow nonzero nested usage after kind:1/2
+/// patches (e.g. `promptTokens: 0` at request root with real counts under
+/// `/response/result/metadata/promptTokens`). Same for timestamps (`0` → 1970).
 fn request_i64_first(req: &Value, paths: &[&str]) -> i64 {
+    let mut first_non_positive: Option<i64> = None;
     for path in paths {
         if let Some(n) = req.pointer(path).and_then(json_number_as_i64) {
-            return n;
+            if n > 0 {
+                return n;
+            }
+            if first_non_positive.is_none() {
+                first_non_positive = Some(n);
+            }
         }
     }
-    0
+    first_non_positive.unwrap_or(0)
 }
 
 /// First non-empty string at any JSON pointer.
@@ -511,7 +524,14 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
         "/response/result/details/credit",
         "/response/result/details/credits",
         "/response/result/details/cost",
+        "/response/result/details/billedCredit",
+        "/response/result/details/billed_credit",
         "/response/details",
+        "/response/details/credit",
+        "/response/details/credits",
+        "/response/details/cost",
+        "/response/details/billedCredit",
+        "/response/details/billed_credit",
     ];
     for path in DETAIL_PATHS {
         if let Some(raw) = req.pointer(path).and_then(Value::as_str) {
@@ -1572,5 +1592,85 @@ mod tests {
             "dedup_key {:?}",
             m.dedup_key
         );
+    }
+
+    /// Root placeholder zeros must not shadow nonzero `/response/result` usage.
+    /// kind:0 stubs often ship `promptTokens:0` / `completionTokens:0` before a
+    /// response deep-set patches real counts under `response.result.metadata`.
+    #[test]
+    fn zero_placeholder_root_tokens_do_not_shadow_response_result() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-zero-0000-0000-000000000004.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                // Root zeros present; real usage only under response.result.
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-zero","timestamp":0,"modelId":"copilot/auto","promptTokens":0,"completionTokens":0}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"timestamp":1782909300000,"result":{"metadata":{"promptTokens":120,"outputTokens":40,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(
+            messages.len(),
+            1,
+            "root zeros must not suppress response.result usage: {messages:?}"
+        );
+        let m = &messages[0];
+        assert_eq!(m.tokens.input, 120);
+        assert_eq!(m.tokens.output, 40);
+        assert_eq!(m.timestamp, 1782909300000, "prefer positive response timestamp over root 0");
+        assert_eq!(m.model_id, "gpt-4o");
+    }
+
+    /// `billedCredit` / `billed_credit` under `response.result.details` (and
+    /// `response.details`) must mark provider-reported USD cost, same as
+    /// `result.details.billedCredit`.
+    #[test]
+    fn response_result_details_billed_credit_is_provider_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-bill-0000-0000-000000000005.jsonl");
+
+        // 2.5 credits × $0.01 = $0.025 under response.result.details.billedCredit.
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-bill","timestamp":1782909300000,"modelId":"copilot/auto","promptTokens":10,"completionTokens":5}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"result":{"details":{"billedCredit":2.5},"metadata":{"promptTokens":10,"outputTokens":5,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert!(
+            (m.cost - 0.025).abs() < 1e-12,
+            "billedCredit 2.5 credits → $0.025, got {}",
+            m.cost
+        );
+        assert!(m.has_authoritative_cost());
+        assert_eq!(m.cost_source, crate::CostSource::ProviderReported);
+
+        // Parallel snake_case under response.details.billed_credit.
+        let path2 = sessions_dir.join("cccccccc-bill-0000-0000-000000000006.jsonl");
+        write_jsonl(
+            &path2,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-bill2","timestamp":1782909300000,"modelId":"copilot/auto","promptTokens":10,"completionTokens":5,"response":{"details":{"billed_credit":3.0},"metadata":{"resolvedModel":"gpt-4o"}}}]}}"#,
+            ],
+        );
+        let messages2 = parse_copilot_vscode_sessions(&[path2]);
+        assert_eq!(messages2.len(), 1);
+        assert!(
+            (messages2[0].cost - 0.03).abs() < 1e-12,
+            "billed_credit 3.0 → $0.03, got {}",
+            messages2[0].cost
+        );
+        assert!(messages2[0].has_authoritative_cost());
     }
 }
