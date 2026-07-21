@@ -579,6 +579,29 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     use_env_roots: bool,
     scanner_settings: &scanner::ScannerSettings,
 ) -> Vec<UnifiedMessage> {
+    parse_all_messages_materialized(
+        home_dir,
+        clients,
+        pricing,
+        use_env_roots,
+        scanner_settings,
+        None,
+    )
+}
+
+/// Materialized full-history parse. When `date_filter` is `Some`, Desktop
+/// session-level VS Code suppressors are registered only for Desktop rows that
+/// pass the report date window — matching the streaming and count paths so an
+/// out-of-range Desktop aggregate cannot wipe in-range VS Code requests before
+/// the outer date filter runs.
+fn parse_all_messages_materialized(
+    home_dir: &str,
+    clients: &[String],
+    pricing: Option<&pricing::PricingService>,
+    use_env_roots: bool,
+    scanner_settings: &scanner::ScannerSettings,
+    date_filter: Option<&LocalParseOptions>,
+) -> Vec<UnifiedMessage> {
     #[derive(Debug)]
     struct CachedParseOutcome {
         messages: Vec<UnifiedMessage>,
@@ -1077,14 +1100,22 @@ fn parse_all_messages_with_pricing_with_env_strategy(
                 |path| sessions::copilot_desktop::parse_copilot_desktop_db(path),
             );
             for message in outcome.messages {
-                // Always register Desktop identities for VS Code suppression,
-                // even when the session is OTEL-covered and not re-emitted.
-                desktop_session_ids.insert(message.session_id.clone());
-                if let Some(key) = message.dedup_key.clone() {
-                    existing_dedup_keys.insert(key);
+                // Mirror streaming/count: only Desktop rows that pass the
+                // active report date filter may session-suppress VS Code.
+                // Out-of-range Desktop must not wipe in-range VS Code requests
+                // before the outer filter runs. OTEL-covered Desktop still
+                // registers when in-range (not re-emitted).
+                let in_report = date_filter
+                    .map(|opts| unified_message_passes_date_filter(&message, opts))
+                    .unwrap_or(true);
+                if in_report {
+                    desktop_session_ids.insert(message.session_id.clone());
+                    if let Some(key) = message.dedup_key.clone() {
+                        existing_dedup_keys.insert(key);
+                    }
+                    existing_copilot_session_timestamps
+                        .insert((message.session_id.clone(), message.timestamp));
                 }
-                existing_copilot_session_timestamps
-                    .insert((message.session_id.clone(), message.timestamp));
                 if !otel_sessions.contains(&message.session_id) {
                     all_messages.push(message);
                 }
@@ -4088,12 +4119,16 @@ fn parse_local_unified_messages_resolved(
     clients: &[String],
     pricing: Option<&pricing::PricingService>,
 ) -> Result<Vec<UnifiedMessage>, String> {
-    let messages = parse_all_messages_with_pricing_with_env_strategy(
+    // Thread date options into Desktop→VS Code suppress so out-of-range
+    // Desktop aggregates cannot erase in-range VS Code rows before the
+    // outer filter (parity with streaming + count paths).
+    let messages = parse_all_messages_materialized(
         home_dir,
         clients,
         pricing,
         options.use_env_roots,
         &options.scanner_settings,
+        Some(&options),
     );
     Ok(filter_unified_messages(messages, &options))
 }
@@ -12330,6 +12365,96 @@ mod tests {
             messages.len(),
             1,
             "in-range VS Code must survive when Desktop is out of report range: {:?}",
+            messages
+                .iter()
+                .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            messages[0]
+                .dedup_key
+                .as_deref()
+                .is_some_and(|k| k.starts_with("copilot-vscode:")),
+            "expected VS Code row, got {:?}",
+            messages[0].dedup_key
+        );
+        assert_eq!(messages[0].session_id, "shared-old-desktop");
+    }
+
+    /// Materialized `parse_local_unified_messages` must apply the same date gate
+    /// before Desktop session-suppresses VS Code (Codex P2 on e561cec9).
+    #[test]
+    #[serial_test::serial]
+    fn m23_materialized_desktop_suppress_respects_report_date_filter() {
+        use rusqlite::{params, Connection};
+
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+
+        let desktop_db = home.join(".copilot/data.db");
+        std::fs::create_dir_all(desktop_db.parent().unwrap()).unwrap();
+        {
+            let conn = Connection::open(&desktop_db).unwrap();
+            conn.execute_batch(
+                r#"
+                CREATE TABLE sessions (
+                    id TEXT, title TEXT, session_type TEXT, mode TEXT, model TEXT,
+                    total_input_tokens INTEGER, total_output_tokens INTEGER,
+                    total_cached_tokens INTEGER, total_reasoning_tokens INTEGER,
+                    total_nano_aiu INTEGER, created_at TEXT, agent TEXT, provider_id TEXT
+                );
+                "#,
+            )
+            .unwrap();
+            conn.execute(
+                r#"
+                INSERT INTO sessions (
+                    id, title, session_type, mode, model,
+                    total_input_tokens, total_output_tokens, total_cached_tokens,
+                    total_reasoning_tokens, total_nano_aiu, created_at, agent, provider_id
+                ) VALUES (?1, 't', 'chat', 'agent', 'gpt-4o', 80, 20, 0, 0, 0,
+                          '2025-01-01T12:00:00Z', 'github.copilot.default', 'github-copilot')
+                "#,
+                params!["shared-old-desktop"],
+            )
+            .unwrap();
+        }
+
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        std::fs::write(
+            vscode_dir.join("shared-old-desktop.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r-in-range","timestamp":1782909300000,"modelId":"copilot/gpt-4o","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let messages = with_isolated_tokscale_cache(cache_home.path(), || {
+            let options = LocalParseOptions {
+                home_dir: Some(home_s.clone()),
+                use_env_roots: false,
+                clients: Some(vec!["copilot".to_string()]),
+                since: Some("2026-07-01".to_string()),
+                until: None,
+                year: None,
+                scanner_settings: scanner::ScannerSettings::default(),
+                modified_after: None,
+            };
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap()
+                .block_on(parse_local_unified_messages(options))
+                .expect("materialized parse")
+        });
+
+        assert_eq!(
+            messages.len(),
+            1,
+            "in-range VS Code must survive materialized path when Desktop is out of range: {:?}",
             messages
                 .iter()
                 .map(|m| (&m.session_id, m.date.as_str(), m.dedup_key.as_deref()))
