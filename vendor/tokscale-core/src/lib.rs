@@ -4645,13 +4645,11 @@ fn grok_source_mtime_ms(source_path: &Path) -> Option<u64> {
 /// Any stat failure keeps the file — over-parsing is safe, silently skipping is
 /// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
-    // Snapshot Copilot suppressors before any mtime prune. When a VS Code
-    // chatSessions path survives, live-tail still needs Desktop + OTEL to build
-    // cross-source suppress sets — otherwise a fresh VS Code file re-emits rows
-    // that a full scan would suppress against a stale Desktop/OTEL cohort.
-    // Inverse: when Desktop survives while older VS Code paths prune, restore
-    // those VS Code paths so date-bounded live-tail keeps vscode_any_sessions
-    // and does not emit Desktop whole-session where full scan prefers VS Code.
+    // Snapshot Copilot suppressors before any mtime prune. After mtime prunes:
+    // (1) if Desktop survived and pre-prune VS Code was non-empty, restore
+    // on-disk VS Code paths so live-tail keeps vscode_any_sessions; (2) if the
+    // final VS Code set is non-empty (natural or inverse), force-retain Desktop
+    // + the complete pre-prune OTEL cohort so suppress matches a full scan.
     let pre_prune_desktop_db = scan_result.copilot_desktop_db.clone();
     let pre_prune_copilot_files = scan_result.get(ClientId::Copilot).clone();
     let pre_prune_vscode_sessions = scan_result.copilot_vscode_sessions.clone();
@@ -4766,9 +4764,26 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
         }
     }
 
-    // Force-retain Desktop + OTEL copilot files whenever any VS Code session
-    // survived prune, so session-level / key-level suppress still matches a
-    // full scan. Over-parsing stale suppressors is safe; dropping them is not.
+    // Inverse force-retain (before suppressor cohort restore): when Desktop
+    // survives mtime prune and pre-prune VS Code was non-empty, restore those
+    // VS Code session paths that still exist on disk. Otherwise live-tail
+    // loses vscode_any_sessions and emits Desktop whole-session where a full
+    // scan would prefer VS Code per-request. Must run before the final
+    // VS Code → Desktop+OTEL retain so inverse-restored VS Code also pulls
+    // the complete pre-prune OTEL cohort (not only naturally surviving VS Code).
+    if scan_result.copilot_desktop_db.is_some() && !pre_prune_vscode_sessions.is_empty() {
+        for path in pre_prune_vscode_sessions {
+            if path.exists() && !scan_result.copilot_vscode_sessions.contains(&path) {
+                scan_result.copilot_vscode_sessions.push(path);
+            }
+        }
+    }
+
+    // Final suppressor-retention: whenever the final VS Code set is non-empty
+    // (natural survival or inverse restore above), force-retain Desktop (if
+    // missing but pre-prune existed) and restore the complete pre-prune OTEL
+    // copilot file cohort so session/key-level suppress matches a full scan.
+    // Over-parsing stale suppressors is safe; dropping them is not.
     if !scan_result.copilot_vscode_sessions.is_empty() {
         if scan_result.copilot_desktop_db.is_none() {
             if let Some(db_path) = pre_prune_desktop_db {
@@ -4778,18 +4793,6 @@ fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_m
             }
         }
         *scan_result.get_mut(ClientId::Copilot) = pre_prune_copilot_files;
-    }
-
-    // Inverse force-retain: when Desktop survives prune and pre-prune VS Code
-    // was non-empty, restore those VS Code session paths that still exist on
-    // disk. Otherwise live-tail loses vscode_any_sessions and emits Desktop
-    // whole-session where a full scan would prefer VS Code per-request.
-    if scan_result.copilot_desktop_db.is_some() && !pre_prune_vscode_sessions.is_empty() {
-        for path in pre_prune_vscode_sessions {
-            if path.exists() && !scan_result.copilot_vscode_sessions.contains(&path) {
-                scan_result.copilot_vscode_sessions.push(path);
-            }
-        }
     }
 }
 
@@ -12475,8 +12478,9 @@ mod tests {
 
         // Fresh VS Code retained → stale Desktop + OTEL force-retained as
         // suppressors (would otherwise reopen VS Code rows live-tail shouldn't).
-        // Inverse: with Desktop present after that force-retain, pre-prune VS
-        // Code paths still on disk are also restored (over-parse is safe).
+        // Stale VS Code that pruned by mtime stays pruned here: inverse restore
+        // only runs when Desktop is present *after* mtime prune (not after the
+        // VS Code → Desktop force-retain that follows).
         let mut scan_result = scanner::ScanResult::default();
         scan_result.copilot_vscode_sessions = vec![stale_vscode.clone(), fresh_vscode.clone()];
         scan_result.copilot_desktop_db = Some(desktop_db.clone());
@@ -12491,10 +12495,10 @@ mod tests {
             "fresh VS Code session must be retained"
         );
         assert!(
-            scan_result
+            !scan_result
                 .copilot_vscode_sessions
                 .contains(&stale_vscode),
-            "stale VS Code must be inverse force-retained once Desktop survives (suppressor completeness)"
+            "stale VS Code pruned by mtime must not be restored merely because Desktop was force-retained for a surviving VS Code path"
         );
         assert_eq!(
             scan_result.copilot_desktop_db.as_ref(),
@@ -12524,12 +12528,16 @@ mod tests {
             "desktop db must be kept when session-state events are fresh"
         );
 
-        // Codex P2-3 inverse: fresh Desktop survives while stale VS Code would
-        // prune → force-retain VS Code paths that still exist on disk so
-        // date-bounded live-tail keeps vscode_any_sessions suppressors.
+        // Codex P2-3 inverse: fresh Desktop survives while stale VS Code + stale
+        // OTEL would prune → restore on-disk VS Code, then (because final VS Code
+        // is non-empty) restore the complete pre-prune OTEL cohort so live-tail
+        // date-bounded suppress matches a full scan.
         let mut scan_fresh_desktop_stale_vscode = scanner::ScanResult::default();
         scan_fresh_desktop_stale_vscode.copilot_desktop_db = Some(fresh_desktop_db.clone());
         scan_fresh_desktop_stale_vscode.copilot_vscode_sessions = vec![stale_vscode.clone()];
+        scan_fresh_desktop_stale_vscode
+            .get_mut(ClientId::Copilot)
+            .push(stale_otel.clone());
         prune_scan_result_by_mtime(&mut scan_fresh_desktop_stale_vscode, threshold_ms);
         assert_eq!(
             scan_fresh_desktop_stale_vscode
@@ -12543,6 +12551,12 @@ mod tests {
                 .copilot_vscode_sessions
                 .contains(&stale_vscode),
             "stale VS Code must be force-retained when Desktop survives prune (inverse of Desktop force-retain when VS Code survives)"
+        );
+        assert!(
+            scan_fresh_desktop_stale_vscode
+                .get(ClientId::Copilot)
+                .contains(&stale_otel),
+            "stale OTEL copilot file must be force-retained when inverse-restored VS Code makes the final VS Code set non-empty"
         );
     }
 

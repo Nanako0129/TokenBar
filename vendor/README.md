@@ -322,7 +322,7 @@ Hermetic coverage includes Desktop/VS Code unit parsers, scanner discovery, Herm
 | Seam | Why local | Report upstream? |
 |---|---|---|
 | Multi-lane OTEL / Desktop / VS Code suppress with session_id + dedup_key + date-filter gate | TokenBar has materialized, streaming, and count paths; upstream is primarily one report path | No — TokenBar multi-lane parity |
-| Force-retain Desktop+OTEL when VS Code survives prune; inverse force-retain VS Code paths (still on disk) when Desktop survives | Live-tail suppress / date-bounded `vscode_any_sessions` must match full scan either direction | No — streaming prune parity |
+| Force-retain Desktop+OTEL whenever final VS Code set is non-empty (natural or inverse); inverse force-retain on-disk VS Code when Desktop survives mtime prune | Live-tail suppress / date-bounded `vscode_any_sessions` must match full scan either direction (OTEL cohort restored after inverse VS Code too) | No — streaming prune parity |
 | VSCodium defaults + `COPILOT_HOME` Desktop db + Copilot extra-root → VS Code lane | Discovery completeness across editor forks and env overrides | Optional product discovery; not a fidelity stop |
 | **Extra-root legacy `.json` promotion** (`chatSessions` / `emptyWindowChatSessions` under `extraScanPaths.copilot` / `TOKSCALE_EXTRA_DIRS=copilot:…`) | Extra roots walk OTEL `*.jsonl` only; pure-legacy session JSON never entered `files[Copilot]` for reclassify — walk extra roots and promote session-layout `*.{jsonl,json}` into the VS Code lane | Optional / Yes — report discovery completeness gap |
 | UNC `file://` authority decode for workspace keys | Windows path correctness | Candidate if upstream lacks it; not blocking |
