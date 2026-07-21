@@ -400,16 +400,17 @@ fn request_cache_write_tokens(req: &Value) -> i64 {
     0
 }
 
-/// Extract provider-billed cost from a VS Code chat request, if present.
+/// Extract provider-billed **USD** cost from a VS Code chat request, if present.
 ///
 /// Preference order:
 /// 1. Numeric nano AIU fields (`nanoAiu`, `copilotUsageNanoAiu`) at request root
-///    or under `result` / `result.metadata` — convert via `nano / 1e9` (1.0 unit
-///    == 1e9 nano).
-/// 2. Parseable credit/dollar string under `result.details` (and common nested
-///    keys) when no numeric nano field is present.
+///    or under `result` / `result.metadata` — convert via
+///    [`super::copilot::copilot_aiu_nano_to_usd`] (1e9 nano = 1 AI credit = $0.01).
+/// 2. Labeled credit/dollar string under `result.details` (and common nested
+///    keys) when no numeric nano field is present. Credits/AIU are scaled to
+///    USD (`* 0.01`); `$…` amounts are already USD and are not rescaled.
 ///
-/// Returns `(cost_usd_or_units, is_provider_reported)`.
+/// Returns `(cost_usd, is_provider_reported)`.
 fn request_billed_cost(req: &Value) -> (f64, bool) {
     const NANO_PATHS: &[&str] = &[
         "/nanoAiu",
@@ -422,13 +423,14 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
     for path in NANO_PATHS {
         if let Some(nano) = req.pointer(path).and_then(json_number_as_i64) {
             if nano > 0 {
-                // nano AIU → billed unit: 1e9 nano = 1.0 unit (USD/credit).
-                return (nano as f64 / 1_000_000_000.0, true);
+                // nano AIU → USD: 1e9 nano = 1 AI credit = $0.01.
+                return (super::copilot::copilot_aiu_nano_to_usd(nano), true);
             }
         }
     }
 
-    // String credit under result.details when numeric nano fields are absent.
+    // Labeled credit/USD under result.details when numeric nano fields are absent.
+    // Nested credit-named numeric fields are AI credits; `…/cost` is treated as USD.
     const DETAIL_PATHS: &[&str] = &[
         "/result/details",
         "/result/details/credit",
@@ -439,21 +441,36 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
     ];
     for path in DETAIL_PATHS {
         if let Some(raw) = req.pointer(path).and_then(Value::as_str) {
-            if let Some(cost) = parse_credit_string(raw) {
-                if cost > 0.0 {
-                    return (cost, true);
+            if let Some(cost_usd) = parse_credit_string_to_usd(raw) {
+                if cost_usd > 0.0 {
+                    return (cost_usd, true);
                 }
             }
         }
-        // details may itself be an object with numeric credit fields.
-        if let Some(n) = req.pointer(path).and_then(json_number_as_f64) {
+        // details may itself be an object with numeric credit/cost fields.
+        if let Some(n) = req.pointer(path).and_then(json_number_as_f64_raw) {
             if n > 0.0 {
-                return (n, true);
+                let cost_usd = if detail_path_is_credit_units(path) {
+                    super::copilot::copilot_ai_credits_to_usd(n)
+                } else {
+                    // `/result/details/cost` (and bare numeric `/result/details`)
+                    // treated as already-USD — no *0.01.
+                    n
+                };
+                if cost_usd > 0.0 {
+                    return (cost_usd, true);
+                }
             }
         }
     }
 
     (0.0, false)
+}
+
+fn detail_path_is_credit_units(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    // credit / credits / billedCredit / billed_credit — not plain "cost".
+    lower.contains("credit") || lower.contains("aiu") || lower.contains("billed")
 }
 
 fn json_number_as_i64(v: &Value) -> Option<i64> {
@@ -467,54 +484,170 @@ fn json_number_as_i64(v: &Value) -> Option<i64> {
         .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
 }
 
-fn json_number_as_f64(v: &Value) -> Option<f64> {
+/// Raw JSON number only (no string credit parse — callers decide USD conversion).
+fn json_number_as_f64_raw(v: &Value) -> Option<f64> {
     v.as_f64()
         .filter(|f| f.is_finite())
         .or_else(|| v.as_i64().map(|n| n as f64))
         .or_else(|| v.as_u64().map(|n| n as f64))
-        .or_else(|| {
-            v.as_str()
-                .and_then(parse_credit_string)
-                .filter(|f| f.is_finite())
-        })
 }
 
-/// Parse a credit/dollar string such as `"0.012"`, `"$0.012"`, or `"1.2 credits"`.
-fn parse_credit_string(raw: &str) -> Option<f64> {
+/// Parse a labeled credit/dollar detail string into **USD**.
+///
+/// Only numbers clearly attached to credit/AIU/USD labels are accepted:
+/// - `$12.3` / `Cost: $0.05` → USD as-is
+/// - `16.3 credits`, `1 AIU`, `2 AI credits` → credit units × $0.01
+///
+/// Bare first numbers and model/multiplier noise (`GPT 5.4 • 2x`) return `None`
+/// so model versions are never mistaken for billed cost.
+fn parse_credit_string_to_usd(raw: &str) -> Option<f64> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return None;
     }
-    // Pull the first decimal number out of the string.
-    let mut num = String::new();
+    if let Some(usd) = parse_dollar_amount(trimmed) {
+        return Some(usd);
+    }
+    if let Some(credits) = parse_credit_labeled_amount(trimmed) {
+        return Some(super::copilot::copilot_ai_credits_to_usd(credits));
+    }
+    None
+}
+
+/// `$(\d+(?:\.\d+)?)` anywhere in the string (case-insensitive noise ok).
+fn parse_dollar_amount(s: &str) -> Option<f64> {
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' {
+            let mut j = i + 1;
+            while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                j += 1;
+            }
+            if let Some((num, _)) = parse_decimal_at(s, j) {
+                if num > 0.0 {
+                    return Some(num);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// `(\d+(?:\.\d+)?)\s*(credits?|aiu|ai\s*credits?)` — case-insensitive.
+/// Picks the number that is **attached** to a credit label, not a bare model
+/// version like `5.4` in `GPT 5.4 • 2x`.
+fn parse_credit_labeled_amount(s: &str) -> Option<f64> {
+    let lower = s.to_ascii_lowercase();
+    let bytes = s.as_bytes();
+    let lower_bytes = lower.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let is_num_start = bytes[i].is_ascii_digit()
+            || (bytes[i] == b'.'
+                && i + 1 < bytes.len()
+                && bytes[i + 1].is_ascii_digit());
+        if !is_num_start {
+            i += 1;
+            continue;
+        }
+        let Some((num, end)) = parse_decimal_at(s, i) else {
+            i += 1;
+            continue;
+        };
+        let mut j = end;
+        while j < lower_bytes.len() && lower_bytes[j].is_ascii_whitespace() {
+            j += 1;
+        }
+        let rest = &lower[j..];
+        if label_is_credit_unit(rest) && num > 0.0 {
+            return Some(num);
+        }
+        i = end.max(i + 1);
+    }
+    None
+}
+
+/// True when `rest` begins with `credits?`, `aiu`, or `ai\s*credits?` at a
+/// label boundary (end of string or non-alphanumeric).
+fn label_is_credit_unit(rest: &str) -> bool {
+    // Order matters: check `aiu` before bare `ai` prefix, and longer
+    // `credits` before `credit`.
+    let after = if rest.starts_with("ai credits") {
+        Some(10)
+    } else if rest.starts_with("ai credit") {
+        Some(9)
+    } else if rest.starts_with("aiu") {
+        Some(3)
+    } else if rest.starts_with("credits") {
+        Some(7)
+    } else if rest.starts_with("credit") {
+        Some(6)
+    } else if rest.starts_with("ai") {
+        // `ai` + whitespace + credits? (regex: `ai\s*credits?`)
+        let mut k = 2;
+        let b = rest.as_bytes();
+        // Require at least one separator unless already matched "ai credit(s)" above.
+        if k < b.len() && b[k].is_ascii_whitespace() {
+            while k < b.len() && b[k].is_ascii_whitespace() {
+                k += 1;
+            }
+            let tail = &rest[k..];
+            if tail.starts_with("credits") {
+                Some(k + 7)
+            } else if tail.starts_with("credit") {
+                Some(k + 6)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    let Some(end) = after else {
+        return false;
+    };
+    is_label_boundary(&rest[end..])
+}
+
+fn is_label_boundary(rest: &str) -> bool {
+    match rest.chars().next() {
+        None => true,
+        Some(c) => !c.is_ascii_alphanumeric() && c != '_',
+    }
+}
+
+/// Parse a non-negative decimal number starting at byte index `start`.
+/// Returns `(value, end_byte_index)`.
+fn parse_decimal_at(s: &str, start: usize) -> Option<(f64, usize)> {
+    let bytes = s.as_bytes();
+    if start >= bytes.len() {
+        return None;
+    }
+    let mut i = start;
     let mut seen_digit = false;
     let mut seen_dot = false;
-    for ch in trimmed.chars() {
+    while i < bytes.len() {
+        let ch = bytes[i];
         if ch.is_ascii_digit() {
-            num.push(ch);
             seen_digit = true;
-        } else if ch == '.' && !seen_dot && seen_digit {
-            num.push(ch);
+            i += 1;
+        } else if ch == b'.' && !seen_dot {
             seen_dot = true;
-        } else if ch == '.' && !seen_dot && !seen_digit {
-            // Leading "." like ".5"
-            num.push(ch);
-            seen_dot = true;
-        } else if seen_digit {
-            break;
-        } else if ch == '$' || ch == ' ' {
-            continue;
+            i += 1;
         } else {
-            // Skip currency letters / noise before the number.
-            continue;
+            break;
         }
     }
     if !seen_digit {
         return None;
     }
-    let parsed: f64 = num.parse().ok()?;
+    let parsed: f64 = s[start..i].parse().ok()?;
     if parsed.is_finite() && parsed >= 0.0 {
-        Some(parsed)
+        Some((parsed, i))
     } else {
         None
     }
@@ -1156,7 +1289,7 @@ mod tests {
         std::fs::create_dir_all(&sessions_dir).unwrap();
         let path = sessions_dir.join("eeeeeeee-5555-0000-0000-000000000000.jsonl");
 
-        // 1_500_000_000 nano AIU => 1.5 billed units.
+        // 1_500_000_000 nano AIU => 1.5 AI credits => $0.015 USD.
         write_jsonl(
             &path,
             &[
@@ -1167,7 +1300,65 @@ mod tests {
         let messages = parse_copilot_vscode_sessions(&[path]);
         assert_eq!(messages.len(), 1);
         let m = &messages[0];
-        assert!((m.cost - 1.5).abs() < 1e-12, "cost={}", m.cost);
+        assert!((m.cost - 0.015).abs() < 1e-12, "cost={}", m.cost);
+        assert!(m.has_authoritative_cost());
+        assert_eq!(m.cost_source, crate::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn one_billion_nano_aiu_is_one_cent_usd() {
+        // Hermetic unit: 1e9 nano = 1 AI credit = $0.01.
+        assert!(
+            (crate::sessions::copilot::copilot_aiu_nano_to_usd(1_000_000_000) - 0.01).abs()
+                < 1e-15
+        );
+    }
+
+    #[test]
+    fn details_multiplier_is_not_billed_cost() {
+        // `GPT 5.4 • 2x` must not parse model version 5.4 (or 2) as cost.
+        assert!(parse_credit_string_to_usd("GPT 5.4 • 2x").is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("ffffffff-7777-0000-0000-000000000001.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-mult","timestamp":12000,"modelId":"copilot/auto","completionTokens":10,"promptTokens":100,"result":{"details":"GPT 5.4 • 2x","metadata":{"resolvedModel":"gpt-5.4"}}}]}"#,
+            ],
+        );
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0);
+        assert!(!messages[0].has_authoritative_cost());
+    }
+
+    #[test]
+    fn details_credits_label_converts_to_usd() {
+        // 16.3 credits * $0.01 = $0.163; model version 5.4 must not win.
+        assert!(
+            (parse_credit_string_to_usd("GPT 5.4 • 16.3 credits").unwrap() - 0.163).abs() < 1e-12
+        );
+        assert!((parse_credit_string_to_usd("$1.25").unwrap() - 1.25).abs() < 1e-12);
+        // Bare number / unlabeled: no provider cost.
+        assert!(parse_credit_string_to_usd("16.3").is_none());
+
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("ffffffff-8888-0000-0000-000000000002.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-cr","timestamp":13000,"modelId":"copilot/auto","completionTokens":10,"promptTokens":100,"result":{"details":"GPT 5.4 • 16.3 credits","metadata":{"resolvedModel":"gpt-5.4"}}}]}"#,
+            ],
+        );
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert!((m.cost - 0.163).abs() < 1e-12, "cost={}", m.cost);
         assert!(m.has_authoritative_cost());
         assert_eq!(m.cost_source, crate::CostSource::ProviderReported);
     }

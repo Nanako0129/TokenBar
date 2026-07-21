@@ -753,6 +753,27 @@ pub(crate) fn normalize_input_tokens(
     }
 }
 
+/// GitHub Copilot bills **1 AI credit = $0.01 USD**.
+///
+/// Nano-AIU fields (`total_nano_aiu`, `nanoAiu`, `copilotUsageNanoAiu`) use
+/// 1e9 nano = 1 AI credit. TokenBar's `message.cost` is USD, so credit units
+/// must be scaled by this constant before assignment / `mark_provider_reported_cost`.
+/// Rationale: GitHub Copilot premium request / AI credit billing (1 credit ≈ $0.01).
+pub(crate) const COPILOT_USD_PER_AI_CREDIT: f64 = 0.01;
+
+/// Convert nano AIU units to USD dollars for provider-reported cost.
+///
+/// `1_000_000_000` nano → 1 AI credit → `$0.01`. Do **not** apply this helper
+/// to values that are already USD (e.g. details strings with a `$` amount).
+pub(crate) fn copilot_aiu_nano_to_usd(nano: i64) -> f64 {
+    (nano as f64 / 1_000_000_000.0) * COPILOT_USD_PER_AI_CREDIT
+}
+
+/// Convert de-nano'd AI credit units to USD (`credits * 0.01`).
+pub(crate) fn copilot_ai_credits_to_usd(credits: f64) -> f64 {
+    credits * COPILOT_USD_PER_AI_CREDIT
+}
+
 fn first_non_empty_attr<'a>(attributes: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
     keys.iter()
         .filter_map(|key| attributes.get(*key).and_then(Value::as_str))

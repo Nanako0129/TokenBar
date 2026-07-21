@@ -20,16 +20,32 @@ struct CopilotDesktopSessionRow {
     total_output_tokens: i64,
     total_cached_tokens: i64,
     total_reasoning_tokens: i64,
-    /// Billed AIU in nano-units (1e9 nano = 1.0 unit). Zero/absent means no
-    /// provider-reported cost; pricing may estimate later.
+    /// Billed AIU in nano-units (1e9 nano = 1 AI credit = $0.01 USD).
+    /// Zero/absent means no provider-reported cost; pricing may estimate later.
     total_nano_aiu: i64,
     created_at: Option<String>,
 }
 
 #[derive(Debug, Default)]
 struct SessionStateMetadata {
-    model: Option<String>,
+    /// First non-empty `session.model_change` (highest priority among events).
+    model_change: Option<String>,
+    /// `session.start` `selectedModel` when no model_change is present.
+    selected_model: Option<String>,
+    /// First non-empty `assistant.usage` `data.model` fallback.
+    usage_model: Option<String>,
     cwd: Option<String>,
+}
+
+impl SessionStateMetadata {
+    /// Preference: first model_change → session.start selectedModel →
+    /// first assistant.usage model. DB `sessions.model` is applied by the caller.
+    fn resolved_model(&self) -> Option<&str> {
+        self.model_change
+            .as_deref()
+            .or(self.selected_model.as_deref())
+            .or(self.usage_model.as_deref())
+    }
 }
 
 /// True when `sessions.total_nano_aiu` exists (newer Desktop schema).
@@ -165,8 +181,7 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
 fn session_row_to_message(db_path: &Path, row: CopilotDesktopSessionRow) -> UnifiedMessage {
     let metadata = read_session_state_metadata(db_path, &row.id);
     let model_id = metadata
-        .model
-        .as_deref()
+        .resolved_model()
         .or(row.model.as_deref())
         .map(str::trim)
         .filter(|model| !model.is_empty())
@@ -189,11 +204,12 @@ fn session_row_to_message(db_path: &Path, row: CopilotDesktopSessionRow) -> Unif
             0
         });
 
-    // total_nano_aiu is the Desktop-billed AIU credit in nano-units
-    // (1e9 nano = 1.0 unit). When non-zero this is the authoritative cost and
-    // must skip later token-based reprice via ProviderReported.
+    // total_nano_aiu is Desktop-billed AI credit in nano-units
+    // (1e9 nano = 1 AI credit = $0.01 USD). When non-zero this is the
+    // authoritative USD cost and must skip later token-based reprice via
+    // ProviderReported. See `copilot::copilot_aiu_nano_to_usd`.
     let (cost, has_provider_cost) = if row.total_nano_aiu > 0 {
-        (row.total_nano_aiu as f64 / 1_000_000_000.0, true)
+        (super::copilot::copilot_aiu_nano_to_usd(row.total_nano_aiu), true)
     } else {
         (0.0, false)
     };
@@ -284,25 +300,50 @@ fn read_events_metadata(events_path: &Path) -> SessionStateMetadata {
         };
 
         match event_type {
-            "session.start" if metadata.cwd.is_none() => {
-                metadata.cwd = event
-                    .pointer("/data/context/cwd")
-                    .and_then(Value::as_str)
-                    .map(str::trim)
-                    .filter(|cwd| !cwd.is_empty())
+            "session.start" => {
+                if metadata.cwd.is_none() {
+                    metadata.cwd = event
+                        .pointer("/data/context/cwd")
+                        .and_then(Value::as_str)
+                        .map(str::trim)
+                        .filter(|cwd| !cwd.is_empty())
+                        .map(str::to_string);
+                }
+                // Initial model when the user never emits model_change.
+                // Nested `data.context.selectedModel` is accepted as a fallback.
+                if metadata.selected_model.is_none() {
+                    metadata.selected_model = first_non_empty_str(
+                        &event,
+                        &["/data/selectedModel", "/data/context/selectedModel"],
+                    )
+                    .filter(|model| *model != "auto")
                     .map(str::to_string);
+                }
             }
             // Prefer the first non-empty model_change: session token totals are
             // whole-session aggregates, so the last mid-session switch must not
             // claim the entire session.
-            "session.model_change" if metadata.model.is_none() => {
+            "session.model_change" if metadata.model_change.is_none() => {
                 if let Some(model) = event
                     .pointer("/data/newModel")
                     .and_then(Value::as_str)
                     .map(str::trim)
-                    .filter(|model| !model.is_empty() && model != &"auto")
+                    .filter(|model| !model.is_empty() && *model != "auto")
                 {
-                    metadata.model = Some(model.to_string());
+                    metadata.model_change = Some(model.to_string());
+                }
+            }
+            // First assistant.usage model only (do not let later turns overwrite
+            // a model already established by model_change / selectedModel /
+            // an earlier usage event).
+            "assistant.usage" if metadata.usage_model.is_none() => {
+                if let Some(model) = event
+                    .pointer("/data/model")
+                    .and_then(Value::as_str)
+                    .map(str::trim)
+                    .filter(|model| !model.is_empty() && *model != "auto")
+                {
+                    metadata.usage_model = Some(model.to_string());
                 }
             }
             _ => {}
@@ -310,6 +351,16 @@ fn read_events_metadata(events_path: &Path) -> SessionStateMetadata {
     }
 
     metadata
+}
+
+fn first_non_empty_str<'a>(event: &'a Value, paths: &[&str]) -> Option<&'a str> {
+    paths.iter().find_map(|path| {
+        event
+            .pointer(path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    })
 }
 
 fn parse_iso8601_timestamp_ms(value: &str) -> Option<i64> {
@@ -563,8 +614,8 @@ mod tests {
 
     #[test]
     fn parse_copilot_desktop_db_reports_nano_aiu_as_provider_cost() {
-        // 2_500_000_000 nano AIU => 2.5 billed units; cost_source must be
-        // ProviderReported so downstream reprice is skipped.
+        // 2_500_000_000 nano AIU => 2.5 AI credits => $0.025 USD; cost_source
+        // must be ProviderReported so downstream reprice is skipped.
         let dir = tempfile::tempdir().unwrap();
         let db_path = dir.path().join("data.db");
         let conn = create_copilot_desktop_db(&db_path);
@@ -584,12 +635,109 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let message = &messages[0];
         assert!(
-            (message.cost - 2.5).abs() < 1e-12,
+            (message.cost - 0.025).abs() < 1e-12,
             "cost={}",
             message.cost
         );
         assert!(message.has_authoritative_cost());
         assert_eq!(message.cost_source, crate::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_one_billion_nano_is_one_cent() {
+        // Hermetic: 1e9 nano AIU → cost ≈ 0.01 USD.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session_with_nano_aiu(
+            &conn,
+            "session-cent",
+            "gpt-5.1-codex",
+            10,
+            5,
+            0,
+            0,
+            1_000_000_000,
+        );
+        drop(conn);
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            (messages[0].cost - 0.01).abs() < 1e-12,
+            "cost={}",
+            messages[0].cost
+        );
+        assert!(messages[0].has_authoritative_cost());
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_uses_session_start_selected_model() {
+        // No model_change: session.start selectedModel is the events model.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session(&conn, "session-1", "auto", 100, 50, 0, 0);
+        drop(conn);
+        write_events(
+            dir.path(),
+            "session-1",
+            &[
+                r#"{"type":"session.start","data":{"selectedModel":"claude-sonnet-4-5","context":{"cwd":"/Users/alice/project"}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-5");
+        assert_eq!(messages[0].provider_id, "anthropic");
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_model_change_beats_selected_and_usage() {
+        // model_change wins over session.start selectedModel and later
+        // assistant.usage model; later usage must not overwrite.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session(&conn, "session-1", "auto", 100, 50, 0, 0);
+        drop(conn);
+        write_events(
+            dir.path(),
+            "session-1",
+            &[
+                r#"{"type":"session.start","data":{"selectedModel":"gpt-4o"}}"#,
+                r#"{"type":"session.model_change","data":{"newModel":"claude-sonnet-4-5"}}"#,
+                r#"{"type":"assistant.usage","data":{"model":"gpt-5.1-codex"}}"#,
+                r#"{"type":"assistant.usage","data":{"model":"o3-mini"}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_uses_assistant_usage_model_without_start_or_change() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session(&conn, "session-1", "auto", 100, 50, 0, 0);
+        drop(conn);
+        write_events(
+            dir.path(),
+            "session-1",
+            &[
+                r#"{"type":"session.start","data":{"context":{"cwd":"/tmp/ws"}}}"#,
+                r#"{"type":"assistant.usage","data":{"model":"gpt-5.1-codex"}}"#,
+                r#"{"type":"assistant.usage","data":{"model":"o3-mini"}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-5.1-codex");
     }
 
     #[test]
