@@ -1,6 +1,3 @@
-New:
-- (none — patch release)
-
 Improved:
 - Token Usage (2D) and Models popover tooltips clamp inside the visible scroll area, dodge the cursor again, and stay above liquid-glass cards so they no longer hide under the footer or neighboring cards.
 
