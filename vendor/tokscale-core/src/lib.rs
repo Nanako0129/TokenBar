@@ -4740,7 +4740,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
 
     struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
@@ -5516,9 +5516,6 @@ mod tests {
         );
     }
 
-    /// Serializes tests that mutate the process-wide model-alias map.
-    static MODEL_ALIAS_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     fn test_alias_map(pairs: &[(&str, &str)]) -> ModelAliasMap {
         ModelAliasMap {
             entries: pairs
@@ -5530,9 +5527,7 @@ mod tests {
 
     #[test]
     fn model_aliases_fold_grouping_only_not_canonical_or_pricing() {
-        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::model_alias::lock_global_alias_tests();
         clear_model_aliases();
 
         // Alias a channel-specific spelling onto the display/group key.
@@ -5653,9 +5648,7 @@ mod tests {
 
     #[test]
     fn model_alias_reload_invalidates_usage_data_consumers() {
-        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::model_alias::lock_global_alias_tests();
         clear_model_aliases();
 
         static FIRES: AtomicUsize = AtomicUsize::new(0);
@@ -5702,9 +5695,7 @@ mod tests {
         // the whole fold. `aggregate_model_usage_entries` snapshots at start;
         // prove the snapshot pattern it uses is stable under mid-fold reload,
         // then that the real aggregator still merges under the fold-start map.
-        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = crate::model_alias::lock_global_alias_tests();
         clear_model_aliases();
         set_model_aliases(&test_alias_map(&[("alias-a", "canonical-b")]));
 

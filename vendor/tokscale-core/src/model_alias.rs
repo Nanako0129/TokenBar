@@ -274,14 +274,20 @@ pub fn snapshot_grouping_aliases() -> GroupingAliasSnapshot {
     GroupingAliasSnapshot { resolver }
 }
 
+/// Shared mutex for every test that mutates process-wide alias state.
+/// Lives outside `mod tests` so `lib.rs` integration-style unit tests and
+/// this module's tests take the **same** guard (Codex: dual locks interleave).
+#[cfg(test)]
+pub(crate) fn lock_global_alias_tests() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::Mutex;
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
-    use std::sync::Mutex;
-
-    /// Serializes tests that mutate the process-wide alias state.
-    static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     fn resolver(pairs: &[(&str, &str)]) -> ModelAliasResolver {
         let entries = pairs
@@ -439,7 +445,7 @@ mod tests {
 
     #[test]
     fn reloadable_global_install_and_clear() {
-        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_global_alias_tests();
         clear_model_aliases();
         let gen0 = model_alias_generation();
 
@@ -483,7 +489,7 @@ mod tests {
 
     #[test]
     fn invalidation_hook_fires_on_set_and_clear() {
-        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_global_alias_tests();
         clear_model_aliases();
 
         static FIRES: AtomicUsize = AtomicUsize::new(0);
@@ -507,7 +513,7 @@ mod tests {
         // Codex P2: a multi-message report must not split across two alias maps
         // when set_model_aliases runs mid-fold. Snapshot at fold start; mutate
         // the live map; prove the snapshot keeps folding with the old config.
-        let _guard = GLOBAL_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = lock_global_alias_tests();
         clear_model_aliases();
         set_model_aliases(&alias_map(&[("alias-a", "canonical-b")]));
 
