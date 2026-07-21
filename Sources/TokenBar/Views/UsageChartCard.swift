@@ -1,6 +1,30 @@
 import SwiftUI
 import TokenBarCore
 
+/// Pure chart geometry shared by canvas, hover hit math, and selftests.
+/// Kept outside `UsageChartCard` so tests do not hit View MainActor isolation.
+enum UsageChartGeometry {
+    static let chartHeight: CGFloat = 150
+    static let gap: CGFloat = 3
+
+    static func barFrame(index: Int, barWidth: CGFloat) -> CGRect {
+        CGRect(
+            x: CGFloat(index) * (barWidth + gap),
+            y: 0,
+            width: barWidth,
+            height: chartHeight)
+    }
+
+    /// Floor-division hit index (pre-change). Gap pixels attach to the left
+    /// bar; points past the last stride are out of range.
+    static func barIndex(atX x: CGFloat, barWidth: CGFloat, count: Int) -> Int? {
+        guard count > 0, barWidth > 0, x >= 0 else { return nil }
+        let stride = barWidth + gap
+        let index = Int(x / stride)
+        return (0..<count).contains(index) ? index : nil
+    }
+}
+
 /// The "Token Usage" card, port of UsageBarGraph2D.tsx: trailing-30-day
 /// stacked bars (Model/Agent stacking, Tokens/Price metric, wrapping legend,
 /// rich hover tooltip) toggling with the full-year 3D contribution grid.
@@ -19,12 +43,11 @@ struct UsageChartCard: View {
     /// "2d" = trailing-30-day stacked bars, "3d" = full-year contribution grid.
     @AppStorage("tokenbar.chart.view") private var chartViewRaw = "2d"
     @State private var hoverIndex: Int?
-    @State private var hoverY: CGFloat = 0
+    @State private var hoverPoint: CGPoint = .zero
     @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var popoverScrollViewport
 
     private static let legendMax = 12
-    private static let chartHeight: CGFloat = 150
-    private static let gap: CGFloat = 3
 
     private var stackBy: StackBy { StackBy(rawValue: stackByRaw) ?? .model }
     private var metric: ChartMetric { ChartMetric(rawValue: metricRaw) ?? .tokens }
@@ -43,6 +66,9 @@ struct UsageChartCard: View {
     var body: some View {
         let bars = self.bars
         let legend = DayBars.legend(bars: bars, metric: metric)
+        let showsTooltip = hoverIndex.map {
+            bars.indices.contains($0) && !bars[$0].isEmpty
+        } ?? false
         DashCard(
             "Token Usage",
             subtitle: is3D
@@ -71,6 +97,7 @@ struct UsageChartCard: View {
                 }
             }
         }
+        .zIndex(showsTooltip ? 1 : 0)
     }
 
     // MARK: - Header toggles
@@ -153,36 +180,51 @@ struct UsageChartCard: View {
     private func chart(_ bars: [DayBar]) -> some View {
         GeometryReader { geo in
             let width = geo.size.width
-            let barWidth = (width - Self.gap * CGFloat(bars.count - 1)) / CGFloat(bars.count)
+            let barWidth = (width - UsageChartGeometry.gap * CGFloat(max(bars.count - 1, 0)))
+                / CGFloat(max(bars.count, 1))
             let maxValue = max(bars.map(barTotal).max() ?? 1, metric == .cost ? 0.000001 : 1)
+            // Anchor X on the bar center (pre-change feel); Y tracks the
+            // cursor so region-dodge can flip above/below inside the chart.
+            let anchor: CGPoint = {
+                guard let index = hoverIndex, bars.indices.contains(index) else {
+                    return hoverPoint
+                }
+                let frame = UsageChartGeometry.barFrame(index: index, barWidth: barWidth)
+                return CGPoint(x: frame.midX, y: hoverPoint.y)
+            }()
 
             ZStack(alignment: .topLeading) {
                 canvas(bars: bars, barWidth: barWidth, maxValue: maxValue)
                 if let index = hoverIndex, bars.indices.contains(index),
                    !bars[index].isEmpty {
-                    // Dodge the cursor like the model-card tooltip: below the
-                    // pointer in the chart's upper half, above it lower down —
-                    // pinning to the top kept covering the hovered area.
+                    let measuredSize = tooltipSize == .zero
+                        ? CGSize(width: Self.tooltipWidth, height: 120)
+                        : tooltipSize
+                    let offset = PopoverTooltipPlacement.offset(
+                        anchor: anchor,
+                        tooltipSize: measuredSize,
+                        containerFrame: geo.frame(in: .global),
+                        viewport: popoverScrollViewport)
                     tooltip(bars[index])
-                        .offset(
-                            x: tooltipX(index: index, barWidth: barWidth, width: width),
-                            y: hoverY < Self.chartHeight * 0.45
-                                ? hoverY + 16
-                                : hoverY - (tooltipSize.height > 0 ? tooltipSize.height : 120) - 12)
+                        .offset(offset ?? .zero)
                 }
             }
+            // One continuous hover on the chart (not per-bar) — smoother and
+            // matches the pre-change dodge path. Gap pixels attach to the
+            // left bar via floor division (see `UsageChartGeometry.barIndex`).
+            .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
                 case let .active(point):
-                    let index = Int(point.x / (barWidth + Self.gap))
-                    hoverIndex = bars.indices.contains(index) ? index : nil
-                    hoverY = point.y
+                    hoverIndex = UsageChartGeometry.barIndex(
+                        atX: point.x, barWidth: barWidth, count: bars.count)
+                    hoverPoint = point
                 case .ended:
                     hoverIndex = nil
                 }
             }
         }
-        .frame(height: Self.chartHeight)
+        .frame(height: UsageChartGeometry.chartHeight)
     }
 
     private func canvas(bars: [DayBar], barWidth: CGFloat, maxValue: Double) -> some View {
@@ -194,11 +236,11 @@ struct UsageChartCard: View {
                 with: .color(.secondary.opacity(0.3)))
 
             for (index, bar) in bars.enumerated() {
-                let x = CGFloat(index) * (barWidth + Self.gap)
+                let frame = UsageChartGeometry.barFrame(index: index, barWidth: barWidth)
                 let total = barTotal(bar)
                 if total <= 0 {
                     context.fill(
-                        Path(roundedRect: CGRect(x: x, y: bottom - 2, width: barWidth, height: 2),
+                        Path(roundedRect: CGRect(x: frame.minX, y: bottom - 2, width: barWidth, height: 2),
                              cornerRadius: 1),
                         with: .color(.secondary.opacity(0.15)))
                     continue
@@ -210,7 +252,7 @@ struct UsageChartCard: View {
                     guard h > 0 else { continue }
                     y -= h
                     context.fill(
-                        Path(roundedRect: CGRect(x: x, y: y, width: barWidth, height: h),
+                        Path(roundedRect: CGRect(x: frame.minX, y: y, width: barWidth, height: h),
                              cornerRadius: min(2, h / 2)),
                         with: .color(Color(hex: segment.color).opacity(0.86)))
                 }
@@ -235,11 +277,6 @@ struct UsageChartCard: View {
     // MARK: - Tooltip
 
     private static let tooltipWidth: CGFloat = 210
-
-    private func tooltipX(index: Int, barWidth: CGFloat, width: CGFloat) -> CGFloat {
-        let center = CGFloat(index) * (barWidth + Self.gap) + barWidth / 2
-        return min(max(center - Self.tooltipWidth / 2, 0), width - Self.tooltipWidth)
-    }
 
     private func tooltip(_ bar: DayBar) -> some View {
         VStack(alignment: .leading, spacing: 4) {
@@ -269,18 +306,7 @@ struct UsageChartCard: View {
         .frame(width: Self.tooltipWidth, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: TooltipSizeKey.self, value: geo.size)
-            })
-        .onPreferenceChange(TooltipSizeKey.self) { tooltipSize = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
         .allowsHitTesting(false)
-    }
-
-    private struct TooltipSizeKey: PreferenceKey {
-        static let defaultValue: CGSize = .zero
-        static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-            value = nextValue()
-        }
     }
 }

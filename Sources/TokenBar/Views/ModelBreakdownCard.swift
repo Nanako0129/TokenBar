@@ -15,6 +15,7 @@ struct ModelBreakdownCard: View {
     @State private var expanded = false
     @State private var hover: HoverState?
     @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var popoverScrollViewport
 
     private struct HoverState {
         let entry: ModelReportEntry
@@ -75,9 +76,21 @@ struct ModelBreakdownCard: View {
                 .overlay(alignment: .topLeading) {
                     if let hover {
                         GeometryReader { geo in
+                            let measuredSize = tooltipSize == .zero
+                                ? CGSize(width: Self.tooltipWidth, height: 120)
+                                : tooltipSize
+                            let offset = PopoverTooltipPlacement.offset(
+                                anchor: hover.point,
+                                tooltipSize: measuredSize,
+                                containerFrame: geo.frame(in: .global),
+                                viewport: popoverScrollViewport)
                             tooltip(hover.entry)
-                                .offset(tooltipOffset(point: hover.point, container: geo.size))
+                                .offset(offset ?? .zero)
                         }
+                        // GeometryReader fills the rows; keep hits on the rows
+                        // so continuous hover does not end while the tooltip
+                        // is up.
+                        .allowsHitTesting(false)
                     }
                 }
                 let hidden = rows.count - min(rows.count, Self.maxRows)
@@ -91,6 +104,7 @@ struct ModelBreakdownCard: View {
                 }
             }
         }
+        .zIndex(hover == nil ? 0 : 1)
     }
 
     private var legend: some View {
@@ -166,22 +180,6 @@ struct ModelBreakdownCard: View {
 
     // MARK: - Hover tooltip
 
-    /// Keep the tooltip inside the card horizontally; flip above the cursor
-    /// for rows past the first few so it never clips out the card's bottom.
-    private func tooltipOffset(point: CGPoint, container: CGSize) -> CGSize {
-        let x = min(max(point.x - Self.tooltipWidth / 2, 0), max(0, container.width - Self.tooltipWidth))
-        let height = tooltipSize.height > 0 ? tooltipSize.height : 120
-        let y = point.y > 110 ? point.y - height - 10 : point.y + 14
-        return CGSize(width: x, height: y)
-    }
-
-    private struct TooltipSizeKey: PreferenceKey {
-        static let defaultValue: CGSize = .zero
-        static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
-            value = nextValue()
-        }
-    }
-
     /// True token counts and linear shares per category — the bar itself is
     /// sqrt-scaled, so this is where the real numbers live.
     private func tooltip(_ entry: ModelReportEntry) -> some View {
@@ -225,11 +223,7 @@ struct ModelBreakdownCard: View {
         .frame(width: Self.tooltipWidth, alignment: .leading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
         .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
-        .background(
-            GeometryReader { geo in
-                Color.clear.preference(key: TooltipSizeKey.self, value: geo.size)
-            })
-        .onPreferenceChange(TooltipSizeKey.self) { tooltipSize = $0 }
+        .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
         .allowsHitTesting(false)
     }
 }

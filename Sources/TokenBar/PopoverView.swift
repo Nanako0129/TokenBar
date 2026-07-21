@@ -108,13 +108,24 @@ struct PopoverView: View {
                 .padding(.horizontal, 12)
                 .padding(.bottom, 10)
             Divider()
-            ScrollView {
-                content
-                    .padding(12)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(OverlayScrollerEnforcer())
+            GeometryReader { viewport in
+                ScrollView {
+                    content
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(OverlayScrollerEnforcer())
+                }
+                // Live global frame for tooltip clamp. While the height
+                // handle is dragged, publish nil so placement falls back to
+                // the source card only — avoids every-pixel env churn AND a
+                // frozen pre-drag rect that would leave a fake dodge after
+                // the user hovers Models/Usage immediately post-resize.
+                .environment(
+                    \.popoverScrollViewport,
+                    dragBase == nil ? viewport.frame(in: .global) : nil)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .clipped()
             }
-            .clipped()
             Divider()
             footer
         }

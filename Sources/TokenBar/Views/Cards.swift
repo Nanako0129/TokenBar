@@ -1,6 +1,122 @@
 import SwiftUI
 import TokenBarCore
 
+private struct PopoverScrollViewportKey: EnvironmentKey {
+    static let defaultValue: CGRect? = nil
+}
+
+extension EnvironmentValues {
+    var popoverScrollViewport: CGRect? {
+        get { self[PopoverScrollViewportKey.self] }
+        set { self[PopoverScrollViewportKey.self] = newValue }
+    }
+}
+
+enum PopoverTooltipPlacement {
+    static let edgeInset: CGFloat = 4
+    static let cursorGap: CGFloat = 12
+    /// Local Y ratio inside the source container. Above this, prefer placing
+    /// the tooltip above the cursor (dodge); below it, prefer below. Matches
+    /// the pre-viewport chart dodge (`chartHeight * 0.45`) and Models feel.
+    static let preferAboveRatio: CGFloat = 0.45
+
+    /// Position a tooltip in its local overlay while keeping it inside the
+    /// visible ScrollView viewport. Prefers the side that dodges the cursor
+    /// (region-based), then falls back / clamps so it never sits under the
+    /// footer. Container and viewport share global coordinates; the returned
+    /// offset is local to the container.
+    static func offset(
+        anchor: CGPoint,
+        tooltipSize: CGSize,
+        containerFrame: CGRect,
+        viewport: CGRect?
+    ) -> CGSize? {
+        guard tooltipSize.width > 0, tooltipSize.height > 0 else { return nil }
+
+        let anchorGlobal = CGPoint(
+            x: containerFrame.minX + anchor.x,
+            y: containerFrame.minY + anchor.y)
+
+        // Freshness: continuous hover only fires over the *visible* scroll
+        // area, so a live viewport must contain the anchor (tiny slack for
+        // float edges). Mere container intersection is not enough — a
+        // pre-resize short viewport can still overlap the card while the
+        // newly exposed hover point sits below it, inventing a fake dodge.
+        let viewport: CGRect = {
+            guard let candidate = viewport, !candidate.isEmpty else { return containerFrame }
+            let slack: CGFloat = 2
+            if candidate.insetBy(dx: -slack, dy: -slack).contains(anchorGlobal) {
+                return candidate
+            }
+            return containerFrame
+        }()
+        guard !viewport.isEmpty else { return nil }
+        let visible = viewport.insetBy(dx: edgeInset, dy: edgeInset)
+        guard visible.width > 0, visible.height > 0 else { return nil }
+        let horizontalMin = max(containerFrame.minX, visible.minX)
+        let horizontalMax = min(containerFrame.maxX, visible.maxX)
+        guard horizontalMax > horizontalMin else { return nil }
+
+        let maxX = horizontalMax - tooltipSize.width
+        let originX = maxX >= horizontalMin
+            ? min(max(anchorGlobal.x - tooltipSize.width / 2, horizontalMin), maxX)
+            : horizontalMin
+
+        let minY = visible.minY
+        let maxY = visible.maxY - tooltipSize.height
+        let belowY = anchorGlobal.y + cursorGap
+        let aboveY = anchorGlobal.y - tooltipSize.height - cursorGap
+        // Region dodge uses the source container (chart / rows), not the
+        // full scroll viewport — "below if the viewport still has room"
+        // always wins on a tall popover and feels like sticky follow.
+        let preferBelow = containerFrame.height > 0
+            ? anchor.y < containerFrame.height * preferAboveRatio
+            : true
+        let originY: CGFloat
+        if tooltipSize.height >= visible.height {
+            originY = minY
+        } else if preferBelow {
+            if belowY <= maxY {
+                originY = max(belowY, minY)
+            } else if aboveY >= minY {
+                originY = min(aboveY, maxY)
+            } else {
+                originY = clampedPreferredY(
+                    belowY: belowY, aboveY: aboveY,
+                    anchorGlobalY: anchorGlobal.y,
+                    minY: minY, maxY: maxY, visible: visible)
+            }
+        } else if aboveY >= minY {
+            originY = min(aboveY, maxY)
+        } else if belowY <= maxY {
+            originY = max(belowY, minY)
+        } else {
+            originY = clampedPreferredY(
+                belowY: belowY, aboveY: aboveY,
+                anchorGlobalY: anchorGlobal.y,
+                minY: minY, maxY: maxY, visible: visible)
+        }
+
+        return CGSize(
+            width: originX - containerFrame.minX,
+            height: originY - containerFrame.minY)
+    }
+
+    private static func clampedPreferredY(
+        belowY: CGFloat,
+        aboveY: CGFloat,
+        anchorGlobalY: CGFloat,
+        minY: CGFloat,
+        maxY: CGFloat,
+        visible: CGRect
+    ) -> CGFloat {
+        let belowSpace = visible.maxY - anchorGlobalY
+        let aboveSpace = anchorGlobalY - visible.minY
+        let preferred = belowSpace >= aboveSpace ? belowY : aboveY
+        return min(max(preferred, minY), maxY)
+    }
+}
+
 /// Liquid Glass card surface on macOS 26+, material fallback below — the
 /// glass lives on the cards themselves (the Control Center look), not on a
 /// backdrop hidden behind opaque fills.
