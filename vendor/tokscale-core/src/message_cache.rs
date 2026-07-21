@@ -239,6 +239,45 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, related_paths)
     }
 
+    /// Fingerprint Copilot Desktop's SQLite DB plus the session-state
+    /// `events.jsonl` files that enrich rows with model/workspace. A
+    /// session-state-only rewrite leaves `data.db` (+ WAL) unchanged, so the
+    /// plain sqlite fingerprint would serve stale model/cwd until an unrelated
+    /// DB write. WAL is included the same way as [`Self::from_sqlite_path`].
+    pub(crate) fn from_copilot_desktop_path(path: &Path) -> Option<Self> {
+        let mut related_paths: Vec<(String, PathBuf)> = vec![(
+            "-wal".to_string(),
+            append_path_suffix(path, "-wal"),
+        )];
+
+        let copilot_root = path.parent().unwrap_or_else(|| Path::new("."));
+        for event_path in
+            crate::sessions::copilot_desktop::copilot_desktop_related_event_paths(path)
+        {
+            // Stable unique suffix: path relative to the copilot root when
+            // possible (e.g. `session-state/{id}/events.jsonl`), else full path.
+            let suffix = event_path
+                .strip_prefix(copilot_root)
+                .map(|rel| rel.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_else(|_| event_path.to_string_lossy().into_owned());
+            related_paths.push((suffix, event_path));
+        }
+
+        Self::from_path_with_related(path, related_paths)
+    }
+
+    /// Fingerprint a VS Code chatSessions JSONL together with its sibling
+    /// `workspace.json` (two levels up under `workspaceStorage/{hash}/`).
+    /// Workspace-only rewrites must invalidate the cache so reports pick up the
+    /// new workspace key/label without waiting for the session file to change.
+    pub(crate) fn from_copilot_vscode_path(path: &Path) -> Option<Self> {
+        let related_paths =
+            crate::sessions::copilot_vscode::copilot_vscode_workspace_json_path(path)
+                .into_iter()
+                .map(|workspace| ("workspace.json".to_string(), workspace));
+        Self::from_path_with_related(path, related_paths)
+    }
+
     /// Fingerprint for a jcode session snapshot plus its sibling
     /// `<session>.journal.jsonl` append-log. jcode appends new turns to the
     /// journal between snapshot rewrites, so a journal-only write leaves the
@@ -1101,6 +1140,80 @@ mod tests {
             plain_before, plain_after,
             "from_path ignores the journal sibling (control)"
         );
+    }
+
+    #[test]
+    fn from_copilot_desktop_path_invalidates_on_events_only_change() {
+        // Desktop parse enriches sessions from session-state/{id}/events.jsonl.
+        // An events-only rewrite (DB byte-identical) must still invalidate.
+        let dir = TempDir::new().unwrap();
+        let db_path = dir.path().join("data.db");
+        std::fs::write(&db_path, b"desktop-db-v1").unwrap();
+        let events = dir
+            .path()
+            .join("session-state")
+            .join("sess-1")
+            .join("events.jsonl");
+        std::fs::create_dir_all(events.parent().unwrap()).unwrap();
+        std::fs::write(&events, b"{\"type\":\"session.start\"}\n").unwrap();
+
+        let before = SourceFingerprint::from_copilot_desktop_path(&db_path).unwrap();
+        let sqlite_before = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
+
+        std::fs::write(
+            &events,
+            b"{\"type\":\"session.start\"}\n{\"type\":\"session.model_change\",\"data\":{\"newModel\":\"gpt-4o\"}}\n",
+        )
+        .unwrap();
+
+        let after = SourceFingerprint::from_copilot_desktop_path(&db_path).unwrap();
+        let sqlite_after = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
+
+        assert_ne!(
+            before, after,
+            "events.jsonl-only change must alter the desktop fingerprint"
+        );
+        assert_eq!(
+            sqlite_before, sqlite_after,
+            "from_sqlite_path ignores session-state siblings (control)"
+        );
+        assert!(
+            before
+                .related_files
+                .iter()
+                .any(|r| r.suffix.contains("events.jsonl")),
+            "desktop fingerprint must include events.jsonl related files"
+        );
+    }
+
+    #[test]
+    fn from_copilot_vscode_path_invalidates_on_workspace_json_only_change() {
+        let dir = TempDir::new().unwrap();
+        let hash_dir = dir.path().join("workspaceStorage").join("abc123");
+        let sessions_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let session = sessions_dir.join("uuid-1.jsonl");
+        std::fs::write(&session, b"{\"kind\":0,\"v\":{\"requests\":[]}}\n").unwrap();
+        let workspace = hash_dir.join("workspace.json");
+        std::fs::write(&workspace, br#"{"folder":"file:///Users/alice/old"}"#).unwrap();
+
+        let before = SourceFingerprint::from_copilot_vscode_path(&session).unwrap();
+        let plain_before = SourceFingerprint::from_path(&session).unwrap();
+
+        std::fs::write(&workspace, br#"{"folder":"file:///Users/alice/new"}"#).unwrap();
+
+        let after = SourceFingerprint::from_copilot_vscode_path(&session).unwrap();
+        let plain_after = SourceFingerprint::from_path(&session).unwrap();
+
+        assert_ne!(
+            before, after,
+            "workspace.json-only change must alter the vscode fingerprint"
+        );
+        assert_eq!(
+            plain_before, plain_after,
+            "from_path ignores workspace.json sibling (control)"
+        );
+        assert_eq!(before.related_files[0].suffix, "workspace.json");
     }
 
     #[test]

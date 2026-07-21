@@ -1043,16 +1043,21 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
     // Copilot Desktop SQLite: session totals enriched from session-state events.
     // Suppress sessions already present from OTEL so dual-source users are not
-    // double-counted.
+    // double-counted. Fingerprint includes session-state events.jsonl so a
+    // model/cwd-only rewrite still invalidates the cache.
     if let Some(db_path) = &scan_result.copilot_desktop_db {
         let otel_sessions: HashSet<String> = all_messages
             .iter()
             .filter(|message| message.client == "copilot")
             .map(|message| message.session_id.clone())
             .collect();
-        let outcome = load_or_parse_sqlite_source(db_path, &source_cache, pricing, |path| {
-            sessions::copilot_desktop::parse_copilot_desktop_db(path)
-        });
+        let outcome = load_or_parse_source_with_fingerprint(
+            db_path,
+            &source_cache,
+            pricing,
+            message_cache::SourceFingerprint::from_copilot_desktop_path,
+            |path| sessions::copilot_desktop::parse_copilot_desktop_db(path),
+        );
         all_messages.extend(
             outcome
                 .messages
@@ -1065,14 +1070,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
     // VS Code chatSessions: per-request JSONL. Dedup against OTEL + Desktop by
     // dedup_key and (session_id, timestamp) so the three sources never
-    // triple-count the same request.
+    // triple-count the same request. Also register each accepted row into the
+    // tracking sets so duplicates within VS Code do not double-count.
     {
-        let existing_dedup_keys: HashSet<String> = all_messages
+        let mut existing_dedup_keys: HashSet<String> = all_messages
             .iter()
             .filter(|m| m.client == "copilot")
             .filter_map(|m| m.dedup_key.clone())
             .collect();
-        let existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
+        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = all_messages
             .iter()
             .filter(|m| m.client == "copilot")
             .map(|m| (m.session_id.clone(), m.timestamp))
@@ -1081,22 +1087,38 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .copilot_vscode_sessions
             .par_iter()
             .map(|path| {
-                load_or_parse_source(path, &source_cache, pricing, |path| {
-                    sessions::copilot_vscode::parse_copilot_vscode_sessions(&[path.to_path_buf()])
-                })
+                load_or_parse_source_with_fingerprint(
+                    path,
+                    &source_cache,
+                    pricing,
+                    message_cache::SourceFingerprint::from_copilot_vscode_path,
+                    |path| {
+                        sessions::copilot_vscode::parse_copilot_vscode_sessions(&[
+                            path.to_path_buf(),
+                        ])
+                    },
+                )
             })
             .collect();
         for outcome in vscode_outcomes {
-            all_messages.extend(outcome.messages.into_iter().filter(|m| {
-                let key_unique = m
+            for message in outcome.messages {
+                let key_unique = message
                     .dedup_key
                     .as_deref()
                     .map(|k| !existing_dedup_keys.contains(k))
                     .unwrap_or(true);
                 let session_ts_unique = !existing_copilot_session_timestamps
-                    .contains(&(m.session_id.clone(), m.timestamp));
-                key_unique && session_ts_unique
-            }));
+                    .contains(&(message.session_id.clone(), message.timestamp));
+                if !(key_unique && session_ts_unique) {
+                    continue;
+                }
+                if let Some(key) = message.dedup_key.clone() {
+                    existing_dedup_keys.insert(key);
+                }
+                existing_copilot_session_timestamps
+                    .insert((message.session_id.clone(), message.timestamp));
+                all_messages.push(message);
+            }
             if let Some(entry) = outcome.cache_entry {
                 source_cache.insert(entry);
             }
@@ -3136,7 +3158,7 @@ fn scan_messages_streaming<F, S>(
         }
 
         if let Some(db_path) = &scan_result.copilot_desktop_db {
-            let fp = message_cache::SourceFingerprint::from_sqlite_path(db_path);
+            let fp = message_cache::SourceFingerprint::from_copilot_desktop_path(db_path);
             let cache_hit = fp.as_ref().and_then(|fp| {
                 source_cache
                     .get(db_path)
@@ -3181,7 +3203,7 @@ fn scan_messages_streaming<F, S>(
         }
 
         for path in &scan_result.copilot_vscode_sessions {
-            let fp = message_cache::SourceFingerprint::from_path(path);
+            let fp = message_cache::SourceFingerprint::from_copilot_vscode_path(path);
             let cache_hit = fp.as_ref().and_then(|fp| {
                 source_cache
                     .get(path)
@@ -3217,6 +3239,12 @@ fn scan_messages_streaming<F, S>(
                 if !(key_unique && session_ts_unique) {
                     continue;
                 }
+                // Self-dedup: register accepted VS Code rows so later duplicates
+                // within the same or subsequent session files are suppressed.
+                if let Some(key) = m.dedup_key.clone() {
+                    existing_dedup_keys.insert(key);
+                }
+                existing_session_timestamps.insert((m.session_id.clone(), m.timestamp));
                 m.refresh_derived_fields();
                 reprice_lane_message(&mut m, pricing, false);
                 if !passes_client(&m) {
@@ -4584,30 +4612,34 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         );
     }
     {
-        let existing_dedup_keys: HashSet<String> = copilot_unified_msgs
+        let mut existing_dedup_keys: HashSet<String> = copilot_unified_msgs
             .iter()
             .filter_map(|m| m.dedup_key.clone())
             .collect();
-        let existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
+        let mut existing_copilot_session_timestamps: HashSet<(String, i64)> = copilot_unified_msgs
             .iter()
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
-        copilot_unified_msgs.extend(
-            sessions::copilot_vscode::parse_copilot_vscode_sessions(
-                &scan_result.copilot_vscode_sessions,
-            )
-            .into_iter()
-            .filter(|m| {
-                let key_unique = m
-                    .dedup_key
-                    .as_deref()
-                    .map(|k| !existing_dedup_keys.contains(k))
-                    .unwrap_or(true);
-                let session_ts_unique = !existing_copilot_session_timestamps
-                    .contains(&(m.session_id.clone(), m.timestamp));
-                key_unique && session_ts_unique
-            }),
-        );
+        for message in sessions::copilot_vscode::parse_copilot_vscode_sessions(
+            &scan_result.copilot_vscode_sessions,
+        ) {
+            let key_unique = message
+                .dedup_key
+                .as_deref()
+                .map(|k| !existing_dedup_keys.contains(k))
+                .unwrap_or(true);
+            let session_ts_unique = !existing_copilot_session_timestamps
+                .contains(&(message.session_id.clone(), message.timestamp));
+            if !(key_unique && session_ts_unique) {
+                continue;
+            }
+            if let Some(key) = message.dedup_key.clone() {
+                existing_dedup_keys.insert(key);
+            }
+            existing_copilot_session_timestamps
+                .insert((message.session_id.clone(), message.timestamp));
+            copilot_unified_msgs.push(message);
+        }
     }
     let copilot_msgs: Vec<ParsedMessage> =
         copilot_unified_msgs.iter().map(unified_to_parsed).collect();
@@ -11893,6 +11925,88 @@ mod tests {
         assert_eq!(counted.counts.get(ClientId::Copilot), 3);
         assert_eq!(run_materialized().len(), 3);
         assert_eq!(run_streaming().len(), 3);
+    }
+
+    /// M23 Codex review: VS Code must self-dedup accepted rows. Duplicate
+    /// requests with the same (session_id, timestamp) / dedup_key (e.g. kind0
+    /// snapshot + kind2 append of the same request, or the same turn across two
+    /// session files) must count once on materialized, streaming, and count lanes.
+    #[test]
+    #[serial_test::serial]
+    fn m23_copilot_vscode_self_dedup_all_lanes() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let materialized_cache = tempfile::TempDir::new().unwrap();
+        let streaming_cache = tempfile::TempDir::new().unwrap();
+        let home = source_home.path();
+        let clients = vec!["copilot".to_string()];
+        let settings = scanner::ScannerSettings::default();
+
+        let vscode_dir =
+            home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
+        std::fs::create_dir_all(&vscode_dir).unwrap();
+        // Same session_id stem + same timestamp appears twice in one file
+        // (kind0 full snapshot + kind2 append of the identical request). Without
+        // self-dedup the materialized/streaming/count lanes would emit 2.
+        std::fs::write(
+            vscode_dir.join("dup-session.jsonl"),
+            r#"{"kind":0,"v":{"requests":[{"requestId":"r1","timestamp":1782909300000,"modelId":"copilot/auto","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}}
+{"kind":2,"k":["requests"],"v":[{"requestId":"r1","timestamp":1782909300000,"modelId":"copilot/auto","completionTokens":15,"promptTokens":60,"result":{"metadata":{"promptTokens":60,"outputTokens":15,"resolvedModel":"gpt-4o"}}}]}
+"#,
+        )
+        .unwrap();
+
+        let home_s = home.to_string_lossy().into_owned();
+        let scan =
+            scanner::scan_all_clients_with_scanner_settings(&home_s, &clients, false, &settings);
+        assert_eq!(scan.copilot_vscode_sessions.len(), 1);
+
+        let mat = with_isolated_tokscale_cache(materialized_cache.path(), || {
+            let mut messages = parse_all_messages_with_pricing_with_env_strategy(
+                &home_s, &clients, None, false, &settings,
+            );
+            messages.retain(|m| m.client == "copilot");
+            messages
+        });
+        let streaming = with_isolated_tokscale_cache(streaming_cache.path(), || {
+            let mut messages = Vec::new();
+            scan_messages_streaming(
+                &home_s,
+                &clients,
+                None,
+                false,
+                &settings,
+                &|_| true,
+                &mut |message| {
+                    if message.client == "copilot" {
+                        messages.push(message.clone());
+                    }
+                },
+            );
+            messages
+        });
+        let counted = parse_local_clients(LocalParseOptions {
+            home_dir: Some(home_s),
+            use_env_roots: false,
+            clients: Some(clients),
+            scanner_settings: settings,
+            ..Default::default()
+        })
+        .unwrap();
+
+        assert_eq!(
+            mat.len(),
+            1,
+            "materialized must self-dedup VS Code rows: {:?}",
+            mat.iter()
+                .map(|m| (&m.session_id, m.timestamp, m.dedup_key.as_deref()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(streaming.len(), 1, "streaming must self-dedup VS Code rows");
+        assert_eq!(
+            counted.counts.get(ClientId::Copilot),
+            1,
+            "count path must self-dedup VS Code rows"
+        );
     }
 
     // micode (`$XDG_DATA_HOME/micode/*.db`, WAL-mode SQLite) must be discovered

@@ -104,20 +104,18 @@ fn request_to_message(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
+    // Strict Copilot marker: do not treat bare `resolvedModel` as sufficient.
+    // Accept only when modelId is under the `copilot/` provider namespace, or a
+    // participant/agent metadata field clearly names Copilot. Generic chat
+    // providers that only carry tokens + resolvedModel must be rejected.
+    if !is_copilot_request(req, model_id_raw) {
+        return None;
+    }
+
     let model_id = resolved_model
         .or_else(|| model_id_raw.map(|m| m.strip_prefix("copilot/").unwrap_or(m)))
         .unwrap_or("auto")
         .to_string();
-
-    // Filter: only include requests that are copilot-originated
-    // (modelId starts with "copilot/" or resolved model is present)
-    let is_copilot = resolved_model.is_some()
-        || model_id_raw
-            .map(|m| m.starts_with("copilot/"))
-            .unwrap_or(false);
-    if !is_copilot {
-        return None;
-    }
 
     let provider_id = inferred_provider_from_model(&model_id)
         .unwrap_or("github-copilot")
@@ -162,6 +160,32 @@ fn request_to_message(
     Some(message)
 }
 
+/// True when the request is clearly Copilot-originated.
+fn is_copilot_request(req: &Value, model_id_raw: Option<&str>) -> bool {
+    if model_id_raw.is_some_and(|m| m.starts_with("copilot/")) {
+        return true;
+    }
+
+    // Common participant/agent metadata paths used by VS Code chat sessions.
+    const PARTICIPANT_PATHS: &[&str] = &[
+        "/participant",
+        "/result/metadata/participant",
+        "/response/participant",
+        "/agent",
+        "/result/metadata/agent",
+        "/response/agent",
+    ];
+    for path in PARTICIPANT_PATHS {
+        if let Some(value) = req.pointer(path).and_then(Value::as_str) {
+            if value.to_ascii_lowercase().contains("copilot") {
+                return true;
+            }
+        }
+    }
+
+    false
+}
+
 /// Workspace metadata sibling for a VS Code chatSessions JSONL path:
 /// `workspaceStorage/{hash}/chatSessions/{uuid}.jsonl` →
 /// `workspaceStorage/{hash}/workspace.json`.
@@ -183,18 +207,75 @@ fn read_workspace_for_file(jsonl_path: &Path) -> Option<(String, Option<String>)
         .and_then(Value::as_str)
         .or_else(|| obj.get("workspace").and_then(Value::as_str))?;
 
-    // folder is a URI like "file:///Users/alice/project"
-    let path_str = if let Some(stripped) = folder.strip_prefix("file://") {
-        // On Windows "file:///C:/..." → strip "file://" leaving "/C:/..."
-        // normalize_workspace_key handles slashes
-        stripped
+    let path_str = decode_file_uri(folder);
+    let workspace_key = normalize_workspace_key(&path_str)?;
+    let workspace_label = workspace_label_from_key(&workspace_key);
+    Some((workspace_key, workspace_label))
+}
+
+/// Decode a VS Code workspace folder URI into a filesystem-style path string
+/// suitable for [`normalize_workspace_key`].
+///
+/// - strips `file://` or bare `file:`
+/// - percent-decodes path segments (`%20` → space, etc.)
+/// - Windows drive form: `/C:/Users/...` → `C:/Users/...`
+/// - UNC: keeps `//server/share` form after decode
+fn decode_file_uri(folder: &str) -> String {
+    let without_scheme = if let Some(rest) = folder.strip_prefix("file://") {
+        rest
+    } else if let Some(rest) = folder.strip_prefix("file:") {
+        rest
     } else {
         folder
     };
 
-    let workspace_key = normalize_workspace_key(path_str)?;
-    let workspace_label = workspace_label_from_key(&workspace_key);
-    Some((workspace_key, workspace_label))
+    let decoded = percent_decode_path(without_scheme);
+
+    // Windows drive URI: file:///C:/Users/... → /C:/Users/... → C:/Users/...
+    if decoded.len() >= 3 {
+        let bytes = decoded.as_bytes();
+        if bytes[0] == b'/'
+            && bytes[1].is_ascii_alphabetic()
+            && bytes[2] == b':'
+            && (decoded.len() == 3 || bytes[3] == b'/' || bytes[3] == b'\\')
+        {
+            return decoded[1..].to_string();
+        }
+    }
+
+    // UNC after stripping file://: //server/share or ///server/share variants.
+    // `file://server/share` → `server/share` (no leading //); restore UNC form
+    // only when the original had the authority-style host.
+    // `file:////server/share` → `//server/share` after strip — keep as-is.
+    decoded
+}
+
+/// Minimal percent-decoder for path characters. Invalid sequences are left as-is.
+fn percent_decode_path(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (from_hex(bytes[i + 1]), from_hex(bytes[i + 2])) {
+                out.push((hi << 4) | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn from_hex(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 #[cfg(test)]
@@ -337,5 +418,102 @@ mod tests {
         );
 
         assert!(parse_copilot_vscode_sessions(&[path]).is_empty());
+    }
+
+    #[test]
+    fn resolved_model_alone_is_not_copilot() {
+        // Generic chat providers may emit tokens + resolvedModel without being
+        // Copilot. Bare resolvedModel must not pass the marker check.
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("eeeeeeee-0000-0000-0000-000000000000.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r6","timestamp":5000,"modelId":"other-provider/gpt-4o","completionTokens":50,"promptTokens":300,"result":{"metadata":{"resolvedModel":"gpt-4o","promptTokens":300,"outputTokens":50}}}]}"#,
+            ],
+        );
+
+        assert!(
+            parse_copilot_vscode_sessions(&[path]).is_empty(),
+            "resolvedModel-only non-copilot rows must be rejected"
+        );
+    }
+
+    #[test]
+    fn participant_metadata_accepts_copilot_without_model_id_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("ffffffff-0000-0000-0000-000000000000.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r7","timestamp":6000,"modelId":"auto","completionTokens":10,"promptTokens":100,"result":{"metadata":{"resolvedModel":"gpt-4o","participant":"github.copilot.default"}}}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].model_id, "gpt-4o");
+    }
+
+    #[test]
+    fn decode_file_uri_windows_drive_and_percent_encoded() {
+        assert_eq!(
+            decode_file_uri("file:///C:/Users/alice/repo"),
+            "C:/Users/alice/repo"
+        );
+        assert_eq!(
+            decode_file_uri("file:///Users/alice/My%20Project"),
+            "/Users/alice/My Project"
+        );
+        assert_eq!(
+            decode_file_uri("file:///Users/alice/repo"),
+            "/Users/alice/repo"
+        );
+        // bare file: prefix
+        assert_eq!(decode_file_uri("file:/Users/alice/repo"), "/Users/alice/repo");
+        // UNC kept after decode
+        assert_eq!(
+            decode_file_uri("file:////server/share/repo"),
+            "//server/share/repo"
+        );
+    }
+
+    #[test]
+    fn workspace_json_file_uri_normalized() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash_dir = dir.path().join("workspaceStorage").join("hash1");
+        let sessions_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("aaaaaaaa-1111-0000-0000-000000000000.jsonl");
+
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            br#"{"folder":"file:///C:/Users/alice/My%20Project"}"#,
+        )
+        .unwrap();
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r8","timestamp":7000,"modelId":"copilot/auto","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("C:/Users/alice/My Project")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("My Project")
+        );
     }
 }
