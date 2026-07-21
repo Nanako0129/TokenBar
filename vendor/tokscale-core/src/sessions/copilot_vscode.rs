@@ -275,7 +275,12 @@ fn request_to_message(
 
     let timestamp_ms = request_i64_first(
         req,
-        &["/timestamp", "/response/timestamp", "/result/timestamp"],
+        &[
+            "/timestamp",
+            "/response/timestamp",
+            "/response/result/timestamp",
+            "/result/timestamp",
+        ],
     );
 
     let resolved_model = request_str_first(
@@ -463,6 +468,7 @@ fn request_cache_write_tokens(req: &Value) -> i64 {
         "/response/result/metadata/cache_write_tokens",
         "/response/result/metadata/cacheWrite",
         "/response/result/metadata/cacheCreationTokens",
+        "/response/result/metadata/cache_creation_tokens",
         "/response/metadata/cacheWriteTokens",
         "/response/cacheWriteTokens",
     ];
@@ -496,10 +502,13 @@ fn request_billed_cost(req: &Value) -> (f64, bool) {
         "/result/metadata/nanoAiu",
         "/result/metadata/copilotUsageNanoAiu",
         "/response/nanoAiu",
+        "/response/copilotUsageNanoAiu",
         "/response/result/nanoAiu",
+        "/response/result/copilotUsageNanoAiu",
         "/response/result/metadata/nanoAiu",
         "/response/result/metadata/copilotUsageNanoAiu",
         "/response/metadata/nanoAiu",
+        "/response/metadata/copilotUsageNanoAiu",
     ];
     for path in NANO_PATHS {
         if let Some(nano) = req.pointer(path).and_then(json_number_as_i64) {
@@ -1624,6 +1633,103 @@ mod tests {
         assert_eq!(m.tokens.output, 40);
         assert_eq!(m.timestamp, 1782909300000, "prefer positive response timestamp over root 0");
         assert_eq!(m.model_id, "gpt-4o");
+    }
+
+    /// Root `timestamp: 0` must not shadow a real `/response/result/timestamp`.
+    #[test]
+    fn response_result_timestamp_preferred_over_root_zero() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-rts-0000-0000-000000000007.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-rts","timestamp":0,"modelId":"copilot/auto","promptTokens":0,"completionTokens":0}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"result":{"timestamp":1782909300000,"metadata":{"promptTokens":55,"outputTokens":12,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1, "expected one message: {messages:?}");
+        assert_eq!(
+            messages[0].timestamp, 1782909300000,
+            "prefer /response/result/timestamp over root 0"
+        );
+        assert_eq!(messages[0].tokens.input, 55);
+        assert_eq!(messages[0].tokens.output, 12);
+    }
+
+    /// `copilotUsageNanoAiu` under `response` / `response.result` /
+    /// `response.metadata` marks provider-reported USD (parallel to root/result).
+    #[test]
+    fn response_wrapped_copilot_usage_nano_aiu_is_provider_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+
+        // 1.5e9 nano AIU = 1.5 AI credits = $0.015 under response.result.
+        let path = sessions_dir.join("cccccccc-nano-0000-0000-000000000008.jsonl");
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-nano","timestamp":1782909300000,"modelId":"copilot/auto","promptTokens":10,"completionTokens":5}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"result":{"copilotUsageNanoAiu":1500000000,"metadata":{"promptTokens":10,"outputTokens":5,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert!(
+            (messages[0].cost - 0.015).abs() < 1e-12,
+            "1.5e9 nano → $0.015, got {}",
+            messages[0].cost
+        );
+        assert!(messages[0].has_authoritative_cost());
+        assert_eq!(messages[0].cost_source, crate::CostSource::ProviderReported);
+
+        // Parallel under response.metadata.copilotUsageNanoAiu.
+        let path2 = sessions_dir.join("cccccccc-nano-0000-0000-000000000009.jsonl");
+        write_jsonl(
+            &path2,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-nano2","timestamp":1782909300000,"modelId":"copilot/auto","promptTokens":10,"completionTokens":5,"response":{"metadata":{"copilotUsageNanoAiu":2000000000,"resolvedModel":"gpt-4o"}}}]}}"#,
+            ],
+        );
+        let messages2 = parse_copilot_vscode_sessions(&[path2]);
+        assert_eq!(messages2.len(), 1);
+        assert!(
+            (messages2[0].cost - 0.02).abs() < 1e-12,
+            "2e9 nano → $0.02, got {}",
+            messages2[0].cost
+        );
+        assert!(messages2[0].has_authoritative_cost());
+    }
+
+    /// `/response/result/metadata/cache_creation_tokens` must yield non-zero
+    /// cache_write after kind:1/2 response deep-set.
+    #[test]
+    fn response_result_metadata_cache_creation_tokens() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-ccache-0000-0000-00000000000a.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"r-ccache","timestamp":1782909300000,"modelId":"copilot/gpt-4o","promptTokens":0,"completionTokens":0}]}}"#,
+                r#"{"kind":2,"k":["requests",0,"response"],"v":{"result":{"metadata":{"promptTokens":100,"outputTokens":20,"cache_creation_tokens":7,"resolvedModel":"gpt-4o"}}}}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1, "expected message: {messages:?}");
+        assert_eq!(
+            messages[0].tokens.cache_write, 7,
+            "cache_creation_tokens under response.result.metadata must be non-zero"
+        );
+        assert_eq!(messages[0].tokens.output, 20);
     }
 
     /// `billedCredit` / `billed_credit` under `response.result.details` (and
