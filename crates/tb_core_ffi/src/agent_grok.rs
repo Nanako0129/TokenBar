@@ -1,15 +1,21 @@
-//! Grok Build subscription quota (weekly SuperGrok credits).
+//! Grok Build subscription quota — two meters, shown as two windows.
 //!
 //! Grok Build stores OIDC credentials at `$GROK_HOME/auth.json` (default
 //! `~/.grok/auth.json`). TokenBar refreshes the access token against
-//! `auth.x.ai` and reads weekly credit usage from the same private billing
+//! `auth.x.ai` and reads usage from two views of the same private billing
 //! endpoint the CLI uses:
 //!
-//!   GET https://cli-chat-proxy.grok.com/v1/billing?format=credits
+//!   Weekly:  GET /v1/billing?format=credits  -> creditUsagePercent / GrokBuild
+//!   Monthly: GET /v1/billing                 -> used / monthlyLimit
 //!
-//! Prefer the `GrokBuild` product percent when present; fall back to overall
-//! `creditUsagePercent`. Omit the card entirely when no Grok auth is on disk
-//! (same stance as Copilot).
+//! The weekly view is the SuperGrok weekly credit meter (the primary "will I
+//! run out this week" number). Right after a weekly reset with no usage yet, it
+//! OMITS the percent fields while still reporting the period — that is a genuine
+//! 0%, not an error, and was the original cause of the card erroring. The
+//! monthly view is the included-allowance meter (percent = used / monthlyLimit)
+//! over a monthly period. The monthly call is best-effort with a short timeout:
+//! a failure or hang there never sinks the card when the weekly meter succeeded.
+//! Omit the card entirely when no Grok auth is on disk (same stance as Copilot).
 
 use crate::agent_account_scope::{
     self, AccountScope, AccountScopeError, RefreshCheckpoint, RefreshScopeTransaction,
@@ -23,9 +29,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const GROK_TOKEN_URL: &str = "https://auth.x.ai/oauth2/token";
-const GROK_BILLING_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+/// Weekly SuperGrok credits meter. Returns `creditUsagePercent` / a `GrokBuild`
+/// product percent over a weekly `currentPeriod`. Right after a weekly reset,
+/// with no usage recorded yet, xAI OMITS those percent fields — the period is
+/// still reported, so that state is a genuine 0%, not an error.
+const GROK_CREDITS_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing?format=credits";
+/// Monthly included-allowance meter. The default view reports `monthlyLimit` +
+/// `used` over a monthly billing period (percent = used / monthlyLimit).
+const GROK_MONTHLY_URL: &str = "https://cli-chat-proxy.grok.com/v1/billing";
 /// Refresh a few minutes early so a clock-skewed expiry doesn't 401 the billing call.
 const ACCESS_SKEW_SECS: i64 = 120;
+/// Best-effort monthly GET budget. Grok is joined in `agent_usage::run`, so a
+/// full 30s hang on the additive meter would stall the whole quota payload after
+/// the weekly meter is already ready.
+const MONTHLY_TIMEOUT_SECS: u64 = 5;
+/// The exact `currentPeriod.type` xAI stamps on the weekly credits meter. Matched
+/// exactly (not by substring) so `..._BIWEEKLY` / `..._NOT_WEEKLY` can't pass.
+const WEEKLY_PERIOD_TYPE: &str = "USAGE_PERIOD_TYPE_WEEKLY";
+const WEEKLY_WINDOW_KEY: &str = "billing.weekly.v1";
+const MONTHLY_WINDOW_KEY: &str = "billing.monthly.v1";
 
 pub(crate) struct GrokData {
     pub identity: Option<AgentIdentity>,
@@ -82,6 +104,17 @@ struct BillingResponse {
 struct BillingConfig {
     #[serde(default)]
     current_period: Option<UsagePeriod>,
+    /// Unified-billing allowance and consumption (`{ "val": n }`). Percent is
+    /// `used / monthly_limit`. Present in the default billing view.
+    #[serde(default)]
+    monthly_limit: Option<CentVal>,
+    #[serde(default)]
+    used: Option<CentVal>,
+    /// RPC-shaped consumption (`usage.totalUsed`); accepted defensively in case
+    /// an account nests the consumed amount under `usage` instead of `used`.
+    #[serde(default)]
+    usage: Option<UnifiedUsage>,
+    /// Credits-view percent fields (`?format=credits`).
     #[serde(default)]
     credit_usage_percent: Option<Box<RawValue>>,
     #[serde(default)]
@@ -90,6 +123,20 @@ struct BillingConfig {
     billing_period_start: Option<String>,
     #[serde(default)]
     billing_period_end: Option<String>,
+}
+
+/// xAI wraps billing amounts as `{ "val": n }` on the wire.
+#[derive(Debug, Deserialize)]
+struct CentVal {
+    #[serde(default)]
+    val: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UnifiedUsage {
+    #[serde(default)]
+    total_used: Option<CentVal>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -149,8 +196,10 @@ async fn fetch_with_credentials(
         .build()
         .map_err(|e| format!("build Grok billing client: {e}"))?;
 
+    // Weekly SuperGrok credits view is the primary meter and owns the full
+    // 401 -> refresh -> retry that repairs a mid-window token revocation.
     let response = client
-        .get(GROK_BILLING_URL)
+        .get(GROK_CREDITS_URL)
         .bearer_auth(&credentials.access_token)
         .header(reqwest::header::ACCEPT, "application/json")
         .header(reqwest::header::USER_AGENT, "TokenBar")
@@ -173,7 +222,7 @@ async fn fetch_with_credentials(
             credentials = refreshed.0;
             refreshed_scope = merge_refreshed_scope(refreshed_scope, refreshed.1);
             let retry = client
-                .get(GROK_BILLING_URL)
+                .get(GROK_CREDITS_URL)
                 .bearer_auth(&credentials.access_token)
                 .header(reqwest::header::ACCEPT, "application/json")
                 .header(reqwest::header::USER_AGENT, "TokenBar")
@@ -193,7 +242,15 @@ async fn fetch_with_credentials(
             }
             let account_scope =
                 refreshed_scope.unwrap_or_else(|| credentials.resolve_account_scope());
-            return map_billing(&retry_body, &credentials, now, account_scope);
+            // Monthly is additive; never let its failure sink a successful weekly.
+            let monthly_body = fetch_monthly_best_effort(&credentials).await;
+            return build_grok_data(
+                &retry_body,
+                monthly_body.as_deref(),
+                &credentials,
+                now,
+                account_scope,
+            );
         }
         return Err("Grok OAuth token expired or invalid. Run `grok` to log in again.".to_string());
     }
@@ -202,7 +259,38 @@ async fn fetch_with_credentials(
     }
 
     let account_scope = refreshed_scope.unwrap_or_else(|| credentials.resolve_account_scope());
-    map_billing(&body, &credentials, now, account_scope)
+    // Monthly unified-billing view is best-effort: short timeout, no OAuth
+    // refresh/rotate on 4xx (weekly just proved the token valid).
+    let monthly_body = fetch_monthly_best_effort(&credentials).await;
+    build_grok_data(
+        &body,
+        monthly_body.as_deref(),
+        &credentials,
+        now,
+        account_scope,
+    )
+}
+
+/// GET the monthly default billing view. Never refreshes credentials on 4xx —
+/// the weekly call already owns token repair — and uses a short timeout so a
+/// hung additive request cannot stall the joined quota payload.
+async fn fetch_monthly_best_effort(credentials: &GrokCredentials) -> Option<String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(MONTHLY_TIMEOUT_SECS))
+        .build()
+        .ok()?;
+    let response = client
+        .get(GROK_MONTHLY_URL)
+        .bearer_auth(&credentials.access_token)
+        .header(reqwest::header::ACCEPT, "application/json")
+        .header(reqwest::header::USER_AGENT, "TokenBar")
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    response.text().await.ok()
 }
 
 fn merge_refreshed_scope(
@@ -220,62 +308,104 @@ fn merge_refreshed_scope(
     })
 }
 
-fn map_billing(
-    body: &str,
+/// Assemble the card's windows from the weekly credits view (required path) and
+/// the monthly unified view (best-effort). Errors only when neither yields a
+/// window.
+fn build_grok_data(
+    credits_body: &str,
+    monthly_body: Option<&str>,
     credentials: &GrokCredentials,
     now: DateTime<Utc>,
     account_scope: Result<AccountScope, AccountScopeError>,
 ) -> Result<GrokData, String> {
-    let payload: BillingResponse =
-        serde_json::from_str(body).map_err(|e| format!("decode Grok billing response: {e}"))?;
-    let config = payload
-        .config
-        .ok_or_else(|| "Grok billing response missing config.".to_string())?;
+    let credits: BillingResponse = serde_json::from_str(credits_body)
+        .map_err(|e| format!("decode Grok billing response: {e}"))?;
 
-    let used_percent = used_percent_from_config(&config).ok_or_else(|| {
-        "Grok billing response has no creditUsagePercent or GrokBuild usage.".to_string()
-    })?;
+    let mut windows = Vec::new();
+    if let Some(config) = credits.config.as_ref() {
+        if let Some(window) = weekly_window(config, now) {
+            windows.push(window);
+        }
+    }
+    if let Some(body) = monthly_body {
+        if let Ok(monthly) = serde_json::from_str::<BillingResponse>(body) {
+            if let Some(config) = monthly.config.as_ref() {
+                if let Some(window) = monthly_window(config, now) {
+                    windows.push(window);
+                }
+            }
+        }
+    }
 
-    let period = period_details(&config);
-    let mut window = match period.kind {
-        Some((label, window_key)) => UsageWindow::from_provider_used_percent(
-            label.to_string(),
-            used_percent,
-            period.end,
-            now,
-        )
-        .with_identity(
-            window_key,
-            Some(window_key.to_string()),
-            period.duration,
-            None,
-        ),
-        None => UsageWindow::from_provider_used_percent(
-            "Unknown".to_string(),
-            used_percent,
-            period.end,
-            now,
-        )
-        .with_identity("row.billing.unknown.v1", None, None, None),
-    };
-    if period.invalid_evidence && period.kind.is_some() {
-        window.unavailable("invalidEvidence");
+    if windows.is_empty() {
+        return Err("Grok billing response had no usable weekly or monthly usage.".to_string());
     }
 
     Ok(GrokData {
         identity: Some(AgentIdentity {
             email: credentials.email.clone(),
-            plan: payload
+            plan: credits
                 .subscription_tiers
                 .filter(|s| !s.trim().is_empty())
                 .map(|s| s.trim().to_string()),
         }),
         account_scope,
-        windows: vec![window],
+        windows,
     })
 }
 
-fn used_percent_from_config(config: &BillingConfig) -> Option<f64> {
+/// Weekly SuperGrok credits window. When the credits view reports a percent, use
+/// it. When it omits the percent, that is only a genuine 0% if the meter's
+/// period is *well-formed* — an explicit weekly `currentPeriod` with a positive
+/// start→end window (a freshly reset week with no usage yet). A malformed,
+/// partial, or non-weekly period is "unknown", not zero, and must not be
+/// fabricated into a Weekly 0%/100%-remaining across the FFI, so return `None`.
+fn weekly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWindow> {
+    let used_percent = match weekly_used_percent(config) {
+        Some(pct) => pct,
+        // Absent percent is a genuine 0% ONLY when a self-contained weekly
+        // `currentPeriod` proves the meter exists: the weekly type AND a
+        // positive start→end window must come from that same object, not a mix
+        // of a weekly-typed period and unrelated flat billing dates.
+        None if self_contained_weekly_period(config).is_some() => 0.0,
+        None => return None,
+    };
+    let period = period_bounds(config);
+    let mut window = UsageWindow::from_provider_used_percent(
+        "Weekly".to_string(),
+        used_percent,
+        period.end,
+        now,
+    )
+    .with_identity(
+        WEEKLY_WINDOW_KEY,
+        Some(WEEKLY_WINDOW_KEY.to_string()),
+        period.duration,
+        None,
+    );
+    if period.invalid_evidence {
+        window.unavailable("invalidEvidence");
+    }
+    Some(window)
+}
+
+/// The positive window length of a self-contained weekly `currentPeriod` — the
+/// exact weekly type plus a `start < end` pair parsed from that same object —
+/// or `None`. This is the "the weekly meter exists" signal that lets an absent
+/// percent be read as 0%; it deliberately does not consult the flat
+/// `billingPeriod*` fields, so a partial or non-weekly period cannot borrow an
+/// unrelated window to masquerade as a weekly meter.
+fn self_contained_weekly_period(config: &BillingConfig) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let period = config.current_period.as_ref()?;
+    if period.period_type.as_deref() != Some(WEEKLY_PERIOD_TYPE) {
+        return None;
+    }
+    let start = period.start.as_deref().and_then(parse_timestamp)?;
+    let end = period.end.as_deref().and_then(parse_timestamp)?;
+    (end > start).then_some((start, end))
+}
+
+fn weekly_used_percent(config: &BillingConfig) -> Option<f64> {
     if let Some(products) = config.product_usage.as_ref() {
         for product in products {
             let name = product.product.as_deref().unwrap_or("");
@@ -292,6 +422,48 @@ fn used_percent_from_config(config: &BillingConfig) -> Option<f64> {
         .and_then(valid_percentage)
 }
 
+/// Monthly included-allowance window: percent = used / monthlyLimit. Only
+/// emitted when the consumed amount is *explicitly present* — xAI reports a
+/// genuine zero as `{ "val": 0 }` (the `history` cycles do exactly this), so an
+/// absent `used`/`usage.totalUsed` means "unknown", not zero, and must not
+/// fabricate a misleading 100%-remaining across the FFI.
+fn monthly_window(config: &BillingConfig, now: DateTime<Utc>) -> Option<UsageWindow> {
+    let limit = config
+        .monthly_limit
+        .as_ref()
+        .and_then(|c| c.val)
+        .filter(|v| *v > 0)?;
+    let used = config
+        .used
+        .as_ref()
+        .and_then(|c| c.val)
+        .or_else(|| {
+            config
+                .usage
+                .as_ref()
+                .and_then(|u| u.total_used.as_ref())
+                .and_then(|c| c.val)
+        })?;
+    let used_percent = (used as f64 / limit as f64 * 100.0).clamp(0.0, 100.0);
+    let period = period_bounds(config);
+    let mut window = UsageWindow::from_provider_used_percent(
+        "Monthly".to_string(),
+        used_percent,
+        period.end,
+        now,
+    )
+    .with_identity(
+        MONTHLY_WINDOW_KEY,
+        Some(MONTHLY_WINDOW_KEY.to_string()),
+        period.duration,
+        None,
+    );
+    if period.invalid_evidence {
+        window.unavailable("invalidEvidence");
+    }
+    Some(window)
+}
+
 fn valid_percentage(raw: &RawValue) -> Option<f64> {
     serde_json::from_str::<f64>(raw.get())
         .ok()
@@ -299,25 +471,16 @@ fn valid_percentage(raw: &RawValue) -> Option<f64> {
 }
 
 struct PeriodMeta {
-    kind: Option<(&'static str, &'static str)>,
     end: Option<DateTime<Utc>>,
     duration: Option<DurationEvidence>,
     invalid_evidence: bool,
 }
 
-fn period_details(config: &BillingConfig) -> PeriodMeta {
+/// Reset instant and duration evidence from a config's period. Prefers the
+/// explicit `currentPeriod`, falling back to the flat `billingPeriodStart/End`.
+/// Identity (label / window_key) is fixed per meter and is not derived here.
+fn period_bounds(config: &BillingConfig) -> PeriodMeta {
     let period = config.current_period.as_ref();
-    let period_type = period
-        .and_then(|period| period.period_type.as_deref())
-        .unwrap_or("");
-    let kind = if period_type.to_ascii_uppercase().contains("WEEKLY") {
-        Some(("Weekly", "billing.weekly.v1"))
-    } else if period_type.to_ascii_uppercase().contains("MONTHLY") {
-        Some(("Monthly", "billing.monthly.v1"))
-    } else {
-        None
-    };
-
     let start_raw = period
         .and_then(|period| period.start.as_deref())
         .or(config.billing_period_start.as_deref());
@@ -342,7 +505,6 @@ fn period_details(config: &BillingConfig) -> PeriodMeta {
         _ => (None, false),
     };
     PeriodMeta {
-        kind,
         end,
         duration,
         invalid_evidence,
@@ -715,6 +877,152 @@ mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
 
+    /// The two real payloads captured from the live endpoint, side by side.
+    const WEEKLY_CREDITS_BODY: &str = r#"{
+        "config": {
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "start": "2026-07-15T00:00:00+00:00",
+                "end": "2026-07-22T00:00:00+00:00"
+            },
+            "creditUsagePercent": 4.0,
+            "productUsage": [ { "product": "GrokBuild", "usagePercent": 4.0 } ],
+            "isUnifiedBillingUser": true,
+            "billingPeriodStart": "2026-07-15T00:00:00+00:00",
+            "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
+        },
+        "subscriptionTiers": "X Premium+"
+    }"#;
+    const MONTHLY_BODY: &str = r#"{
+        "config": {
+            "monthlyLimit": { "val": 15000 },
+            "used": { "val": 216 },
+            "billingPeriodStart": "2026-07-01T00:00:00+00:00",
+            "billingPeriodEnd": "2026-08-01T00:00:00+00:00"
+        }
+    }"#;
+    /// The empty-week credits payload: period present, percent fields omitted.
+    const EMPTY_WEEK_CREDITS_BODY: &str = r#"{
+        "config": {
+            "currentPeriod": {
+                "type": "USAGE_PERIOD_TYPE_WEEKLY",
+                "start": "2026-07-15T00:00:00+00:00",
+                "end": "2026-07-22T00:00:00+00:00"
+            },
+            "onDemandCap": { "val": 0 },
+            "isUnifiedBillingUser": true,
+            "billingPeriodStart": "2026-07-15T00:00:00+00:00",
+            "billingPeriodEnd": "2026-07-22T00:00:00+00:00"
+        }
+    }"#;
+
+    fn test_credentials() -> GrokCredentials {
+        GrokCredentials {
+            auth_path: PathBuf::from("/tmp/unused"),
+            entry_key: "k".into(),
+            access_token: "t".into(),
+            refresh_token: "r".into(),
+            client_id: "c".into(),
+            expires_at: None,
+            email: Some("user@example.com".into()),
+            raw_json: Value::Object(Default::default()),
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        DateTime::parse_from_rfc3339("2026-07-21T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc)
+    }
+
+    fn scope_none() -> Result<AccountScope, AccountScopeError> {
+        Err(AccountScopeError::NoTrustedEvidence)
+    }
+
+    #[test]
+    fn builds_both_weekly_and_monthly_windows() {
+        let data = build_grok_data(
+            WEEKLY_CREDITS_BODY,
+            Some(MONTHLY_BODY),
+            &test_credentials(),
+            now(),
+            scope_none(),
+        )
+        .unwrap();
+        assert_eq!(data.windows.len(), 2);
+        // [0] Weekly: 4% used -> 96% remaining, resets 2026-07-22.
+        assert_eq!(data.windows[0].label_for_test(), "Weekly");
+        assert_eq!(
+            data.windows[0].pace_window_key_for_test(),
+            Some("billing.weekly.v1")
+        );
+        assert!((data.windows[0].remaining_for_test() - 96.0).abs() < 0.01);
+        // [1] Monthly: 216/15000 = 1.44% used -> 98.56% remaining, resets 2026-08-01.
+        assert_eq!(data.windows[1].label_for_test(), "Monthly");
+        assert_eq!(
+            data.windows[1].pace_window_key_for_test(),
+            Some("billing.monthly.v1")
+        );
+        assert!((data.windows[1].remaining_for_test() - 98.56).abs() < 0.01);
+        assert_eq!(
+            data.identity.as_ref().and_then(|i| i.email.as_deref()),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            data.identity.as_ref().and_then(|i| i.plan.as_deref()),
+            Some("X Premium+")
+        );
+    }
+
+    #[test]
+    fn empty_week_shows_zero_percent_weekly_not_error() {
+        // THE original bug: a freshly reset week with no usage yet omits the
+        // percent fields. With a self-contained weekly period still present,
+        // that is 0% used, and the card must show a Weekly window rather than
+        // erroring.
+        let data = build_grok_data(
+            EMPTY_WEEK_CREDITS_BODY,
+            None,
+            &test_credentials(),
+            now(),
+            scope_none(),
+        )
+        .unwrap();
+        assert_eq!(data.windows.len(), 1);
+        assert_eq!(data.windows[0].label_for_test(), "Weekly");
+        assert!((data.windows[0].remaining_for_test() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn monthly_failure_still_shows_weekly() {
+        // The monthly view is best-effort: an unparseable monthly body must not
+        // sink the card when the weekly meter succeeded.
+        let data = build_grok_data(
+            WEEKLY_CREDITS_BODY,
+            Some("not json"),
+            &test_credentials(),
+            now(),
+            scope_none(),
+        )
+        .unwrap();
+        assert_eq!(data.windows.len(), 1);
+        assert_eq!(data.windows[0].label_for_test(), "Weekly");
+    }
+
+    #[test]
+    fn no_usable_windows_is_an_error() {
+        // Credits view with neither a percent nor a period, and no monthly data,
+        // has nothing to show — surface an honest error, not an empty card.
+        let data = build_grok_data(
+            r#"{ "config": {} }"#,
+            None,
+            &test_credentials(),
+            now(),
+            scope_none(),
+        );
+        assert!(data.is_err());
+    }
+
     #[test]
     fn prefers_grok_build_product_percent() {
         let config: BillingConfig = serde_json::from_str(
@@ -727,7 +1035,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!((used_percent_from_config(&config).unwrap() - 4.0).abs() < 0.01);
+        assert!((weekly_used_percent(&config).unwrap() - 4.0).abs() < 0.01);
     }
 
     #[test]
@@ -742,7 +1050,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!((used_percent_from_config(&config).unwrap() - 12.5).abs() < 0.01);
+        assert!((weekly_used_percent(&config).unwrap() - 12.5).abs() < 0.01);
     }
 
     #[test]
@@ -756,7 +1064,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(used_percent_from_config(&invalid_product).is_none());
+        assert!(weekly_used_percent(&invalid_product).is_none());
 
         for invalid in ["1e400", r#""NaN""#] {
             let malformed_product: BillingConfig = serde_json::from_str(&format!(
@@ -768,7 +1076,7 @@ mod tests {
                 }}"#
             ))
             .unwrap();
-            assert!(used_percent_from_config(&malformed_product).is_none());
+            assert!(weekly_used_percent(&malformed_product).is_none());
         }
 
         let invalid: BillingConfig = serde_json::from_str(
@@ -780,7 +1088,7 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(used_percent_from_config(&invalid).is_none());
+        assert!(weekly_used_percent(&invalid).is_none());
     }
 
     #[test]
@@ -800,27 +1108,12 @@ mod tests {
             },
             "subscriptionTiers": "X Premium+"
         }"#;
-        let credentials = GrokCredentials {
-            auth_path: PathBuf::from("/tmp/unused"),
-            entry_key: "k".into(),
-            access_token: "t".into(),
-            refresh_token: "r".into(),
-            client_id: "c".into(),
-            expires_at: None,
-            email: Some("user@example.com".into()),
-            raw_json: Value::Object(Default::default()),
-        };
+        let credentials = test_credentials();
         assert_eq!(credentials.scope_marker(), Some(b"r".as_slice()));
         let now = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let data = map_billing(
-            body,
-            &credentials,
-            now,
-            Err(AccountScopeError::NoTrustedEvidence),
-        )
-        .unwrap();
+        let data = build_grok_data(body, None, &credentials, now, scope_none()).unwrap();
         assert_eq!(data.windows.len(), 1);
         assert_eq!(data.windows[0].label_for_test(), "Weekly");
         assert_eq!(data.windows[0].window_minutes_for_test(), Some(10_080));
@@ -840,38 +1133,108 @@ mod tests {
     }
 
     #[test]
-    fn stage4_grok_period_routes_are_exact_and_fail_closed() {
-        let credentials = GrokCredentials {
-            auth_path: PathBuf::from("/tmp/unused"),
-            entry_key: "k".into(),
-            access_token: "t".into(),
-            refresh_token: "r".into(),
-            client_id: "c".into(),
-            expires_at: None,
-            email: None,
-            raw_json: Value::Object(Default::default()),
-        };
-        let map = |period: Value, now: DateTime<Utc>| {
-            let body = serde_json::json!({
-                "config": {
-                    "currentPeriod": period,
-                    "creditUsagePercent": 12.0
-                }
-            })
-            .to_string();
-            map_billing(
-                &body,
-                &credentials,
-                now,
-                Err(AccountScopeError::NoTrustedEvidence),
-            )
-            .unwrap()
-            .windows
-            .into_iter()
-            .next()
-            .unwrap()
-        };
+    fn weekly_window_rejects_malformed_or_nonweekly_period_without_percent() {
+        // An empty period object is not a "meter exists" signal — no dates, no
+        // type => unknown, not 0%.
+        let config: BillingConfig =
+            serde_json::from_str(r#"{ "currentPeriod": {} }"#).unwrap();
+        assert!(weekly_window(&config, now()).is_none());
 
+        // A weekly type but no parseable start/end window is still unknown.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY" } }"#,
+        )
+        .unwrap();
+        assert!(weekly_window(&config, now()).is_none());
+
+        // An explicit MONTHLY period with no percent must NOT be fabricated into
+        // a Weekly 0%.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "currentPeriod": {
+                    "type": "USAGE_PERIOD_TYPE_MONTHLY",
+                    "start": "2026-07-01T00:00:00+00:00",
+                    "end": "2026-08-01T00:00:00+00:00"
+                } }"#,
+        )
+        .unwrap();
+        assert!(weekly_window(&config, now()).is_none());
+
+        // MIXED SOURCE: a weekly-typed period with NO dates of its own must not
+        // borrow the flat billingPeriod* window to masquerade as a meter.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY" },
+                 "billingPeriodStart": "2026-07-15T00:00:00+00:00",
+                 "billingPeriodEnd": "2026-07-22T00:00:00+00:00" }"#,
+        )
+        .unwrap();
+        assert!(weekly_window(&config, now()).is_none());
+
+        // SUBSTRING: types that merely CONTAIN "WEEKLY" must be rejected by the
+        // exact-match gate, even with a valid self-contained window.
+        for ty in ["USAGE_PERIOD_TYPE_BIWEEKLY", "USAGE_PERIOD_TYPE_NOT_WEEKLY"] {
+            let config: BillingConfig = serde_json::from_str(&format!(
+                r#"{{ "currentPeriod": {{
+                        "type": "{ty}",
+                        "start": "2026-07-15T00:00:00+00:00",
+                        "end": "2026-07-22T00:00:00+00:00"
+                    }} }}"#
+            ))
+            .unwrap();
+            assert!(
+                weekly_window(&config, now()).is_none(),
+                "type {ty} must not be accepted as weekly"
+            );
+        }
+    }
+
+    #[test]
+    fn monthly_window_prefers_flat_used_over_usage_total() {
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 200 }, "used": { "val": 50 },
+                 "usage": { "totalUsed": { "val": 999 } } }"#,
+        )
+        .unwrap();
+        // 50/200 = 25% used -> 75% remaining.
+        assert!((monthly_window(&config, now()).unwrap().remaining_for_test() - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn monthly_window_falls_back_to_usage_total_used() {
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 400 }, "usage": { "totalUsed": { "val": 100 } } }"#,
+        )
+        .unwrap();
+        assert!((monthly_window(&config, now()).unwrap().remaining_for_test() - 75.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn monthly_window_explicit_zero_used_is_zero_percent() {
+        // xAI reports a genuine zero as `{ "val": 0 }` -> 0% used, 100% remaining.
+        let config: BillingConfig =
+            serde_json::from_str(r#"{ "monthlyLimit": { "val": 15000 }, "used": { "val": 0 } }"#)
+                .unwrap();
+        assert!((monthly_window(&config, now()).unwrap().remaining_for_test() - 100.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn monthly_window_without_explicit_used_is_none() {
+        // A limit with NO explicit `used`/`totalUsed` is "unknown", not zero:
+        // it must not fabricate a misleading 100%-remaining across the FFI.
+        let config: BillingConfig =
+            serde_json::from_str(r#"{ "monthlyLimit": { "val": 15000 } }"#).unwrap();
+        assert!(monthly_window(&config, now()).is_none());
+        // An empty `{ }` wrapper (val absent) is treated the same as absent.
+        let config: BillingConfig = serde_json::from_str(
+            r#"{ "monthlyLimit": { "val": 15000 }, "used": {}, "usage": {} }"#,
+        )
+        .unwrap();
+        assert!(monthly_window(&config, now()).is_none());
+    }
+
+    #[test]
+    fn stage4_grok_period_routes_are_exact_and_fail_closed() {
+        // Monthly duration routes: fixed Monthly identity from the monthly
+        // meter, with provider duration from the period bounds.
         for (label, start, end, days) in [
             ("28-day", "2023-02-01T00:00:00Z", "2023-03-01T00:00:00Z", 28),
             ("29-day", "2024-02-01T00:00:00Z", "2024-03-01T00:00:00Z", 29),
@@ -879,14 +1242,17 @@ mod tests {
             ("31-day", "2024-05-01T00:00:00Z", "2024-06-01T00:00:00Z", 31),
         ] {
             let now = parse_timestamp(start).unwrap() + chrono::Duration::days(1);
-            let window = map(
-                serde_json::json!({
+            let config: BillingConfig = serde_json::from_value(serde_json::json!({
+                "monthlyLimit": { "val": 100 },
+                "used": { "val": 12 },
+                "currentPeriod": {
                     "type": "USAGE_PERIOD_TYPE_MONTHLY",
                     "start": start,
                     "end": end
-                }),
-                now,
-            );
+                }
+            }))
+            .unwrap();
+            let window = monthly_window(&config, now).unwrap();
             let wire = serde_json::to_value(&window).unwrap();
             assert_eq!(wire["cardId"], "billing.monthly.v1", "{label}");
             assert_eq!(
@@ -902,14 +1268,19 @@ mod tests {
             assert_eq!(wire["paceStatus"]["state"], "learningHistory", "{label}");
         }
 
-        let end_only = map(
-            serde_json::json!({
+        // Weekly end-only (no start): still Weekly identity, learningDuration.
+        let end_only: BillingConfig = serde_json::from_value(serde_json::json!({
+            "creditUsagePercent": 12.0,
+            "currentPeriod": {
                 "type": "USAGE_PERIOD_TYPE_WEEKLY",
                 "end": "2026-07-24T00:00:00Z"
-            }),
-            parse_timestamp("2026-07-17T00:00:00Z").unwrap(),
-        );
-        let wire = serde_json::to_value(&end_only).unwrap();
+            }
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(
+            weekly_window(&end_only, parse_timestamp("2026-07-17T00:00:00Z").unwrap()).unwrap(),
+        )
+        .unwrap();
         assert_eq!(wire["cardId"], "billing.weekly.v1");
         assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
         assert_eq!(wire["paceStatus"]["state"], "learningDuration");
@@ -917,20 +1288,30 @@ mod tests {
         assert!(wire["paceStatus"].get("durationSeconds").is_none());
         assert!(wire["paceStatus"].get("durationSource").is_none());
 
-        let unknown = map(
-            serde_json::json!({
+        // Credits meter is always Weekly identity even when currentPeriod type
+        // is not weekly — the endpoint, not the period substring, owns the key.
+        // Duration evidence still flows from the period bounds when valid.
+        let daily_typed: BillingConfig = serde_json::from_value(serde_json::json!({
+            "creditUsagePercent": 12.0,
+            "currentPeriod": {
                 "type": "USAGE_PERIOD_TYPE_DAILY",
                 "start": "2026-07-17T00:00:00Z",
                 "end": "2026-07-18T00:00:00Z"
-            }),
-            parse_timestamp("2026-07-17T12:00:00Z").unwrap(),
-        );
-        let wire = serde_json::to_value(&unknown).unwrap();
-        assert_eq!(wire["cardId"], "row.billing.unknown.v1");
-        assert_eq!(wire["paceStatus"]["state"], "unavailable");
-        assert_eq!(wire["paceStatus"]["reason"], "windowIdentity");
-        assert!(wire["paceStatus"].get("windowKey").is_none());
-        assert!(wire["paceStatus"].get("durationSeconds").is_none());
+            }
+        }))
+        .unwrap();
+        let wire = serde_json::to_value(
+            weekly_window(
+                &daily_typed,
+                parse_timestamp("2026-07-17T12:00:00Z").unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(wire["cardId"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["windowKey"], "billing.weekly.v1");
+        assert_eq!(wire["paceStatus"]["durationSeconds"], 86_400);
+        assert_eq!(wire["paceStatus"]["durationSource"], "provider");
 
         for (label, start, end) in [
             (
@@ -941,14 +1322,17 @@ mod tests {
             ("malformed-start", "not-a-date", "2026-07-24T00:00:00Z"),
             ("malformed-end", "2026-07-17T00:00:00Z", "not-a-date"),
         ] {
-            let window = map(
-                serde_json::json!({
+            let config: BillingConfig = serde_json::from_value(serde_json::json!({
+                "creditUsagePercent": 12.0,
+                "currentPeriod": {
                     "type": "USAGE_PERIOD_TYPE_WEEKLY",
                     "start": start,
                     "end": end
-                }),
-                parse_timestamp("2026-07-17T12:00:00Z").unwrap(),
-            );
+                }
+            }))
+            .unwrap();
+            let window =
+                weekly_window(&config, parse_timestamp("2026-07-17T12:00:00Z").unwrap()).unwrap();
             let wire = serde_json::to_value(&window).unwrap();
             assert_eq!(
                 wire["paceStatus"]["windowKey"], "billing.weekly.v1",
@@ -1299,7 +1683,7 @@ mod tests {
                 .into_iter()
                 .fold(None, merge_refreshed_scope)
                 .unwrap();
-            let mapped = map_billing(body, &credentials, now, merged).unwrap();
+            let mapped = build_grok_data(body, None, &credentials, now, merged).unwrap();
             assert_eq!(mapped.account_scope, expected, "{label}");
         }
         scope.cleanup();
