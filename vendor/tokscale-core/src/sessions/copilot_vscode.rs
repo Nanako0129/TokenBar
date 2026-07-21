@@ -22,6 +22,9 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
 
     let workspace = read_workspace_for_file(path);
 
+    // Replay the VS Code chatSessions mutation log into a final requests array.
+    // kind:0 snapshots set the whole list; kind:2 patches set paths under
+    // "requests" (full array replace, index replace, or nested field set).
     let mut requests: Vec<Value> = Vec::new();
 
     for line in BufReader::new(file).lines().map_while(Result::ok) {
@@ -35,22 +38,14 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         let kind = obj.get("kind").and_then(Value::as_i64).unwrap_or(-1);
         match kind {
             0 => {
+                // Full document snapshot: replace requests from v.requests when present.
                 if let Some(arr) = obj.pointer("/v/requests").and_then(Value::as_array) {
-                    requests.extend(arr.iter().cloned());
+                    requests = arr.clone();
                 }
             }
             2 => {
                 if let Some(k) = obj.get("k").and_then(Value::as_array) {
-                    let is_requests = k
-                        .first()
-                        .and_then(Value::as_str)
-                        .map(|s| s == "requests")
-                        .unwrap_or(false);
-                    if is_requests {
-                        if let Some(arr) = obj.get("v").and_then(Value::as_array) {
-                            requests.extend(arr.iter().cloned());
-                        }
-                    }
+                    apply_requests_patch(&mut requests, k, obj.get("v"));
                 }
             }
             _ => {}
@@ -61,6 +56,139 @@ fn parse_file(path: &Path) -> Vec<UnifiedMessage> {
         .iter()
         .filter_map(|req| request_to_message(req, &session_id, &workspace))
         .collect()
+}
+
+/// Apply a kind:2 mutation-log entry whose path starts at `"requests"`.
+///
+/// Supported path shapes (minimal correct subset):
+/// - `k == ["requests"]` — full array replace when `v` is an array
+/// - `k == ["requests", N]` — set/replace request at index N
+/// - `k == ["requests", N, ...path]` — deep-set into request N along `path`
+///
+/// Non-`requests` roots are ignored. Index segments may be JSON numbers or
+/// digit strings. Missing intermediate objects/arrays are created as needed.
+fn apply_requests_patch(requests: &mut Vec<Value>, k: &[Value], v: Option<&Value>) {
+    let Some(root) = k.first().and_then(Value::as_str) else {
+        return;
+    };
+    if root != "requests" {
+        return;
+    }
+    let Some(v) = v else {
+        return;
+    };
+
+    // Full array replace: k == ["requests"], v is the whole requests array.
+    if k.len() == 1 {
+        if let Some(arr) = v.as_array() {
+            *requests = arr.clone();
+        }
+        return;
+    }
+
+    let Some(idx) = path_segment_as_index(&k[1]) else {
+        return;
+    };
+    // Grow with empty objects so sparse index patches (common after a kind:0
+    // stub with requests:[]) can land at the intended slot.
+    while requests.len() <= idx {
+        requests.push(Value::Object(serde_json::Map::new()));
+    }
+
+    if k.len() == 2 {
+        requests[idx] = v.clone();
+        return;
+    }
+
+    deep_set_path(&mut requests[idx], &k[2..], v);
+}
+
+fn path_segment_as_index(seg: &Value) -> Option<usize> {
+    if let Some(n) = seg.as_u64() {
+        return usize::try_from(n).ok();
+    }
+    if let Some(n) = seg.as_i64() {
+        if n < 0 {
+            return None;
+        }
+        return usize::try_from(n).ok();
+    }
+    if let Some(s) = seg.as_str() {
+        return s.parse::<usize>().ok();
+    }
+    None
+}
+
+fn path_segment_as_key(seg: &Value) -> Option<String> {
+    if let Some(s) = seg.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(n) = seg.as_i64() {
+        return Some(n.to_string());
+    }
+    if let Some(n) = seg.as_u64() {
+        return Some(n.to_string());
+    }
+    None
+}
+
+/// Set `target` at `path` to `v`, creating intermediate objects/arrays.
+fn deep_set_path(target: &mut Value, path: &[Value], v: &Value) {
+    if path.is_empty() {
+        *target = v.clone();
+        return;
+    }
+
+    // Last segment: assign into the current container.
+    if path.len() == 1 {
+        if let Some(idx) = path_segment_as_index(&path[0]) {
+            if !target.is_array() {
+                *target = Value::Array(Vec::new());
+            }
+            if let Some(arr) = target.as_array_mut() {
+                while arr.len() <= idx {
+                    arr.push(Value::Null);
+                }
+                arr[idx] = v.clone();
+            }
+            return;
+        }
+        if let Some(key) = path_segment_as_key(&path[0]) {
+            if !target.is_object() {
+                *target = Value::Object(serde_json::Map::new());
+            }
+            if let Some(obj) = target.as_object_mut() {
+                obj.insert(key, v.clone());
+            }
+            return;
+        }
+        return;
+    }
+
+    // Intermediate segment: ensure container then recurse.
+    if let Some(idx) = path_segment_as_index(&path[0]) {
+        if !target.is_array() {
+            *target = Value::Array(Vec::new());
+        }
+        if let Some(arr) = target.as_array_mut() {
+            while arr.len() <= idx {
+                arr.push(Value::Object(serde_json::Map::new()));
+            }
+            deep_set_path(&mut arr[idx], &path[1..], v);
+        }
+        return;
+    }
+    if let Some(key) = path_segment_as_key(&path[0]) {
+        if !target.is_object() {
+            *target = Value::Object(serde_json::Map::new());
+        }
+        if let Some(obj) = target.as_object_mut() {
+            let entry = obj
+                .entry(key)
+                .or_insert_with(|| Value::Object(serde_json::Map::new()));
+            deep_set_path(entry, &path[1..], v);
+        }
+    }
 }
 
 fn request_to_message(
@@ -152,6 +280,8 @@ fn request_to_message(
         None => format!("copilot-vscode:{session_id}:{timestamp_ms}"),
     };
 
+    let (cost, has_billed_credit) = request_billed_cost(req);
+
     let mut message = UnifiedMessage::new_with_dedup(
         "copilot",
         model_id,
@@ -159,15 +289,140 @@ fn request_to_message(
         session_id.to_string(),
         timestamp_ms,
         tokens,
-        0.0,
+        cost,
         Some(dedup_key),
     );
+
+    // Provider-billed AIU/credits are authoritative; skip later reprice.
+    if has_billed_credit {
+        message.mark_provider_reported_cost();
+    }
 
     if let Some((key, label)) = workspace {
         message.set_workspace(Some(key.clone()), label.clone());
     }
 
     Some(message)
+}
+
+/// Extract provider-billed cost from a VS Code chat request, if present.
+///
+/// Preference order:
+/// 1. Numeric nano AIU fields (`nanoAiu`, `copilotUsageNanoAiu`) at request root
+///    or under `result` / `result.metadata` — convert via `nano / 1e9` (1.0 unit
+///    == 1e9 nano).
+/// 2. Parseable credit/dollar string under `result.details` (and common nested
+///    keys) when no numeric nano field is present.
+///
+/// Returns `(cost_usd_or_units, is_provider_reported)`.
+fn request_billed_cost(req: &Value) -> (f64, bool) {
+    const NANO_PATHS: &[&str] = &[
+        "/nanoAiu",
+        "/copilotUsageNanoAiu",
+        "/result/nanoAiu",
+        "/result/copilotUsageNanoAiu",
+        "/result/metadata/nanoAiu",
+        "/result/metadata/copilotUsageNanoAiu",
+    ];
+    for path in NANO_PATHS {
+        if let Some(nano) = req.pointer(path).and_then(json_number_as_i64) {
+            if nano > 0 {
+                // nano AIU → billed unit: 1e9 nano = 1.0 unit (USD/credit).
+                return (nano as f64 / 1_000_000_000.0, true);
+            }
+        }
+    }
+
+    // String credit under result.details when numeric nano fields are absent.
+    const DETAIL_PATHS: &[&str] = &[
+        "/result/details",
+        "/result/details/credit",
+        "/result/details/credits",
+        "/result/details/cost",
+        "/result/details/billedCredit",
+        "/result/details/billed_credit",
+    ];
+    for path in DETAIL_PATHS {
+        if let Some(raw) = req.pointer(path).and_then(Value::as_str) {
+            if let Some(cost) = parse_credit_string(raw) {
+                if cost > 0.0 {
+                    return (cost, true);
+                }
+            }
+        }
+        // details may itself be an object with numeric credit fields.
+        if let Some(n) = req.pointer(path).and_then(json_number_as_f64) {
+            if n > 0.0 {
+                return (n, true);
+            }
+        }
+    }
+
+    (0.0, false)
+}
+
+fn json_number_as_i64(v: &Value) -> Option<i64> {
+    v.as_i64()
+        .or_else(|| v.as_u64().and_then(|n| i64::try_from(n).ok()))
+        .or_else(|| {
+            v.as_f64()
+                .filter(|f| f.is_finite() && *f >= 0.0)
+                .map(|f| f as i64)
+        })
+        .or_else(|| v.as_str().and_then(|s| s.trim().parse::<i64>().ok()))
+}
+
+fn json_number_as_f64(v: &Value) -> Option<f64> {
+    v.as_f64()
+        .filter(|f| f.is_finite())
+        .or_else(|| v.as_i64().map(|n| n as f64))
+        .or_else(|| v.as_u64().map(|n| n as f64))
+        .or_else(|| {
+            v.as_str()
+                .and_then(parse_credit_string)
+                .filter(|f| f.is_finite())
+        })
+}
+
+/// Parse a credit/dollar string such as `"0.012"`, `"$0.012"`, or `"1.2 credits"`.
+fn parse_credit_string(raw: &str) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    // Pull the first decimal number out of the string.
+    let mut num = String::new();
+    let mut seen_digit = false;
+    let mut seen_dot = false;
+    for ch in trimmed.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+            seen_digit = true;
+        } else if ch == '.' && !seen_dot && seen_digit {
+            num.push(ch);
+            seen_dot = true;
+        } else if ch == '.' && !seen_dot && !seen_digit {
+            // Leading "." like ".5"
+            num.push(ch);
+            seen_dot = true;
+        } else if seen_digit {
+            break;
+        } else if ch == '$' || ch == ' ' {
+            continue;
+        } else {
+            // Skip currency letters / noise before the number.
+            continue;
+        }
+    }
+    if !seen_digit {
+        return None;
+    }
+    let parsed: f64 = num.parse().ok()?;
+    if parsed.is_finite() && parsed >= 0.0 {
+        Some(parsed)
+    } else {
+        None
+    }
 }
 
 /// True when the request is clearly Copilot-originated.
@@ -212,14 +467,32 @@ fn read_workspace_for_file(jsonl_path: &Path) -> Option<(String, Option<String>)
     let contents = std::fs::read_to_string(&workspace_json).ok()?;
     let obj: Value = serde_json::from_str(&contents).ok()?;
 
-    let folder = obj
-        .get("folder")
-        .and_then(Value::as_str)
-        .or_else(|| obj.get("workspace").and_then(Value::as_str))?;
+    let folder = workspace_uri_from_workspace_json(&obj)?;
 
     let workspace_key = workspace_key_from_folder_uri(folder)?;
     let workspace_label = workspace_label_from_key(&workspace_key);
     Some((workspace_key, workspace_label))
+}
+
+/// Resolve a folder/workspace URI string from a VS Code `workspace.json` object.
+///
+/// Accepts:
+/// - string `folder`
+/// - string `workspace`
+/// - object `workspace` with string `configPath` / `path` / `uri`
+fn workspace_uri_from_workspace_json(obj: &Value) -> Option<&str> {
+    if let Some(folder) = obj.get("folder").and_then(Value::as_str) {
+        return Some(folder);
+    }
+    match obj.get("workspace") {
+        Some(Value::String(s)) => Some(s.as_str()),
+        Some(Value::Object(map)) => map
+            .get("configPath")
+            .and_then(Value::as_str)
+            .or_else(|| map.get("path").and_then(Value::as_str))
+            .or_else(|| map.get("uri").and_then(Value::as_str)),
+        _ => None,
+    }
 }
 
 /// Build a stable workspace key from a VS Code `workspace.json` folder URI.
@@ -695,5 +968,116 @@ mod tests {
             Some("vscode-remote://ssh-remote+dev.example/home/alice/My Repo")
         );
         assert_eq!(messages[0].workspace_label.as_deref(), Some("My Repo"));
+    }
+
+    #[test]
+    fn kind0_stub_plus_index_and_nested_patches_yield_tokens() {
+        // Real chatSessions often start with an empty kind:0 snapshot and fill
+        // requests via kind:2 path patches (index set + nested field merges).
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("cccccccc-3333-0000-0000-000000000000.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[]}}"#,
+                r#"{"kind":2,"k":["requests",0],"v":{"requestId":"r-patch","timestamp":9000,"modelId":"copilot/auto"}}"#,
+                r#"{"kind":2,"k":["requests",0,"promptTokens"],"v":120}"#,
+                r#"{"kind":2,"k":["requests",0,"completionTokens"],"v":40}"#,
+                r#"{"kind":2,"k":["requests",0,"result","metadata","resolvedModel"],"v":"gpt-4o"}"#,
+                r#"{"kind":2,"k":["requests",0,"result","metadata","promptTokens"],"v":120}"#,
+                r#"{"kind":2,"k":["requests",0,"result","metadata","outputTokens"],"v":40}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert_eq!(m.tokens.input, 120);
+        assert_eq!(m.tokens.output, 40);
+        assert_eq!(m.model_id, "gpt-4o");
+        assert_eq!(m.timestamp, 9000);
+    }
+
+    #[test]
+    fn full_requests_array_replace_overwrites_prior_snapshot() {
+        // k == ["requests"] is a full array replace, not an append.
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("dddddddd-4444-0000-0000-000000000000.jsonl");
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":0,"v":{"requests":[{"requestId":"old","timestamp":1000,"modelId":"copilot/auto","completionTokens":1,"promptTokens":1}]}}"#,
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"new","timestamp":2000,"modelId":"copilot/gpt-4o","completionTokens":25,"promptTokens":75}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].tokens.input, 75);
+        assert_eq!(messages[0].tokens.output, 25);
+        assert_eq!(messages[0].timestamp, 2000);
+        assert_eq!(messages[0].model_id, "gpt-4o");
+    }
+
+    #[test]
+    fn nano_aiu_marks_provider_reported_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions_dir = dir.path().join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("eeeeeeee-5555-0000-0000-000000000000.jsonl");
+
+        // 1_500_000_000 nano AIU => 1.5 billed units.
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-aiu","timestamp":10000,"modelId":"copilot/auto","completionTokens":10,"promptTokens":100,"nanoAiu":1500000000,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        let m = &messages[0];
+        assert!((m.cost - 1.5).abs() < 1e-12, "cost={}", m.cost);
+        assert!(m.has_authoritative_cost());
+        assert_eq!(m.cost_source, crate::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn workspace_json_object_form_config_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash_dir = dir.path().join("workspaceStorage").join("hash-ws-obj");
+        let sessions_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("ffffffff-6666-0000-0000-000000000000.jsonl");
+
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            br#"{"workspace":{"configPath":"file:///Users/alice/proj.code-workspace"}}"#,
+        )
+        .unwrap();
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-ws","timestamp":11000,"modelId":"copilot/auto","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("/Users/alice/proj.code-workspace")
+        );
+        assert_eq!(
+            messages[0].workspace_label.as_deref(),
+            Some("proj.code-workspace")
+        );
     }
 }

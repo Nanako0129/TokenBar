@@ -20,6 +20,9 @@ struct CopilotDesktopSessionRow {
     total_output_tokens: i64,
     total_cached_tokens: i64,
     total_reasoning_tokens: i64,
+    /// Billed AIU in nano-units (1e9 nano = 1.0 unit). Zero/absent means no
+    /// provider-reported cost; pricing may estimate later.
+    total_nano_aiu: i64,
     created_at: Option<String>,
 }
 
@@ -83,6 +86,7 @@ pub fn parse_copilot_desktop_db(db_path: &Path) -> Vec<UnifiedMessage> {
             total_output_tokens: row.get::<_, Option<i64>>(4)?.unwrap_or(0),
             total_cached_tokens: row.get::<_, Option<i64>>(5)?.unwrap_or(0),
             total_reasoning_tokens: row.get::<_, Option<i64>>(6)?.unwrap_or(0),
+            total_nano_aiu: row.get::<_, Option<i64>>(7)?.unwrap_or(0),
             created_at: row.get(8)?,
         })
     }) {
@@ -138,6 +142,15 @@ fn session_row_to_message(db_path: &Path, row: CopilotDesktopSessionRow) -> Unif
             0
         });
 
+    // total_nano_aiu is the Desktop-billed AIU credit in nano-units
+    // (1e9 nano = 1.0 unit). When non-zero this is the authoritative cost and
+    // must skip later token-based reprice via ProviderReported.
+    let (cost, has_provider_cost) = if row.total_nano_aiu > 0 {
+        (row.total_nano_aiu as f64 / 1_000_000_000.0, true)
+    } else {
+        (0.0, false)
+    };
+
     let mut message = UnifiedMessage::new_with_dedup(
         "copilot",
         model_id,
@@ -155,9 +168,13 @@ fn session_row_to_message(db_path: &Path, row: CopilotDesktopSessionRow) -> Unif
             0,
             row.total_reasoning_tokens,
         ),
-        0.0,
+        cost,
         Some(format!("copilot-desktop:{}", row.id)),
     );
+
+    if has_provider_cost {
+        message.mark_provider_reported_cost();
+    }
 
     if let Some(workspace_key) = metadata.cwd.as_deref().and_then(normalize_workspace_key) {
         let workspace_label = workspace_label_from_key(&workspace_key);
@@ -323,6 +340,19 @@ mod tests {
         cached: i64,
         reasoning: i64,
     ) {
+        insert_session_with_nano_aiu(conn, id, model, input, output, cached, reasoning, 0);
+    }
+
+    fn insert_session_with_nano_aiu(
+        conn: &Connection,
+        id: &str,
+        model: &str,
+        input: i64,
+        output: i64,
+        cached: i64,
+        reasoning: i64,
+        nano_aiu: i64,
+    ) {
         conn.execute(
             r#"
             INSERT INTO sessions (
@@ -341,7 +371,7 @@ mod tests {
                 output,
                 cached,
                 reasoning,
-                0_i64,
+                nano_aiu,
                 "2026-07-01T12:34:56Z",
                 "github.copilot.default",
                 "github-copilot"
@@ -482,5 +512,51 @@ mod tests {
             Some(1_782_909_296_000)
         );
         assert_eq!(parse_iso8601_timestamp_ms("not-a-timestamp"), None);
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_reports_nano_aiu_as_provider_cost() {
+        // 2_500_000_000 nano AIU => 2.5 billed units; cost_source must be
+        // ProviderReported so downstream reprice is skipped.
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session_with_nano_aiu(
+            &conn,
+            "session-aiu",
+            "gpt-5.1-codex",
+            100,
+            50,
+            0,
+            0,
+            2_500_000_000,
+        );
+        drop(conn);
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        let message = &messages[0];
+        assert!(
+            (message.cost - 2.5).abs() < 1e-12,
+            "cost={}",
+            message.cost
+        );
+        assert!(message.has_authoritative_cost());
+        assert_eq!(message.cost_source, crate::CostSource::ProviderReported);
+    }
+
+    #[test]
+    fn parse_copilot_desktop_db_zero_nano_aiu_leaves_cost_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let db_path = dir.path().join("data.db");
+        let conn = create_copilot_desktop_db(&db_path);
+        insert_session(&conn, "session-1", "gpt-5.1-codex", 100, 50, 0, 0);
+        drop(conn);
+
+        let messages = parse_copilot_desktop_db(&db_path);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].cost, 0.0);
+        assert!(!messages[0].has_authoritative_cost());
+        assert_eq!(messages[0].cost_source, crate::CostSource::Unknown);
     }
 }

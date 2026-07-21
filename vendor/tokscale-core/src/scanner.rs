@@ -615,6 +615,11 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         "{}/Library/Application Support/Code/User/workspaceStorage",
         home_dir
     )));
+    // macOS VS Code Insiders Application Support root (alongside stable Code).
+    roots.push(PathBuf::from(format!(
+        "{}/Library/Application Support/Code - Insiders/User/workspaceStorage",
+        home_dir
+    )));
     // macOS VSCodium Application Support root (mirrors Code).
     roots.push(PathBuf::from(format!(
         "{}/Library/Application Support/VSCodium/User/workspaceStorage",
@@ -622,6 +627,11 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
     )));
     roots.push(PathBuf::from(format!(
         "{}/.config/Code/User/workspaceStorage",
+        home_dir
+    )));
+    // Linux VS Code Insiders config root (alongside stable Code).
+    roots.push(PathBuf::from(format!(
+        "{}/.config/Code - Insiders/User/workspaceStorage",
         home_dir
     )));
     // Always probe the default VSCodium config root alongside Code. Do not
@@ -633,11 +643,12 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
     )));
 
     // When env roots are enabled, also honour $XDG_CONFIG_HOME (may differ from
-    // $HOME/.config on Linux) for Code and VSCodium.
+    // $HOME/.config on Linux) for Code, Insiders, and VSCodium.
     if use_env_roots {
         if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
             let xdg = PathBuf::from(xdg);
             roots.push(xdg.join("Code/User/workspaceStorage"));
+            roots.push(xdg.join("Code - Insiders/User/workspaceStorage"));
             roots.push(xdg.join("VSCodium/User/workspaceStorage"));
         }
     }
@@ -646,10 +657,15 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
             let app_data = PathBuf::from(app_data);
             roots.push(app_data.join("Code/User/workspaceStorage"));
+            roots.push(app_data.join("Code - Insiders/User/workspaceStorage"));
             roots.push(app_data.join("VSCodium/User/workspaceStorage"));
         }
     }
     roots.push(PathBuf::from(home_dir).join("AppData/Roaming/Code/User/workspaceStorage"));
+    // Windows home-relative VS Code Insiders (mirrors Code AppData/Roaming layout).
+    roots.push(
+        PathBuf::from(home_dir).join("AppData/Roaming/Code - Insiders/User/workspaceStorage"),
+    );
     // Windows home-relative VSCodium (mirrors Code AppData/Roaming layout).
     roots.push(PathBuf::from(home_dir).join("AppData/Roaming/VSCodium/User/workspaceStorage"));
     let mut files: Vec<PathBuf> = Vec::new();
@@ -2777,12 +2793,36 @@ mod tests {
         let codium_session = codium_dir.join("session-macos-codium.jsonl");
         File::create(&codium_session).unwrap();
 
+        // macOS VS Code Insiders Application Support root (alongside stable Code).
+        let insiders_dir = home.join(
+            "Library/Application Support/Code - Insiders/User/workspaceStorage/hash-insiders/chatSessions",
+        );
+        fs::create_dir_all(&insiders_dir).unwrap();
+        let insiders_session = insiders_dir.join("session-macos-insiders.jsonl");
+        File::create(&insiders_session).unwrap();
+
         // Windows home-relative VSCodium (always probed; works on any host OS).
         let win_codium_dir =
             home.join("AppData/Roaming/VSCodium/User/workspaceStorage/hash-win/chatSessions");
         fs::create_dir_all(&win_codium_dir).unwrap();
         let win_codium_session = win_codium_dir.join("session-win-codium.jsonl");
         File::create(&win_codium_session).unwrap();
+
+        // Windows home-relative VS Code Insiders (always probed).
+        let win_insiders_dir = home.join(
+            "AppData/Roaming/Code - Insiders/User/workspaceStorage/hash-win-insiders/chatSessions",
+        );
+        fs::create_dir_all(&win_insiders_dir).unwrap();
+        let win_insiders_session = win_insiders_dir.join("session-win-insiders.jsonl");
+        File::create(&win_insiders_session).unwrap();
+
+        // Linux default ~/.config Insiders root (always probed).
+        let linux_insiders_dir = home.join(
+            ".config/Code - Insiders/User/workspaceStorage/hash-linux-insiders/chatSessions",
+        );
+        fs::create_dir_all(&linux_insiders_dir).unwrap();
+        let linux_insiders_session = linux_insiders_dir.join("session-linux-insiders.jsonl");
+        File::create(&linux_insiders_session).unwrap();
 
         let result = scan_all_clients_with_scanner_settings(
             home.to_str().unwrap(),
@@ -2803,10 +2843,29 @@ mod tests {
             result.copilot_vscode_sessions
         );
         assert!(
+            result.copilot_vscode_sessions.contains(&insiders_session),
+            "expected macOS Code - Insiders session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
             result
                 .copilot_vscode_sessions
                 .contains(&win_codium_session),
             "expected Windows VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result
+                .copilot_vscode_sessions
+                .contains(&win_insiders_session),
+            "expected Windows Code - Insiders session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result
+                .copilot_vscode_sessions
+                .contains(&linux_insiders_session),
+            "expected Linux Code - Insiders session, got {:?}",
             result.copilot_vscode_sessions
         );
     }
@@ -2834,6 +2893,13 @@ mod tests {
         let codium_session = codium_dir.join("session-codium.jsonl");
         File::create(&codium_session).unwrap();
 
+        let insiders_dir = xdg_dir
+            .path()
+            .join("Code - Insiders/User/workspaceStorage/hash-insiders/chatSessions");
+        fs::create_dir_all(&insiders_dir).unwrap();
+        let insiders_session = insiders_dir.join("session-insiders.jsonl");
+        File::create(&insiders_session).unwrap();
+
         // Home-relative .config must not be required when XDG_CONFIG_HOME is set.
         let result = scan_all_clients_with_scanner_settings(
             home_dir.path().to_str().unwrap(),
@@ -2850,6 +2916,11 @@ mod tests {
         assert!(
             result.copilot_vscode_sessions.contains(&codium_session),
             "expected XDG VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&insiders_session),
+            "expected XDG Code - Insiders session, got {:?}",
             result.copilot_vscode_sessions
         );
     }
