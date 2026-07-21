@@ -65,7 +65,13 @@ final class StatusItemController: NSObject {
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in
-            MainActor.assumeIsolated { self?.chrome.reloadFromDefaults() }
+            // macOS can post this synchronously from registerDefaults() while
+            // SwiftUI is laying out a newly opened popover. Resizing in that
+            // AttributeGraph transaction aborts the process, so apply the
+            // value-gated reload on the next main-queue turn.
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated { self?.chrome.reloadFromDefaults() }
+            }
         }
 
         if let button = statusItem.button {
