@@ -217,10 +217,78 @@ fn read_workspace_for_file(jsonl_path: &Path) -> Option<(String, Option<String>)
         .and_then(Value::as_str)
         .or_else(|| obj.get("workspace").and_then(Value::as_str))?;
 
-    let path_str = decode_file_uri(folder);
-    let workspace_key = normalize_workspace_key(&path_str)?;
+    let workspace_key = workspace_key_from_folder_uri(folder)?;
     let workspace_label = workspace_label_from_key(&workspace_key);
     Some((workspace_key, workspace_label))
+}
+
+/// Build a stable workspace key from a VS Code `workspace.json` folder URI.
+///
+/// - `file:` URIs keep the decode + [`normalize_workspace_key`] path.
+/// - Non-file scheme URIs (`vscode-remote://`, `vscode-vfs://`, …) are preserved
+///   as keys without slash-collapsing (which would destroy the `://` authority).
+/// - Bare filesystem paths go through [`normalize_workspace_key`] directly.
+fn workspace_key_from_folder_uri(folder: &str) -> Option<String> {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if trimmed.starts_with("file:") {
+        return normalize_workspace_key(&decode_file_uri(trimmed));
+    }
+    if is_non_file_scheme_uri(trimmed) {
+        return preserve_non_file_workspace_uri(trimmed);
+    }
+    normalize_workspace_key(trimmed)
+}
+
+/// True for scheme URIs other than `file:` that carry a `://` authority form,
+/// e.g. `vscode-remote://ssh-remote+host/path`.
+fn is_non_file_scheme_uri(folder: &str) -> bool {
+    let Some(colon) = folder.find(':') else {
+        return false;
+    };
+    if colon == 0 {
+        return false;
+    }
+    let scheme = &folder[..colon];
+    if scheme.eq_ignore_ascii_case("file") {
+        return false;
+    }
+    let scheme_ok = scheme
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '+' || c == '-' || c == '.');
+    scheme_ok && folder[colon + 1..].starts_with("//")
+}
+
+/// Preserve a non-file workspace URI as a stable key.
+///
+/// Percent-decodes the authority/path tail after `://` but never collapses
+/// double-slashes, so `vscode-remote://host/path` stays intact (unlike
+/// [`normalize_workspace_key`], which would turn `://` into `:/`).
+fn preserve_non_file_workspace_uri(folder: &str) -> Option<String> {
+    let trimmed = folder.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let key = if let Some(idx) = trimmed.find("://") {
+        let head = &trimmed[..idx + 3]; // includes "://"
+        let tail = percent_decode_path(&trimmed[idx + 3..]);
+        format!("{head}{tail}")
+    } else {
+        percent_decode_path(trimmed)
+    };
+    // Trim a trailing path slash only when a path segment exists beyond scheme://
+    let key = if key.bytes().filter(|&b| b == b'/').count() > 2 {
+        key.trim_end_matches('/').to_string()
+    } else {
+        key
+    };
+    if key.is_empty() {
+        None
+    } else {
+        Some(key)
+    }
 }
 
 /// Decode a VS Code workspace folder URI into a filesystem-style path string
@@ -571,5 +639,61 @@ mod tests {
             messages[0].workspace_label.as_deref(),
             Some("My Project")
         );
+    }
+
+    #[test]
+    fn preserve_non_file_scheme_uris_without_collapsing_slashes() {
+        assert_eq!(
+            workspace_key_from_folder_uri(
+                "vscode-remote://ssh-remote+dev.example/home/alice/My%20Repo"
+            )
+            .as_deref(),
+            Some("vscode-remote://ssh-remote+dev.example/home/alice/My Repo")
+        );
+        assert_eq!(
+            workspace_key_from_folder_uri("vscode-vfs://github/org/repo/")
+                .as_deref(),
+            Some("vscode-vfs://github/org/repo")
+        );
+        // file: still uses the filesystem decode path
+        assert_eq!(
+            workspace_key_from_folder_uri("file:///Users/alice/repo").as_deref(),
+            Some("/Users/alice/repo")
+        );
+        // Bare path still normalizes
+        assert_eq!(
+            workspace_key_from_folder_uri("/Users/alice//repo/").as_deref(),
+            Some("/Users/alice/repo")
+        );
+    }
+
+    #[test]
+    fn workspace_json_vscode_remote_uri_preserved() {
+        let dir = tempfile::tempdir().unwrap();
+        let hash_dir = dir.path().join("workspaceStorage").join("hash-remote");
+        let sessions_dir = hash_dir.join("chatSessions");
+        std::fs::create_dir_all(&sessions_dir).unwrap();
+        let path = sessions_dir.join("bbbbbbbb-2222-0000-0000-000000000000.jsonl");
+
+        std::fs::write(
+            hash_dir.join("workspace.json"),
+            br#"{"folder":"vscode-remote://ssh-remote+dev.example/home/alice/My%20Repo"}"#,
+        )
+        .unwrap();
+
+        write_jsonl(
+            &path,
+            &[
+                r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r-remote","timestamp":8000,"modelId":"copilot/auto","completionTokens":5,"promptTokens":50,"result":{"metadata":{"resolvedModel":"gpt-4o"}}}]}"#,
+            ],
+        );
+
+        let messages = parse_copilot_vscode_sessions(&[path]);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(
+            messages[0].workspace_key.as_deref(),
+            Some("vscode-remote://ssh-remote+dev.example/home/alice/My Repo")
+        );
+        assert_eq!(messages[0].workspace_label.as_deref(), Some("My Repo"));
     }
 }

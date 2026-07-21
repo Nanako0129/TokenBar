@@ -549,6 +549,16 @@ fn discover_copilot_vscode_sessions(home_dir: &str, use_env_roots: bool) -> Vec<
         home_dir
     )));
 
+    // When env roots are enabled, also honour $XDG_CONFIG_HOME (may differ from
+    // $HOME/.config on Linux) and common VSCodium config layout.
+    if use_env_roots {
+        if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+            let xdg = PathBuf::from(xdg);
+            roots.push(xdg.join("Code/User/workspaceStorage"));
+            roots.push(xdg.join("VSCodium/User/workspaceStorage"));
+        }
+    }
+
     if cfg!(target_os = "windows") && use_env_roots {
         if let Some(app_data) = std::env::var_os("APPDATA").filter(|v| !v.is_empty()) {
             roots.push(PathBuf::from(app_data).join("Code/User/workspaceStorage"));
@@ -2676,6 +2686,49 @@ mod tests {
 
         assert_eq!(result.copilot_desktop_db.as_ref(), Some(&desktop_db));
         assert_eq!(result.copilot_vscode_sessions, vec![vscode_session]);
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_discovers_copilot_vscode_under_xdg_config_home() {
+        let home_dir = TempDir::new().unwrap();
+        let xdg_dir = TempDir::new().unwrap();
+        let mut env = EnvGuard::capture(&["XDG_CONFIG_HOME", "TOKSCALE_EXTRA_DIRS"]);
+        env.remove("TOKSCALE_EXTRA_DIRS");
+        env.set("XDG_CONFIG_HOME", xdg_dir.path());
+
+        let code_dir = xdg_dir
+            .path()
+            .join("Code/User/workspaceStorage/hash-xdg/chatSessions");
+        fs::create_dir_all(&code_dir).unwrap();
+        let code_session = code_dir.join("session-xdg.jsonl");
+        File::create(&code_session).unwrap();
+
+        let codium_dir = xdg_dir
+            .path()
+            .join("VSCodium/User/workspaceStorage/hash-codium/chatSessions");
+        fs::create_dir_all(&codium_dir).unwrap();
+        let codium_session = codium_dir.join("session-codium.jsonl");
+        File::create(&codium_session).unwrap();
+
+        // Home-relative .config must not be required when XDG_CONFIG_HOME is set.
+        let result = scan_all_clients_with_scanner_settings(
+            home_dir.path().to_str().unwrap(),
+            &["copilot".to_string()],
+            true,
+            &ScannerSettings::default(),
+        );
+
+        assert!(
+            result.copilot_vscode_sessions.contains(&code_session),
+            "expected XDG Code session, got {:?}",
+            result.copilot_vscode_sessions
+        );
+        assert!(
+            result.copilot_vscode_sessions.contains(&codium_session),
+            "expected XDG VSCodium session, got {:?}",
+            result.copilot_vscode_sessions
+        );
     }
 
     #[test]

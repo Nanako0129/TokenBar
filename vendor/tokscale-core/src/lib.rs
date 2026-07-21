@@ -1044,8 +1044,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     // Copilot Desktop + VS Code share ClientId::Copilot with OTEL. Build
     // suppress sets from OTEL, register every Desktop identity (including
     // OTEL-covered sessions that are not re-emitted), then filter VS Code by
-    // dedup_key + (session_id, timestamp). Fingerprints cover session-state
-    // events.jsonl and workspace.json so metadata-only rewrites invalidate.
+    // Desktop session-level coverage + dedup_key + (session_id, timestamp)
+    // against OTEL. Fingerprints cover session-state events.jsonl and
+    // workspace.json so metadata-only rewrites invalidate.
     {
         let otel_sessions: HashSet<String> = all_messages
             .iter()
@@ -1062,6 +1063,10 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .filter(|m| m.client == "copilot")
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
+        // Desktop emits one aggregate at created_at while VS Code has many
+        // request timestamps; any Desktop session_id (including OTEL-covered
+        // ones that are not re-emitted) suppresses ALL VS Code rows for that id.
+        let mut desktop_session_ids: HashSet<String> = HashSet::new();
 
         if let Some(db_path) = &scan_result.copilot_desktop_db {
             let outcome = load_or_parse_source_with_fingerprint(
@@ -1074,6 +1079,7 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             for message in outcome.messages {
                 // Always register Desktop identities for VS Code suppression,
                 // even when the session is OTEL-covered and not re-emitted.
+                desktop_session_ids.insert(message.session_id.clone());
                 if let Some(key) = message.dedup_key.clone() {
                     existing_dedup_keys.insert(key);
                 }
@@ -1107,14 +1113,19 @@ fn parse_all_messages_with_pricing_with_env_strategy(
             .collect();
         for outcome in vscode_outcomes {
             for message in outcome.messages {
+                // Session-level: Desktop (incl. OTEL-suppressed Desktop) covers
+                // the whole VS Code session regardless of request timestamps.
+                if desktop_session_ids.contains(&message.session_id) {
+                    continue;
+                }
                 let key_unique = message
                     .dedup_key
                     .as_deref()
                     .map(|k| !existing_dedup_keys.contains(k))
                     .unwrap_or(true);
-                // Cross-source suppress against OTEL + Desktop only: do not fold
-                // VS Code rows into session_timestamps so two distinct
-                // requestIds that share a millisecond still both count.
+                // Cross-source suppress against OTEL only for non-Desktop
+                // sessions: do not fold VS Code rows into session_timestamps so
+                // two distinct requestIds that share a millisecond both count.
                 let session_ts_unique = !existing_copilot_session_timestamps
                     .contains(&(message.session_id.clone(), message.timestamp));
                 if !(key_unique && session_ts_unique) {
@@ -3149,11 +3160,12 @@ fn scan_messages_streaming<F, S>(
     simple_lane!(ClientId::Copilot, sessions::copilot::parse_copilot_file);
     // Copilot Desktop + VS Code chatSessions reuse ClientId::Copilot. Build the
     // OTEL suppress sets once, emit Desktop (session_id suppress), then VS Code
-    // (dedup_key + session_id/timestamp suppress against OTEL + Desktop).
+    // (Desktop session-level coverage + dedup_key / timestamp against OTEL).
     {
         let mut otel_sessions: HashSet<String> = HashSet::new();
         let mut existing_dedup_keys: HashSet<String> = HashSet::new();
         let mut existing_session_timestamps: HashSet<(String, i64)> = HashSet::new();
+        let mut desktop_session_ids: HashSet<String> = HashSet::new();
         for path in scan_result.get(ClientId::Copilot) {
             for message in sessions::copilot::parse_copilot_file(path) {
                 otel_sessions.insert(message.session_id.clone());
@@ -3191,6 +3203,7 @@ fn scan_messages_streaming<F, S>(
             for mut m in msgs {
                 // Always register Desktop identities for VS Code suppression,
                 // even when the session is OTEL-covered and not re-emitted.
+                desktop_session_ids.insert(m.session_id.clone());
                 if let Some(key) = m.dedup_key.clone() {
                     existing_dedup_keys.insert(key);
                 }
@@ -3236,14 +3249,17 @@ fn scan_messages_streaming<F, S>(
                 msgs
             };
             for mut m in msgs {
+                if desktop_session_ids.contains(&m.session_id) {
+                    continue;
+                }
                 let key_unique = m
                     .dedup_key
                     .as_deref()
                     .map(|k| !existing_dedup_keys.contains(k))
                     .unwrap_or(true);
-                // Cross-source suppress against OTEL + Desktop only: do not fold
-                // VS Code rows into session_timestamps so two distinct
-                // requestIds that share a millisecond still both count.
+                // Cross-source suppress against OTEL only for non-Desktop
+                // sessions: do not fold VS Code rows into session_timestamps so
+                // two distinct requestIds that share a millisecond both count.
                 let session_ts_unique =
                     !existing_session_timestamps.contains(&(m.session_id.clone(), m.timestamp));
                 if !(key_unique && session_ts_unique) {
@@ -4658,10 +4674,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
             .iter()
             .map(|m| (m.session_id.clone(), m.timestamp))
             .collect();
+        let mut desktop_session_ids: HashSet<String> = HashSet::new();
         if let Some(db_path) = &scan_result.copilot_desktop_db {
             for message in sessions::copilot_desktop::parse_copilot_desktop_db(db_path) {
                 // Always register Desktop identities for VS Code suppression,
                 // even when the session is OTEL-covered and not re-emitted.
+                desktop_session_ids.insert(message.session_id.clone());
                 if let Some(key) = message.dedup_key.clone() {
                     existing_dedup_keys.insert(key);
                 }
@@ -4675,12 +4693,16 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
         for message in sessions::copilot_vscode::parse_copilot_vscode_sessions(
             &scan_result.copilot_vscode_sessions,
         ) {
+            // Session-level: Desktop covers every VS Code row for the session_id.
+            if desktop_session_ids.contains(&message.session_id) {
+                continue;
+            }
             let key_unique = message
                 .dedup_key
                 .as_deref()
                 .map(|k| !existing_dedup_keys.contains(k))
                 .unwrap_or(true);
-            // Cross-source suppress against OTEL + Desktop only.
+            // Cross-source suppress against OTEL only for non-Desktop sessions.
             let session_ts_unique = !existing_copilot_session_timestamps
                 .contains(&(message.session_id.clone(), message.timestamp));
             if !(key_unique && session_ts_unique) {
@@ -11838,7 +11860,8 @@ mod tests {
         )
         .unwrap();
 
-        // VS Code: unique session + collision against desktop-only session_id+ts.
+        // VS Code: unique session + shared session_id with Desktop (multiple
+        // request timestamps that intentionally do NOT match Desktop created_at).
         let vscode_dir =
             home.join("Library/Application Support/Code/User/workspaceStorage/hash1/chatSessions");
         std::fs::create_dir_all(&vscode_dir).unwrap();
@@ -11848,10 +11871,13 @@ mod tests {
 "#,
         )
         .unwrap();
-        // created_at 2026-07-01T12:34:56Z == 1782909296000 ms
+        // Desktop created_at is 2026-07-01T12:34:56Z == 1782909296000 ms, but
+        // VS Code request timestamps differ. Session-level Desktop coverage must
+        // still suppress every row for this session_id (not only exact ts match).
         std::fs::write(
             vscode_dir.join("desktop-only.jsonl"),
-            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r2","timestamp":1782909296000,"modelId":"copilot/gpt-4o","completionTokens":20,"promptTokens":80}]}
+            r#"{"kind":2,"k":["requests"],"v":[{"requestId":"r2","timestamp":1782909400000,"modelId":"copilot/gpt-4o","completionTokens":20,"promptTokens":80}]}
+{"kind":2,"k":["requests"],"v":[{"requestId":"r3","timestamp":1782909500000,"modelId":"copilot/gpt-4o","completionTokens":10,"promptTokens":40}]}
 "#,
         )
         .unwrap();
@@ -11926,8 +11952,9 @@ mod tests {
         );
 
         // Expect exactly three: OTEL shared-session, desktop-only, vscode unique.
-        // Desktop shared-session suppressed by OTEL; VS Code collision suppressed
-        // by desktop-only session_id+timestamp.
+        // Desktop shared-session suppressed by OTEL; both VS Code rows that share
+        // the desktop-only session_id are session-level suppressed even though
+        // their request timestamps do not match Desktop created_at.
         assert_eq!(
             cold.len(),
             3,
@@ -11936,6 +11963,15 @@ mod tests {
             cold.iter()
                 .map(|m| (&m.session_id, m.tokens.input, m.dedup_key.as_deref()))
                 .collect::<Vec<_>>()
+        );
+        assert!(
+            !cold.iter().any(|m| {
+                m.session_id == "desktop-only"
+                    && m.dedup_key
+                        .as_deref()
+                        .is_some_and(|k| k.starts_with("copilot-vscode:"))
+            }),
+            "VS Code rows for Desktop-covered session_id must be fully suppressed"
         );
         assert_eq!(
             cold.iter()
