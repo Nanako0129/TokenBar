@@ -18,7 +18,9 @@ This file remains the exact vendor ledger. The selective-port method and streami
 
 ## Current selective-alignment checkpoint
 
-M21 is merged on TokenBar main at baseline [`471a7f239f0270b4ebfaed04894335c506d588d3`](https://github.com/Nanako0129/TokenBar/commit/471a7f239f0270b4ebfaed04894335c506d588d3), PR [#71](https://github.com/Nanako0129/TokenBar/pull/71). It selectively ports Kimi Code, Junie, and OpenCodeReview from the audited range while preserving the shared materialized, shipping streaming, count, and report paths. M21 landed at `74/13/0/10/13/1`; after the M22 fidelity decision reclassified five Zcode-bearing rows without changing runtime code, the current exact classification is `ALREADY_VENDORED 74`, `TAKE 8`, `ADAPT_FOR_STREAMING 0`, `DEFER 15`, `SKIP 13`, `SUPERSEDED 1`.
+M21 is merged on TokenBar main at baseline [`471a7f239f0270b4ebfaed04894335c506d588d3`](https://github.com/Nanako0129/TokenBar/commit/471a7f239f0270b4ebfaed04894335c506d588d3), PR [#71](https://github.com/Nanako0129/TokenBar/pull/71). It selectively ports Kimi Code, Junie, and OpenCodeReview from the audited range while preserving the shared materialized, shipping streaming, count, and report paths. M21 landed at `74/13/0/10/13/1`; after the M22 fidelity decision reclassified five Zcode-bearing rows without changing runtime code, the post-M22 exact classification was `ALREADY_VENDORED 74`, `TAKE 8`, `ADAPT_FOR_STREAMING 0`, `DEFER 15`, `SKIP 13`, `SUPERSEDED 1`.
+
+M25 (this worktree / pending integration) ports reloadable grouping-only model aliases from upstream [`9a5aeb65`](https://github.com/junhoyeo/tokscale/commit/9a5aeb65) (#850) and moves that row to `ALREADY_VENDORED`, producing the post-M25-only exact classification `ALREADY_VENDORED 75`, `TAKE 7`, `ADAPT_FOR_STREAMING 0`, `DEFER 15`, `SKIP 13`, `SUPERSEDED 1`. Cache remains schema 31.
 
 M22 PR [#72](https://github.com/Nanako0129/TokenBar/pull/72) is closed and unmerged (`merged=false`), so none of its implementation is part of main. Its head is [`c41b864b2b867bd84b69e82ff391b0197177775e`](https://github.com/Nanako0129/TokenBar/commit/c41b864b2b867bd84b69e82ff391b0197177775e), spanning 17 commits and 12 files (`+4392/-52`), with production drift about 2.1–2.5x upstream and total drift about 3.1–3.5x, including 15 review-driven fixes and about 520 lines of custom cross-store matching. Under the fidelity rule, M22 is `DEFER` until upstream converges; do not treat its code as landed. Main and M23 therefore must not assume `ClientId::Zcode` or `COUNT=34`. Cache remains schema 31.
 
@@ -34,8 +36,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 74 |
-| `TAKE` | 8 |
+| `ALREADY_VENDORED` | 75 |
+| `TAKE` | 7 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 15 |
 | `SKIP` | 13 |
@@ -45,7 +47,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 74</summary>
+<summary><code>ALREADY_VENDORED</code> — 75</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -57,16 +59,16 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
 9155018c 18cd13cc a87f0ab6 959cce84 6c804711 839ce378 052f43de 633ea946
-77948d9d 302d39c3
+77948d9d 302d39c3 9a5aeb65
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 8</summary>
+<summary><code>TAKE</code> — 7</summary>
 
 ```text
-63a44d7c f6f7eced 0b454e60 9a5aeb65 074619f7 c1aef5e9 ae36db5c cd07bf78
+63a44d7c f6f7eced 0b454e60 074619f7 c1aef5e9 ae36db5c cd07bf78
 ```
 
 </details>
@@ -112,7 +114,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -124,7 +126,7 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M22 — PR #72 closed unmerged / DEFER | Zcode legacy and v2; no implementation landed | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk remain deferred |
 | M23 | Copilot Desktop, Copilot VS Code `chatSessions`, and Hermes Windows discovery | `f6f7eced 0b454e60 074619f7 c1aef5e9` |
 | M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
-| M25 | Reloadable configurable model aliases | `9a5aeb65` |
+| M25 — this worktree / pending integration | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
 | M26 | Full source-message shard cache, including format-2 related-file path/existence metadata | `ae36db5c` + `cd07bf78` cache-metadata hunks |
@@ -192,7 +194,7 @@ If M23, M25, M24, and M26 complete, the terminal classification is `ALREADY_VEND
 
 The local cache is schema 31 after merged M16 and switches to active shard format 2 after M26; M17, M18, M21, M22, M23, M24, M25, and M19-A keep schema 31. M19-A changes only the Windows atomic replacement transport. M17 adds a separately fingerprinted source and report-time cross-source selector, so existing cached legacy rows remain valid and no schema bump is required. The legacy schema-31 monolith remains untouched when M26 activates shards.
 
-Public issue #45 is the designated full remote inventory. M21 is merged in PR #71 at baseline `471a7f239f0270b4ebfaed04894335c506d588d3`, with five audited transitions and unchanged schema 31. M22 PR #72 is closed unmerged and deferred; M23 follows M21 directly. M25 is independently ready from merged M18. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated full remote inventory. M21 is merged in PR #71 at baseline `471a7f239f0270b4ebfaed04894335c506d588d3`, with five audited transitions and unchanged schema 31. M22 PR #72 is closed unmerged and deferred; M23 follows M21 directly. M25 ports `9a5aeb65` and lands the post-M25-only ledger `75/7/0/15/13/1` with schema 31 unchanged; Swift/FFI settings wiring is deferred as a follow-up. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -294,6 +296,10 @@ An early prepared-patch verifier reproduced a provider-scoped boundary bypass: `
 M21 selectively ports Kimi Code from upstream [`839ce378`](https://github.com/junhoyeo/tokscale/commit/839ce378) and [`052f43de`](https://github.com/junhoyeo/tokscale/commit/052f43de), Junie from [`633ea946`](https://github.com/junhoyeo/tokscale/commit/633ea946) and [`77948d9d`](https://github.com/junhoyeo/tokscale/commit/77948d9d), OpenCodeReview from [`302d39c3`](https://github.com/junhoyeo/tokscale/commit/302d39c3), and only the Junie/OpenCodeReview start-anchor hunks of mixed [`b64d861e`](https://github.com/junhoyeo/tokscale/commit/b64d861e). Kimi Code reuses public client ID `kimi`, is selected by the `sessions/<workspace>/<session>/agents/<agent>/wire.jsonl` topology, counts only explicit turn-scoped `usage.record` rows, and collapses exact replays without merging distinct turns that happen to use the same token counts. The default `~/.kimi-code` root and explicit `KIMI_CODE_HOME` root coexist with legacy `~/.kimi`; environment overrides are ignored when `use_env_roots` is false. Legacy Kimi keeps its config-dependent model lookup, while self-contained Kimi Code files exclude that unrelated sibling from fingerprint, mtime, pruning, and change-token semantics.
 
 Junie reads `events.jsonl`, preserves each finite non-negative provider-reported cost as authoritative, marks only the first valid usage in the next response event as a turn start while consuming prompt ownership even when that response has no `modelUsage` array or no countable usage, and start-anchors explicit response end timestamps by duration. OpenCodeReview reads session JSONL, carries normalized workspace metadata from `session_start`, and likewise start-anchors duration while retaining the recorded end timestamp in replay identity. Append-only `ClientId::Junie = 31` and `ClientId::OpenCodeReview = 32` raise `COUNT` to 33 without changing existing IDs; Swift uses `Kimi`, `Junie`, and `OpenCodeReview` display metadata and retains the existing initial-letter fallback instead of adding unverified logo assets. Materialized, shipping streaming, count, model, monthly, hourly, and Agents paths share parser selection, per-client dedup, raw source caching, and post-cache pricing. Hermetic fixtures prove Kimi legacy/Code coexistence, in-file and cross-agent replay collapse with distinct-turn retention, overflow-safe preservation of extreme nonzero token buckets, Junie authoritative cost through cold/warm rewrite, OpenCodeReview removal without stale cache replay, count/report parity, and unchanged totals across every lane. These are new source identities rather than changed existing-source serialization, so monolithic cache schema remains **31**. M21 moves five audited rows to `ALREADY_VENDORED`; M22 is closed unmerged, and its five selected Zcode rows are `DEFER`, producing the duplicate-free exact classification `74/8/0/15/13/1`. Mixed `b64d861e` is `DEFER` because its Zcode hunk did not land.
+
+## M25 reloadable grouping model aliases
+
+M25 selectively ports upstream [#850](https://github.com/junhoyeo/tokscale/pull/850) / [`9a5aeb65`](https://github.com/junhoyeo/tokscale/commit/9a5aeb65): a config-driven `{alias → canonical}` map that folds model-name variants for **local report grouping only**. The fold is the terminal step of `normalize_model_for_grouping`; `canonical_model_id` is the alias-free syntactic path used by graph `ClientContribution` keys and any future submit/export/persist surface. Pricing continues to resolve the raw message `model_id` (and the static `pricing/aliases.rs` machine-id table remains a separate layer). TokenBar adaptation vs upstream's load-once `OnceLock`: the process-wide map is **reloadable** via `set_model_aliases` / `clear_model_aliases`, bumps `model_alias_generation`, and fires every `register_usage_data_invalidation_hook` so usage-data consumers (and later M24 Warp) refresh without a process restart. Excluded: tokscale-cli TUI/settings/tests, any message-cache schema bump (stays **31**), Copilot Desktop/VS Code/Hermes discovery (M23), and Swift/FFI settings wiring (core API is ready; call from settings later). Hermetic tests prove grouping folds while pricing and canonical identity stay on the raw path, and that reload/clear bump generation and fire the invalidation seam. Ledger transition: `9a5aeb65: TAKE → ALREADY_VENDORED`, post-M25-only classification `75/7/0/15/13/1`.
 
 ## M19-A Windows atomic-replacement completion
 

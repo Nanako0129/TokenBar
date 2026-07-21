@@ -5,6 +5,7 @@ mod cc_mirror;
 pub mod clients;
 pub mod fs_atomic;
 mod message_cache;
+pub mod model_alias;
 mod parser;
 pub mod paths;
 pub mod pricing;
@@ -15,6 +16,10 @@ pub mod sessions;
 
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
+pub use model_alias::{
+    clear_model_aliases, model_alias_generation, model_aliases,
+    register_usage_data_invalidation_hook, set_model_aliases, ModelAliasMap,
+};
 pub use parser::*;
 pub use scanner::*;
 pub use sessionize::{
@@ -55,7 +60,45 @@ pub(crate) fn strip_parenthesized_reasoning_tier(model_id: &str) -> Option<&str>
     Some(base_model)
 }
 
+/// Canonical model identity — the model id that leaves the machine.
+///
+/// This is [`normalize_syntactic`] with **no alias folding**: purely structural
+/// canonicalization (lowercase, strip a `(reasoning-tier)` suffix, strip a
+/// trailing `-YYYYMMDD` date, rewrite `.`→`-` inside claude version numbers, and
+/// fold an `anthropic/claude-…` prefix). It never consults the user's
+/// machine-local model aliases.
+///
+/// Every path that submits, uploads, exports as raw data, or persists a model id
+/// MUST use this, not [`normalize_model_for_grouping`]. A machine-local alias
+/// config must never rewrite the model identity persisted server-side, or usage
+/// history would fragment and fork across a user's devices. Graph
+/// `ClientContribution` keys also use this so export/raw identity stays stable.
+pub fn canonical_model_id(model_id: &str) -> String {
+    normalize_syntactic(model_id)
+}
+
+/// Local display/grouping model name: [`canonical_model_id`] plus the user's
+/// configured model-alias fold. Every local report-grouping surface — the models
+/// report, every `GroupBy`, monthly, and hourly — routes through this so name
+/// variants fold uniformly for presentation.
+///
+/// The alias fold is **presentation only** and must never reach the
+/// submit/upload/export/persist path (those use [`canonical_model_id`]), pricing
+/// (which resolves the raw message `model_id`), or the message-cache key space.
+/// An empty/unset alias config makes this identical to [`canonical_model_id`].
 pub fn normalize_model_for_grouping(model_id: &str) -> String {
+    model_alias::apply_global(normalize_syntactic(model_id))
+}
+
+/// Structural-only model-name normalization: lowercase, strip a
+/// `(reasoning-tier)` suffix, strip a trailing `-YYYYMMDD` date, rewrite `.`→`-`
+/// inside claude version numbers, and fold an `anthropic/claude-…` prefix.
+///
+/// This is the syntactic half of [`normalize_model_for_grouping`] /
+/// [`canonical_model_id`]. It is also used by [`model_alias`] to normalize
+/// configured alias keys and values into the same space, so a configured alias
+/// matches its model regardless of case, dated suffix, or `.`-vs-`-` spelling.
+pub(crate) fn normalize_syntactic(model_id: &str) -> String {
     let mut name = model_id.to_lowercase();
 
     if let Some(base_model) = strip_parenthesized_reasoning_tier(&name) {
@@ -4668,24 +4711,25 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 mod tests {
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
-        dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
-        get_model_report, get_monthly_report, latest_source_mtime_ms, local_source_change_token,
-        message_cache, normalize_model_for_grouping,
-        parse_all_messages_with_pricing_with_env_strategy,
-        parse_local_clients,
-        parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
-        reprice_lane_message, retain_for_requested_clients, scan_messages_streaming, scanner,
-        select_local_parse_pricing, sessions, unified_to_parsed, AgentAccumulator, ClientId,
-        opencode_authoritative_sources, opencode_identity_group, CostSource, GroupBy,
-        LocalParseOptions, OpenCodeSelection, OpenCodeSourceIdentity, ReportOptions,
-        TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        canonical_model_id, clear_model_aliases, dedupe_latest_trae_messages,
+        fold_messages_streaming, get_agents_report, get_hourly_report, get_model_report,
+        get_monthly_report, latest_source_mtime_ms, local_source_change_token, message_cache,
+        model_alias_generation, normalize_model_for_grouping, opencode_authoritative_sources,
+        opencode_identity_group, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
+        prune_scan_result_by_mtime, register_usage_data_invalidation_hook, reprice_lane_message,
+        retain_for_requested_clients, scan_messages_streaming, scanner, select_local_parse_pricing,
+        sessions, set_model_aliases, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
+        GroupBy, LocalParseOptions, ModelAliasMap, OpenCodeSelection, OpenCodeSourceIdentity,
+        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeMap, HashMap, HashSet};
     use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::str::FromStr;
-    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
 
     struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
@@ -5458,6 +5502,186 @@ mod tests {
         assert_eq!(
             normalize_model_for_grouping("claude-opus-4.5-20251101"),
             "claude-opus-4-5"
+        );
+    }
+
+    /// Serializes tests that mutate the process-wide model-alias map.
+    static MODEL_ALIAS_GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn test_alias_map(pairs: &[(&str, &str)]) -> ModelAliasMap {
+        ModelAliasMap {
+            entries: pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    #[test]
+    fn model_aliases_fold_grouping_only_not_canonical_or_pricing() {
+        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_model_aliases();
+
+        // Alias a channel-specific spelling onto the display/group key.
+        set_model_aliases(&test_alias_map(&[("claude-opus-4-8-cc", "claude-opus-4-8")]));
+
+        // Grouping sees the folded label.
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-8-cc"),
+            "claude-opus-4-8"
+        );
+        // Raw identity path stays alias-free (syntactic only).
+        assert_eq!(
+            canonical_model_id("claude-opus-4-8-cc"),
+            "claude-opus-4-8-cc"
+        );
+
+        // Pricing resolves the *raw* message model id, never the grouping label.
+        // Custom pricing is registered only under the raw channel spelling; the
+        // display/group key has no rate. After the alias fold, cost still uses
+        // the raw path and remains non-zero.
+        let mut custom = HashMap::new();
+        custom.insert(
+            "claude-opus-4-8-cc".to_string(),
+            pricing::ModelPricing {
+                input_cost_per_token: Some(0.001),
+                output_cost_per_token: Some(0.002),
+                ..Default::default()
+            },
+        );
+        let service = pricing::PricingService::new_with_custom(
+            pricing::custom::CustomPricing::from_models(custom),
+            HashMap::new(),
+            HashMap::new(),
+        );
+        let tokens = TokenBreakdown {
+            input: 1000,
+            output: 500,
+            cache_read: 0,
+            cache_write: 0,
+            reasoning: 0,
+        };
+        let raw_cost = service.calculate_cost_with_provider("claude-opus-4-8-cc", None, &tokens);
+        let group_label_cost =
+            service.calculate_cost_with_provider("claude-opus-4-8", None, &tokens);
+        assert!(raw_cost > 0.0, "raw id must remain the pricing key");
+        assert_eq!(
+            group_label_cost, 0.0,
+            "grouping label must not be used as the pricing key"
+        );
+
+        let mut msg = UnifiedMessage::new(
+            "claude",
+            "claude-opus-4-8-cc",
+            "anthropic",
+            "s1",
+            1_733_011_200_000,
+            tokens.clone(),
+            0.0,
+        );
+        apply_pricing_if_available(&mut msg, Some(&service));
+        assert!(
+            (msg.cost - raw_cost).abs() < 1e-12,
+            "apply_pricing must keep using the raw message model_id (got {}, expected {})",
+            msg.cost,
+            raw_cost
+        );
+        // Message identity is never rewritten by aliases.
+        assert_eq!(msg.model_id, "claude-opus-4-8-cc");
+
+        // Model-report grouping merges channel variants under the alias label,
+        // while pre-computed costs simply sum (aliases never reprice).
+        let mut other = UnifiedMessage::new(
+            "claude",
+            "claude-opus-4-8",
+            "anthropic",
+            "s2",
+            1_733_011_200_001,
+            tokens,
+            1.5,
+        );
+        other.mark_estimated_cost();
+        msg.cost = raw_cost;
+        msg.mark_estimated_cost();
+        let entries = aggregate_model_usage_entries(vec![msg, other], &GroupBy::Model);
+        assert_eq!(
+            entries.len(),
+            1,
+            "alias must fold both variants into one bucket"
+        );
+        assert_eq!(entries[0].model, "claude-opus-4-8");
+        assert!(
+            (entries[0].cost - (raw_cost + 1.5)).abs() < 1e-9,
+            "merged cost is the sum of already-costed buckets, not a reprice"
+        );
+
+        // Graph/export client contribution keeps the alias-free raw identity.
+        let graph = fold_messages_streaming(&[UnifiedMessage::new(
+            "claude",
+            "claude-opus-4-8-cc",
+            "anthropic",
+            "s1",
+            1_733_011_200_000,
+            TokenBreakdown {
+                input: 10,
+                output: 5,
+                cache_read: 0,
+                cache_write: 0,
+                reasoning: 0,
+            },
+            0.25,
+        )]);
+        assert_eq!(graph.len(), 1);
+        assert_eq!(graph[0].clients.len(), 1);
+        assert_eq!(graph[0].clients[0].model_id, "claude-opus-4-8-cc");
+
+        clear_model_aliases();
+    }
+
+    #[test]
+    fn model_alias_reload_invalidates_usage_data_consumers() {
+        let _guard = MODEL_ALIAS_GLOBAL_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        clear_model_aliases();
+
+        static FIRES: AtomicUsize = AtomicUsize::new(0);
+        register_usage_data_invalidation_hook(|| {
+            FIRES.fetch_add(1, Ordering::SeqCst);
+        });
+        let baseline_fires = FIRES.load(Ordering::SeqCst);
+        let gen0 = model_alias_generation();
+
+        set_model_aliases(&test_alias_map(&[("claude-opus-4-8-cc", "claude-opus-4-8")]));
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-8-cc"),
+            "claude-opus-4-8"
+        );
+        let gen1 = model_alias_generation();
+        assert!(gen1 > gen0);
+
+        // Reload replaces the map; consumers see the new fold on the next report.
+        set_model_aliases(&test_alias_map(&[("gpt-5.5-cc", "gpt-5.5")]));
+        assert_eq!(
+            normalize_model_for_grouping("claude-opus-4-8-cc"),
+            "claude-opus-4-8-cc",
+            "previous alias must not survive a reload"
+        );
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-cc"), "gpt-5.5");
+        let gen2 = model_alias_generation();
+        assert!(gen2 > gen1);
+
+        clear_model_aliases();
+        assert_eq!(normalize_model_for_grouping("gpt-5.5-cc"), "gpt-5.5-cc");
+        assert!(model_alias_generation() > gen2);
+
+        let after_fires = FIRES.load(Ordering::SeqCst);
+        assert!(
+            after_fires >= baseline_fires + 3,
+            "set/reload/clear must each fire the usage-data invalidation hook \
+             (baseline={baseline_fires}, after={after_fires})"
         );
     }
 

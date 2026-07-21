@@ -4,7 +4,7 @@ id: kb-plan-tokscale-alignment
 kind: plan
 scope: repository
 read_when: planning the next vendor sync or reviewing issue #45 inventory
-last_verified: 2026-07-20
+last_verified: 2026-07-21
 sources: ["vendor/README.md", "public issue #45", "public tokscale history", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
 ---
 
@@ -38,7 +38,7 @@ TokenBar follows upstream `tokscale` as a rolling source and selects bounded mil
 | 111-row classification | `ALREADY_VENDORED 74`, `TAKE 8`, `ADAPT_FOR_STREAMING 0`, `DEFER 15`, `SKIP 13`, `SUPERSEDED 1` |
 | Cache | TokenBar main uses monolithic schema 31; closed-unmerged M22 made no runtime change |
 
-The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED`, moved mixed `34cfbb50` to `DEFER`, and left mixed `b64d861e` as one `TAKE` row after its Jcode hunk. M19-A moved `a87f0ab6`; M17 used non-main `ed798642` and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`. M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`; M22 did not merge, and its five selected rows move to `DEFER`, producing the current `74/8/0/15/13/1` classification. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
+The audited range and all referenced trees are readable from a clean upstream clone. The six categories are duplicate-free and have no symmetric difference from the 111-hash range. M20 moved `366ce643`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED`, moved mixed `34cfbb50` to `DEFER`, and left mixed `b64d861e` as one `TAKE` row after its Jcode hunk. M19-A moved `a87f0ab6`; M17 used non-main `ed798642` and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`. M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`; M22 did not merge, and its five selected rows move to `DEFER`, producing `74/8/0/15/13/1`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`, producing the post-M25-only `75/7/0/15/13/1` classification. Three non-main commits and one pre-anchor Warp commit are semantic sources only and do not enter the 111-row ledger.
 
 ### Merged milestone drift audit
 
@@ -94,7 +94,7 @@ flowchart TD
     S --> WS[M19-B final TokenBar-Windows re-sync]
 ```
 
-The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, and M21 are merged. M22 is closed unmerged and deferred under the fidelity threshold; M23 depends on M21 directly and does not depend on M22. M25 is independently ready from M18. M19-A's bounded Windows replacement behavior remains an M26 dependency. M26 is the final Native architecture barrier and M19-B runs exactly once after it.
+The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, and M21 are merged. M22 is closed unmerged and deferred under the fidelity threshold; M23 depends on M21 directly and does not depend on M22. M25 is implemented in this worktree from M18 (post-M25-only ledger `75/7/0/15/13/1`); M24 can attach to the shared invalidation seam. M19-A's bounded Windows replacement behavior remains an M26 dependency. M26 is the final Native architecture barrier and M19-B runs exactly once after it.
 
 ## Milestone queue
 
@@ -109,7 +109,7 @@ The shared-parser critical path through M17, the money-correctness M18 checkpoin
 | M22 | M21 | PR #72 closed unmerged; DEFER until upstream converges because its Zcode cross-store/parser/schema/provider/scanner scope exceeded the fidelity threshold | Keep schema 31; no rollback because it never merged |
 | M23 | M21 | Add Copilot Desktop/VS Code sources and Hermes Windows fallback discovery; do not assume `ClientId::Zcode` or `COUNT=34` | Keep schema 31 |
 | M18 | M16 | Merged as PR #70 at `0735fd2b`: add `fugu-ultra` regular/long rates, select one whole-request tier only for verified Sakana and LiteLLM GPT-5.4/GPT-5.5 when `input + cache_read > 272,000`, preserve bare `fugu` as unpriced, and enforce exact raw/custom first refusal, parenthesized validation, provider-scoped fail-closed behavior, bounded path/terminal fallbacks, case-insensitive forced-source isolation, provider ranking/cache backfill, and one Claude never-degrade guard | Kept schema 31 |
-| M25 | M18 | Add reloadable grouping aliases and one process-wide usage-data invalidation seam | Keep schema 31 |
+| M25 | M18 | Implemented in worktree: reloadable grouping aliases (`set_model_aliases` / `clear_model_aliases`), alias-free `canonical_model_id`, and process-wide usage-data invalidation (`model_alias_generation` + hooks); Swift/FFI settings wiring deferred | Keep schema 31 |
 | M24 | M25 | Add explicit-credential Warp fetching/local reporting through the shared invalidation seam; no automatic credential harvesting | Keep schema 31 |
 | M19-A | M15-T | Merged as PR #68 at `11ae1bed`: retry only Windows atomic-replacement errors 5/32 for at most five attempts with exact bounded backoff; preserve non-Windows rename and exclude TUI signal behavior | Keep schema 31 |
 | M26 | M23 + M24 + M19-A | Activate 256 identity-aware cache shards across every materialized, streaming, count, and report lane, including `cd07bf78` generic related-file path/existence metadata while excluding Devin behavior | Active shard format 2; leave legacy schema-31 monolith untouched |
