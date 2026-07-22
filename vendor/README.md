@@ -24,7 +24,7 @@ M25 merged in PR [#75](https://github.com/Nanako0129/TokenBar/pull/75) and moved
 
 M22 PR [#72](https://github.com/Nanako0129/TokenBar/pull/72) is closed and unmerged (`merged=false`), so none of its implementation is part of main. Its head is [`c41b864b2b867bd84b69e82ff391b0197177775e`](https://github.com/Nanako0129/TokenBar/commit/c41b864b2b867bd84b69e82ff391b0197177775e), spanning 17 commits and 12 files (`+4392/-52`), with production drift about 2.1–2.5x upstream and total drift about 3.1–3.5x, including 15 review-driven fixes and about 520 lines of custom cross-store matching. Under the fidelity rule, M22 is `DEFER` until upstream converges; do not treat its code as landed or assume `ClientId::Zcode` / `COUNT=34`.
 
-M23 is split after PR #74 (`e274f2ad`) reached about 3.1x Copilot production drift and 14 review rounds without converging. M23-H merged in PR [#82](https://github.com/Nanako0129/TokenBar/pull/82) at [`1a8ee0c6`](https://github.com/Nanako0129/TokenBar/commit/1a8ee0c62429472589308c2836c026d6e5432243) with only the faithful Hermes Windows discovery residual (`c1aef5e9`). The current M23-D checkpoint rebuilds Copilot Desktop from `f6f7eced + 0b454e60` with one pre-aggregation OTEL-session authority selector; M23-V keeps VS Code `chatSessions` (`074619f7`) in `DEFER` until upstream fixes ObjectMutationLog replay. This checkpoint is `78/3/0/16/13/1`, with cache schema 32 unchanged.
+M23 was split after PR #74 (`e274f2ad`) reached about 3.1x Copilot production drift and 14 review rounds without converging; PR #74 is closed unmerged as fidelity evidence. M23-H merged in PR [#82](https://github.com/Nanako0129/TokenBar/pull/82) at [`1a8ee0c6`](https://github.com/Nanako0129/TokenBar/commit/1a8ee0c62429472589308c2836c026d6e5432243) with only the faithful Hermes Windows discovery residual (`c1aef5e9`). M23-D then merged in PR [#83](https://github.com/Nanako0129/TokenBar/pull/83) at [`f99d9274`](https://github.com/Nanako0129/TokenBar/commit/f99d9274fcfdfc8fc228e21e52808584f822385f), rebuilding Copilot Desktop from `f6f7eced + 0b454e60` with one pre-aggregation OTEL-session authority selector. M23-V keeps VS Code `chatSessions` (`074619f7`) in `DEFER` until upstream fixes ObjectMutationLog replay. The merged checkpoint is `78/3/0/16/13/1`, with cache schema 32 unchanged.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -116,7 +116,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; the current M23-D checkpoint moves `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -127,13 +127,14 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M21 — merged in PR #71 | Kimi Code, Junie, and OpenCodeReview | `839ce378 052f43de 633ea946 77948d9d 302d39c3` + `b64d861e` Junie/OpenCodeReview hunks |
 | M22 — PR #72 closed unmerged / DEFER | Zcode legacy and v2; no implementation landed | `640e97b9 f7a124da ed6f8b95 65f8f3e2` + `b64d861e` Zcode hunk remain deferred |
 | M23-H — merged in PR #82 | Hermes Windows default/profile discovery | `c1aef5e9` |
-| M23-D — current checkpoint | Copilot Desktop token source with OTEL whole-session authority | `f6f7eced 0b454e60` |
+| M23-D — merged in PR #83 | Copilot Desktop token source with OTEL whole-session authority | `f6f7eced 0b454e60` |
 | M23-V — DEFER | Copilot VS Code `chatSessions`; upstream ObjectMutationLog replay is not yet trustworthy | `074619f7` |
 | M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
-| M26 | Full source-message shard cache, including format-2 related-file path/existence metadata | `ae36db5c` + `cd07bf78` cache-metadata hunks |
+| M26-A | Full source-message shard cache with the final format-2 envelope | `ae36db5c` shard-architecture hunks |
+| M26-B | Generic related-file path/existence behavior on the fixed format-2 envelope | `cd07bf78` cache-metadata hunks; Devin hunks excluded |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
 
@@ -156,8 +157,8 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `34cfbb50` | `DEFER`; M16 vendors the provider hardening, while the remaining bridge and scanner hunks are 9Router-only | Remains `DEFER` |
 | `b64d861e` | Kiro, Jcode, Junie, and OpenCodeReview start-anchor hunks are vendored through M21; Zcode did not merge | `DEFER`; its remaining Zcode and Devin hunks both wait for upstream convergence |
 | `c1aef5e9` | `ALREADY_VENDORED`; M11 carried the macOS/profile scope and M23-H adds the remaining Windows home candidates without widening explicit `HERMES_HOME` | Remains `ALREADY_VENDORED` |
-| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26 |
-| `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26; only Devin remains |
+| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26-A |
+| `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26-B; only Devin remains |
 
 ### Execution order and ledger transitions
 
@@ -174,10 +175,11 @@ flowchart TD
     P --> A[M25 reloadable model aliases]
     A --> W[M24 Warp producer/local reporting]
     T --> F[M19-A Windows atomic retry]
-    D --> S[M26 full shard cache]
-    W --> S
-    F --> S
-    S --> WS[M19-B final TokenBar-Windows re-sync]
+    D --> SA[M26-A shard engine and final format-2 envelope]
+    W --> SA
+    F --> SA
+    SA --> SB[M26-B generic related-file behavior]
+    SB --> WS[M19-B final TokenBar-Windows re-sync]
 ```
 
 | Milestone | Ledger transition after merge |
@@ -189,20 +191,21 @@ flowchart TD
 | M21 | `839ce378 052f43de 633ea946 77948d9d 302d39c3: TAKE → ALREADY_VENDORED`; `b64d861e` remains `TAKE` |
 | M22 | Closed unmerged / DEFER; `640e97b9 f7a124da ed6f8b95 65f8f3e2 b64d861e: TAKE → DEFER` under the fidelity threshold |
 | M23-H | `c1aef5e9: TAKE → ALREADY_VENDORED`; `074619f7: TAKE → DEFER` after the PR #74 fidelity stop |
-| M23-D | Current checkpoint applies `f6f7eced 0b454e60: TAKE → ALREADY_VENDORED`; merge remains a separate authorization gate |
+| M23-D | PR #83 merged `f6f7eced 0b454e60: TAKE → ALREADY_VENDORED` |
 | M23-V | No runtime branch; `074619f7` remains `DEFER` until upstream ObjectMutationLog semantics converge |
 | M18 | `959cce84 6c804711: TAKE → ALREADY_VENDORED`; non-main sources do not change counts |
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
 | M24 | `63a44d7c: TAKE → ALREADY_VENDORED` |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
-| M26 | `ae36db5c: TAKE → ALREADY_VENDORED`; `cd07bf78: TAKE → DEFER` after taking only generic format-2 cache metadata |
+| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; land the final format-2 cache envelope |
+| M26-B | `cd07bf78: TAKE → DEFER` after taking only generic related-file behavior; format-2 envelope remains fixed |
 | M19-B | Consumer sync; counts unchanged |
 
-If M23-D, M24, and M26 complete after this checkpoint, the terminal classification is `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
+With M23-D merged, M24 and M26 are the remaining ledger transitions before the terminal classification `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
 The active monolithic cache is schema 32 after PR #77. M23-H changes discovery only, and M23-D adds a new independently fingerprinted source, so neither requires schema 33. M26 activates shard format 2 while leaving the legacy schema-32 monolith unread, unchanged, and available as provenance.
 
-Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; PR #74 remains open and unmerged while the local M23-D replacement is verified. Issue #45 still needs explicit remote authorization for the M23-H bookkeeping update, and must not record M23-D as landed until its own replacement PR merges. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; and PR #74 is closed unmerged at `e274f2ad` as fidelity evidence. Issue #45 records the completed M23 bookkeeping. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
