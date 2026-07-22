@@ -22,6 +22,7 @@ mod agent_history;
 mod agent_quota_duration;
 mod agent_quota_history;
 mod agent_usage;
+mod agent_warp;
 mod agents_report;
 mod hourly_report;
 mod model_report;
@@ -31,6 +32,7 @@ mod usage_tail;
 
 use std::collections::HashMap;
 use std::ffi::{c_char, CStr, CString};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -89,6 +91,42 @@ static TAIL_TICK: Mutex<TickState> = Mutex::new(TickState {
     last: None,
     in_flight: false,
 });
+static USAGE_DATA_GENERATION: AtomicU64 = AtomicU64::new(0);
+static USAGE_INVALIDATION_INIT: LazyLock<()> = LazyLock::new(|| {
+    tokscale_core::register_usage_data_invalidation_hook(|| {
+        USAGE_DATA_GENERATION.fetch_add(1, Ordering::SeqCst);
+        GRAPH_CACHE
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
+        TAILER.invalidate();
+        TAIL_TICK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .last = None;
+    });
+});
+
+pub(crate) fn usage_data_generation() -> u64 {
+    USAGE_DATA_GENERATION.load(Ordering::SeqCst)
+}
+
+fn with_stable_usage_source<T>(
+    mut body: impl FnMut(tokscale_core::scanner::ScannerSettings) -> Result<T, String>,
+) -> Result<T, String> {
+    agent_warp::refresh_external_if_active();
+    for _ in 0..2 {
+        let usage_generation = usage_data_generation();
+        let warp = agent_warp::source_snapshot();
+        let result = body(warp.scanner_settings);
+        if usage_data_generation() == usage_generation
+            && agent_warp::generation() == warp.generation
+        {
+            return result;
+        }
+    }
+    Err("usage_data_changed".to_string())
+}
 
 fn into_raw_json(json: String) -> *mut c_char {
     // A JSON payload should never contain interior NULs; fall back to an
@@ -104,6 +142,33 @@ fn envelope(result: Result<serde_json::Value, String>) -> *mut c_char {
         Err(err) => serde_json::json!({"ok": false, "err": err}).to_string(),
     };
     into_raw_json(json)
+}
+
+fn warp_envelope<T: serde::Serialize>(result: Result<T, agent_warp::WarpError>) -> *mut c_char {
+    envelope(match result {
+        Ok(value) => serde_json::to_value(value)
+            .map_err(|_| agent_warp::WarpError::Internal.code().to_string()),
+        Err(error) => Err(error.code().to_string()),
+    })
+}
+
+fn guarded_warp(body: impl FnOnce() -> *mut c_char) -> *mut c_char {
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        LazyLock::force(&USAGE_INVALIDATION_INIT);
+        body()
+    })) {
+        Ok(pointer) => pointer,
+        Err(_) => warp_envelope::<serde_json::Value>(Err(agent_warp::WarpError::Internal)),
+    }
+}
+
+unsafe fn warp_utf8<'a>(value: *const c_char) -> Result<&'a str, agent_warp::WarpError> {
+    if value.is_null() {
+        return Err(agent_warp::WarpError::InvalidUsage);
+    }
+    unsafe { CStr::from_ptr(value) }
+        .to_str()
+        .map_err(|_| agent_warp::WarpError::InvalidUsage)
 }
 
 /// Run an FFI entry-point body, converting any panic into an error envelope
@@ -123,6 +188,7 @@ fn envelope(result: Result<serde_json::Value, String>) -> *mut c_char {
 /// in-flight flag without stamping on a tick panic so the tail re-parses next.
 fn guarded(name: &str, body: impl FnOnce() -> *mut c_char) -> *mut c_char {
     LazyLock::force(&RAYON_INIT);
+    LazyLock::force(&USAGE_INVALIDATION_INIT);
     match std::panic::catch_unwind(std::panic::AssertUnwindSafe(body)) {
         Ok(ptr) => ptr,
         Err(payload) => {
@@ -173,7 +239,11 @@ unsafe fn clients_from(clients: *const c_char) -> Result<Option<Vec<String>>, St
     Ok(if list.is_empty() { None } else { Some(list) })
 }
 
-fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
+fn graph_cached(
+    year: &str,
+    max_age: Duration,
+    scanner_settings: tokscale_core::scanner::ScannerSettings,
+) -> Option<serde_json::Value> {
     // Read the entry and release the lock before any filesystem I/O — never hold
     // GRAPH_CACHE across the source-state probe below (mirrors graph_compute,
     // which probes outside the lock too), so concurrent tb_graph callers don't
@@ -191,7 +261,11 @@ fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
     // briefly to re-stamp so the next calls inside the oneshot window skip the
     // probe entirely. A lost re-stamp (entry evicted/replaced meanwhile) just
     // degrades to the next call re-probing — benign.
-    let fresh = tokscale_core::local_source_change_token(&Default::default()).ok()?;
+    let fresh = tokscale_core::local_source_change_token(&tokscale_core::LocalParseOptions {
+        scanner_settings,
+        ..Default::default()
+    })
+    .ok()?;
     if fresh == token {
         let mut cache = GRAPH_CACHE.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(entry) = cache.get_mut(year) {
@@ -202,12 +276,23 @@ fn graph_cached(year: &str, max_age: Duration) -> Option<serde_json::Value> {
     None
 }
 
-fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
+fn graph_compute(
+    year: &str,
+    scanner_settings: tokscale_core::scanner::ScannerSettings,
+) -> Result<serde_json::Value, String> {
+    let generation = usage_data_generation();
     // Probe before parsing: a source write or topology change that lands
     // mid-compute changes the token, so the next aged-out read recomputes
     // rather than serving a graph that missed it.
-    let token = tokscale_core::local_source_change_token(&Default::default()).unwrap_or(0);
-    let data = usage_graph::run(year)?;
+    let token = tokscale_core::local_source_change_token(&tokscale_core::LocalParseOptions {
+        scanner_settings: scanner_settings.clone(),
+        ..Default::default()
+    })
+    .unwrap_or(0);
+    let data = usage_graph::run(year, scanner_settings)?;
+    if usage_data_generation() != generation {
+        return Err("usage_data_changed".to_string());
+    }
     GRAPH_CACHE
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -257,8 +342,11 @@ fn tail_tick_if_stale() {
     };
     if claimed {
         let _guard = TickGuard; // clears in_flight on drop (success or panic)
+        let generation = usage_data_generation();
         TAILER.tick();
-        lock_tick().last = Some(Instant::now()); // success only — panic skips this
+        if usage_data_generation() == generation {
+            lock_tick().last = Some(Instant::now()); // success only — panic skips this
+        }
     }
 }
 
@@ -268,8 +356,13 @@ fn tail_tick_if_stale() {
 #[no_mangle]
 pub extern "C" fn tb_probe() -> *mut c_char {
     guarded("tb_probe", || {
-        let opts = tokscale_core::LocalParseOptions::default();
-        let json = match tokscale_core::parse_local_clients(opts) {
+        let result = with_stable_usage_source(|scanner_settings| {
+            tokscale_core::parse_local_clients(tokscale_core::LocalParseOptions {
+                scanner_settings,
+                ..Default::default()
+            })
+        });
+        let json = match result {
             Ok(pm) => format!(r#"{{"ok":true,"messages":{}}}"#, pm.messages.len()),
             Err(e) => serde_json::json!({"ok": false, "err": e}).to_string(),
         };
@@ -287,10 +380,16 @@ pub extern "C" fn tb_probe() -> *mut c_char {
 pub unsafe extern "C" fn tb_graph(year: *const c_char) -> *mut c_char {
     guarded("tb_graph", || {
         envelope(unsafe { year_from(year) }.and_then(|year| {
-            if let Some(data) = graph_cached(&year, Duration::from_secs(ONESHOT_MAX_AGE_SECS)) {
-                return Ok(data);
-            }
-            graph_compute(&year)
+            with_stable_usage_source(|scanner_settings| {
+                if let Some(data) = graph_cached(
+                    &year,
+                    Duration::from_secs(ONESHOT_MAX_AGE_SECS),
+                    scanner_settings.clone(),
+                ) {
+                    return Ok(data);
+                }
+                graph_compute(&year, scanner_settings)
+            })
         }))
     })
 }
@@ -302,7 +401,9 @@ pub unsafe extern "C" fn tb_graph(year: *const c_char) -> *mut c_char {
 #[no_mangle]
 pub unsafe extern "C" fn tb_refresh_graph(year: *const c_char) -> *mut c_char {
     guarded("tb_refresh_graph", || {
-        envelope(unsafe { year_from(year) }.and_then(|year| graph_compute(&year)))
+        envelope(unsafe { year_from(year) }.and_then(|year| {
+            with_stable_usage_source(|scanner_settings| graph_compute(&year, scanner_settings))
+        }))
     })
 }
 
@@ -402,6 +503,80 @@ pub extern "C" fn tb_agent_usage() -> *mut c_char {
     })
 }
 
+/// Warp local-reporting capability. Windows exposes a sanitized unsupported
+/// status; it never creates credential storage or starts a producer.
+#[no_mangle]
+pub extern "C" fn tb_warp_capability() -> *mut c_char {
+    guarded_warp(|| warp_envelope(Ok(agent_warp::capability())))
+}
+
+/// Current Warp source state. Contains only aggregate counters and fixed error
+/// codes; no bearer, path, workspace label, or remote response text crosses FFI.
+#[no_mangle]
+pub extern "C" fn tb_warp_status() -> *mut c_char {
+    guarded_warp(|| warp_envelope(Ok(agent_warp::status())))
+}
+
+/// Install or replace the process-memory Warp bearer after a complete two-query
+/// sync and authenticated cache write/readback.
+///
+/// # Safety
+/// `bearer` must point to a valid NUL-terminated string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_warp_set_bearer(bearer: *const c_char) -> *mut c_char {
+    guarded_warp(|| {
+        let result = unsafe { warp_utf8(bearer) }
+            .map_err(|_| agent_warp::WarpError::InvalidBearer)
+            .and_then(|bearer| RUNTIME.block_on(agent_warp::set_bearer(bearer)));
+        warp_envelope(result)
+    })
+}
+
+/// Refresh the active app-owned bearer source. External mode is read-only and
+/// has no credential refresh path.
+#[no_mangle]
+pub extern "C" fn tb_warp_refresh() -> *mut c_char {
+    guarded_warp(|| warp_envelope(RUNTIME.block_on(agent_warp::refresh())))
+}
+
+/// Install an explicit external file source. Only the exact selected
+/// `usage.json` is read; sibling backup/archive/temp files are never searched.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 path.
+#[no_mangle]
+pub unsafe extern "C" fn tb_warp_set_external_usage(path: *const c_char) -> *mut c_char {
+    guarded_warp(|| {
+        let result = unsafe { warp_utf8(path) }
+            .map_err(|_| agent_warp::WarpError::InvalidExternalPath)
+            .and_then(|path| agent_warp::set_external(std::path::Path::new(path)));
+        warp_envelope(result)
+    })
+}
+
+/// Restore a remembered external source only while no newer app or external
+/// source is active. The Rust generation check makes bootstrap racing with a
+/// bearer connection fail closed instead of replacing the newer source.
+///
+/// # Safety
+/// `path` must point to a valid NUL-terminated UTF-8 path.
+#[no_mangle]
+pub unsafe extern "C" fn tb_warp_restore_external_usage(path: *const c_char) -> *mut c_char {
+    guarded_warp(|| {
+        let result = unsafe { warp_utf8(path) }
+            .map_err(|_| agent_warp::WarpError::InvalidExternalPath)
+            .and_then(|path| agent_warp::restore_external_if_inactive(std::path::Path::new(path)));
+        warp_envelope(result)
+    })
+}
+
+/// Drop the active Warp mode. App mode also purges the app-owned cache;
+/// external mode only forgets the reference and never deletes the selected file.
+#[no_mangle]
+pub extern "C" fn tb_warp_clear() -> *mut c_char {
+    guarded_warp(|| warp_envelope(agent_warp::clear()))
+}
+
 /// Release a string returned by any tb_* entry point.
 ///
 /// # Safety
@@ -446,6 +621,44 @@ mod tests {
         let s = unsafe { take(p) };
         assert!(s.contains(r#""ok":false"#), "got: {s}");
         assert!(s.contains("tb_test panicked: boom"), "got: {s}");
+    }
+
+    #[test]
+    fn warp_ffi_rejects_null_and_invalid_utf8_with_fixed_codes() {
+        let bearer_null = unsafe { take(tb_warp_set_bearer(std::ptr::null())) };
+        assert!(bearer_null.contains("warp_invalid_bearer"));
+        let path_null = unsafe { take(tb_warp_set_external_usage(std::ptr::null())) };
+        assert!(path_null.contains("warp_invalid_external_path"));
+        let restore_null = unsafe { take(tb_warp_restore_external_usage(std::ptr::null())) };
+        assert!(restore_null.contains("warp_invalid_external_path"));
+
+        let invalid = [0xff_u8, 0];
+        let bearer_invalid = unsafe { take(tb_warp_set_bearer(invalid.as_ptr().cast::<c_char>())) };
+        assert!(bearer_invalid.contains("warp_invalid_bearer"));
+        let path_invalid = unsafe {
+            take(tb_warp_set_external_usage(
+                invalid.as_ptr().cast::<c_char>(),
+            ))
+        };
+        assert!(path_invalid.contains("warp_invalid_external_path"));
+        let restore_invalid = unsafe {
+            take(tb_warp_restore_external_usage(
+                invalid.as_ptr().cast::<c_char>(),
+            ))
+        };
+        assert!(restore_invalid.contains("warp_invalid_external_path"));
+    }
+
+    #[test]
+    fn warp_panic_boundary_never_returns_panic_details() {
+        let output = unsafe {
+            take(guarded_warp(|| {
+                panic!("sentinel-secret /private/usage.json")
+            }))
+        };
+        assert!(output.contains("warp_internal"));
+        assert!(!output.contains("sentinel-secret"));
+        assert!(!output.contains("/private"));
     }
 
     #[test]

@@ -55,6 +55,19 @@ char *tb_tokens_per_min(void);
 // Network-bound; per-provider failures are reported inside each snapshot.
 char *tb_agent_usage(void);
 
+// Warp aggregate local reporting. Bearers are process-memory only; every error
+// is a fixed `warp_*` code with no remote body, label, credential, or path.
+char *tb_warp_capability(void);
+char *tb_warp_status(void);
+char *tb_warp_set_bearer(const char *bearer);
+char *tb_warp_refresh(void);
+// `path` must identify the exact external file named `usage.json`.
+char *tb_warp_set_external_usage(const char *path);
+// Bootstrap-only variant: does nothing when a newer source is already active.
+char *tb_warp_restore_external_usage(const char *path);
+// App mode purges the app-owned cache; external mode only forgets its reference.
+char *tb_warp_clear(void);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 

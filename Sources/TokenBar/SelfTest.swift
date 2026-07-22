@@ -1403,6 +1403,11 @@ enum SelfTest {
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")
         }
+        let warpCapability = try? TBCore.warpCapability()
+        let warpStatus = try? TBCore.warpStatus()
+        expect(
+            warpCapability != nil && ["none", "app", "external"].contains(warpStatus?.mode ?? ""),
+            "Warp capability/status FFI wiring")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

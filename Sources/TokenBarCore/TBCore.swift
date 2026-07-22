@@ -21,6 +21,26 @@ public struct ProbeResult: Decodable {
     public let err: String?
 }
 
+public struct WarpCapability: Decodable, Sendable {
+    public let supported: Bool
+    public let bearerInProcessOnly: Bool
+    public let externalExactUsageJson: Bool
+}
+
+public struct WarpStatus: Decodable, Sendable {
+    public let supported: Bool
+    public let mode: String
+    public let active: Bool
+    public let stale: Bool
+    public let syncedAtMs: Int64?
+    public let retryAtMs: Int64?
+    public let errorCode: String?
+    public let requestsUsed: Int64?
+    public let requestLimit: Int64?
+    public let spendCents: Int64?
+    public let workspaceCount: Int
+}
+
 /// Standard envelope every non-probe entry point returns:
 /// `{"ok":true,"data":<payload>}` or `{"ok":false,"err":"..."}`.
 struct TBEnvelope<T: Decodable>: Decodable {
@@ -165,6 +185,36 @@ public enum TBCore {
     /// per-provider failures are reported in each snapshot's `error`.
     public static func agentUsage() throws -> AgentUsagePayload {
         try unwrap(tb_agent_usage())
+    }
+
+    public static func warpCapability() throws -> WarpCapability {
+        try unwrap(tb_warp_capability())
+    }
+
+    public static func warpStatus() throws -> WarpStatus {
+        try unwrap(tb_warp_status())
+    }
+
+    /// Network-bound. The bearer exists only in this call and Rust process
+    /// memory; callers must not persist it in app settings.
+    public static func warpSetBearer(_ bearer: String) throws -> WarpStatus {
+        try bearer.withCString { try unwrap(tb_warp_set_bearer($0)) }
+    }
+
+    public static func warpRefresh() throws -> WarpStatus {
+        try unwrap(tb_warp_refresh())
+    }
+
+    public static func warpSetExternalUsage(path: String) throws -> WarpStatus {
+        try path.withCString { try unwrap(tb_warp_set_external_usage($0)) }
+    }
+
+    public static func warpRestoreExternalUsage(path: String) throws -> WarpStatus {
+        try path.withCString { try unwrap(tb_warp_restore_external_usage($0)) }
+    }
+
+    public static func warpClear() throws -> WarpStatus {
+        try unwrap(tb_warp_clear())
     }
 
     /// Hermetic checks for the FFI envelope/error contract, surfaced to the

@@ -49,20 +49,20 @@ struct ModelReportData {
 /// Build the per-model report for `year` (empty string = all time).
 pub fn run(year: &str) -> Result<Value, String> {
     let year = normalize_year(year)?;
-
-    let options = tokscale_core::ReportOptions {
-        year,
-        ..Default::default()
-    };
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("build runtime: {}", e))?;
-    let report = runtime.block_on(tokscale_core::get_model_report(options))?;
-
-    let data = map_report(report);
-    serde_json::to_value(data).map_err(|e| format!("serialize model report: {}", e))
+    crate::with_stable_usage_source(|scanner_settings| {
+        let options = tokscale_core::ReportOptions {
+            year: year.clone(),
+            scanner_settings,
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build runtime: {}", e))?;
+        let report = runtime.block_on(tokscale_core::get_model_report(options))?;
+        serde_json::to_value(map_report(report))
+            .map_err(|e| format!("serialize model report: {}", e))
+    })
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {

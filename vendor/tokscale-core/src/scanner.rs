@@ -58,6 +58,11 @@ pub struct ScannerSettings {
     /// so the JSON stays stable and human-editable.
     #[serde(default)]
     pub extra_scan_paths: BTreeMap<String, Vec<PathBuf>>,
+    /// Process-memory-only Warp source installed by TokenBar's credential boundary.
+    /// It is deliberately skipped by serde: scanner settings, environment roots,
+    /// and directory globs must never activate Warp or persist source payloads.
+    #[serde(skip)]
+    pub warp_usage_source: Option<crate::sessions::warp::WarpUsageSource>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +92,10 @@ pub struct ScanResult {
     pub zed_db: Option<PathBuf>,
     pub kiro_db: Option<PathBuf>,
     pub crush_dbs: Vec<CrushDbSource>,
+    /// Exact point-in-time Warp source supplied by the caller. Warp is never
+    /// discovered from a default directory, extra path, environment variable, or
+    /// filename glob.
+    pub warp_usage_source: Option<crate::sessions::warp::WarpUsageSource>,
     /// Path to the OpenCode legacy JSON directory (for migration cache stat checks)
     pub opencode_json_dir: Option<PathBuf>,
 }
@@ -104,6 +113,7 @@ impl Default for ScanResult {
             zed_db: None,
             kiro_db: None,
             crush_dbs: Vec::new(),
+            warp_usage_source: None,
             opencode_json_dir: None,
         }
     }
@@ -120,7 +130,8 @@ impl ScanResult {
 
     /// Get total number of files found
     pub fn total_files(&self) -> usize {
-        self.files.iter().map(|v| v.len()).sum()
+        self.files.iter().map(|v| v.len()).sum::<usize>()
+            + usize::from(self.warp_usage_source.is_some())
     }
 
     /// Get all files as a single vector
@@ -131,6 +142,9 @@ impl ScanResult {
             for path in self.get(client) {
                 result.push((client, path.clone()));
             }
+        }
+        if let Some(source) = &self.warp_usage_source {
+            result.push((ClientId::Warp, source.path().to_path_buf()));
         }
 
         result
@@ -742,7 +756,7 @@ fn supports_extra_dir_scanning(client_id: ClientId) -> bool {
     // `scan_directory` to find them from user-provided roots.
     !matches!(
         client_id,
-        ClientId::Kilo | ClientId::Crush | ClientId::Goose
+        ClientId::Kilo | ClientId::Crush | ClientId::Goose | ClientId::Warp
     )
 }
 
@@ -905,6 +919,10 @@ fn scan_all_clients_with_env_strategy_inner(
 
     let headless_roots = headless_roots_with_env_strategy(home_dir, use_env_roots);
 
+    if enabled.contains(&ClientId::Warp) {
+        result.warp_usage_source = scanner_settings.warp_usage_source.clone();
+    }
+
     // Define scan tasks
     let mut tasks: Vec<(ClientId, String, &str)> = Vec::new();
     let mut seen_scan_roots: HashSet<(ClientId, PathBuf)> = HashSet::new();
@@ -924,6 +942,7 @@ fn scan_all_clients_with_env_strategy_inner(
                 | ClientId::Zed
                 | ClientId::Crush
                 | ClientId::Codebuff
+                | ClientId::Warp
         ) {
             continue;
         }
@@ -4141,5 +4160,79 @@ mod tests {
             &settings,
         );
         assert!(disabled.get(ClientId::Kiro).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn warp_uses_only_the_explicit_point_in_time_source() {
+        let mut extra = EnvGuard::capture(&["TOKSCALE_EXTRA_DIRS"]);
+        let home = TempDir::new().unwrap();
+        let selected = home.path().join("selected/usage.json");
+        fs::create_dir_all(selected.parent().unwrap()).unwrap();
+        fs::write(&selected, b"selected").unwrap();
+        for sibling in [
+            "usage-old.json",
+            "usage.json.backup",
+            ".usage.json.tmp",
+            "usage-archive.json",
+        ] {
+            fs::write(selected.parent().unwrap().join(sibling), b"ignored").unwrap();
+        }
+        let source = crate::sessions::warp::WarpUsageSource::new(
+            selected.clone(),
+            crate::sessions::warp::WarpNormalizedUsage {
+                version: crate::sessions::warp::WARP_NORMALIZED_USAGE_VERSION,
+                synced_at_ms: 1,
+                account_scope: "A".repeat(43),
+                usage: crate::sessions::warp::WarpAggregateUsage {
+                    requests_used: Some(1),
+                    ..Default::default()
+                },
+                workspaces: Vec::new(),
+            },
+            [7; 32],
+            1,
+        )
+        .unwrap();
+        let mut settings = ScannerSettings {
+            warp_usage_source: Some(source),
+            ..Default::default()
+        };
+        settings.extra_scan_paths.insert(
+            "warp".to_string(),
+            vec![selected.parent().unwrap().to_path_buf()],
+        );
+        extra.set(
+            "TOKSCALE_EXTRA_DIRS",
+            format!("warp:{}", selected.parent().unwrap().display()),
+        );
+
+        let result = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["warp".to_string()],
+            true,
+            &settings,
+        );
+        assert!(result.get(ClientId::Warp).is_empty());
+        assert_eq!(
+            result.warp_usage_source.as_ref().unwrap().path(),
+            selected.as_path()
+        );
+        assert_eq!(result.all_files(), vec![(ClientId::Warp, selected)]);
+
+        let disabled = scan_all_clients_with_scanner_settings(
+            home.path().to_str().unwrap(),
+            &["claude".to_string()],
+            true,
+            &settings,
+        );
+        assert!(disabled.warp_usage_source.is_none());
+        let serialized = serde_json::to_string(&ScannerSettings {
+            warp_usage_source: settings.warp_usage_source.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(!serialized.contains("warpUsageSource"));
+        assert!(!serialized.contains("selected"));
     }
 }

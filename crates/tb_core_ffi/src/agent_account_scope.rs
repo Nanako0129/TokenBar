@@ -25,6 +25,7 @@ const INSTALLATION_KEY_FILE: &str = "quota-account-scope-installation-key-v1.bin
 const METADATA_FILE: &str = "quota-account-scope-v1.json";
 const METADATA_LOCK_FILE: &str = "quota-account-scope-v1.lock";
 const V3_HISTORY_FILE: &str = "quota-pace-history-v3.json";
+const WARP_USAGE_CACHE_FILE: &str = "warp-usage-cache-v1.json";
 const METADATA_SCHEMA_VERSION: u32 = 1;
 const INSTALLATION_KEY_BYTES: usize = 32;
 const LINEAGE_ID_BYTES: usize = 16;
@@ -35,6 +36,7 @@ static CODEX_REFRESH_LOCK: Mutex<()> = Mutex::new(());
 static CLAUDE_REFRESH_LOCK: Mutex<()> = Mutex::new(());
 static GROK_REFRESH_LOCK: Mutex<()> = Mutex::new(());
 static ANTIGRAVITY_REFRESH_LOCK: Mutex<()> = Mutex::new(());
+static WARP_REFRESH_LOCK: Mutex<()> = Mutex::new(());
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, PartialEq, Eq)]
@@ -338,9 +340,12 @@ fn ensure_installation_key_locked<B: Backend>(
         .map_err(|_| AccountScopeError::StorageUnavailable)?;
     let history_exists = regular_artifact_exists(&history_path)
         .map_err(|_| AccountScopeError::StorageUnavailable)?;
+    let warp_cache_exists = regular_artifact_exists(&directory.join(WARP_USAGE_CACHE_FILE))
+        .map_err(|_| AccountScopeError::StorageUnavailable)?;
     let orphaned_metadata_exists = orphaned_metadata_artifact_exists(backend, directory)
         .map_err(|_| AccountScopeError::StorageUnavailable)?;
-    let had_artifacts = metadata_exists || history_exists || orphaned_metadata_exists;
+    let had_artifacts =
+        metadata_exists || history_exists || warp_cache_exists || orphaned_metadata_exists;
 
     let generated = installation_key_from_bytes(&backend.random_bytes(INSTALLATION_KEY_BYTES)?)?;
     if metadata_exists {
@@ -920,6 +925,32 @@ fn open_existing_owner_only(path: &Path) -> io::Result<Option<File>> {
     secure_open_regular_file(path, file).map(Some)
 }
 
+fn open_existing_strict_owner_only(path: &Path) -> io::Result<Option<File>> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_file() => {}
+        Ok(_) => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "account-scope artifact is not a regular file",
+            ))
+        }
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    let file = OpenOptions::new().read(true).open(path)?;
+    verify_open_regular_file(path, &file)?;
+    require_owner_only_mode(&file.metadata()?)?;
+    verify_open_regular_file(path, &file)?;
+    Ok(Some(file))
+}
+
+fn verify_existing_owner_only_target(path: &Path) -> io::Result<()> {
+    let Some(_file) = open_existing_strict_owner_only(path)? else {
+        return Ok(());
+    };
+    Ok(())
+}
+
 fn read_owner_only(path: &Path) -> io::Result<Option<Vec<u8>>> {
     let Some(mut file) = open_existing_owner_only(path)? else {
         return Ok(None);
@@ -928,6 +959,87 @@ fn read_owner_only(path: &Path) -> io::Result<Option<Vec<u8>>> {
     file.read_to_end(&mut bytes)?;
     verify_open_regular_file(path, &file)?;
     Ok(Some(bytes))
+}
+
+pub(crate) struct SecureFileRead {
+    pub(crate) path: PathBuf,
+    pub(crate) bytes: Vec<u8>,
+    pub(crate) modified_ms: u64,
+}
+
+pub(crate) fn read_external_regular_bounded(
+    path: &Path,
+    max_bytes: u64,
+) -> Result<SecureFileRead, AccountScopeError> {
+    read_regular_bounded(path, max_bytes, false).map_err(|_| AccountScopeError::MetadataRead)
+}
+
+fn read_regular_bounded(
+    path: &Path,
+    max_bytes: u64,
+    require_owner_only: bool,
+) -> io::Result<SecureFileRead> {
+    require_regular_file_path(path)?;
+    let mut file = OpenOptions::new().read(true).open(path)?;
+    verify_open_regular_file(path, &file)?;
+    let metadata = file.metadata()?;
+    if require_owner_only {
+        require_owner_only_mode(&metadata)?;
+    }
+    if metadata.len() > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "account-scope artifact exceeds size limit",
+        ));
+    }
+
+    let capacity = usize::try_from(metadata.len()).unwrap_or(0);
+    let mut bytes = Vec::with_capacity(capacity);
+    std::io::Read::by_ref(&mut file)
+        .take(max_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "account-scope artifact exceeds size limit",
+        ));
+    }
+    verify_open_regular_file(path, &file)?;
+    let canonical = fs::canonicalize(path)?;
+    verify_open_regular_file(&canonical, &file)?;
+    let metadata = file.metadata()?;
+    if require_owner_only {
+        require_owner_only_mode(&metadata)?;
+    }
+    let modified_ms = metadata
+        .modified()
+        .ok()
+        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0);
+    Ok(SecureFileRead {
+        path: canonical,
+        bytes,
+        modified_ms,
+    })
+}
+
+#[cfg(unix)]
+fn require_owner_only_mode(metadata: &fs::Metadata) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+    if metadata.permissions().mode() & 0o7777 == 0o600 {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "account-scope artifact is not owner-only",
+        ))
+    }
+}
+
+#[cfg(not(unix))]
+fn require_owner_only_mode(_metadata: &fs::Metadata) -> io::Result<()> {
+    Ok(())
 }
 
 fn require_regular_file_path(path: &Path) -> io::Result<()> {
@@ -1278,6 +1390,97 @@ impl RefreshTransaction {
             new_marker,
         )
     }
+
+    pub(crate) fn opaque_hmac(
+        &self,
+        domain: &'static [u8],
+        fields: &[&[u8]],
+    ) -> Result<String, AccountScopeError> {
+        self.hmac_digest(domain, fields)
+            .map(|digest| encode_digest(&digest))
+    }
+
+    pub(crate) fn hmac_digest(
+        &self,
+        domain: &'static [u8],
+        fields: &[&[u8]],
+    ) -> Result<[u8; DIGEST_BYTES], AccountScopeError> {
+        if domain.is_empty() {
+            return Err(AccountScopeError::InvalidEvidence);
+        }
+        let key = self.key.as_ref().map_err(|error| *error)?;
+        let mut separated = Vec::with_capacity(fields.len().saturating_add(1));
+        separated.push(domain);
+        separated.extend_from_slice(fields);
+        hmac_digest(key, &separated)
+    }
+
+    pub(crate) fn verify_hmac(
+        &self,
+        domain: &'static [u8],
+        fields: &[&[u8]],
+        expected: &[u8],
+    ) -> Result<(), AccountScopeError> {
+        if domain.is_empty() || expected.len() != DIGEST_BYTES {
+            return Err(AccountScopeError::InvalidEvidence);
+        }
+        let key = self.key.as_ref().map_err(|error| *error)?;
+        let mut separated = Vec::with_capacity(fields.len().saturating_add(1));
+        separated.push(domain);
+        separated.extend_from_slice(fields);
+        let encoded = encode_fields(&separated)?;
+        let mut mac =
+            HmacSha256::new_from_slice(key).map_err(|_| AccountScopeError::InvalidEvidence)?;
+        mac.update(&encoded);
+        mac.verify_slice(expected)
+            .map_err(|_| AccountScopeError::MetadataCorrupt)
+    }
+
+    pub(crate) fn read_warp_cache(
+        &self,
+        max_bytes: u64,
+    ) -> Result<Option<SecureFileRead>, AccountScopeError> {
+        let directory = ensure_storage_dir(&SystemBackend)?;
+        let path = directory.join(WARP_USAGE_CACHE_FILE);
+        match fs::symlink_metadata(&path) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err(AccountScopeError::MetadataRead),
+            Ok(_) => read_regular_bounded(&path, max_bytes, true)
+                .map(Some)
+                .map_err(|_| AccountScopeError::MetadataRead),
+        }
+    }
+
+    pub(crate) fn write_warp_cache(
+        &self,
+        bytes: &[u8],
+        max_bytes: u64,
+    ) -> Result<SecureFileRead, AccountScopeError> {
+        if bytes.len() as u64 > max_bytes {
+            return Err(AccountScopeError::MetadataWrite);
+        }
+        let directory = ensure_storage_dir(&SystemBackend)?;
+        let path = directory.join(WARP_USAGE_CACHE_FILE);
+        verify_existing_owner_only_target(&path).map_err(|_| AccountScopeError::MetadataWrite)?;
+        save_atomic(&SystemBackend, &directory, &path, bytes)
+            .map_err(|_| AccountScopeError::MetadataWrite)?;
+        read_regular_bounded(&path, max_bytes, true).map_err(|_| AccountScopeError::MetadataWrite)
+    }
+
+    pub(crate) fn remove_warp_cache(&self) -> Result<(), AccountScopeError> {
+        let directory = ensure_storage_dir(&SystemBackend)?;
+        let path = directory.join(WARP_USAGE_CACHE_FILE);
+        let Some(file) =
+            open_existing_strict_owner_only(&path).map_err(|_| AccountScopeError::MetadataWrite)?
+        else {
+            return Ok(());
+        };
+        fs::remove_file(&path).map_err(|_| AccountScopeError::MetadataWrite)?;
+        if verify_open_regular_file(&path, &file).is_ok() {
+            return Err(AccountScopeError::MetadataWrite);
+        }
+        sync_directory(&SystemBackend, &directory).map_err(|_| AccountScopeError::MetadataWrite)
+    }
 }
 
 impl RefreshScopeTransaction for RefreshTransaction {
@@ -1319,6 +1522,7 @@ fn refresh_process_lock(provider: &str) -> Result<&'static Mutex<()>, AccountSco
         "claude" => Ok(&CLAUDE_REFRESH_LOCK),
         "grok" => Ok(&GROK_REFRESH_LOCK),
         "antigravity" => Ok(&ANTIGRAVITY_REFRESH_LOCK),
+        "warp" => Ok(&WARP_REFRESH_LOCK),
         _ => Err(AccountScopeError::InvalidEvidence),
     }
 }
@@ -3218,6 +3422,68 @@ mod tests {
                 );
             }
         }
+        backend.cleanup();
+    }
+
+    #[test]
+    fn warp_cache_defers_key_recreation_when_the_old_key_is_missing() {
+        let backend = TestBackend::new("warp-cache-orphan");
+        ensure_real_directory(&backend.directory).unwrap();
+        fs::write(backend.directory.join(WARP_USAGE_CACHE_FILE), b"old-mac").unwrap();
+        assert_eq!(
+            ensure_installation_key(&backend, &Mutex::new(())),
+            Err(AccountScopeError::OrphanedArtifacts)
+        );
+        assert!(backend.directory.join(INSTALLATION_KEY_FILE).exists());
+        assert!(backend.directory.join(WARP_USAGE_CACHE_FILE).exists());
+        assert!(ensure_installation_key(&backend, &Mutex::new(())).is_ok());
+        backend.cleanup();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_warp_file_reads_reject_mode_symlink_fifo_and_oversize_attacks() {
+        use std::os::unix::fs::{symlink, PermissionsExt as _};
+
+        let backend = TestBackend::new("warp-bounded-read");
+        ensure_real_directory(&backend.directory).unwrap();
+        let path = backend.directory.join(WARP_USAGE_CACHE_FILE);
+        fs::write(&path, b"safe").unwrap();
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).unwrap();
+        let read = read_regular_bounded(&path, 4, true).unwrap();
+        assert_eq!(read.bytes, b"safe");
+        assert!(read_regular_bounded(&path, 3, true).is_err());
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_regular_bounded(&path, 4, true).is_err());
+        assert!(verify_existing_owner_only_target(&path).is_err());
+        fs::remove_file(&path).unwrap();
+
+        let target = backend.directory.with_extension("external-warp-cache");
+        fs::write(&target, b"external").unwrap();
+        symlink(&target, &path).unwrap();
+        assert!(read_regular_bounded(&path, 32, false).is_err());
+        assert_eq!(fs::read(&target).unwrap(), b"external");
+        fs::remove_file(&path).unwrap();
+
+        assert!(std::process::Command::new("mkfifo")
+            .arg(&path)
+            .status()
+            .unwrap()
+            .success());
+        assert!(read_regular_bounded(&path, 32, false).is_err());
+        fs::remove_file(&path).unwrap();
+        fs::remove_file(target).unwrap();
+        backend.cleanup();
+    }
+
+    #[test]
+    fn warp_refresh_uses_the_existing_owner_only_refresh_lock_lane() {
+        assert!(refresh_process_lock("warp").is_ok());
+        let backend = TestBackend::new("warp-refresh-lock");
+        let directory = ensure_storage_dir(&backend).unwrap();
+        let file = open_refresh_lock_file(&backend, &directory, "warp").unwrap();
+        fs2::FileExt::unlock(&file).unwrap();
         backend.cleanup();
     }
 

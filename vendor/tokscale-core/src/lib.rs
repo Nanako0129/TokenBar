@@ -17,7 +17,7 @@ pub mod sessions;
 pub use aggregator::*;
 pub use clients::{ClientCounts, ClientDef, ClientId, PathRoot};
 pub use model_alias::{
-    clear_model_aliases, model_alias_generation, model_aliases,
+    clear_model_aliases, invalidate_usage_data, model_alias_generation, model_aliases,
     register_usage_data_invalidation_hook, set_model_aliases, snapshot_grouping_aliases,
     GroupingAliasSnapshot, ModelAliasMap,
 };
@@ -1124,16 +1124,15 @@ fn parse_all_messages_with_pricing_with_env_strategy(
         }
     }
 
-    let warp_outcomes: Vec<CachedParseOutcome> = scan_result
-        .get(ClientId::Warp)
-        .par_iter()
-        .map(|path| {
-            load_or_parse_source(path, &source_cache, pricing, |path| {
-                sessions::warp::parse_warp_file(path)
-            })
-        })
-        .collect();
-    for outcome in warp_outcomes {
+    if let Some(source) = &scan_result.warp_usage_source {
+        let path = source.path();
+        let outcome = load_or_parse_source_with_fingerprint(
+            path,
+            &source_cache,
+            pricing,
+            |path| message_cache::SourceFingerprint::from_warp_source(path, source),
+            |_| sessions::warp::parse_warp_source(source),
+        );
         all_messages.extend(outcome.messages);
         if let Some(entry) = outcome.cache_entry {
             source_cache.insert(entry);
@@ -3059,7 +3058,37 @@ where
         }
     }
     simple_lane!(ClientId::Cursor,    sessions::cursor::parse_cursor_file);
-    simple_lane!(ClientId::Warp,      sessions::warp::parse_warp_file);
+    if let Some(source) = &scan_result.warp_usage_source {
+        let path = source.path();
+        let fingerprint = message_cache::SourceFingerprint::from_warp_source(path, source);
+        let cached = fingerprint.as_ref().and_then(|fingerprint| {
+            source_cache
+                .get(path)
+                .filter(|entry| entry.fingerprint == *fingerprint && !entry.messages.is_empty())
+        });
+        let messages = if let Some(cached) = cached {
+            cached.messages.clone()
+        } else {
+            let messages = sessions::warp::parse_warp_source(source);
+            if let Some(fingerprint) = fingerprint.filter(|_| !messages.is_empty()) {
+                source_cache.insert(message_cache::CachedSourceEntry::new(
+                    path,
+                    fingerprint,
+                    messages.clone(),
+                    Vec::new(),
+                    None,
+                ));
+            }
+            messages
+        };
+        for mut message in messages {
+            message.refresh_derived_fields();
+            apply_pricing_if_available(&mut message, pricing);
+            if passes_client(&message) && filter(&message) {
+                sink(&message);
+            }
+        }
+    }
     simple_lane!(ClientId::Amp,       sessions::amp::parse_amp_file);
     simple_lane!(ClientId::Codebuff,  sessions::codebuff::parse_codebuff_file);
     simple_lane!(
@@ -3842,6 +3871,9 @@ fn latest_source_mtime_ms_from_scan(scan_result: &scanner::ScanResult) -> u64 {
             latest = latest.max(roo_source_mtime_ms(ui_messages).unwrap_or(0));
         }
     }
+    if let Some(source) = &scan_result.warp_usage_source {
+        latest = latest.max(source.observed_mtime_ms());
+    }
     // These file-backed parsers consult secondary sources whose writes do not
     // update the scanned primary: Droid's fallback transcript, legacy Kimi's
     // shared config, and Kiro's CLI/IDE message sidecars. Probe each dependency
@@ -3977,6 +4009,12 @@ pub fn local_source_change_token(options: &LocalParseOptions) -> Result<u64, Str
         });
         state.hash(&mut hasher);
     }
+    if let Some(source) = &scan_result.warp_usage_source {
+        ClientId::Warp.hash(&mut hasher);
+        source.path().hash(&mut hasher);
+        source.fingerprint().hash(&mut hasher);
+        source.observed_mtime_ms().hash(&mut hasher);
+    }
     Ok(hasher.finish())
 }
 
@@ -4088,6 +4126,14 @@ fn grok_source_mtime_ms(source_path: &Path) -> Option<u64> {
 /// Any stat failure keeps the file — over-parsing is safe, silently skipping is
 /// not.
 fn prune_scan_result_by_mtime(scan_result: &mut scanner::ScanResult, threshold_ms: u64) {
+    if scan_result
+        .warp_usage_source
+        .as_ref()
+        .is_some_and(|source| source.observed_mtime_ms() < threshold_ms)
+    {
+        scan_result.warp_usage_source = None;
+    }
+
     let copilot_desktop_fresh = scan_result.copilot_desktop_db.as_ref().is_some_and(|path| {
         copilot_desktop_source_mtime_ms(path).is_none_or(|mtime| mtime >= threshold_ms)
     });
@@ -4751,14 +4797,12 @@ pub fn parse_local_clients(options: LocalParseOptions) -> Result<ParsedMessages,
     messages.extend(trae_msgs);
 
     let warp_msgs: Vec<ParsedMessage> = scan_result
-        .get(ClientId::Warp)
-        .par_iter()
-        .flat_map(|path| {
-            sessions::warp::parse_warp_file(path)
-                .into_iter()
-                .map(|msg| unified_to_parsed(&msg))
-                .collect::<Vec<_>>()
-        })
+        .warp_usage_source
+        .as_ref()
+        .map(sessions::warp::parse_warp_source)
+        .unwrap_or_default()
+        .iter()
+        .map(unified_to_parsed)
         .collect();
     let warp_count = summed_parsed_message_count(&warp_msgs);
     counts.set(ClientId::Warp, warp_count);
@@ -4918,17 +4962,18 @@ mod tests {
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
         canonical_model_id, clear_model_aliases, copilot_desktop_source_mtime_ms,
-        dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
-        get_model_report, get_monthly_report, latest_source_mtime_ms, local_source_change_token,
-        message_cache, model_alias_generation, normalize_model_for_grouping, normalize_syntactic,
-        opencode_authoritative_sources, opencode_identity_group,
-        parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
-        parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
-        register_usage_data_invalidation_hook, reprice_lane_message, retain_for_requested_clients,
-        scan_messages_streaming, scanner, select_local_parse_pricing, sessions, set_model_aliases,
-        snapshot_grouping_aliases, unified_to_parsed, AgentAccumulator, ClientId, CostSource,
-        GroupBy, LocalParseOptions, ModelAliasMap, OpenCodeSelection, OpenCodeSourceIdentity,
-        ReportOptions, TokenBreakdown, UnifiedMessage, UNKNOWN_WORKSPACE_LABEL,
+        dedupe_latest_trae_messages, fold_messages_streaming, generate_local_graph_report,
+        get_agents_report, get_hourly_report, get_model_report, get_monthly_report,
+        latest_source_mtime_ms, local_source_change_token, message_cache, model_alias_generation,
+        normalize_model_for_grouping, normalize_syntactic, opencode_authoritative_sources,
+        opencode_identity_group, parse_all_messages_with_pricing_with_env_strategy,
+        parse_local_clients, parse_local_unified_messages, parsed_to_unified, pricing,
+        prune_scan_result_by_mtime, register_usage_data_invalidation_hook, reprice_lane_message,
+        retain_for_requested_clients, scan_messages_streaming, scanner, select_local_parse_pricing,
+        sessions, set_model_aliases, snapshot_grouping_aliases, unified_to_parsed,
+        AgentAccumulator, ClientId, CostSource, GroupBy, LocalParseOptions, ModelAliasMap,
+        OpenCodeSelection, OpenCodeSourceIdentity, ReportOptions, TokenBreakdown, UnifiedMessage,
+        UNKNOWN_WORKSPACE_LABEL,
     };
     use bincode::Options;
     use std::collections::{BTreeMap, HashMap, HashSet};
@@ -15564,5 +15609,157 @@ mod tests {
 
         // Keep the fixture path live for the cache/source identity assertion.
         assert!(message_cache::SourceFingerprint::from_kiro_path(&snapshot).is_some());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn warp_explicit_source_has_materialized_streaming_and_report_parity() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let _env = EnvGuard::set(&[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", std::ffi::OsStr::new("1")),
+        ]);
+        let path = source_home.path().join("usage.json");
+        std::fs::write(&path, b"point-in-time source marker").unwrap();
+        let synced_at_ms = 1_769_688_000_000;
+        let usage = sessions::warp::WarpNormalizedUsage {
+            version: sessions::warp::WARP_NORMALIZED_USAGE_VERSION,
+            synced_at_ms,
+            account_scope: "A".repeat(43),
+            usage: sessions::warp::WarpAggregateUsage {
+                requests_used: Some(42),
+                request_limit: Some(100),
+                spend_cents: Some(1_234),
+                credits_purchased_cents: Some(500),
+                next_refresh_at_ms: Some(1_769_769_600_000),
+            },
+            workspaces: vec![
+                sessions::warp::WarpWorkspaceUsage {
+                    workspace_scope: "B".repeat(43),
+                    requests_used: Some(12),
+                    spend_cents: Some(345),
+                },
+                sessions::warp::WarpWorkspaceUsage {
+                    workspace_scope: "C".repeat(43),
+                    requests_used: Some(30),
+                    spend_cents: Some(889),
+                },
+            ],
+        };
+        let source =
+            sessions::warp::WarpUsageSource::new(path.clone(), usage, [7; 32], synced_at_ms as u64)
+                .unwrap();
+        let scanner_settings = scanner::ScannerSettings {
+            warp_usage_source: Some(source.clone()),
+            ..Default::default()
+        };
+        let local = LocalParseOptions {
+            home_dir: Some(source_home.path().to_string_lossy().into_owned()),
+            clients: Some(vec!["warp".to_string()]),
+            scanner_settings: scanner_settings.clone(),
+            ..Default::default()
+        };
+
+        let parsed = parse_local_clients(local.clone()).unwrap();
+        assert_eq!(parsed.counts.get(ClientId::Warp), 42);
+        assert_eq!(parsed.messages.len(), 2);
+        assert_eq!(
+            parsed
+                .messages
+                .iter()
+                .map(|message| message.message_count)
+                .sum::<i32>(),
+            42
+        );
+        let identities = parsed
+            .messages
+            .iter()
+            .map(|message| {
+                format!(
+                    "{}|{}|{}",
+                    message.session_id,
+                    message.workspace_key.as_deref().unwrap_or_default(),
+                    message.workspace_label.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(!identities.contains("raw-workspace"));
+        assert!(!identities.contains("workspace-name"));
+        assert!(parsed.messages.iter().all(|message| {
+            message.workspace_label.is_none()
+                && message
+                    .workspace_key
+                    .as_deref()
+                    .is_some_and(|scope| scope.len() == 43)
+        }));
+
+        let report_options = ReportOptions {
+            home_dir: local.home_dir.clone(),
+            clients: local.clients.clone(),
+            scanner_settings: scanner_settings.clone(),
+            ..Default::default()
+        };
+        let model = get_model_report(report_options.clone()).await.unwrap();
+        let monthly = get_monthly_report(report_options.clone()).await.unwrap();
+        let hourly = get_hourly_report(report_options.clone()).await.unwrap();
+        let agents = get_agents_report(report_options.clone()).await.unwrap();
+        let graph = generate_local_graph_report(report_options).await.unwrap();
+
+        assert_eq!(model.total_messages, 42);
+        assert!((model.total_cost - 12.34).abs() < 1e-9);
+        assert_eq!(
+            monthly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            42
+        );
+        assert!((monthly.total_cost - 12.34).abs() < 1e-9);
+        assert_eq!(
+            hourly
+                .entries
+                .iter()
+                .map(|entry| entry.message_count)
+                .sum::<i32>(),
+            42
+        );
+        assert!((hourly.total_cost - 12.34).abs() < 1e-9);
+        assert_eq!(agents.total_messages, 42);
+        assert!((agents.total_cost - 12.34).abs() < 1e-9);
+        assert_eq!(graph.summary.active_days, 1);
+        assert_eq!(graph.summary.clients, vec!["warp"]);
+        assert!((graph.summary.total_cost - 12.34).abs() < 1e-9);
+
+        assert_eq!(latest_source_mtime_ms(&local).unwrap(), synced_at_ms as u64);
+        let first_token = local_source_change_token(&local).unwrap();
+        let rotated = sessions::warp::WarpUsageSource::new(
+            path,
+            source.usage().clone(),
+            [8; 32],
+            synced_at_ms as u64,
+        )
+        .unwrap();
+        let rotated_options = LocalParseOptions {
+            scanner_settings: scanner::ScannerSettings {
+                warp_usage_source: Some(rotated),
+                ..Default::default()
+            },
+            ..local.clone()
+        };
+        assert_ne!(
+            local_source_change_token(&rotated_options).unwrap(),
+            first_token
+        );
+        let pruned = parse_local_clients(LocalParseOptions {
+            modified_after: Some(synced_at_ms as u64 + 1),
+            ..local
+        })
+        .unwrap();
+        assert_eq!(pruned.counts.get(ClientId::Warp), 0);
+        assert!(pruned.messages.is_empty());
     }
 }

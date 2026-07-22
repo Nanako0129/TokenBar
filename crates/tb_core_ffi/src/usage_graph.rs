@@ -103,22 +103,21 @@ struct TokenContributionData {
 /// the async `generate_local_graph_report`. That entry point uses cached
 /// pricing with a graceful offline fallback, and `PricingService` is a process
 /// -wide `OnceCell`, so the network fetch happens at most once per launch.
-pub fn run(year: &str) -> Result<Value, String> {
-    let year = normalize_year(year)?;
-
+pub fn run(
+    year: &str,
+    scanner_settings: tokscale_core::scanner::ScannerSettings,
+) -> Result<Value, String> {
     let options = tokscale_core::ReportOptions {
-        year,
+        year: normalize_year(year)?,
+        scanner_settings,
         ..Default::default()
     };
-
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("build runtime: {}", e))?;
     let graph = runtime.block_on(tokscale_core::generate_local_graph_report(options))?;
-
-    let payload = map_graph(graph);
-    serde_json::to_value(payload).map_err(|e| format!("serialize usage graph: {}", e))
+    serde_json::to_value(map_graph(graph)).map_err(|e| format!("serialize usage graph: {}", e))
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {

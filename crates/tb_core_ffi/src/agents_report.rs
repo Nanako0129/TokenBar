@@ -44,21 +44,21 @@ struct AgentsReportData {
 /// this because each `AgentAccumulator` folds all clients into one mixed total.
 pub fn run(year: &str, clients: Option<Vec<String>>) -> Result<Value, String> {
     let year = normalize_year(year)?;
-
-    let options = tokscale_core::ReportOptions {
-        year,
-        clients,
-        ..Default::default()
-    };
-
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| format!("build runtime: {}", e))?;
-    let report = runtime.block_on(tokscale_core::get_agents_report(options))?;
-
-    let data = map_report(report);
-    serde_json::to_value(data).map_err(|e| format!("serialize agents report: {}", e))
+    crate::with_stable_usage_source(|scanner_settings| {
+        let options = tokscale_core::ReportOptions {
+            year: year.clone(),
+            clients: clients.clone(),
+            scanner_settings,
+            ..Default::default()
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| format!("build runtime: {}", e))?;
+        let report = runtime.block_on(tokscale_core::get_agents_report(options))?;
+        serde_json::to_value(map_report(report))
+            .map_err(|e| format!("serialize agents report: {}", e))
+    })
 }
 
 fn normalize_year(year: &str) -> Result<Option<String>, String> {

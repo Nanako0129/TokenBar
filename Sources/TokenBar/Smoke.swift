@@ -107,6 +107,12 @@ enum Smoke {
                 + " vs full-list \(filtered.entries.count)/\(filTok) tok"
         }
 
+        summarize("warp") {
+            let capability = try TBCore.warpCapability()
+            let status = try TBCore.warpStatus()
+            return "supported=\(capability.supported), mode=\(status.mode), active=\(status.active), stale=\(status.stale)"
+        }
+
         summarize("agentUsage") {
             let usage = try TBCore.agentUsage()
             let cards = usage.agents.map { snapshot in

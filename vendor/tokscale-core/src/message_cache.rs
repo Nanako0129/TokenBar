@@ -232,6 +232,22 @@ impl SourceFingerprint {
         Self::from_path_with_related(path, std::iter::empty())
     }
 
+    pub(crate) fn from_warp_source(
+        path: &Path,
+        source: &crate::sessions::warp::WarpUsageSource,
+    ) -> Option<Self> {
+        if source.path() != path {
+            return None;
+        }
+        Some(Self {
+            size: source.usage().workspaces.len().saturating_add(1) as u64,
+            modified_ns: source.observed_mtime_ms().saturating_mul(1_000_000),
+            sample_hashes: Vec::new(),
+            content_hash: source.fingerprint(),
+            related_files: Vec::new(),
+        })
+    }
+
     pub(crate) fn from_sqlite_path(path: &Path) -> Option<Self> {
         let related_paths = ["-wal"]
             .into_iter()

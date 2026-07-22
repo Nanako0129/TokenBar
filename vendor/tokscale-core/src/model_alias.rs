@@ -170,10 +170,14 @@ fn install(config: ModelAliasMap) {
         state.resolver = resolver;
     }
     GENERATION.fetch_add(1, Ordering::SeqCst);
-    notify_usage_data_invalidation();
+    invalidate_usage_data();
 }
 
-fn notify_usage_data_invalidation() {
+/// Notify every process-wide usage-data consumer that its source or grouping
+/// snapshot changed. Warp source replacement/clear shares this seam with model
+/// alias reloads so graph, live-tail, count, and report caches cannot retain the
+/// previous account or source.
+pub fn invalidate_usage_data() {
     let hooks = hooks().read().unwrap_or_else(|e| e.into_inner());
     for hook in hooks.iter() {
         hook();

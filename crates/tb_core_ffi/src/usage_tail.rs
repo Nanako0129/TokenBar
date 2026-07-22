@@ -62,6 +62,7 @@ pub struct UsageTailer {
     /// changed, the event window is still correct (rate queries re-filter by
     /// timestamp on read) and the tick skips the parse entirely.
     last_source_token: Mutex<Option<u64>>,
+    last_source_generation: Mutex<Option<u64>>,
 }
 
 impl UsageTailer {
@@ -69,6 +70,7 @@ impl UsageTailer {
         Self {
             events: Mutex::new(Vec::new()),
             last_source_token: Mutex::new(None),
+            last_source_generation: Mutex::new(None),
         }
     }
 
@@ -76,6 +78,9 @@ impl UsageTailer {
     /// window. Returns the number of events now in the window (cheap to compute
     /// and only used as a "did anything happen" hint by callers).
     pub fn tick(&self) -> usize {
+        crate::agent_warp::refresh_external_if_active();
+        let usage_generation = crate::usage_data_generation();
+        let source = crate::agent_warp::source_snapshot();
         // `since` is date-granular; reach back one day so a sub-hour window that
         // straddles midnight still sees yesterday's tail.
         let since = (Local::now() - Duration::days(1))
@@ -90,13 +95,19 @@ impl UsageTailer {
         let options = tokscale_core::LocalParseOptions {
             since: Some(since),
             modified_after: Some((now_ms() - window_reach_ms) as u64),
+            scanner_settings: source.scanner_settings,
             ..Default::default()
         };
 
         // No source changed since the last parse → the window is already
         // correct; skip the parse. Probe failure falls through to a parse.
         let token = tokscale_core::local_source_change_token(&options).ok();
-        if token.is_some() && *self.last_source_token.lock() == token {
+        let previous_token = *self.last_source_token.lock();
+        let previous_generation = *self.last_source_generation.lock();
+        if token.is_some()
+            && previous_token == token
+            && previous_generation == Some(source.generation)
+        {
             return self.events.lock().len();
         }
 
@@ -104,7 +115,6 @@ impl UsageTailer {
             Ok(parsed) => parsed,
             Err(_) => return self.events.lock().len(),
         };
-        *self.last_source_token.lock() = token;
 
         let cutoff = now_ms() - EVENT_WINDOW_SECS * 1000;
         let mut next: Vec<UsageEvent> = parsed
@@ -132,9 +142,25 @@ impl UsageTailer {
             .collect();
         next.sort_by_key(|e| e.ts_ms);
 
+        let mut events = self.events.lock();
+        let mut last_token = self.last_source_token.lock();
+        let mut last_generation = self.last_source_generation.lock();
+        if crate::usage_data_generation() != usage_generation
+            || crate::agent_warp::generation() != source.generation
+        {
+            return events.len();
+        }
         let len = next.len();
-        *self.events.lock() = next;
+        *events = next;
+        *last_token = token;
+        *last_generation = Some(source.generation);
         len
+    }
+
+    pub fn invalidate(&self) {
+        self.events.lock().clear();
+        *self.last_source_token.lock() = None;
+        *self.last_source_generation.lock() = None;
     }
 
     #[allow(dead_code)] // kept for API symmetry with rate_in_window

@@ -1,6 +1,24 @@
 import Foundation
 import TokenBarCore
 
+enum WarpSourcePreference {
+    static let externalPathKey = "warpExternalUsagePath"
+}
+
+private actor WarpSourceBootstrap {
+    static let shared = WarpSourceBootstrap()
+    private var restored = false
+
+    func restoreExternalIfNeeded() {
+        guard !restored else { return }
+        restored = true
+        guard let path = UserDefaults.standard.string(forKey: WarpSourcePreference.externalPathKey),
+              !path.isEmpty
+        else { return }
+        _ = try? TBCore.warpRestoreExternalUsage(path: path)
+    }
+}
+
 /// App-level source of usage data. Every usage consumer depends on this
 /// contract so `--demo` can replace the complete usage surface without
 /// allowing live FFI calls to leak into the demo path.
@@ -26,20 +44,32 @@ protocol UsageDataSource: Sendable {
 struct LiveUsageDataSource: UsageDataSource {
     let allowsQuotaCachePersistence = true
 
+    private func restoreWarpSource() async {
+        await WarpSourceBootstrap.shared.restoreExternalIfNeeded()
+    }
+
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
-        try await Task.detached(priority: priority) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: priority) {
             try TBCore.graph(year: year)
         }.value
     }
 
     func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
-        try await Task.detached(priority: priority) {
-            try TBCore.refreshGraph(year: year)
+        await restoreWarpSource()
+        return try await Task.detached(priority: priority) {
+            if let status = try? TBCore.warpStatus(), status.supported,
+               status.mode == "app"
+            {
+                _ = try? TBCore.warpRefresh()
+            }
+            return try TBCore.refreshGraph(year: year)
         }.value
     }
 
     func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
-        try await Task.detached(priority: priority) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: priority) {
             try TBCore.modelReport(year: year)
         }.value
     }
@@ -47,7 +77,8 @@ struct LiveUsageDataSource: UsageDataSource {
     func hourlyReport(
         year: String?, clients: [String]?, priority: TaskPriority
     ) async throws -> HourlyReport {
-        try await Task.detached(priority: priority) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: priority) {
             try TBCore.hourlyReport(year: year, clients: clients)
         }.value
     }
@@ -55,7 +86,8 @@ struct LiveUsageDataSource: UsageDataSource {
     func agentsReport(
         year: String?, clients: [String]?, priority: TaskPriority
     ) async throws -> AgentsReport {
-        try await Task.detached(priority: priority) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: priority) {
             try TBCore.agentsReport(year: year, clients: clients)
         }.value
     }
@@ -67,13 +99,15 @@ struct LiveUsageDataSource: UsageDataSource {
     }
 
     func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
-        try await Task.detached(priority: .utility) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: .utility) {
             try TBCore.usageTrace(windowSecs: windowSecs)
         }.value
     }
 
     func tokensPerMin() async throws -> Double {
-        try await Task.detached(priority: .utility) {
+        await restoreWarpSource()
+        return try await Task.detached(priority: .utility) {
             try TBCore.tokensPerMin()
         }.value
     }

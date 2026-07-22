@@ -30,6 +30,11 @@ struct SettingsPanel: View {
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
+    @AppStorage(WarpSourcePreference.externalPathKey) private var warpExternalPath = ""
+    @State private var warpBearer = ""
+    @State private var warpStatus: WarpStatus?
+    @State private var warpBusy = false
+    @State private var warpError: String?
 
     // New for tabs improvement
     @AppStorage(ClientRegistry.tabOrderKey) private var tabsOrderRaw = ""
@@ -372,6 +377,53 @@ struct SettingsPanel: View {
                 hint("Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height.")
             }
 
+            section("Warp local reporting") {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text(warpStatusLabel)
+                            .font(.caption)
+                            .foregroundStyle(warpStatus?.active == true ? .primary : .secondary)
+                        Spacer()
+                        if warpBusy {
+                            ProgressView().controlSize(.small)
+                        }
+                    }
+
+                    SecureField("Warp bearer token", text: $warpBearer)
+                        .textFieldStyle(.roundedBorder)
+                        .disabled(warpBusy || warpStatus?.supported == false)
+
+                    HStack {
+                        Button("Connect & Sync") { connectWarpBearer() }
+                            .disabled(
+                                warpBusy || warpStatus?.supported == false
+                                    || warpBearer.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        Button("Choose usage.json") { chooseWarpExternalFile() }
+                            .disabled(warpBusy || warpStatus?.supported == false)
+                        Spacer()
+                        if warpStatus?.mode == "app" {
+                            Button("Sync Now") { refreshWarp() }
+                                .disabled(warpBusy)
+                        }
+                        if warpStatus?.active == true {
+                            Button("Disconnect") { clearWarp() }
+                                .disabled(warpBusy)
+                        }
+                    }
+                    .controlSize(.small)
+
+                    if let warpError {
+                        Text(warpError)
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                    }
+                }
+                .padding(.horizontal, 10)
+                .padding(.vertical, 8)
+                .glassCard(cornerRadius: 8)
+                hint("Bearer mode keeps the token only in process memory. External mode reads only the exact selected usage.json and never reads or manages its credentials.")
+            }
+
             section("Data refresh") {
                 radioGroup(
                     selection: Binding(
@@ -403,6 +455,164 @@ struct SettingsPanel: View {
                 }
                 hint("TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed.")
             }
+        }
+        .task { await loadWarpStatus() }
+    }
+
+    private var warpStatusLabel: String {
+        guard let status = warpStatus else { return "Checking availability…" }
+        guard status.supported else { return "Unsupported on this platform" }
+        guard status.active else { return "Not configured" }
+        let requests = status.requestsUsed.map(String.init) ?? "—"
+        let limit = status.requestLimit.map(String.init) ?? "—"
+        let stale = status.stale ? " · stale" : ""
+        return status.mode == "app"
+            ? "Bearer · \(requests) / \(limit) requests\(stale)"
+            : "External usage.json · \(requests) requests"
+    }
+
+    @MainActor
+    private func loadWarpStatus() async {
+        guard !warpBusy else { return }
+        warpBusy = true
+        defer { warpBusy = false }
+        do {
+            let path = warpExternalPath
+            let result = try await Task.detached(priority: .utility) {
+                let status = try TBCore.warpStatus()
+                if status.supported && !status.active && !path.isEmpty {
+                    return try TBCore.warpRestoreExternalUsage(path: path)
+                }
+                return status
+            }.value
+            warpStatus = result
+            warpError = result.errorCode.map(warpErrorMessage)
+        } catch {
+            warpError = warpErrorMessage(error)
+            warpStatus = try? await Task.detached(priority: .utility) {
+                try TBCore.warpStatus()
+            }.value
+        }
+    }
+
+    private func connectWarpBearer() {
+        let bearer = warpBearer
+        warpBusy = true
+        warpError = nil
+        Task { @MainActor in
+            defer { warpBusy = false }
+            do {
+                warpStatus = try await Task.detached(priority: .utility) {
+                    try TBCore.warpSetBearer(bearer)
+                }.value
+                warpBearer = ""
+                warpExternalPath = ""
+            } catch {
+                warpBearer = ""
+                warpError = warpErrorMessage(error)
+                warpStatus = try? await Task.detached(priority: .utility) {
+                    try TBCore.warpStatus()
+                }.value
+            }
+        }
+    }
+
+    private func refreshWarp() {
+        warpBusy = true
+        warpError = nil
+        Task { @MainActor in
+            defer { warpBusy = false }
+            do {
+                warpStatus = try await Task.detached(priority: .utility) {
+                    try TBCore.warpRefresh()
+                }.value
+            } catch {
+                warpError = warpErrorMessage(error)
+                warpStatus = try? await Task.detached(priority: .utility) {
+                    try TBCore.warpStatus()
+                }.value
+            }
+        }
+    }
+
+    private func chooseWarpExternalFile() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use usage.json"
+        if !warpExternalPath.isEmpty {
+            panel.directoryURL = URL(fileURLWithPath: warpExternalPath).deletingLastPathComponent()
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard url.lastPathComponent == "usage.json" else {
+            warpError = warpErrorMessage("warp_invalid_external_path")
+            return
+        }
+        let path = url.path
+        warpBearer = ""
+        warpBusy = true
+        warpError = nil
+        Task { @MainActor in
+            defer { warpBusy = false }
+            do {
+                warpStatus = try await Task.detached(priority: .utility) {
+                    try TBCore.warpSetExternalUsage(path: path)
+                }.value
+                warpExternalPath = path
+                warpBearer = ""
+            } catch {
+                warpError = warpErrorMessage(error)
+            }
+        }
+    }
+
+    private func clearWarp() {
+        warpBusy = true
+        warpError = nil
+        Task { @MainActor in
+            defer { warpBusy = false }
+            do {
+                warpStatus = try await Task.detached(priority: .utility) {
+                    try TBCore.warpClear()
+                }.value
+                warpBearer = ""
+                warpExternalPath = ""
+            } catch {
+                warpError = warpErrorMessage(error)
+                warpStatus = try? await Task.detached(priority: .utility) {
+                    try TBCore.warpStatus()
+                }.value
+                if warpStatus?.active != true {
+                    warpBearer = ""
+                    warpExternalPath = ""
+                }
+            }
+        }
+    }
+
+    private func warpErrorMessage(_ error: Error) -> String {
+        guard case let TBCoreError.bridge(code) = error else {
+            return "Warp reporting failed."
+        }
+        return warpErrorMessage(code)
+    }
+
+    private func warpErrorMessage(_ code: String) -> String {
+        switch code {
+        case "warp_unsupported_platform": return "Warp reporting is unavailable on this platform."
+        case "warp_invalid_bearer": return "Enter a valid Warp bearer token."
+        case "warp_no_active_credential": return "No Warp bearer is active."
+        case "warp_retry_cooldown": return "Warp sync is cooling down after a failed request."
+        case "warp_unauthorized": return "Warp rejected this bearer. Enter a fresh token."
+        case "warp_forbidden": return "Warp denied access; the last same-account data is retained."
+        case "warp_rate_limited": return "Warp rate-limited sync; retry is delayed for at least five minutes."
+        case "warp_timeout", "warp_transport", "warp_remote_server": return "Warp is temporarily unavailable; the last same-account data is retained."
+        case "warp_graphql_error", "warp_decode_failed", "warp_response_too_large", "warp_invalid_usage": return "Warp returned an unusable usage response."
+        case "warp_invalid_external_path": return "Choose the exact external file named usage.json."
+        case "warp_scope_mismatch": return "The cached Warp account does not match the active source."
+        case "warp_storage_failed": return "Warp's owner-only local cache could not be verified or saved."
+        default: return "Warp reporting failed."
         }
     }
 
