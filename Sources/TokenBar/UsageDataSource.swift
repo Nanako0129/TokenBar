@@ -5,17 +5,34 @@ enum WarpSourcePreference {
     static let externalPathKey = "warpExternalUsagePath"
 }
 
-private actor WarpSourceBootstrap {
+actor WarpSourceBootstrap {
     static let shared = WarpSourceBootstrap()
     private var restored = false
 
     func restoreExternalIfNeeded() {
+        restoreExternalIfNeeded(
+            path: UserDefaults.standard.string(forKey: WarpSourcePreference.externalPathKey)
+        ) { path in
+            _ = try TBCore.warpRestoreExternalUsage(path: path)
+        }
+    }
+
+    func restoreExternalIfNeeded(
+        path: String?,
+        restore: @Sendable (String) throws -> Void
+    ) {
         guard !restored else { return }
-        restored = true
-        guard let path = UserDefaults.standard.string(forKey: WarpSourcePreference.externalPathKey),
-              !path.isEmpty
-        else { return }
-        _ = try? TBCore.warpRestoreExternalUsage(path: path)
+        guard let path, !path.isEmpty else {
+            restored = true
+            return
+        }
+        do {
+            try restore(path)
+            restored = true
+        } catch {
+            // Retry on the next usage read: removable volumes and synced files
+            // can become available after the first launch-time attempt.
+        }
     }
 }
 

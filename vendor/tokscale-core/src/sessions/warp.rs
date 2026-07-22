@@ -40,8 +40,8 @@ pub struct WarpWorkspaceUsage {
 ///
 /// The source contains only normalized usage and installation-key HMAC identities.
 /// Raw bearer tokens, workspace ids/names, response ids, and external file bytes never
-/// enter tokscale-core, its message cache, or any report. The source path is used only
-/// as the existing cache identity; parsing consumes the in-memory normalized payload.
+/// enter tokscale-core or any report. The path remains process-local source metadata;
+/// Warp bypasses the generic source-message cache and parses this normalized payload.
 #[derive(Clone)]
 pub struct WarpUsageSource {
     path: PathBuf,

@@ -9,6 +9,31 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
     var result: Result<Value, Error>?
 }
 
+private enum WarpRestoreProbeError: Error {
+    case unavailable
+}
+
+private final class WarpRestoreProbe: @unchecked Sendable {
+    private let lock = NSLock()
+    private var attempts = 0
+
+    func restore(_ path: String) throws {
+        lock.lock()
+        attempts += 1
+        let shouldFail = attempts == 1
+        lock.unlock()
+        guard path == "/mounted/usage.json", !shouldFail else {
+            throw WarpRestoreProbeError.unavailable
+        }
+    }
+
+    var attemptCount: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return attempts
+    }
+}
+
 enum SelfTest {
     static func run() -> Never {
         var failures = 0
@@ -1145,6 +1170,24 @@ enum SelfTest {
         expect(liveSource is LiveUsageDataSource, "usage source factory selects live mode")
         expect(!demoSource.allowsQuotaCachePersistence, "demo source disables quota cache persistence")
         expect(liveSource.allowsQuotaCachePersistence, "live source allows quota cache persistence")
+
+        let warpBootstrap = WarpSourceBootstrap()
+        let warpRestoreProbe = WarpRestoreProbe()
+        let warpRestoreAttempts = awaitValue {
+            await warpBootstrap.restoreExternalIfNeeded(path: "/mounted/usage.json") { path in
+                try warpRestoreProbe.restore(path)
+            }
+            await warpBootstrap.restoreExternalIfNeeded(path: "/mounted/usage.json") { path in
+                try warpRestoreProbe.restore(path)
+            }
+            await warpBootstrap.restoreExternalIfNeeded(path: "/mounted/usage.json") { path in
+                try warpRestoreProbe.restore(path)
+            }
+            return warpRestoreProbe.attemptCount
+        }
+        expect(
+            warpRestoreAttempts == 2,
+            "Warp external bootstrap retries one failure and stops after success")
 
         let demoPayload = DemoData.payload
         let demoDates = demoPayload.contributions.map(\.date)

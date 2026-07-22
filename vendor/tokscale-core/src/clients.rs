@@ -644,7 +644,7 @@ mod tests {
     }
 
     #[test]
-    fn test_warp_client_registered_as_aggregate_cache_source() {
+    fn test_warp_client_registered_for_normalized_usage_source() {
         let client = ClientId::from_str("warp").expect("warp client should be registered");
         assert_eq!(client.data().relative_path, "warp-cache");
         assert_eq!(client.data().pattern, "usage.json");

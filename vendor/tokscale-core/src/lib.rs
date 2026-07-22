@@ -1125,18 +1125,9 @@ fn parse_all_messages_with_pricing_with_env_strategy(
     }
 
     if let Some(source) = &scan_result.warp_usage_source {
-        let path = source.path();
-        let outcome = load_or_parse_source_with_fingerprint(
-            path,
-            &source_cache,
-            pricing,
-            |path| message_cache::SourceFingerprint::from_warp_source(path, source),
-            |_| sessions::warp::parse_warp_source(source),
-        );
-        all_messages.extend(outcome.messages);
-        if let Some(entry) = outcome.cache_entry {
-            source_cache.insert(entry);
-        }
+        let mut messages = sessions::warp::parse_warp_source(source);
+        apply_pricing_to_messages(&mut messages, pricing);
+        all_messages.extend(messages);
     }
 
     let amp_outcomes: Vec<CachedParseOutcome> = scan_result
@@ -3059,29 +3050,7 @@ where
     }
     simple_lane!(ClientId::Cursor,    sessions::cursor::parse_cursor_file);
     if let Some(source) = &scan_result.warp_usage_source {
-        let path = source.path();
-        let fingerprint = message_cache::SourceFingerprint::from_warp_source(path, source);
-        let cached = fingerprint.as_ref().and_then(|fingerprint| {
-            source_cache
-                .get(path)
-                .filter(|entry| entry.fingerprint == *fingerprint && !entry.messages.is_empty())
-        });
-        let messages = if let Some(cached) = cached {
-            cached.messages.clone()
-        } else {
-            let messages = sessions::warp::parse_warp_source(source);
-            if let Some(fingerprint) = fingerprint.filter(|_| !messages.is_empty()) {
-                source_cache.insert(message_cache::CachedSourceEntry::new(
-                    path,
-                    fingerprint,
-                    messages.clone(),
-                    Vec::new(),
-                    None,
-                ));
-            }
-            messages
-        };
-        for mut message in messages {
+        for mut message in sessions::warp::parse_warp_source(source) {
             message.refresh_derived_fields();
             apply_pricing_if_available(&mut message, pricing);
             if passes_client(&message) && filter(&message) {
@@ -15733,6 +15702,12 @@ mod tests {
         assert_eq!(graph.summary.active_days, 1);
         assert_eq!(graph.summary.clients, vec!["warp"]);
         assert!((graph.summary.total_cost - 12.34).abs() < 1e-9);
+        assert!(
+            !crate::paths::get_cache_dir()
+                .join("source-message-cache.bin")
+                .exists(),
+            "Warp's normalized point-in-time source must bypass the generic path-keyed cache"
+        );
 
         assert_eq!(latest_source_mtime_ms(&local).unwrap(), synced_at_ms as u64);
         let first_token = local_source_change_token(&local).unwrap();
