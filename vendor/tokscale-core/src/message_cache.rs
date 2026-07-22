@@ -16,7 +16,11 @@ use std::time::UNIX_EPOCH;
 // cross-client type such as UnifiedMessage changes incompatibly. Parser-only
 // changes belong in parser_version() so one client cannot evict every other
 // client's cached transcripts.
-const CACHE_FORMAT_VERSION: u32 = 1;
+// 2: Related-file fingerprints now retain their paths and whether they were
+// absent when cached. Claude sidechain parent candidates can therefore be
+// revalidated without reparsing the sidechain on every warm scan, while a
+// later-created parent transcript still invalidates the entry.
+const CACHE_FORMAT_VERSION: u32 = 2;
 // V2 intentionally starts cold and leaves source-message-cache.bin untouched:
 // the monolith did not record a trustworthy parser owner for migration.
 const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
@@ -125,6 +129,8 @@ pub(crate) struct SourceFingerprint {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct RelatedFileFingerprint {
     pub suffix: String,
+    pub path: CachedPath,
+    pub exists: bool,
     pub size: u64,
     pub modified_ns: u64,
     pub sample_hashes: Vec<FileSampleHash>,
@@ -206,6 +212,7 @@ impl SourceFingerprint {
     /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
     /// sidecar. When the sidecar appears or changes (e.g. after a Claude Code upgrade),
     /// the fingerprint changes and the cache invalidates.
+    #[cfg(test)]
     pub(crate) fn from_claude_code_path_with_home(
         path: &Path,
         home_dir: Option<&Path>,
@@ -379,15 +386,24 @@ impl SourceFingerprint {
         {
             related.push(("cc-mirror/variant.json".to_string(), variant_path));
         }
-        for (index, parent_path) in
-            crate::sessions::claudecode::parent_session_paths_for_cache(path)
-                .into_iter()
-                .enumerate()
-        {
-            related.push((format!("parent-session-{index}.jsonl"), parent_path));
-        }
 
-        Self::check_path_with_related_mode(path, related, cached, mode)
+        let primary_matches =
+            cached.and_then(|fingerprint| primary_fingerprint_matches(path, fingerprint));
+        let parent_paths = cached
+            .filter(|_| primary_matches == Some(true))
+            .map(cached_claude_parent_paths)
+            .unwrap_or_else(|| {
+                crate::sessions::claudecode::parent_session_paths_for_cache(path)
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, parent_path)| {
+                        (format!("parent-session-{index}.jsonl"), parent_path)
+                    })
+                    .collect()
+            });
+        related.extend(parent_paths);
+
+        Self::check_path_with_related_mode_and_primary(path, related, cached, mode, primary_matches)
     }
 
     pub(crate) fn check_grok_path_samples_only(
@@ -492,10 +508,27 @@ impl SourceFingerprint {
     where
         I: IntoIterator<Item = (String, PathBuf)>,
     {
+        Self::check_path_with_related_mode_and_primary(path, related_paths, cached, mode, None)
+    }
+
+    fn check_path_with_related_mode_and_primary<I>(
+        path: &Path,
+        related_paths: I,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+        primary_matches: Option<bool>,
+    ) -> Option<FingerprintStatus>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
         let related_paths: Vec<(String, PathBuf)> = related_paths.into_iter().collect();
-        if cached.is_some_and(|fingerprint| {
-            fingerprint_metadata_matches(path, &related_paths, fingerprint).unwrap_or(false)
-        }) {
+        let cache_hit = cached.is_some_and(|fingerprint| {
+            primary_matches
+                .unwrap_or_else(|| primary_fingerprint_matches(path, fingerprint).unwrap_or(false))
+                && related_fingerprint_metadata_matches(&related_paths, fingerprint)
+                    .unwrap_or(false)
+        });
+        if cache_hit {
             return Some(FingerprintStatus::Unchanged);
         }
 
@@ -520,10 +553,10 @@ impl SourceFingerprint {
         let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
         let mut related_files: Vec<RelatedFileFingerprint> = related_paths
             .into_iter()
-            .filter_map(|(suffix, related_path)| {
+            .map(|(suffix, related_path)| {
                 RelatedFileFingerprint::from_path(suffix, &related_path, mode)
             })
-            .collect();
+            .collect::<Option<_>>()?;
         related_files.sort_by(|left, right| left.suffix.cmp(&right.suffix));
 
         Some(Self {
@@ -567,15 +600,50 @@ fn copilot_desktop_related_paths(path: &Path) -> Option<Vec<(String, PathBuf)>> 
 
 impl RelatedFileFingerprint {
     fn from_path(suffix: String, path: &Path, mode: ContentHashMode) -> Option<Self> {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
-        Some(Self {
-            suffix,
-            size,
-            modified_ns,
-            sample_hashes,
-            content_hash,
-        })
+        let cached_path = CachedPath::from_path(path);
+        match path.metadata() {
+            Ok(_) => {
+                let (size, modified_ns, sample_hashes, content_hash) =
+                    file_fingerprint_parts(path, mode)?;
+                Some(Self {
+                    suffix,
+                    path: cached_path,
+                    exists: true,
+                    size,
+                    modified_ns,
+                    sample_hashes,
+                    content_hash,
+                })
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(Self {
+                suffix,
+                path: cached_path,
+                exists: false,
+                size: 0,
+                modified_ns: 0,
+                sample_hashes: Vec::new(),
+                content_hash: [0; 32],
+            }),
+            Err(_) => None,
+        }
     }
+}
+
+fn cached_claude_parent_paths(cached: &SourceFingerprint) -> Vec<(String, PathBuf)> {
+    cached
+        .related_files
+        .iter()
+        .filter(|related| related.suffix.starts_with("parent-session-"))
+        .map(|related| (related.suffix.clone(), related.path.to_path_buf()))
+        .collect()
+}
+
+fn primary_fingerprint_matches(path: &Path, cached: &SourceFingerprint) -> Option<bool> {
+    let (size, modified_ns) = metadata_signature(path).ok()?;
+    if size != cached.size || modified_ns != cached.modified_ns {
+        return Some(false);
+    }
+    Some(compute_sample_hashes(path, size)? == cached.sample_hashes)
 }
 
 fn metadata_signature(path: &Path) -> std::io::Result<(u64, u64)> {
@@ -588,32 +656,28 @@ fn metadata_signature(path: &Path) -> std::io::Result<(u64, u64)> {
     Ok((metadata.len(), modified_ns))
 }
 
-fn fingerprint_metadata_matches(
-    path: &Path,
+fn related_fingerprint_metadata_matches(
     related_paths: &[(String, PathBuf)],
     cached: &SourceFingerprint,
 ) -> Option<bool> {
-    let (size, modified_ns) = metadata_signature(path).ok()?;
-    if size != cached.size || modified_ns != cached.modified_ns {
-        return Some(false);
-    }
-    if compute_sample_hashes(path, size)? != cached.sample_hashes {
+    if cached.related_files.len() != related_paths.len() {
         return Some(false);
     }
 
-    let mut existing_related = 0;
     for (suffix, related_path) in related_paths {
+        let Some(related) = cached
+            .related_files
+            .iter()
+            .find(|related| related.suffix == *suffix)
+        else {
+            return Some(false);
+        };
+        if related.path != CachedPath::from_path(related_path) {
+            return Some(false);
+        }
         match metadata_signature(related_path) {
             Ok((size, modified_ns)) => {
-                existing_related += 1;
-                let Some(related) = cached
-                    .related_files
-                    .iter()
-                    .find(|related| related.suffix == *suffix)
-                else {
-                    return Some(false);
-                };
-                if related.size != size || related.modified_ns != modified_ns {
+                if !related.exists || related.size != size || related.modified_ns != modified_ns {
                     return Some(false);
                 }
                 if compute_sample_hashes(related_path, size)? != related.sample_hashes {
@@ -621,11 +685,7 @@ fn fingerprint_metadata_matches(
                 }
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                if cached
-                    .related_files
-                    .iter()
-                    .any(|related| related.suffix == *suffix)
-                {
+                if related.exists {
                     return Some(false);
                 }
             }
@@ -633,7 +693,7 @@ fn fingerprint_metadata_matches(
         }
     }
 
-    Some(existing_related == cached.related_files.len())
+    Some(true)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1361,8 +1421,9 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
 
 /// Whether a fingerprint carries a whole-file `content_hash`.
 ///
-/// Validation uses size + mtime + samples ([`fingerprint_metadata_matches`])
-/// for every source. Only Codex reads `content_hash` for incremental resume;
+/// Validation uses size + mtime + samples ([`primary_fingerprint_matches`] and
+/// [`related_fingerprint_metadata_matches`]) for every source. Only Codex reads
+/// `content_hash` for incremental resume;
 /// generic parsers and SQLite sources store a zero sentinel so changed or cold
 /// files do not pay for a second whole-file hash that cannot affect parsing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1906,6 +1967,128 @@ mod tests {
     }
 
     #[test]
+    fn test_copilot_desktop_dynamic_event_set_adds_and_removes() {
+        let dir = TempDir::new().unwrap();
+        let copilot_root = dir.path().join(".copilot");
+        let db_path = copilot_root.join("copilot.db");
+        std::fs::create_dir_all(&copilot_root).unwrap();
+        std::fs::write(&db_path, b"database\n").unwrap();
+
+        let without_events = SourceFingerprint::from_copilot_desktop_path(&db_path).unwrap();
+        let event_path = copilot_root
+            .join("session-state/session-1")
+            .join("events.jsonl");
+        std::fs::create_dir_all(event_path.parent().unwrap()).unwrap();
+        std::fs::write(&event_path, b"event\n").unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_copilot_desktop_path_samples_only(
+                &db_path,
+                Some(&without_events),
+            ),
+            Some(FingerprintStatus::Changed(_))
+        ));
+
+        let with_events = SourceFingerprint::from_copilot_desktop_path(&db_path).unwrap();
+        std::fs::remove_file(&event_path).unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_copilot_desktop_path_samples_only(
+                &db_path,
+                Some(&with_events),
+            ),
+            Some(FingerprintStatus::Changed(_))
+        ));
+    }
+
+    #[test]
+    fn test_related_path_identity_and_set_changes_miss_warm_cache() {
+        let dir = TempDir::new().unwrap();
+        let primary_path = dir.path().join("primary.jsonl");
+        let first_related = dir.path().join("first.json");
+        let second_related = dir.path().join("second.json");
+        std::fs::write(&primary_path, b"primary\n").unwrap();
+        std::fs::write(&first_related, b"same\n").unwrap();
+        std::fs::write(&second_related, b"same\n").unwrap();
+        let first_modified = std::fs::metadata(&first_related)
+            .unwrap()
+            .modified()
+            .unwrap();
+        File::open(&second_related)
+            .unwrap()
+            .set_modified(first_modified)
+            .unwrap();
+
+        let cached = SourceFingerprint::from_path_with_related_mode(
+            &primary_path,
+            vec![("dependency".to_string(), first_related.clone())],
+            ContentHashMode::SamplesOnly,
+        )
+        .unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_path_with_related_mode(
+                &primary_path,
+                vec![("dependency".to_string(), first_related.clone())],
+                Some(&cached),
+                ContentHashMode::SamplesOnly,
+            ),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        assert!(matches!(
+            SourceFingerprint::check_path_with_related_mode(
+                &primary_path,
+                vec![("dependency".to_string(), second_related.clone())],
+                Some(&cached),
+                ContentHashMode::SamplesOnly,
+            ),
+            Some(FingerprintStatus::Changed(_))
+        ));
+        assert!(matches!(
+            SourceFingerprint::check_path_with_related_mode(
+                &primary_path,
+                vec![
+                    ("dependency".to_string(), first_related),
+                    ("extra".to_string(), second_related),
+                ],
+                Some(&cached),
+                ContentHashMode::SamplesOnly,
+            ),
+            Some(FingerprintStatus::Changed(_))
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_related_non_not_found_read_failure_returns_none() {
+        let dir = TempDir::new().unwrap();
+        let primary_path = dir.path().join("primary.jsonl");
+        let related_path = dir.path().join("dependency.json");
+        std::fs::write(&primary_path, b"primary\n").unwrap();
+        std::fs::write(&related_path, b"dependency\n").unwrap();
+        let mut cached = SourceFingerprint::from_path_with_related_mode(
+            &primary_path,
+            vec![("dependency".to_string(), related_path.clone())],
+            ContentHashMode::SamplesOnly,
+        )
+        .unwrap();
+
+        std::fs::remove_file(&related_path).unwrap();
+        std::fs::create_dir(&related_path).unwrap();
+        let (size, modified_ns) = metadata_signature(&related_path).unwrap();
+        cached.related_files[0].size = size;
+        cached.related_files[0].modified_ns = modified_ns;
+        assert!(
+            SourceFingerprint::check_path_with_related_mode(
+                &primary_path,
+                vec![("dependency".to_string(), related_path)],
+                Some(&cached),
+                ContentHashMode::SamplesOnly,
+            )
+            .is_none(),
+            "a non-NotFound related read failure must fail open to a cold parse"
+        );
+    }
+
+    #[test]
     fn test_jcode_fingerprint_tracks_journal_sidecar_changes() {
         let dir = TempDir::new().unwrap();
         let session_path = dir.path().join("session_fixture.json");
@@ -2010,14 +2193,16 @@ mod tests {
         let updated_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
         assert_ne!(with_messages, updated_messages);
 
-        // A CLI source initially matches the plain fingerprint while its
-        // same-stem JSONL sidecar is absent.
+        // A CLI source records its absent same-stem JSONL sidecar so a later
+        // creation invalidates the cache without reparsing the primary file.
         let cli_path = dir.path().join("cli-session.json");
         std::fs::write(&cli_path, b"{}").unwrap();
-        assert_eq!(
-            SourceFingerprint::from_kiro_path(&cli_path),
-            SourceFingerprint::from_path_samples_only(&cli_path)
-        );
+        let cli_fingerprint = SourceFingerprint::from_kiro_path(&cli_path).unwrap();
+        assert!(cli_fingerprint.related_files.iter().any(|related| {
+            related.suffix == "messages.jsonl"
+                && related.path.to_path_buf() == dir.path().join("cli-session.jsonl")
+                && !related.exists
+        }));
     }
 
     #[test]
@@ -2027,15 +2212,29 @@ mod tests {
         std::fs::write(&session_path, br#"{"sessionId":"session-1"}"#).unwrap();
 
         let base = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&session_path, Some(&base)),
+            Some(FingerprintStatus::Unchanged)
+        ));
 
         let messages_path = dir.path().join("cli-session.jsonl");
         std::fs::write(&messages_path, b"message-1\n").unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&session_path, Some(&base)),
+            Some(FingerprintStatus::Changed(_))
+        ));
         let with_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
         assert_ne!(base, with_messages);
 
         std::fs::write(&messages_path, b"message-2\n").unwrap();
         let updated_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
         assert_ne!(with_messages, updated_messages);
+
+        std::fs::remove_file(&messages_path).unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_kiro_path_samples_only(&session_path, Some(&updated_messages),),
+            Some(FingerprintStatus::Changed(_))
+        ));
     }
 
     #[test]
@@ -2159,6 +2358,47 @@ mod tests {
         let updated_parent =
             SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
         assert_ne!(with_parent, updated_parent);
+    }
+
+    #[test]
+    fn test_claude_sidechain_warm_check_reuses_cached_parent_dependencies() {
+        let dir = TempDir::new().unwrap();
+        let project_dir = dir.path().join("projects/project-one");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let sidechain_path = project_dir.join("agent-child.jsonl");
+        let mut sidechain = format!("{}\n", "x".repeat(4096)).repeat(65);
+        sidechain.push_str(concat!(
+            r#"{"type":"assistant","isSidechain":true,"sessionId":"flat-parent","agentId":"child","timestamp":"2026-01-01T00:00:00Z","requestId":"req-1","message":{"id":"msg-1","model":"claude-sonnet-4","usage":{"input_tokens":1,"output_tokens":1}}}"#,
+            "\n"
+        ));
+        std::fs::write(&sidechain_path, sidechain).unwrap();
+
+        let cached =
+            SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
+        let parent_path = project_dir.join("flat-parent.jsonl");
+        assert!(cached.related_files.iter().any(|related| {
+            related.suffix == "parent-session-0.jsonl"
+                && related.path.to_path_buf() == parent_path
+                && !related.exists
+        }));
+        assert!(matches!(
+            SourceFingerprint::check_claude_code_path_with_home_samples_only(
+                &sidechain_path,
+                Some(&cached),
+                None,
+            ),
+            Some(FingerprintStatus::Unchanged)
+        ));
+
+        std::fs::write(&parent_path, b"parent transcript\n").unwrap();
+        assert!(matches!(
+            SourceFingerprint::check_claude_code_path_with_home_samples_only(
+                &sidechain_path,
+                Some(&cached),
+                None,
+            ),
+            Some(FingerprintStatus::Changed(_))
+        ));
     }
 
     #[test]
@@ -2484,6 +2724,58 @@ mod tests {
         ));
         assert!(SourceMessageCache::load()
             .get(claude, source.path())
+            .is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_format_one_shard_is_stale_without_hiding_format_two_namespace() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (format_one_path, valid_path) = write_sources_in_distinct_shards(&source_dir, identity);
+        let codex = CacheIdentity::for_client(ClientId::Codex);
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, &valid_path, "format-two-session"));
+        seed.save_if_dirty();
+
+        let stale_key = CacheShardKey {
+            namespace: codex.namespace.to_string(),
+            index: CacheKey::new(codex, &format_one_path).shard().index,
+        };
+        let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        let format_one_envelope = CachedShardEnvelope {
+            format_version: 1,
+            parser_namespace: codex.namespace.to_string(),
+            parser_version: codex.parser_version,
+            payload: b"deliberately invalid format-1 payload".to_vec(),
+        };
+        let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &format_one_envelope)
+            .unwrap();
+        writer.flush().unwrap();
+
+        assert!(matches!(
+            read_shard(&stale_path, codex),
+            ShardReadStatus::Stale
+        ));
+        let mut loaded = SourceMessageCache::load();
+        assert!(loaded.get(identity, &valid_path).is_some());
+        assert!(loaded.rewrite_shards.contains(&stale_key));
+
+        loaded.save_if_dirty();
+        assert!(matches!(
+            read_shard(&stale_path, codex),
+            ShardReadStatus::Loaded(entries) if entries.is_empty()
+        ));
+        assert!(SourceMessageCache::load()
+            .get(identity, &valid_path)
             .is_some());
 
         restore_cache_env(prev_env);

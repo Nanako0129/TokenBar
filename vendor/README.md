@@ -30,7 +30,7 @@ The Copilot duplicate-span contribution reached upstream in issue [#938](https:/
 
 M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) is closed unmerged as fidelity evidence; its [close rationale](https://github.com/Nanako0129/TokenBar/pull/86#issuecomment-5047332480) records the public stop decision. Current-head Codex found four independent security/state-machine defects, and the first local fix round was rejected by fresh security verification because process-local Warp source/revocation state could race with the shared cross-process singleton app cache: one process handling a 401 or Disconnect for scope B could delete another process's valid scope-A cache. Holding the refresh lock through remote I/O violates the approved network boundary; releasing it exposes the cache-ownership conflict. The second consecutive review round therefore triggered the M24 stop condition. No review fix was pushed, `63a44d7c` moved from `TAKE` to `DEFER`, and the resulting checkpoint was `78/2/0/17/13/1`.
 
-The approved replacement delivery graph removes M24 from the cache dependency chain without reviving Warp: `M26-A → M26-B → M19-B0 → M19-B1 → D2`. M26-A selectively ports `ae36db5c`'s identity-aware format-1 shard engine while preserving TokenBar's streaming and source-specific cache seams, moving `ae36db5c` to `ALREADY_VENDORED` and producing `79/1/0/17/13/1`. Warp remains `parse_local: false`; `cd07bf78` remains the sole `TAKE` row for M26-B.
+The approved replacement delivery graph removes M24 from the cache dependency chain without reviving Warp: `M26-A → M26-B → M19-B0 → M19-B1 → D2`. M26-A merged in PR [#90](https://github.com/Nanako0129/TokenBar/pull/90) at [`95c819c7`](https://github.com/Nanako0129/TokenBar/commit/95c819c7cf6532be7276b64386490b1b03a0c1ae), selectively porting `ae36db5c`'s identity-aware format-1 shard engine while preserving TokenBar's streaming and source-specific cache seams. The actual M26-B base is [`43fa8ad6`](https://github.com/Nanako0129/TokenBar/commit/43fa8ad67865ae2054211ddf2757024ddce2101c); after the generic format-2 port, `cd07bf78` moves to `DEFER` because its Devin residual remains excluded. Warp remains `parse_local: false`.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -45,9 +45,9 @@ The classification union has no duplicates and no symmetric difference from that
 | Classification | Count |
 |---|---:|
 | `ALREADY_VENDORED` | 79 |
-| `TAKE` | 1 |
+| `TAKE` | 0 |
 | `ADAPT_FOR_STREAMING` | 0 |
-| `DEFER` | 17 |
+| `DEFER` | 18 |
 | `SKIP` | 13 |
 | `SUPERSEDED` | 1 |
 | **Total** | **111** |
@@ -73,10 +73,10 @@ d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 </details>
 
 <details>
-<summary><code>TAKE</code> — 1</summary>
+<summary><code>TAKE</code> — 0</summary>
 
 ```text
-cd07bf78
+(empty)
 ```
 
 </details>
@@ -91,12 +91,12 @@ cd07bf78
 </details>
 
 <details>
-<summary><code>DEFER</code> — 17</summary>
+<summary><code>DEFER</code> — 18</summary>
 
 ```text
 18c7e87f db88138b 1c91cb34 6a1535d1 90d28ec0
 20f6d4dd b9b7d09f 0097ba7e ed64e77b 34cfbb50
-640e97b9 f7a124da ed6f8b95 65f8f3e2 b64d861e 074619f7 63a44d7c
+640e97b9 f7a124da ed6f8b95 65f8f3e2 b64d861e 074619f7 63a44d7c cd07bf78
 ```
 
 </details>
@@ -122,7 +122,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 PR #86 is closed unmerged, so `63a44d7c` moves from `TAKE` to `DEFER` and no Warp runtime code enters main. M26-A moves `ae36db5c` to `ALREADY_VENDORED` after selectively adopting the format-1 shard engine and adapting both Native cache lanes; `cd07bf78` remains `TAKE` for M26-B. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 PR #86 is closed unmerged, so `63a44d7c` moves from `TAKE` to `DEFER` and no Warp runtime code enters main. M26-A merged in PR #90 at `95c819c7`, moving `ae36db5c` to `ALREADY_VENDORED` after selectively adopting the format-1 shard engine and adapting both Native cache lanes. M26-B takes only generic format-2 metadata and Claude cached-parent recovery from `cd07bf78`; its Devin residual remains excluded, so `cd07bf78` moves from `TAKE` to `DEFER`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -139,8 +139,8 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 — PR #86 closed unmerged / DEFER | Warp producer and local reporting; process-local source ownership conflicts with the shared cross-process singleton cache | `63a44d7c` remains unvendored and deferred |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
-| M26-A — format 1 | Identity-aware 256-shard source-message cache with per-parser versions, bounded generic/SQLite sampling, Codex prefix state, concurrent-writer merge, and legacy-monolith preservation; Warp stays disabled | `ae36db5c: TAKE → ALREADY_VENDORED` |
-| M26-B — next after M26-A | Format-2 generic related-file path/existence metadata | `cd07bf78` remains `TAKE`; Pi/Devin hunks excluded |
+| M26-A — merged in PR #90 at `95c819c7` | Identity-aware 256-shard source-message cache with per-parser versions, bounded generic/SQLite sampling, Codex prefix state, concurrent-writer merge, and legacy-monolith preservation; Warp stays disabled | `ae36db5c: TAKE → ALREADY_VENDORED` |
+| M26-B — based on `43fa8ad6` | Format-2 generic related-file path/existence metadata and Claude cached-parent recovery; Pi/Devin hunks excluded | `cd07bf78: TAKE → DEFER` because the Devin residual remains excluded |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
 
@@ -153,7 +153,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `DEFER` | Zcode legacy / v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` plus the Zcode hunk of mixed `b64d861e`; PR #72 closed unmerged after exceeding the fidelity threshold |
 | `DEFER` | Copilot VS Code `chatSessions` | `074619f7`; PR #74 reached about 3.1x Copilot production drift and still mis-replays ObjectMutationLog `kind:2`, so reassess only after upstream format semantics converge |
 | `DEFER` | Warp producer and local reporting | `63a44d7c`; PR #86 closed unmerged after two consecutive review rounds exposed new security failure classes, culminating in a process-local state versus cross-process singleton-cache ownership conflict |
-| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; `cd07bf78` remains wholly `TAKE` pending M26-B, whose generic format-2 port must leave its Devin hunks deferred |
+| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; M26-B leaves the Devin residual of `cd07bf78` excluded |
 | `DEFER` | 9Router | `34cfbb50`; M16 takes only its provider hardening, leaving the bridge and 9Router product integration excluded |
 | `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
 
@@ -166,7 +166,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `c1aef5e9` | `ALREADY_VENDORED`; M11 carried the macOS/profile scope and M23-H adds the remaining Windows home candidates without widening explicit `HERMES_HOME` | Remains `ALREADY_VENDORED` |
 | `63a44d7c` | `DEFER`; the active-day aggregator hunk was already vendored earlier, but PR #86's Warp enablement/local producer did not merge | Reassess only after a coherent cross-process source/cache ownership contract exists |
 | `ae36db5c` | `ALREADY_VENDORED`; M26-A adopts the format-1 shard architecture and retains the previously vendored Claude/Droid/Kimi/Kiro dependency seams | Per-client parser versions are append-only after this checkpoint |
-| `cd07bf78` | Generic cache format 2, related-file metadata, and Devin hunks remain unvendored; row remains `TAKE` | M26-B may take only generic format-2 metadata and Claude cached-parent recovery; Pi/Devin remain excluded |
+| `cd07bf78` | Generic format-2 cache metadata and Claude cached-parent recovery are vendored; the Devin residual remains excluded, so the row is `DEFER` | Reassess the excluded Devin scope only after upstream convergence |
 
 ### Execution order and ledger transitions
 
@@ -206,15 +206,15 @@ flowchart TD
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
 | M24 | PR #86 closed unmerged; `63a44d7c: TAKE → DEFER` after the security fidelity stop |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
-| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; format-1 identity-aware shards become active while M24 remains excluded |
-| M26-B | Next milestone; `cd07bf78` remains `TAKE` and Pi/Devin stay excluded |
+| M26-A | PR #90 merged at `95c819c7`; `ae36db5c: TAKE → ALREADY_VENDORED`; format-1 identity-aware shards become active while M24 remains excluded |
+| M26-B | Based on `43fa8ad6`; generic format-2 metadata and Claude cached-parent recovery land, while `cd07bf78: TAKE → DEFER` leaves the Devin residual and Pi excluded |
 | M19-B0 / M19-B1 | Follow M26-B; counts unchanged |
 
-The current checkpoint is `ALREADY_VENDORED 79`, `TAKE 1`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. M24 remains deferred and outside the cache dependency graph; the approved sequence is now M26-A, M26-B, M19-B0, M19-B1, then D2. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
+The current checkpoint is `ALREADY_VENDORED 79`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 18`, `SKIP 13`, and `SUPERSEDED 1`, total 111. M24 remains deferred and outside the cache dependency graph; the approved sequence is now M26-A, M26-B, M19-B0, M19-B1, then D2. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
 
-M26-A makes shard format 1 active at `source-message-cache-v2/<namespace>/shard-XX.bin`. The former schema-32 `source-message-cache.bin` is inert provenance: the shard reader does not load, migrate, rewrite, or delete it. Format 1 starts cold, and per-client parser versions replace global monolith bumps for later parser-output changes.
+M26-A made shard format 1 active at `source-message-cache-v2/<namespace>/shard-XX.bin`; M26-B makes format 2 the active cache contract by persisting related-file paths and existence state and reusing cached Claude parent candidates only after the primary fingerprint matches. Existing format-1 shards are locally stale and cold-rebuild under format 2. The former schema-32 `source-message-cache.bin` remains inert provenance: the shard reader does not load, migrate, rewrite, or delete it. Per-client parser versions remain independent of this global storage-format bump.
 
-Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; M26-A merged in PR #90 at `95c819c7`; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. M26-B is implemented from base `43fa8ad6`; no M26-B PR or merge SHA is claimed here. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -336,20 +336,26 @@ M26-A selectively ports upstream [#856](https://github.com/junhoyeo/tokscale/pul
 
 The former schema-32 `source-message-cache.bin` is deliberately inert: M26-A never reads, migrates, rewrites, or deletes it, and the byte/metadata sentinel verifies a cold shard build leaves it untouched. `HASH_MEMO` and monolith-only `STORE_MEMO` are retired rather than layered over bounded sampling or shard persistence. Cache entries remain raw per-source parser output; cohort authority, dedup, pricing, filters, and reports still run after cache retrieval. Warp stays `parse_local: false`, and no M24 producer, credential, account scope, network, settings, or ABI code is introduced.
 
-| Parser identity | Preserved dependencies and authority | Format-1 evidence | Format-2 follow-up |
+| Parser identity | Preserved dependencies and authority | Format-1 evidence | Format-2 result |
 |---|---|---|---|
-| Claude | `.meta.json`, cc-mirror variant, nested/flat parent transcripts | Sidecar/parent invalidation, materialized and streaming cache paths | Persist exact paths and absent candidates; recover cached parent paths |
-| Copilot | OTEL files plus Desktop DB, optional WAL, dynamic `session-state/*/events.jsonl`; OTEL whole-session authority stays post-cache | WAL/event invalidation and unreadable-dependency fail-open | Exact dynamic related-set path/cardinality validation |
-| Jcode | Snapshot plus `.journal.jsonl` | Journal-only mutation invalidates warm cache | Persist absent journal candidate and detect creation/removal |
-| Droid | Settings snapshot plus fallback `session.jsonl` | Fallback-only mutation invalidates warm cache | Persist absent fallback candidate and detect creation/removal |
-| Kimi | Legacy `config.json`; Kimi Code remains self-contained | Legacy config mutations invalidate; nearby Kimi Code config does not | Preserve path identity without adding a Code dependency |
-| Kiro | CLI same-stem JSONL and IDE `messages.jsonl`; suppression remains post-cache | Both sibling forms invalidate independently | Persist exact candidate path/existence |
-| Roo / Kilo / Cline | `api_conversation_history.json` | History-only model/agent mutation invalidates | Persist exact history path/existence |
-| Grok | Legacy `signals.json`, `summary.json`, `events.jsonl`; unified log remains self-contained and precedence stays post-cache | All legacy siblings invalidate independently | Persist exact sibling paths/existence |
+| Claude | `.meta.json`, cc-mirror variant, nested/flat parent transcripts | Sidecar/parent invalidation, materialized and streaming cache paths | Exact paths/existence persist; cached parent paths reuse after a primary match |
+| Copilot | OTEL files plus Desktop DB, optional WAL, dynamic `session-state/*/events.jsonl`; OTEL whole-session authority stays post-cache | WAL/event invalidation and unreadable-dependency fail-open | Dynamic related-set discovery, exact path/cardinality checks, and fail-open behavior remain intact |
+| Jcode | Snapshot plus `.journal.jsonl` | Journal-only mutation invalidates warm cache | Absent journal path persists and creation/removal invalidates |
+| Droid | Settings snapshot plus fallback `session.jsonl` | Fallback-only mutation invalidates warm cache | Absent fallback path persists and creation/removal invalidates |
+| Kimi | Legacy `config.json`; Kimi Code remains self-contained | Legacy config mutations invalidate; nearby Kimi Code config does not | Exact legacy path/existence persists without adding a Code dependency |
+| Kiro | CLI same-stem JSONL and IDE `messages.jsonl`; suppression remains post-cache | Both sibling forms invalidate independently | Exact candidate path/existence persists |
+| Roo / Kilo / Cline | `api_conversation_history.json` | History-only model/agent mutation invalidates | Exact history path/existence persists |
+| Grok | Legacy `signals.json`, `summary.json`, `events.jsonl`; unified log remains self-contained and precedence stays post-cache | All legacy siblings invalidate independently | Exact sibling paths/existence persist |
 | Codex | `consumed_offset`, newline boundary, prefix hash, parse state | Full-prefix reuse, append resume, mismatch cold parse | No generic related-file expansion |
-| Generic / SQLite | Primary samples; SQLite `-wal` | Same-size restored-mtime mutation in a sampled window invalidates without full hashing | Persist related path/existence where applicable |
+| Generic / SQLite | Primary samples; SQLite `-wal` | Same-size restored-mtime mutation in a sampled window invalidates without full hashing | Related path/existence metadata persists where applicable |
 
-The ledger transition is `ae36db5c: TAKE → ALREADY_VENDORED`, producing `79/1/0/17/13/1`. `cd07bf78` remains the single `TAKE` row for M26-B; only its generic format-2 metadata and Claude cached-parent recovery are eligible, while Pi and Devin remain excluded.
+The ledger transition is `ae36db5c: TAKE → ALREADY_VENDORED`, producing `79/1/0/17/13/1` at the M26-A checkpoint. M26-A merged in PR #90 at `95c819c7`; its actual child base for M26-B is `43fa8ad6`.
+
+## M26-B format-2 related-file metadata
+
+M26-B selectively ports the generic cache hunks from upstream `cd07bf78` without importing its Pi or Devin runtime work. `CACHE_FORMAT_VERSION` advances from 1 to 2 because each serialized `RelatedFileFingerprint` now retains the exact `CachedPath` and an `exists` bit. Missing dependencies are persisted as zero-metadata records, so later creation invalidates a warm entry; any non-`NotFound` metadata, read, or bounded-sampling failure prevents a warm hit and forces a cold parse instead of treating an unreadable dependency as absent. Warm validation separates the primary sample check from exact related-file count, suffix, path, existence transition, metadata, and bounded sample checks. Claude reuses cached parent-session candidates only when its primary fingerprint matches, avoiding repeated sidechain probing while still invalidating on parent creation or change. Both the materialized compatibility lane and the shipping streaming reports use this status-aware checker.
+
+The active cache is format 2. Existing format-1 shards are locally stale and rebuild cold; the legacy schema-32 `source-message-cache.bin` monolith remains unread, unmodified, and undeleted. Copilot Desktop's dynamic `session-state/*/events.jsonl` discovery and non-`NotFound` fail-open behavior remain unchanged, as do Native Grok/Kiro/Droid/Kimi/Jcode/Roo/SQLite helpers, M26-A shard merge/durability/pruning semantics, Codex prefix state, bounded generic/SQLite samples, and all post-cache authority, deduplication, pricing, filtering, reports, FFI, and Swift behavior. The Devin residual of `cd07bf78` remains excluded, so the audited row moves `TAKE → DEFER` and the exact classification is `79/0/0/18/13/1`, total 111.
 
 ## M19-A Windows atomic-replacement completion
 

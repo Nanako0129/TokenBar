@@ -2959,18 +2959,31 @@ where
     let claude_home = PathBuf::from(home_dir);
     let mut claude_seen: HashSet<String> = HashSet::new();
     for path in scan_result.get(ClientId::Claude) {
-        let fp = message_cache::SourceFingerprint::from_claude_code_path_with_home(
-            path,
-            Some(&claude_home),
-        );
-        let cache_hit = fp.as_ref().and_then(|fp| {
-            source_cache
-                .get(
-                    message_cache::CacheIdentity::for_client(ClientId::Claude),
-                    path,
-                )
-                .filter(|c| &c.fingerprint == fp && !c.messages.is_empty())
-        });
+        let identity = message_cache::CacheIdentity::for_client(ClientId::Claude);
+        let cached = source_cache.get(identity, path);
+        let fingerprint_status =
+            message_cache::SourceFingerprint::check_claude_code_path_with_home_samples_only(
+                path,
+                cached.map(|entry| &entry.fingerprint),
+                Some(&claude_home),
+            );
+        let (cache_hit, fingerprint) = match fingerprint_status {
+            Some(message_cache::FingerprintStatus::Unchanged) => {
+                let cached =
+                    cached.expect("an uncached Claude source always builds a complete fingerprint");
+                if cached.messages.is_empty() {
+                    (None, Some(cached.fingerprint.clone()))
+                } else {
+                    (Some(cached), None)
+                }
+            }
+            Some(message_cache::FingerprintStatus::Changed(fingerprint)) => {
+                let cache_hit = cached
+                    .filter(|entry| entry.fingerprint == fingerprint && !entry.messages.is_empty());
+                (cache_hit, Some(fingerprint))
+            }
+            None => (None, None),
+        };
         if let Some(cached) = cache_hit {
             for msg in cached.messages.iter() {
                 let mut m = msg.clone();
@@ -2983,9 +2996,9 @@ where
         } else {
             let msgs = sessions::claudecode::parse_claude_file_with_home(path, Some(&claude_home));
             if !msgs.is_empty() {
-                if let Some(fingerprint) = fp {
+                if let Some(fingerprint) = fingerprint {
                     source_cache.insert(message_cache::CachedSourceEntry::new(
-                        message_cache::CacheIdentity::for_client(ClientId::Claude),
+                        identity,
                         path,
                         fingerprint,
                         msgs.clone(),
@@ -9562,6 +9575,83 @@ mod tests {
         assert_eq!(warm.total_messages, cold.total_messages);
         assert_eq!(warm.total_input, cold.total_input);
         assert_eq!(warm.total_output, cold.total_output);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_claude_shipping_warm_cache_reuses_persisted_parent_paths() {
+        let source_home = tempfile::TempDir::new().unwrap();
+        let cache_home = tempfile::TempDir::new().unwrap();
+        let project_dir = source_home.path().join(".claude/projects/project-one");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        let source = project_dir.join("agent-child.jsonl");
+        std::fs::write(
+            &source,
+            concat!(
+                r#"{"type":"assistant","isSidechain":true,"sessionId":"flat-parent","agentId":"child","timestamp":"2026-01-01T00:00:00Z","requestId":"req-source","message":{"id":"msg-source","model":"claude-sonnet-4","usage":{"input_tokens":123,"output_tokens":45}}}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let mut fingerprint = message_cache::SourceFingerprint::from_claude_code_path_with_home(
+            &source,
+            Some(source_home.path()),
+        )
+        .unwrap();
+        let persisted_parent = fingerprint
+            .related_files
+            .iter_mut()
+            .find(|related| related.suffix.starts_with("parent-session-"))
+            .unwrap();
+        persisted_parent.path =
+            message_cache::CachedPath::from_path(&project_dir.join("cached-only-parent.jsonl"));
+        assert!(!persisted_parent.exists);
+
+        let sentinel = UnifiedMessage::new_with_dedup(
+            "claude",
+            "cached-sentinel",
+            "anthropic",
+            "cached-session",
+            1_767_225_600_000,
+            TokenBreakdown {
+                input: 999,
+                output: 1,
+                ..Default::default()
+            },
+            0.0,
+            Some("cached-sentinel".to_string()),
+        );
+        with_isolated_tokscale_cache(cache_home.path(), || {
+            let mut cache = message_cache::SourceMessageCache::default();
+            cache.insert(message_cache::CachedSourceEntry::new(
+                message_cache::CacheIdentity::for_client(ClientId::Claude),
+                &source,
+                fingerprint,
+                vec![sentinel],
+                Vec::new(),
+                None,
+            ));
+            cache.save_if_dirty();
+        });
+
+        let clients = ["claude".to_string()];
+        let mut streamed = Vec::new();
+        with_isolated_tokscale_cache(cache_home.path(), || {
+            scan_messages_streaming(
+                source_home.path().to_str().unwrap(),
+                &clients,
+                None,
+                false,
+                &scanner::ScannerSettings::default(),
+                &|_| true,
+                &mut |message| streamed.push(message.clone()),
+            );
+        });
+
+        assert_eq!(streamed.len(), 1);
+        assert_eq!(streamed[0].model_id, "cached-sentinel");
+        assert_eq!(streamed[0].tokens.input, 999);
     }
 
     #[test]
