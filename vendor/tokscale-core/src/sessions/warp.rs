@@ -179,6 +179,7 @@ fn validate_normalized_usage(usage: &WarpNormalizedUsage) -> Result<(), &'static
     }
 
     let mut scopes = HashSet::new();
+    let mut emitted_requests = 0_i32;
     for workspace in &usage.workspaces {
         if !is_opaque_hmac(&workspace.workspace_scope)
             || !scopes.insert(workspace.workspace_scope.as_str())
@@ -187,6 +188,9 @@ fn validate_normalized_usage(usage: &WarpNormalizedUsage) -> Result<(), &'static
         }
         validate_non_negative(workspace.requests_used)?;
         validate_non_negative(workspace.spend_cents)?;
+        emitted_requests = emitted_requests
+            .checked_add(non_negative_i32(workspace.requests_used))
+            .ok_or("warp workspace request count overflow")?;
     }
     Ok(())
 }
@@ -298,6 +302,83 @@ mod tests {
         assert_eq!(messages[0].workspace_label, None);
         assert_eq!(messages[0].message_count, 42);
         assert!((messages[0].cost - 12.34).abs() < 1e-9);
+    }
+
+    #[test]
+    fn emitted_workspace_request_totals_are_bounded_before_parsing() {
+        let overflowing = WarpNormalizedUsage {
+            version: WARP_NORMALIZED_USAGE_VERSION,
+            synced_at_ms: 1,
+            account_scope: opaque(b'D'),
+            usage: WarpAggregateUsage::default(),
+            workspaces: vec![
+                WarpWorkspaceUsage {
+                    workspace_scope: opaque(b'E'),
+                    requests_used: Some(i32::MAX as i64),
+                    spend_cents: None,
+                },
+                WarpWorkspaceUsage {
+                    workspace_scope: opaque(b'F'),
+                    requests_used: Some(i32::MAX as i64),
+                    spend_cents: None,
+                },
+            ],
+        };
+        let old_counts = overflowing
+            .workspaces
+            .iter()
+            .map(|workspace| non_negative_i32(workspace.requests_used))
+            .collect::<Vec<_>>();
+        assert!(old_counts[0].checked_add(old_counts[1]).is_none());
+        assert!(
+            WarpUsageSource::new(PathBuf::from("usage.json"), overflowing, [0; 32], 1,).is_err()
+        );
+
+        let legal = source(WarpNormalizedUsage {
+            version: WARP_NORMALIZED_USAGE_VERSION,
+            synced_at_ms: 1,
+            account_scope: opaque(b'G'),
+            usage: WarpAggregateUsage::default(),
+            workspaces: vec![
+                WarpWorkspaceUsage {
+                    workspace_scope: opaque(b'H'),
+                    requests_used: Some(i32::MAX as i64 - 1),
+                    spend_cents: None,
+                },
+                WarpWorkspaceUsage {
+                    workspace_scope: opaque(b'I'),
+                    requests_used: Some(1),
+                    spend_cents: None,
+                },
+            ],
+        });
+        let messages = parse_warp_source(&legal);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(
+            messages.iter().try_fold(0_i32, |total, message| {
+                total.checked_add(message.message_count)
+            }),
+            Some(i32::MAX)
+        );
+
+        let aggregate = source(WarpNormalizedUsage {
+            version: WARP_NORMALIZED_USAGE_VERSION,
+            synced_at_ms: 1,
+            account_scope: opaque(b'J'),
+            usage: WarpAggregateUsage {
+                requests_used: Some(7),
+                ..Default::default()
+            },
+            workspaces: vec![WarpWorkspaceUsage {
+                workspace_scope: opaque(b'K'),
+                requests_used: Some(0),
+                spend_cents: Some(0),
+            }],
+        });
+        let messages = parse_warp_source(&aggregate);
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0].message_count, 7);
+        assert!(messages[0].workspace_key.is_none());
     }
 
     #[test]

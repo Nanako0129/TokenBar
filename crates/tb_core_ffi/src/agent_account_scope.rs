@@ -974,6 +974,15 @@ pub(crate) fn read_external_regular_bounded(
     read_regular_bounded(path, max_bytes, false).map_err(|_| AccountScopeError::MetadataRead)
 }
 
+fn same_snapshot_metadata(
+    before_len: u64,
+    before_modified: SystemTime,
+    after_len: u64,
+    after_modified: SystemTime,
+) -> bool {
+    before_len == after_len && before_modified == after_modified
+}
+
 fn read_regular_bounded(
     path: &Path,
     max_bytes: u64,
@@ -982,18 +991,19 @@ fn read_regular_bounded(
     require_regular_file_path(path)?;
     let mut file = OpenOptions::new().read(true).open(path)?;
     verify_open_regular_file(path, &file)?;
-    let metadata = file.metadata()?;
+    let before_metadata = file.metadata()?;
+    let before_modified = before_metadata.modified()?;
     if require_owner_only {
-        require_owner_only_mode(&metadata)?;
+        require_owner_only_mode(&before_metadata)?;
     }
-    if metadata.len() > max_bytes {
+    if before_metadata.len() > max_bytes {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "account-scope artifact exceeds size limit",
         ));
     }
 
-    let capacity = usize::try_from(metadata.len()).unwrap_or(0);
+    let capacity = usize::try_from(before_metadata.len()).unwrap_or(0);
     let mut bytes = Vec::with_capacity(capacity);
     std::io::Read::by_ref(&mut file)
         .take(max_bytes.saturating_add(1))
@@ -1007,14 +1017,27 @@ fn read_regular_bounded(
     verify_open_regular_file(path, &file)?;
     let canonical = fs::canonicalize(path)?;
     verify_open_regular_file(&canonical, &file)?;
-    let metadata = file.metadata()?;
+    let after_metadata = file.metadata()?;
+    let after_modified = after_metadata.modified()?;
     if require_owner_only {
-        require_owner_only_mode(&metadata)?;
+        require_owner_only_mode(&after_metadata)?;
     }
-    let modified_ms = metadata
-        .modified()
+    if bytes.len() as u64 != after_metadata.len()
+        || !same_snapshot_metadata(
+            before_metadata.len(),
+            before_modified,
+            after_metadata.len(),
+            after_modified,
+        )
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "account-scope artifact changed while reading",
+        ));
+    }
+    let modified_ms = after_modified
+        .duration_since(UNIX_EPOCH)
         .ok()
-        .and_then(|value| value.duration_since(UNIX_EPOCH).ok())
         .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
         .unwrap_or(0);
     Ok(SecureFileRead {
@@ -3438,6 +3461,15 @@ mod tests {
         assert!(backend.directory.join(WARP_USAGE_CACHE_FILE).exists());
         assert!(ensure_installation_key(&backend, &Mutex::new(())).is_ok());
         backend.cleanup();
+    }
+
+    #[test]
+    fn bounded_file_snapshot_requires_matching_length_and_modified_time() {
+        let before = UNIX_EPOCH + std::time::Duration::from_secs(10);
+        let after = UNIX_EPOCH + std::time::Duration::from_secs(11);
+        assert!(same_snapshot_metadata(4, before, 4, before));
+        assert!(!same_snapshot_metadata(4, before, 5, before));
+        assert!(!same_snapshot_metadata(4, before, 4, after));
     }
 
     #[cfg(unix)]

@@ -15,6 +15,7 @@ use reqwest::header::AUTHORIZATION;
 use reqwest::header::{CONTENT_LENGTH, RETRY_AFTER};
 use reqwest::{redirect, StatusCode};
 use serde::{Deserialize, Serialize};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{LazyLock, RwLock};
@@ -134,6 +135,8 @@ struct AppMode {
 
 struct ExternalMode {
     prepared: PreparedSource,
+    stale: bool,
+    error: Option<WarpError>,
 }
 
 enum Mode {
@@ -145,6 +148,7 @@ enum Mode {
 struct WarpState {
     mode: Option<Mode>,
     last_error: Option<WarpError>,
+    revoked_scopes: HashSet<String>,
 }
 
 pub(crate) struct SourceSnapshot {
@@ -175,9 +179,9 @@ pub(crate) fn status() -> WarpStatus {
         Some(Mode::External(external)) => status_for_usage(
             "external",
             &external.prepared.usage,
-            false,
+            external.stale,
             None,
-            state.last_error,
+            external.error,
         ),
         None => WarpStatus {
             supported: cfg!(target_os = "macos"),
@@ -263,32 +267,35 @@ pub(crate) async fn set_bearer(raw: &str) -> Result<WarpStatus, WarpError> {
     }
 
     let cache_candidate = if prior.is_none() {
-        load_cache(&transaction, &account_scope)?
+        load_cache_candidate_with(&account_scope, || load_cache(&transaction, &account_scope))?
     } else {
         None
     };
     match fetch_usage(&transaction, &bearer, &account_scope).await {
         Ok(usage) => {
             let prepared = persist_app_source(&transaction, usage)?;
-            install_mode(Mode::App(AppMode {
+            install_authenticated_app_mode(AppMode {
                 bearer,
                 account_scope,
                 prepared,
                 stale: false,
                 retry_at_ms: None,
                 error: None,
-            }));
+            });
             Ok(status())
         }
         Err(failure) => {
-            match set_failure_action(
+            if failure.error == WarpError::Unauthorized {
+                revoke_scope(&account_scope);
+            }
+            let returned_error = match set_failure_action(
                 prior.as_ref(),
                 &account_scope,
                 cache_candidate.is_some(),
                 failure.error,
             ) {
                 SetFailureAction::ApplySameScope => {
-                    apply_same_scope_failure(&transaction, failure)?;
+                    apply_same_scope_failure(&transaction, &account_scope, failure).err()
                 }
                 SetFailureAction::InstallCached => {
                     let prepared = cache_candidate.ok_or(WarpError::Internal)?;
@@ -300,16 +307,14 @@ pub(crate) async fn set_bearer(raw: &str) -> Result<WarpStatus, WarpError> {
                         retry_at_ms: failure.retry_at_ms,
                         error: Some(failure.error),
                     }));
+                    None
                 }
                 SetFailureAction::StayInactive => {
-                    if failure.error == WarpError::Unauthorized {
-                        let _ = transaction.remove_warp_cache();
-                    }
-                    set_no_mode_error(failure.error);
+                    apply_inactive_failure(&transaction, &account_scope, failure).err()
                 }
-                SetFailureAction::PreservePrior => {}
-            }
-            Err(failure.error)
+                SetFailureAction::PreservePrior => None,
+            };
+            Err(returned_error.unwrap_or(failure.error))
         }
     }
 }
@@ -330,18 +335,21 @@ pub(crate) async fn refresh() -> Result<WarpStatus, WarpError> {
             if generation() != snapshot.generation {
                 return Err(WarpError::SourceChanged);
             }
-            install_mode(Mode::App(AppMode {
+            install_authenticated_app_mode(AppMode {
                 bearer: snapshot.bearer,
                 account_scope: snapshot.account_scope,
                 prepared,
                 stale: false,
                 retry_at_ms: None,
                 error: None,
-            }));
+            });
             Ok(status())
         }
         Err(failure) => {
-            apply_same_scope_failure(&transaction, failure)?;
+            if failure.error == WarpError::Unauthorized {
+                revoke_scope(&snapshot.account_scope);
+            }
+            apply_same_scope_failure(&transaction, &snapshot.account_scope, failure)?;
             Err(failure.error)
         }
     }
@@ -352,7 +360,7 @@ pub(crate) fn set_external(path: &Path) -> Result<WarpStatus, WarpError> {
     validate_external_filename(path)?;
     let transaction = begin_refresh("warp").map_err(|_| WarpError::Storage)?;
     let prepared = prepare_external_source(&transaction, path)?;
-    if external_source_is_current(&prepared) {
+    if clear_external_error_if_current(&prepared) {
         return Ok(status());
     }
 
@@ -364,7 +372,11 @@ pub(crate) fn set_external(path: &Path) -> Result<WarpStatus, WarpError> {
             .remove_warp_cache()
             .map_err(|_| WarpError::Storage)?;
     }
-    install_mode(Mode::External(ExternalMode { prepared }));
+    install_mode(Mode::External(ExternalMode {
+        prepared,
+        stale: false,
+        error: None,
+    }));
     Ok(status())
 }
 
@@ -392,7 +404,11 @@ fn install_external_if_inactive(expected_generation: u64, prepared: PreparedSour
         if generation() != expected_generation || state.mode.is_some() {
             return false;
         }
-        state.mode = Some(Mode::External(ExternalMode { prepared }));
+        state.mode = Some(Mode::External(ExternalMode {
+            prepared,
+            stale: false,
+            error: None,
+        }));
         state.last_error = None;
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
@@ -419,16 +435,27 @@ pub(crate) fn refresh_external_if_active() {
     let Some((expected_generation, path)) = snapshot else {
         return;
     };
-    let Ok(transaction) = begin_refresh("warp") else {
-        return;
+    let result = match begin_refresh("warp") {
+        Ok(transaction) => {
+            if generation() != expected_generation {
+                return;
+            }
+            prepare_external_source(&transaction, &path)
+        }
+        Err(_) => Err(WarpError::Storage),
     };
-    if generation() != expected_generation {
-        return;
+    finish_external_refresh(expected_generation, &path, result);
+}
+
+fn finish_external_refresh(
+    expected_generation: u64,
+    expected_path: &Path,
+    result: Result<PreparedSource, WarpError>,
+) -> bool {
+    match result {
+        Ok(prepared) => install_refreshed_external(expected_generation, expected_path, prepared),
+        Err(error) => mark_external_stale(expected_generation, expected_path, error),
     }
-    let Ok(prepared) = prepare_external_source(&transaction, &path) else {
-        return;
-    };
-    install_refreshed_external(expected_generation, &path, prepared);
 }
 
 fn install_refreshed_external(
@@ -436,6 +463,7 @@ fn install_refreshed_external(
     expected_path: &Path,
     prepared: PreparedSource,
 ) -> bool {
+    let mut invalidate = false;
     {
         let mut state = STATE
             .write()
@@ -443,19 +471,43 @@ fn install_refreshed_external(
         if generation() != expected_generation {
             return false;
         }
-        let Some(Mode::External(current)) = state.mode.as_ref() else {
+        let Some(Mode::External(current)) = state.mode.as_mut() else {
             return false;
         };
-        if current.prepared.source.path() != expected_path
-            || same_external_source(&current.prepared, &prepared)
-        {
+        if current.prepared.source.path() != expected_path {
             return false;
         }
-        state.mode = Some(Mode::External(ExternalMode { prepared }));
+        if !same_external_source(&current.prepared, &prepared) {
+            current.prepared = prepared;
+            GENERATION.fetch_add(1, Ordering::SeqCst);
+            invalidate = true;
+        }
+        current.stale = false;
+        current.error = None;
         state.last_error = None;
-        GENERATION.fetch_add(1, Ordering::SeqCst);
     }
-    tokscale_core::invalidate_usage_data();
+    if invalidate {
+        tokscale_core::invalidate_usage_data();
+    }
+    true
+}
+
+fn mark_external_stale(expected_generation: u64, expected_path: &Path, error: WarpError) -> bool {
+    let mut state = STATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if generation() != expected_generation {
+        return false;
+    }
+    let Some(Mode::External(current)) = state.mode.as_mut() else {
+        return false;
+    };
+    if current.prepared.source.path() != expected_path {
+        return false;
+    }
+    current.stale = true;
+    current.error = Some(error);
+    state.last_error = None;
     true
 }
 
@@ -568,6 +620,30 @@ fn set_failure_action(
     }
 }
 
+fn load_cache_candidate_with<T>(
+    account_scope: &str,
+    load: impl FnOnce() -> Result<Option<T>, WarpError>,
+) -> Result<Option<T>, WarpError> {
+    let revoked = STATE
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .revoked_scopes
+        .contains(account_scope);
+    if revoked {
+        Ok(None)
+    } else {
+        load()
+    }
+}
+
+fn revoke_scope(account_scope: &str) {
+    STATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .revoked_scopes
+        .insert(account_scope.to_string());
+}
+
 fn prior_identity() -> Option<PriorIdentity> {
     let state = STATE
         .read()
@@ -586,6 +662,7 @@ fn prior_identity() -> Option<PriorIdentity> {
     })
 }
 
+#[cfg(test)]
 fn external_source_is_current(prepared: &PreparedSource) -> bool {
     let state = STATE
         .read()
@@ -594,6 +671,22 @@ fn external_source_is_current(prepared: &PreparedSource) -> bool {
         state.mode.as_ref(),
         Some(Mode::External(current)) if same_external_source(&current.prepared, prepared)
     )
+}
+
+fn clear_external_error_if_current(prepared: &PreparedSource) -> bool {
+    let mut state = STATE
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let Some(Mode::External(current)) = state.mode.as_mut() else {
+        return false;
+    };
+    if !same_external_source(&current.prepared, prepared) {
+        return false;
+    }
+    current.stale = false;
+    current.error = None;
+    state.last_error = None;
+    true
 }
 
 fn same_external_source(current: &PreparedSource, candidate: &PreparedSource) -> bool {
@@ -637,6 +730,19 @@ fn install_mode(mode: Mode) {
     tokscale_core::invalidate_usage_data();
 }
 
+fn install_authenticated_app_mode(app: AppMode) {
+    {
+        let mut state = STATE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.revoked_scopes.remove(&app.account_scope);
+        state.mode = Some(Mode::App(app));
+        state.last_error = None;
+        GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+    tokscale_core::invalidate_usage_data();
+}
+
 fn clear_mode() {
     {
         let mut state = STATE
@@ -644,6 +750,18 @@ fn clear_mode() {
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         state.mode = None;
         state.last_error = None;
+        GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+    tokscale_core::invalidate_usage_data();
+}
+
+fn clear_mode_with_error(error: WarpError) {
+    {
+        let mut state = STATE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.mode = None;
+        state.last_error = Some(error);
         GENERATION.fetch_add(1, Ordering::SeqCst);
     }
     tokscale_core::invalidate_usage_data();
@@ -666,13 +784,28 @@ struct FetchFailure {
 
 fn apply_same_scope_failure(
     transaction: &RefreshTransaction,
+    account_scope: &str,
     failure: FetchFailure,
 ) -> Result<(), WarpError> {
-    if failure.error == WarpError::Unauthorized {
-        clear_mode();
+    apply_same_scope_failure_with(account_scope, failure, || {
         transaction
             .remove_warp_cache()
-            .map_err(|_| WarpError::Storage)?;
+            .map_err(|_| WarpError::Storage)
+    })
+}
+
+fn apply_same_scope_failure_with(
+    account_scope: &str,
+    failure: FetchFailure,
+    purge: impl FnOnce() -> Result<(), WarpError>,
+) -> Result<(), WarpError> {
+    if failure.error == WarpError::Unauthorized {
+        revoke_scope(account_scope);
+        clear_mode_with_error(WarpError::Unauthorized);
+        if purge().is_err() {
+            set_no_mode_error(WarpError::Storage);
+            return Err(WarpError::Storage);
+        }
         return Ok(());
     }
     let mut state = STATE
@@ -683,6 +816,22 @@ fn apply_same_scope_failure(
         app.retry_at_ms = failure.retry_at_ms;
         app.error = Some(failure.error);
     }
+    Ok(())
+}
+
+fn apply_inactive_failure(
+    transaction: &RefreshTransaction,
+    account_scope: &str,
+    failure: FetchFailure,
+) -> Result<(), WarpError> {
+    if failure.error == WarpError::Unauthorized {
+        revoke_scope(account_scope);
+        if transaction.remove_warp_cache().is_err() {
+            set_no_mode_error(WarpError::Storage);
+            return Err(WarpError::Storage);
+        }
+    }
+    set_no_mode_error(failure.error);
     Ok(())
 }
 
@@ -1227,6 +1376,16 @@ mod tests {
 
     static STATE_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+    fn reset_state_for_test() {
+        let mut state = STATE
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.mode = None;
+        state.last_error = None;
+        state.revoked_scopes.clear();
+        GENERATION.fetch_add(1, Ordering::SeqCst);
+    }
+
     fn prepared(account: char, fingerprint: u8) -> PreparedSource {
         prepared_with_requests(account, fingerprint, 1)
     }
@@ -1235,6 +1394,22 @@ mod tests {
         account: char,
         fingerprint: u8,
         requests_used: i64,
+    ) -> PreparedSource {
+        prepared_at_path(
+            PathBuf::from("usage.json"),
+            account,
+            fingerprint,
+            requests_used,
+            1,
+        )
+    }
+
+    fn prepared_at_path(
+        path: PathBuf,
+        account: char,
+        fingerprint: u8,
+        requests_used: i64,
+        modified_ms: u64,
     ) -> PreparedSource {
         let usage = WarpNormalizedUsage {
             version: WARP_NORMALIZED_USAGE_VERSION,
@@ -1247,13 +1422,8 @@ mod tests {
             workspaces: Vec::new(),
         };
         PreparedSource {
-            source: WarpUsageSource::new(
-                PathBuf::from("usage.json"),
-                usage.clone(),
-                [fingerprint; 32],
-                1,
-            )
-            .unwrap(),
+            source: WarpUsageSource::new(path, usage.clone(), [fingerprint; 32], modified_ms)
+                .unwrap(),
             usage,
         }
     }
@@ -1616,6 +1786,8 @@ mod tests {
 
         install_mode(Mode::External(ExternalMode {
             prepared: prepared('B', 2),
+            stale: false,
+            error: None,
         }));
         let external = source_snapshot();
         assert!(external.scanner_settings.warp_usage_source.is_some());
@@ -1641,6 +1813,8 @@ mod tests {
         clear_mode();
         install_mode(Mode::External(ExternalMode {
             prepared: prepared('A', 1),
+            stale: false,
+            error: None,
         }));
         let external_generation = generation();
         assert!(install_refreshed_external(
@@ -1675,6 +1849,96 @@ mod tests {
         ));
         assert_eq!(status().mode, "app");
         clear_mode();
+    }
+
+    #[test]
+    fn external_refresh_failures_keep_last_good_visible_and_success_clears_status() {
+        let _guard = STATE_TEST_LOCK.lock().unwrap();
+        reset_state_for_test();
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "tokenbar-warp-external-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let selected = directory.join("usage.json");
+        let valid = br#"{"version":1,"syncedAt":"2026-07-22T00:00:00Z","usage":{"requestsUsed":9,"requestLimit":10,"spendCents":0,"creditsPurchasedCents":0,"nextRefreshTime":null},"workspaces":[]}"#;
+        std::fs::write(&selected, valid).unwrap();
+        assert!(serde_json::from_slice::<ExternalUsage>(valid).is_ok());
+        let canonical = std::fs::canonicalize(&selected).unwrap();
+        let last_good = prepared_at_path(canonical.clone(), 'A', 7, 9, 1);
+        install_mode(Mode::External(ExternalMode {
+            prepared: last_good,
+            stale: false,
+            error: None,
+        }));
+        let expected_generation = generation();
+
+        std::fs::remove_file(&selected).unwrap();
+        let deleted_error = match read_external_regular_bounded(&canonical, MAX_RESPONSE_BYTES) {
+            Err(_) => WarpError::InvalidExternalPath,
+            Ok(_) => panic!("deleted external usage source unexpectedly read"),
+        };
+        assert!(finish_external_refresh(
+            expected_generation,
+            &canonical,
+            Err(deleted_error),
+        ));
+        assert!(status().stale);
+        assert_eq!(
+            status().error_code,
+            Some(WarpError::InvalidExternalPath.code())
+        );
+        let source = source_snapshot()
+            .scanner_settings
+            .warp_usage_source
+            .expect("last-good source remains selectable");
+        assert_eq!(
+            tokscale_core::sessions::warp::parse_warp_source(&source)[0].message_count,
+            9
+        );
+
+        std::fs::write(&selected, b"{").unwrap();
+        let read = read_external_regular_bounded(&canonical, MAX_RESPONSE_BYTES).unwrap();
+        assert!(serde_json::from_slice::<ExternalUsage>(&read.bytes).is_err());
+        assert!(finish_external_refresh(
+            expected_generation,
+            &canonical,
+            Err(WarpError::Decode),
+        ));
+        assert!(status().stale);
+        assert_eq!(status().error_code, Some(WarpError::Decode.code()));
+
+        for error in [WarpError::Storage, WarpError::InvalidUsage] {
+            assert!(finish_external_refresh(
+                expected_generation,
+                &canonical,
+                Err(error),
+            ));
+            assert!(status().stale);
+            assert_eq!(status().error_code, Some(error.code()));
+            assert!(source_snapshot()
+                .scanner_settings
+                .warp_usage_source
+                .is_some());
+        }
+
+        assert!(finish_external_refresh(
+            expected_generation,
+            &canonical,
+            Ok(prepared_at_path(canonical.clone(), 'A', 7, 9, 1)),
+        ));
+        let recovered = status();
+        assert!(!recovered.stale);
+        assert_eq!(recovered.error_code, None);
+        assert_eq!(recovered.requests_used, Some(9));
+
+        reset_state_for_test();
+        std::fs::remove_file(&selected).unwrap();
+        std::fs::remove_dir(directory).unwrap();
     }
 
     #[test]
@@ -1733,6 +1997,71 @@ mod tests {
             set_failure_action(None, &"A".repeat(43), false, WarpError::Timeout),
             SetFailureAction::StayInactive
         );
+    }
+
+    #[test]
+    fn unauthorized_purge_failure_blocks_residual_cache_on_transient_retry() {
+        let _guard = STATE_TEST_LOCK.lock().unwrap();
+        reset_state_for_test();
+        let account_scope = "R".repeat(43);
+        install_mode(Mode::App(AppMode {
+            bearer: "revoked-bearer".to_string(),
+            account_scope: account_scope.clone(),
+            prepared: prepared('R', 1),
+            stale: false,
+            retry_at_ms: None,
+            error: None,
+        }));
+
+        let failure = FetchFailure {
+            error: WarpError::Unauthorized,
+            retry_at_ms: None,
+        };
+        assert_eq!(
+            apply_same_scope_failure_with(&account_scope, failure, || { Err(WarpError::Storage) }),
+            Err(WarpError::Storage)
+        );
+        let failed_purge = status();
+        assert_eq!(failed_purge.mode, "none");
+        assert_eq!(failed_purge.error_code, Some(WarpError::Storage.code()));
+
+        let residual =
+            load_cache_candidate_with(&account_scope, || Ok(Some(prepared('R', 1)))).unwrap();
+        assert!(residual.is_none());
+        assert_eq!(
+            set_failure_action(None, &account_scope, residual.is_some(), WarpError::Timeout,),
+            SetFailureAction::StayInactive
+        );
+        assert!(source_snapshot()
+            .scanner_settings
+            .warp_usage_source
+            .is_none());
+
+        clear_mode();
+        assert!(
+            load_cache_candidate_with(&account_scope, || Ok(Some(prepared('R', 2))))
+                .unwrap()
+                .is_none()
+        );
+
+        install_authenticated_app_mode(AppMode {
+            bearer: "fresh-authenticated-bearer".to_string(),
+            account_scope: account_scope.clone(),
+            prepared: prepared('R', 3),
+            stale: false,
+            retry_at_ms: None,
+            error: None,
+        });
+        let mut loaded_after_success = false;
+        assert!(load_cache_candidate_with(&account_scope, || {
+            loaded_after_success = true;
+            Ok(Some(()))
+        })
+        .unwrap()
+        .is_some());
+        assert!(loaded_after_success);
+
+        reset_state_for_test();
     }
 
     #[cfg(unix)]
