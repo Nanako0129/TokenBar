@@ -28,6 +28,8 @@ M23 was split after PR #74 (`e274f2ad`) reached about 3.1x Copilot production dr
 
 The Copilot duplicate-span contribution reached upstream in issue [#938](https://github.com/junhoyeo/tokscale/issues/938) and merged PR [#939](https://github.com/junhoyeo/tokscale/pull/939) at merge commit [`1652852f`](https://github.com/junhoyeo/tokscale/commit/1652852f0f35d14fe4ff87f6cc32cc9d02a2ddd8). Post-merge verification found deterministic agent-attribution and partial-timestamp gaps, tracked in issue [#942](https://github.com/junhoyeo/tokscale/issues/942) and follow-up PR [#943](https://github.com/junhoyeo/tokscale/pull/943). PR #943 head `9c399cc5` is maintainer-ready: current-head Codex is clean, all CI checks pass, no review threads remain unresolved, the full upstream format/clippy/test/release-build gates pass, and fresh verification confirms parser-version 7 invalidation plus the agent/timing regressions. These upstream-only commits are outside the fixed 111-row audit range and do not change this vendor tree, its ledger counts, or local cache schema 32.
 
+This tree completes M24 Warp local reporting and moves audited row `63a44d7c` to `ALREADY_VENDORED`, producing `79/2/0/16/13/1`. Rust owns the only active normalized source: either an explicit process-memory bearer fetched from Warp's fixed HTTPS GraphQL endpoint or one user-selected exact `usage.json`; the modes are mutually exclusive and never fall back to or add one another. Opaque installation-key HMAC identities replace raw account/workspace identity, the app-owned normalized cache is MAC-verified and account-scoped, external files remain read-only, and the already-normalized Warp source bypasses the generic path-keyed source-message cache; existing tokscale schema 32 is unchanged.
+
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
 ```bash
@@ -40,8 +42,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 78 |
-| `TAKE` | 3 |
+| `ALREADY_VENDORED` | 79 |
+| `TAKE` | 2 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 16 |
 | `SKIP` | 13 |
@@ -51,7 +53,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 78</summary>
+<summary><code>ALREADY_VENDORED</code> — 79</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -63,16 +65,16 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
 9155018c 18cd13cc a87f0ab6 959cce84 6c804711 839ce378 052f43de 633ea946
-77948d9d 302d39c3 9a5aeb65 c1aef5e9 f6f7eced 0b454e60
+77948d9d 302d39c3 9a5aeb65 c1aef5e9 f6f7eced 0b454e60 63a44d7c
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 3</summary>
+<summary><code>TAKE</code> — 2</summary>
 
 ```text
-63a44d7c ae36db5c cd07bf78
+ae36db5c cd07bf78
 ```
 
 </details>
@@ -118,7 +120,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 moves `63a44d7c` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -133,7 +135,7 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M23-V — DEFER | Copilot VS Code `chatSessions`; upstream ObjectMutationLog replay is not yet trustworthy | `074619f7` |
 | M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
-| M24 | Warp producer and local reporting | `63a44d7c` |
+| M24 — this tree | Explicit-credential Warp producer and local reporting with opaque account/workspace identity | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
 | M26-A | Full source-message shard cache using upstream format 1 | `ae36db5c` shard-architecture hunks |
 | M26-B | Format-2 generic related-file path/existence metadata | `cd07bf78` cache-metadata hunks; Devin hunks excluded |
@@ -197,15 +199,15 @@ flowchart TD
 | M23-V | No runtime branch; `074619f7` remains `DEFER` until upstream ObjectMutationLog semantics converge |
 | M18 | `959cce84 6c804711: TAKE → ALREADY_VENDORED`; non-main sources do not change counts |
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
-| M24 | `63a44d7c: TAKE → ALREADY_VENDORED` |
+| M24 | This tree moves `63a44d7c: TAKE → ALREADY_VENDORED`; explicit bearer and external `usage.json` modes remain mutually exclusive |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
 | M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; activate upstream format-1 shards |
 | M26-B | `cd07bf78: TAKE → DEFER` after taking generic format-2 related-file metadata; advance format 1 → 2 |
 | M19-B | Consumer sync; counts unchanged |
 
-With M23-D merged, M24 and M26 are the remaining ledger transitions before the terminal classification `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
+With M24 in this tree, M26-A and M26-B are the remaining ledger transitions before the terminal classification `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
 
-The active monolithic cache is schema 32 after PR #77. M23-H changes discovery only, and M23-D adds a new independently fingerprinted source, so neither requires schema 33. M26 activates shard format 2 while leaving the legacy schema-32 monolith unread, unchanged, and available as provenance.
+The active monolithic cache is schema 32 after PR #77. M23-H changes discovery, M23-D adds a new independently fingerprinted source, and M24 adds a new independently scoped Warp source, so none requires schema 33. M26 activates shard format 2 while leaving the legacy schema-32 monolith unread, unchanged, and available as provenance.
 
 Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; and PR #74 is closed unmerged at `e274f2ad` as fidelity evidence. Issue #45 records the completed M23 bookkeeping. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
@@ -314,6 +316,14 @@ Junie reads `events.jsonl`, preserves each finite non-negative provider-reported
 ## M25 reloadable grouping model aliases
 
 M25 selectively ports upstream [#850](https://github.com/junhoyeo/tokscale/pull/850) / [`9a5aeb65`](https://github.com/junhoyeo/tokscale/commit/9a5aeb65): a config-driven `{alias → canonical}` map that folds model-name variants for **local report grouping only**. The fold is the terminal step of `normalize_model_for_grouping`; `canonical_model_id` is the alias-free syntactic path used by graph `ClientContribution` keys and any future submit/export/persist surface. Pricing continues to resolve the raw message `model_id` (and the static `pricing/aliases.rs` machine-id table remains a separate layer). TokenBar adaptation vs upstream's load-once `OnceLock`: the process-wide map is **reloadable** via `set_model_aliases` / `clear_model_aliases`, bumps `model_alias_generation`, and fires every `register_usage_data_invalidation_hook` so usage-data consumers (and later M24 Warp) refresh without a process restart. Excluded: tokscale-cli TUI/settings/tests, any M25 message-cache schema bump (it kept the then-active **31**; current main is 32 after later PR #77), Copilot Desktop/VS Code/Hermes discovery (M23), and Swift/FFI settings wiring (core API is ready; call from settings later). Hermetic tests prove grouping folds while pricing and canonical identity stay on the raw path, and that reload/clear bump generation and fire the invalidation seam. Ledger transition: `9a5aeb65: TAKE → ALREADY_VENDORED`, post-M25-only classification `75/7/0/15/13/1`.
+
+## M24 explicit-credential Warp local reporting
+
+M24 selects audited row [`63a44d7c`](https://github.com/junhoyeo/tokscale/commit/63a44d7c) for Warp local reporting and uses pre-anchor [`d1cd03c2`](https://github.com/junhoyeo/tokscale/commit/d1cd03c2) only as producer/GraphQL semantic evidence. Rust owns one normalized active source. App mode accepts an explicitly entered bearer in process memory, calls only `https://app.warp.dev/graphql/v2` over HTTPS with redirects disabled, an 8-second timeout, a 2 MiB response cap, and two all-or-nothing typed queries that exclude member identity. External mode reads one user-selected exact `usage.json`; it never searches sibling backups, archives, temp files, credential stores, browser data, Keychain, or shell environment. Cookie input, Warp CLI/TUI/login/status/logout behavior, recursive credential discovery, and persistent raw credentials are excluded.
+
+Both modes normalize into opaque installation-key HMAC account/workspace identities before entering `tokscale-core`. Workspace rows emit provider-reported request cost with zero token buckets; an account aggregate is used only when no valid workspace message exists. App and external modes are mutually exclusive and never add or fall back to one another. The app-owned version-1 normalized cache is MAC-verified and account-scoped; raw bearer, workspace ID/label, remote response identity, local path, and remote error text do not cross status/report JSON. Same-scope transient failures retain last-good data with `stale=true`; rate limits honor a longer `Retry-After` with a five-minute minimum, unauthorized scopes enter a process-local opaque revoked set and trigger cache purge, failed credential replacement leaves the previous account active, external reload failure retains its last-good source, a failed launch-time external restore remains retryable on later usage reads until it succeeds, and clearing external mode forgets only the reference without deleting the user-owned file.
+
+The C ABI and Swift facade expose capability, status, set-bearer, refresh, set/restore-external-usage, and clear operations. `LiveUsageDataSource` restores the explicit external reference before report reads, app mode refreshes before graph recalculation, and every successful source change uses the shared usage-data invalidation bus. The normalized point-in-time source is cheap to parse and bypasses the generic source-message cache, preventing the explicit external path and normalized payload from being duplicated into `source-message-cache.bin`. Hermetic coverage locks that bypass alongside the fixed HTTPS/Bearer-only transport, redirect/body/timeout limits, all-or-nothing query commit, sanitized errors, opaque identity and bounded request totals, source rotation and generation ordering, last-good/revocation behavior, scoped cache verification, exact external shape, FFI null/UTF-8/panic boundaries, and workspace/aggregate parser fallback. M24 moves `63a44d7c` to `ALREADY_VENDORED`, producing `79/2/0/16/13/1`; because Warp is a new independently scoped source, the tokscale monolithic message-cache schema remains **32**.
 
 ## M19-A Windows atomic-replacement completion
 
