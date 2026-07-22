@@ -90,14 +90,14 @@ flowchart TD
 
     T --> F[M19-A Windows atomic retry]
 
-    D --> SA[M26-A shard engine and final format-2 envelope]
+    D --> SA[M26-A identity-aware format-1 shards]
     W --> SA
     F --> SA
-    SA --> SB[M26-B generic related-file behavior]
+    SA --> SB[M26-B format-2 related-file metadata]
     SB --> WS[M19-B final TokenBar-Windows re-sync]
 ```
 
-The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, M21, M25, M23-H, and M23-D are merged. M22 is closed unmerged and deferred. M23-V is deferred and does not block M26. M24 can attach to M25's shared invalidation seam. M26-A waits for M24 and M19-A, then M26-B applies only generic related-file behavior before M19-B runs exactly once.
+The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, M21, M25, M23-H, and M23-D are merged. M22 is closed unmerged and deferred. M23-V is deferred and does not block M26. M24 can attach to M25's shared invalidation seam. M26-A waits for M24 and M19-A to activate upstream-faithful format-1 shards; M26-B then ports the generic `cd07bf78` format-2 path/existence metadata before M19-B runs exactly once. No release occurs between the two cache PRs.
 
 ## Milestone queue
 
@@ -117,8 +117,8 @@ The shared-parser critical path through M17, the money-correctness M18 checkpoin
 | M25 | M18 | Merged in PR #75: reloadable grouping aliases (`set_model_aliases` / `clear_model_aliases`), alias-free `canonical_model_id`, and process-wide usage-data invalidation (`model_alias_generation` + hooks); Swift/FFI settings wiring deferred | Kept then-active schema 31; current main is 32 after PR #77 |
 | M24 | M25 | Add explicit-credential Warp fetching/local reporting through the shared invalidation seam; no automatic credential harvesting | Keep current schema 32 |
 | M19-A | M15-T | Merged as PR #68 at `11ae1bed`: retry only Windows atomic-replacement errors 5/32 for at most five attempts with exact bounded backoff; preserve non-Windows rename and exclude TUI signal behavior | Keep schema 31 |
-| M26-A | M23-D + M24 + M19-A | Activate 256 identity-aware cache shards across every materialized, streaming, count, and report lane; land the final format-2 envelope while excluding Devin behavior | Active shard format 2; leave legacy schema-32 monolith untouched; ledger `80/1/0/16/13/1` |
-| M26-B | M26-A merged | Apply only `cd07bf78` generic related-file path/existence behavior to the fixed format-2 envelope; exclude Devin behavior | Keep format 2 and legacy boundary; terminal ledger `80/0/0/17/13/1` |
+| M26-A | M23-D + M24 + M19-A | Activate 256 identity-aware cache shards across every materialized, streaming, count, and report lane from `ae36db5c`, excluding unrelated parser/client hunks | Active shard format 1; leave legacy schema-32 monolith untouched; ledger `80/1/0/16/13/1` |
+| M26-B | M26-A merged | Port `cd07bf78` generic format-2 related-file path/existence metadata; exclude Devin behavior | Advance shard format 1 → 2, preserve the legacy boundary, and reach terminal ledger `80/0/0/17/13/1` |
 | M19-B | M26-B merged | Reconcile Windows-only residuals and perform one final Rust/header/registry re-sync with parity gates | Sync shard format 2 and legacy schema-32 provenance |
 
 Every runtime merge applies the deterministic ledger delta recorded in [`vendor/README.md`](../../../vendor/README.md), regenerates all six hash sets, and rechecks duplicates plus both symmetric-difference directions. The merged M23 checkpoint is `78/3/0/16/13/1`; M24 advances it to `79/2/0/16/13/1`, M26-A to `80/1/0/16/13/1`, and M26-B to the terminal `80/0/0/17/13/1`, total 111. The difference from the older forecast is M23-V: `074619f7` remains deferred. M26-B moves `cd07bf78` from `TAKE` to `DEFER`. Fidelity rule: preserve necessary TokenBar streaming/FFI seams, but stop when core parser/authority needs continuous systematic repair, custom algorithm scope exceeds upstream, or review exposes new failure classes; defer until upstream converges rather than continuing by sunk cost.
@@ -147,8 +147,8 @@ Prepared parser/specialist patches must not carry shared registry, scanner, cach
 | M17, M18, M21, M22, M25, and M19-A | Schema 31 unchanged through those checkpoints; M22 has no runtime rollback because PR #72 never merged |
 | PR #77 / current baseline | Monolithic schema 32 for Grok `turn_completed.usage` |
 | M23-H, M23-D, and M24 | Keep schema 32; M23-V has no runtime change |
-| M26-A | `source-message-cache-v2/<client>/<00..ff>.bin`, final format-2 envelope; legacy schema-32 monolith is not read, changed, deleted, or migrated |
-| M26-B | Keep M26-A format 2 and legacy boundary while applying generic related-file behavior only |
+| M26-A | `source-message-cache-v2/<client>/<00..ff>.bin`, format 1 from `ae36db5c`; legacy schema-32 monolith is not read, changed, deleted, or migrated |
+| M26-B | Advance format 1 → 2 with `cd07bf78` generic related-file path/existence metadata; keep the legacy boundary |
 | M19-B | Windows consumer matches format 2 and the preserved legacy schema-32 boundary |
 
 Any newly discovered serialized-output change outside this schedule is a stop condition, not permission to invent another schema bump inside a prepared branch.

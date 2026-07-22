@@ -133,8 +133,8 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 | Warp producer and local reporting | `63a44d7c` |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
-| M26-A | Full source-message shard cache with the final format-2 envelope | `ae36db5c` shard-architecture hunks |
-| M26-B | Generic related-file path/existence behavior on the fixed format-2 envelope | `cd07bf78` cache-metadata hunks; Devin hunks excluded |
+| M26-A | Full source-message shard cache using upstream format 1 | `ae36db5c` shard-architecture hunks |
+| M26-B | Format-2 generic related-file path/existence metadata | `cd07bf78` cache-metadata hunks; Devin hunks excluded |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
 
@@ -175,10 +175,10 @@ flowchart TD
     P --> A[M25 reloadable model aliases]
     A --> W[M24 Warp producer/local reporting]
     T --> F[M19-A Windows atomic retry]
-    D --> SA[M26-A shard engine and final format-2 envelope]
+    D --> SA[M26-A identity-aware format-1 shards]
     W --> SA
     F --> SA
-    SA --> SB[M26-B generic related-file behavior]
+    SA --> SB[M26-B format-2 related-file metadata]
     SB --> WS[M19-B final TokenBar-Windows re-sync]
 ```
 
@@ -197,8 +197,8 @@ flowchart TD
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
 | M24 | `63a44d7c: TAKE → ALREADY_VENDORED` |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
-| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; land the final format-2 cache envelope |
-| M26-B | `cd07bf78: TAKE → DEFER` after taking only generic related-file behavior; format-2 envelope remains fixed |
+| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; activate upstream format-1 shards |
+| M26-B | `cd07bf78: TAKE → DEFER` after taking generic format-2 related-file metadata; advance format 1 → 2 |
 | M19-B | Consumer sync; counts unchanged |
 
 With M23-D merged, M24 and M26 are the remaining ledger transitions before the terminal classification `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
