@@ -5,4 +5,5 @@ Improved:
 - Hovered Token Usage and Models bars now gain adaptive outlines and glow in light and dark appearances. Model markers glow with their rows, and Daily/Monthly drill-downs show detailed Input, Output, Cache read, Cache write, and Reasoning tooltips above neighboring rows.
 
 Under the hood:
+- Usage caching now uses bounded identity-aware shards instead of one message-cache file. The first scan after updating starts cold because the legacy cache is intentionally left untouched; later refreshes use the new cache without changing report semantics.
 - Hermes discovery supports native Windows layouts for the downstream Windows build without changing the macOS app.

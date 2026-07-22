@@ -5,4 +5,5 @@
 
 ## Changes
 
+- **Usage caching is now sharded by source identity.** TokenBar replaces the single message cache with bounded per-source shards that isolate parser versions, preserve concurrent updates, and let report paths seed their own cache entries. The first scan after updating starts cold because the legacy cache is intentionally left untouched; later refreshes use the new cache without changing report semantics. [#90](https://github.com/Nanako0129/TokenBar/pull/90)
 - **Hermes discovery supports native Windows layouts** for the downstream Windows build while leaving the macOS app unchanged. [#82](https://github.com/Nanako0129/TokenBar/pull/82)
