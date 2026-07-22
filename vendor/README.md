@@ -28,6 +28,8 @@ M23 was split after PR #74 (`e274f2ad`) reached about 3.1x Copilot production dr
 
 The Copilot duplicate-span contribution reached upstream in issue [#938](https://github.com/junhoyeo/tokscale/issues/938) and merged PR [#939](https://github.com/junhoyeo/tokscale/pull/939) at merge commit [`1652852f`](https://github.com/junhoyeo/tokscale/commit/1652852f0f35d14fe4ff87f6cc32cc9d02a2ddd8). Post-merge verification found deterministic agent-attribution and partial-timestamp gaps, tracked in issue [#942](https://github.com/junhoyeo/tokscale/issues/942) and follow-up PR [#943](https://github.com/junhoyeo/tokscale/pull/943). PR #943 head `9c399cc5` is maintainer-ready: current-head Codex is clean, all CI checks pass, no review threads remain unresolved, the full upstream format/clippy/test/release-build gates pass, and fresh verification confirms parser-version 7 invalidation plus the agent/timing regressions. These upstream-only commits are outside the fixed 111-row audit range and do not change this vendor tree, its ledger counts, or local cache schema 32.
 
+M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) is closed unmerged as fidelity evidence; its [close rationale](https://github.com/Nanako0129/TokenBar/pull/86#issuecomment-5047332480) records the public stop decision. Current-head Codex found four independent security/state-machine defects, and the first local fix round was rejected by fresh security verification because process-local Warp source/revocation state could race with the shared cross-process singleton app cache: one process handling a 401 or Disconnect for scope B could delete another process's valid scope-A cache. Holding the refresh lock through remote I/O violates the approved network boundary; releasing it exposes the cache-ownership conflict. The second consecutive review round therefore triggered the M24 stop condition. No review fix was pushed, `main` remains unchanged, schema stays 32, and `63a44d7c` moves from `TAKE` to `DEFER`, producing `78/2/0/17/13/1`.
+
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
 ```bash
@@ -41,9 +43,9 @@ The classification union has no duplicates and no symmetric difference from that
 | Classification | Count |
 |---|---:|
 | `ALREADY_VENDORED` | 78 |
-| `TAKE` | 3 |
+| `TAKE` | 2 |
 | `ADAPT_FOR_STREAMING` | 0 |
-| `DEFER` | 16 |
+| `DEFER` | 17 |
 | `SKIP` | 13 |
 | `SUPERSEDED` | 1 |
 | **Total** | **111** |
@@ -69,10 +71,10 @@ d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 </details>
 
 <details>
-<summary><code>TAKE</code> — 3</summary>
+<summary><code>TAKE</code> — 2</summary>
 
 ```text
-63a44d7c ae36db5c cd07bf78
+ae36db5c cd07bf78
 ```
 
 </details>
@@ -87,12 +89,12 @@ d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 </details>
 
 <details>
-<summary><code>DEFER</code> — 16</summary>
+<summary><code>DEFER</code> — 17</summary>
 
 ```text
 18c7e87f db88138b 1c91cb34 6a1535d1 90d28ec0
 20f6d4dd b9b7d09f 0097ba7e ed64e77b 34cfbb50
-640e97b9 f7a124da ed6f8b95 65f8f3e2 b64d861e 074619f7
+640e97b9 f7a124da ed6f8b95 65f8f3e2 b64d861e 074619f7 63a44d7c
 ```
 
 </details>
@@ -118,7 +120,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 PR #86 is closed unmerged, so `63a44d7c` moves from `TAKE` to `DEFER` and no Warp runtime code enters main. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -133,10 +135,10 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M23-V — DEFER | Copilot VS Code `chatSessions`; upstream ObjectMutationLog replay is not yet trustworthy | `074619f7` |
 | M18 — merged in PR #70 | Sakana/Fugu pricing and the full routed-pricing pipeline | `959cce84 6c804711` |
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
-| M24 | Warp producer and local reporting | `63a44d7c` |
+| M24 — PR #86 closed unmerged / DEFER | Warp producer and local reporting; process-local source ownership conflicts with the shared cross-process singleton cache | `63a44d7c` remains unvendored and deferred |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
-| M26-A | Full source-message shard cache using upstream format 1 | `ae36db5c` shard-architecture hunks |
-| M26-B | Format-2 generic related-file path/existence metadata | `cd07bf78` cache-metadata hunks; Devin hunks excluded |
+| M26-A — blocked | Full source-message shard cache using upstream format 1; do not start until the M24 dependency is redesigned or explicitly removed by a new plan | `ae36db5c` remains `TAKE` |
+| M26-B — blocked by M26-A | Format-2 generic related-file path/existence metadata | `cd07bf78` remains `TAKE`; Devin hunks excluded |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
 
@@ -148,19 +150,21 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `DEFER` | CodeBuddy / WorkBuddy | `1c91cb34 6a1535d1 90d28ec0 20f6d4dd b9b7d09f` |
 | `DEFER` | Zcode legacy / v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` plus the Zcode hunk of mixed `b64d861e`; PR #72 closed unmerged after exceeding the fidelity threshold |
 | `DEFER` | Copilot VS Code `chatSessions` | `074619f7`; PR #74 reached about 3.1x Copilot production drift and still mis-replays ObjectMutationLog `kind:2`, so reassess only after upstream format semantics converge |
-| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; the remaining `cd07bf78` Devin hunks join after M26 |
+| `DEFER` | Warp producer and local reporting | `63a44d7c`; PR #86 closed unmerged after two consecutive review rounds exposed new security failure classes, culminating in a process-local state versus cross-process singleton-cache ownership conflict |
+| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; `cd07bf78` remains wholly `TAKE` while M26 is blocked, and any future generic-cache port must leave its Devin hunks deferred |
 | `DEFER` | 9Router | `34cfbb50`; M16 takes only its provider hardening, leaving the bridge and 9Router product integration excluded |
 | `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
 
 ### Mixed-commit bookkeeping
 
-| Commit | Current state | Terminal transition |
+| Commit | Current state | Reassessment boundary |
 |---|---|---|
 | `34cfbb50` | `DEFER`; M16 vendors the provider hardening, while the remaining bridge and scanner hunks are 9Router-only | Remains `DEFER` |
 | `b64d861e` | Kiro, Jcode, Junie, and OpenCodeReview start-anchor hunks are vendored through M21; Zcode did not merge | `DEFER`; its remaining Zcode and Devin hunks both wait for upstream convergence |
 | `c1aef5e9` | `ALREADY_VENDORED`; M11 carried the macOS/profile scope and M23-H adds the remaining Windows home candidates without widening explicit `HERMES_HOME` | Remains `ALREADY_VENDORED` |
-| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored | `TAKE → ALREADY_VENDORED` after M26-A |
-| `cd07bf78` | `TAKE` for generic cache format 2 and related-file path/existence metadata; Devin parser/discovery hunks excluded | `TAKE → DEFER` after M26-B; only Devin remains |
+| `63a44d7c` | `DEFER`; the active-day aggregator hunk was already vendored earlier, but PR #86's Warp enablement/local producer did not merge | Reassess only after a coherent cross-process source/cache ownership contract exists |
+| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored; row remains `TAKE` | A new approved plan must redefine the blocked M26-A dependency before any transition |
+| `cd07bf78` | Generic cache format 2, related-file metadata, and Devin hunks all remain unvendored; row remains `TAKE` | Reassess only after M26-A is explicitly reopened; any selective port must continue excluding Devin |
 
 ### Execution order and ledger transitions
 
@@ -175,16 +179,16 @@ flowchart TD
     H --> D[M23-D Copilot Desktop]
     C --> P[M18 Sakana + long-context + routed pricing]
     P --> A[M25 reloadable model aliases]
-    A --> W[M24 Warp producer/local reporting]
+    A --> W[M24 fidelity stop — PR #86]
     T --> F[M19-A Windows atomic retry]
-    D --> SA[M26-A identity-aware format-1 shards]
-    W --> SA
+    D --> SA[M26-A blocked]
+    W -. unresolved dependency .-> SA
     F --> SA
-    SA --> SB[M26-B format-2 related-file metadata]
-    SB --> WS[M19-B final TokenBar-Windows re-sync]
+    SA --> SB[M26-B blocked]
+    SB --> WS[M19-B blocked]
 ```
 
-| Milestone | Ledger transition after merge |
+| Milestone | Ledger transition or current state |
 |---|---|
 | M20 | `366ce643: TAKE → ALREADY_VENDORED` |
 | M15-B | `405ded4a 315549b4: TAKE → ALREADY_VENDORED`; `b64d861e` remains `TAKE` |
@@ -197,17 +201,17 @@ flowchart TD
 | M23-V | No runtime branch; `074619f7` remains `DEFER` until upstream ObjectMutationLog semantics converge |
 | M18 | `959cce84 6c804711: TAKE → ALREADY_VENDORED`; non-main sources do not change counts |
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
-| M24 | `63a44d7c: TAKE → ALREADY_VENDORED` |
+| M24 | PR #86 closed unmerged; `63a44d7c: TAKE → DEFER` after the security fidelity stop |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
-| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; activate upstream format-1 shards |
-| M26-B | `cd07bf78: TAKE → DEFER` after taking generic format-2 related-file metadata; advance format 1 → 2 |
-| M19-B | Consumer sync; counts unchanged |
+| M26-A | Blocked; `ae36db5c` remains `TAKE` until a new plan resolves or removes the M24 dependency |
+| M26-B | Blocked by M26-A; `cd07bf78` remains `TAKE` |
+| M19-B | Blocked by the shard-cache sequence; counts unchanged |
 
-With M23-D merged, M24 and M26 are the remaining ledger transitions before the terminal classification `ALREADY_VENDORED 80`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The one-row shift from the older forecast is M23-V: `074619f7` remains deferred instead of landing. Every merge must apply its delta to the actual previous ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks rather than trusting a precomputed intermediate count.
+The current checkpoint is `ALREADY_VENDORED 78`, `TAKE 2`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The prior terminal forecast is no longer an active delivery schedule: M24 is deferred, so M26-A, M26-B, and M19-B stop until a new approved plan either establishes coherent cross-process Warp source/cache ownership or explicitly removes M24 from the cache dependency graph. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
 
-The active monolithic cache is schema 32 after PR #77. M23-H changes discovery only, and M23-D adds a new independently fingerprinted source, so neither requires schema 33. M26 activates shard format 2 while leaving the legacy schema-32 monolith unread, unchanged, and available as provenance.
+The active monolithic cache remains schema 32 after PR #77. M23-H changes discovery only, M23-D adds a new independently fingerprinted source, and M24 did not merge. No shard format is active; the legacy schema-32 monolith remains the current cache contract.
 
-Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; and PR #74 is closed unmerged at `e274f2ad` as fidelity evidence. Issue #45 records the completed M23 bookkeeping. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 
@@ -313,13 +317,21 @@ Junie reads `events.jsonl`, preserves each finite non-negative provider-reported
 
 ## M25 reloadable grouping model aliases
 
-M25 selectively ports upstream [#850](https://github.com/junhoyeo/tokscale/pull/850) / [`9a5aeb65`](https://github.com/junhoyeo/tokscale/commit/9a5aeb65): a config-driven `{alias → canonical}` map that folds model-name variants for **local report grouping only**. The fold is the terminal step of `normalize_model_for_grouping`; `canonical_model_id` is the alias-free syntactic path used by graph `ClientContribution` keys and any future submit/export/persist surface. Pricing continues to resolve the raw message `model_id` (and the static `pricing/aliases.rs` machine-id table remains a separate layer). TokenBar adaptation vs upstream's load-once `OnceLock`: the process-wide map is **reloadable** via `set_model_aliases` / `clear_model_aliases`, bumps `model_alias_generation`, and fires every `register_usage_data_invalidation_hook` so usage-data consumers (and later M24 Warp) refresh without a process restart. Excluded: tokscale-cli TUI/settings/tests, any M25 message-cache schema bump (it kept the then-active **31**; current main is 32 after later PR #77), Copilot Desktop/VS Code/Hermes discovery (M23), and Swift/FFI settings wiring (core API is ready; call from settings later). Hermetic tests prove grouping folds while pricing and canonical identity stay on the raw path, and that reload/clear bump generation and fire the invalidation seam. Ledger transition: `9a5aeb65: TAKE → ALREADY_VENDORED`, post-M25-only classification `75/7/0/15/13/1`.
+M25 selectively ports upstream [#850](https://github.com/junhoyeo/tokscale/pull/850) / [`9a5aeb65`](https://github.com/junhoyeo/tokscale/commit/9a5aeb65): a config-driven `{alias → canonical}` map that folds model-name variants for **local report grouping only**. The fold is the terminal step of `normalize_model_for_grouping`; `canonical_model_id` is the alias-free syntactic path used by graph `ClientContribution` keys and any future submit/export/persist surface. Pricing continues to resolve the raw message `model_id` (and the static `pricing/aliases.rs` machine-id table remains a separate layer). TokenBar adaptation vs upstream's load-once `OnceLock`: the process-wide map is **reloadable** via `set_model_aliases` / `clear_model_aliases`, bumps `model_alias_generation`, and fires every `register_usage_data_invalidation_hook` so usage-data consumers refresh without a process restart. Excluded: tokscale-cli TUI/settings/tests, any M25 message-cache schema bump (it kept the then-active **31**; current main is 32 after later PR #77), Copilot Desktop/VS Code/Hermes discovery (M23), and Swift/FFI settings wiring (core API is ready; call from settings later). Hermetic tests prove grouping folds while pricing and canonical identity stay on the raw path, and that reload/clear bump generation and fire the invalidation seam. Ledger transition: `9a5aeb65: TAKE → ALREADY_VENDORED`, post-M25-only classification `75/7/0/15/13/1`.
+
+## M24 Warp fidelity stop
+
+M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) proposed a Rust-owned normalized Warp source from either an explicit process-memory bearer or one user-selected exact `usage.json`. Its current head `7dcb6985` included bounded fixed-endpoint GraphQL transport, opaque installation-key HMAC identities, mutually exclusive app/external modes, MAC-verified scoped app cache, generic source-message-cache bypass, C ABI/Swift settings wiring, and materialized/streaming/count/report parity. Hermetic and full runtime gates passed, but those green checks did not establish a coherent multi-process cache owner.
+
+Current-head Codex found four new failure classes: an inactive 401 could purge an unrelated account cache, an old refresh failure could stale or clear a newer source, a failed Disconnect could forget the only purge-retry state, and a stale bearer connect could replace a newer source. The first local fix round added generation guards, matching-scope inactive purge, retryable Disconnect cleanup, and remote I/O outside the refresh/storage transaction. That round was not pushed because fresh security verification reproduced a further production interleaving: Warp source and revoked-scope state are process-local, but `warp-usage-v1.json` is one cross-process singleton. While process P1 waits on remote I/O for scope B, process P2 can write scope A; P1 can then reacquire the provider lock and delete A during same-scope 401 handling or Disconnect. Keeping the lock across remote I/O would avoid that interleaving but violate the approved network boundary.
+
+This second consecutive review round triggers the fidelity stop rather than another local patch. PR #86 is closed unmerged, its rejected fix remains unpushed, and the remote branch is retained as evidence. Main has no M24 runtime, schema stays 32, and `63a44d7c` moves from `TAKE` to `DEFER`, producing `78/2/0/17/13/1`. M26-A, M26-B, and M19-B are blocked until a new approved plan either defines coherent cross-process Warp source/cache ownership or removes M24 from the shard-cache dependency graph.
 
 ## M19-A Windows atomic-replacement completion
 
 M19-A selectively ports only the `fs_atomic.rs` hunk from upstream [#906](https://github.com/junhoyeo/tokscale/pull/906) / [`a87f0ab6`](https://github.com/junhoyeo/tokscale/commit/a87f0ab6). On Windows, `MoveFileExW(MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)` retries only `ERROR_ACCESS_DENIED` (5) and `ERROR_SHARING_VIOLATION` (32), stops after five total attempts, and sleeps for 10, 20, 30, then 40 milliseconds between failures. Other errors return after one attempt. The non-Windows path remains the existing single `std::fs::rename` call.
 
-TokenBar factors the retry loop into an injected replacement/sleep helper compiled on Windows and in tests, so deterministic non-Windows fixtures cover both retryable codes, eventual success, persistent failure at attempt five, immediate non-transient failure, and the exact attempt/backoff sequence without pretending to exercise `MoveFileExW` on macOS. The upstream TUI signal and background-screen changes are excluded. No serialized parser output, cache identity, layout, FFI, Swift, or C ABI changes, so M19-A kept the then-active monolithic cache at 31; current main is schema 32 after later PR #77, and M26 can reuse this bounded replacement behavior for shard writes.
+TokenBar factors the retry loop into an injected replacement/sleep helper compiled on Windows and in tests, so deterministic non-Windows fixtures cover both retryable codes, eventual success, persistent failure at attempt five, immediate non-transient failure, and the exact attempt/backoff sequence without pretending to exercise `MoveFileExW` on macOS. The upstream TUI signal and background-screen changes are excluded. No serialized parser output, cache identity, layout, FFI, Swift, or C ABI changes, so M19-A kept the then-active monolithic cache at 31; current main is schema 32 after later PR #77. Any future approved shard-cache plan can reuse this bounded replacement behavior rather than inventing another Windows retry path.
 
 ## Recovered Windows downstream commits
 
