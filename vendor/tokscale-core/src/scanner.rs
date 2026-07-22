@@ -287,7 +287,13 @@ pub fn scan_directory(root: &str, pattern: &str) -> Vec<PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let path = e.path();
-            if !path.is_file() {
+            // WalkDir already knows the entry type from the directory read, so
+            // trust it for the common regular-file case and avoid a redundant
+            // stat() per file. Symlinks still follow metadata to preserve the
+            // existing file-symlink behavior.
+            let file_type = e.file_type();
+            let is_file = file_type.is_file() || (file_type.is_symlink() && path.is_file());
+            if !is_file {
                 return false;
             }
 
@@ -1606,6 +1612,19 @@ mod tests {
         let json_files = scan_directory(path.to_str().unwrap(), "*.json");
         assert_eq!(json_files.len(), 2);
         assert!(json_files.iter().all(|p| p.extension().unwrap() == "json"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_scan_directory_keeps_file_symlinks() {
+        let dir = TempDir::new().unwrap();
+        let target = dir.path().join("target.json");
+        let alias = dir.path().join("alias.json");
+        File::create(&target).unwrap();
+        std::os::unix::fs::symlink(&target, &alias).unwrap();
+
+        let files = scan_directory(dir.path().to_str().unwrap(), "*.json");
+        assert_eq!(files, vec![alias, target]);
     }
 
     #[test]

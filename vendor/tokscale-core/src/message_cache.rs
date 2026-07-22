@@ -1,3 +1,4 @@
+use crate::clients::ClientId;
 use crate::sessions::codex::CodexParseState;
 use crate::UnifiedMessage;
 use bincode::Options;
@@ -8,113 +9,27 @@ use std::ffi::OsString;
 use std::fs::{self, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Mutex, OnceLock};
 use std::time::UNIX_EPOCH;
 
-// 19: Codex fork-replay parsing now skips replayed parent usage, scopes the
-// token_count dedup key to the fork parent, and keeps user-fork turns after
-// repeated child session_meta rows. Cached messages store their dedup_key and
-// older entries can be empty, so they must be reparsed.
-// 20 (#760 vendoring): session parsers now canonicalize provider ids
-// (fireworks->fireworks_ai, vertex/gemini/azure aliases), recover
-// missing-provider messages (gjc/pi), infer codex provider from the model, and
-// emit stable dedup keys (qwen/mux) — all of which change cached parser output,
-// so stale entries must be reparsed. (Our own schema counter; do not mirror
-// upstream's number.)
-// 21 (M5b: vendoring our own upstream-merged fixes): codex same-millisecond
-// fork-replay gate (#735), micode row-id-fallback dedup namespaced by db (#742),
-// and gjc header-less session fallback by file name (#743) all change cached
-// dedup keys / codex token output, so stale entries must be reparsed. (#741
-// roo-family sibling fingerprinting also invalidates naturally, and #737's
-// antigravity-cli timestamps converge with our dropped local patch.)
-// 22 (M6: follow-up correctness + attribution): jcode journal-wins over stale
-// snapshot + tz-less timestamps (#754), micode epoch seconds/ms normalization
-// (#747), fable->anthropic provider inference (#762), and copilot per-message
-// agent attribution (#724/#751) all change cached parser output, so stale
-// entries must be reparsed. (Our own schema counter; do not mirror upstream's.)
-// 23 (PR #30: drop synthetic claude rows): claudecode parsing now discards
-// assistant turns whose model is the `<synthetic>` placeholder (locally
-// fabricated by Claude Code, zero-token, no real cost), so a session cached
-// before this change still carries the phantom zero-token row until reparsed.
-// (Our own schema counter; do not mirror upstream's number.)
-// 24 (M8-B1: cost provenance contract): UnifiedMessage now serializes
-// cost_source, so schema-23 bincode entries must be rebuilt with the new field.
-// 25 (M10-B: Jcode journal corrections that only replace a snapshotted message
-// are now turn-neutral, so a following brand-new journal turn is no longer robbed
-// of its is_turn_start; schema-24 caches carry the under-counted turn flags, so
-// invalidate them.)
-// 26 (M10-C: Pi session_info now supplies subagent attribution. Non-empty
-// schema-25 caches replay Pi messages with no agent metadata, so invalidate them.
-// This is TokenBar's own counter, replacing upstream #856's per-client
-// parser_version rather than importing it.)
-// 27 (M10-D: Claude workflow journals are now excluded, and deep nested workflow
-// transcripts recover Tier-2 parent-session attribution. Schema-26 caches may
-// replay usage-shaped workflow journals or stale/generic deep Tier-2 agent
-// attribution, so invalidate them. The #856 parser_version/shard-cache
-// architecture remains excluded.)
-// 28 (M10-E: Copilot trace fallback now resolves the first root invoke_agent
-// span by walking the parentSpanId hierarchy, so nested sub-agent invokes
-// exported first no longer become the trace default. Schema-27 caches can carry
-// the wrong nested fallback and must be rebuilt. The final #834 resolver covers
-// #821's reversed-export-order semantic.)
-// 29 (M14: Codex token durations now advance from the last accepted token
-// snapshot instead of repeatedly measuring from the turn start. Schema-28
-// caches can replay overlapping duration_ms values or resume an incremental
-// parse without the new cursor, so unchanged sources must be rebuilt.)
-// 30 (M20: OpenCode now reads v2 session_message rows. A hybrid database can
-// already have a non-empty schema-29 cache containing only its v1 message rows;
-// because the database fingerprint is unchanged, that entry must be rejected so
-// the same source is rebuilt with both v1 and v2 output.)
-// 31 (M16: existing Codex, Claude, Copilot, Jcode, provider, and Antigravity
-// sources now emit corrected fork boundaries, explicit-token handling, start
-// anchors, duration merges, provider identity, or model aliases. Schema-30
-// entries can replay stale output under unchanged fingerprints, so rebuild them
-// once instead of importing upstream's per-parser shard versions.)
-// 32 (Grok Build: prefer turn_completed.params.update.usage over the
-// context-window _meta.totalTokens delta. Schema-31 caches can replay
-// undercounted context-only rows for sessions that already have authoritative
-// per-turn usage, so unchanged sources must be rebuilt.)
-const CACHE_SCHEMA_VERSION: u32 = 32;
-const CACHE_FILENAME: &str = "source-message-cache.bin";
+// CACHE_FORMAT_VERSION changes only when the serialized storage layout or a
+// cross-client type such as UnifiedMessage changes incompatibly. Parser-only
+// changes belong in parser_version() so one client cannot evict every other
+// client's cached transcripts.
+const CACHE_FORMAT_VERSION: u32 = 1;
+// V2 intentionally starts cold and leaves source-message-cache.bin untouched:
+// the monolith did not record a trustworthy parser owner for migration.
+const CACHE_SHARD_DIRNAME: &str = "source-message-cache-v2";
 const CACHE_LOCK_FILENAME: &str = "source-message-cache.lock";
-const MAX_CACHE_FILE_BYTES: u64 = 256 * 1024 * 1024;
+const CACHE_SHARD_COUNT: usize = 256;
+const MAX_CACHE_SHARD_BYTES: u64 = 256 * 1024 * 1024;
 const FINGERPRINT_SAMPLE_BYTES: usize = 4096;
 const FINGERPRINT_SAMPLE_POINTS: usize = 5;
 const HASH_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Process-level memo keyed by (path, size, modified_ns). On a cache hit the
-/// caller skips `compute_sample_hashes` + `hash_prefix` (the expensive I/O +
-/// SHA-256 work). On lock poison or stat failure the caller falls back to the
-/// full recompute path — FAIL-LOUD, never returns stale/empty data.
-struct HashMemoEntry {
-    size: u64,
-    modified_ns: u64,
-    sample_hashes: Vec<FileSampleHash>,
-    content_hash: [u8; 32],
-}
-
-static HASH_MEMO: LazyLock<Mutex<HashMap<PathBuf, HashMemoEntry>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-/// Process-level memo for the deserialized store. On a cache hit (`path +
-/// size + modified_ns` all match) `load()` skips the bincode deserialize.
-/// Path is compared so a test-env config-dir switch never returns data from
-/// a different store file.
-struct StoreMemo {
-    cache_file: PathBuf,
-    file_size: u64,
-    file_modified_ns: u64,
-    entries: HashMap<CachedPath, Arc<CachedSourceEntry>>,
-}
-
-static STORE_MEMO: LazyLock<Mutex<Option<StoreMemo>>> =
-    LazyLock::new(|| Mutex::new(None));
-
-/// Convert a `Duration` (typically elapsed since UNIX_EPOCH) to nanoseconds
-/// as `u64`.
-/// u64 holds ~584 years of ns since epoch — truncation is theoretical.
-fn duration_to_nanos(d: std::time::Duration) -> u64 {
-    d.as_nanos() as u64
+#[cfg(test)]
+thread_local! {
+    static FULL_HASH_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 fn cache_dir() -> Option<PathBuf> {
@@ -128,26 +43,12 @@ fn cache_dir() -> Option<PathBuf> {
     }
 }
 
-fn cache_path() -> Option<PathBuf> {
-    Some(cache_dir()?.join(CACHE_FILENAME))
+fn cache_shard_dir() -> Option<PathBuf> {
+    Some(cache_dir()?.join(CACHE_SHARD_DIRNAME))
 }
 
 fn cache_lock_path() -> Option<PathBuf> {
     Some(cache_dir()?.join(CACHE_LOCK_FILENAME))
-}
-
-fn legacy_cache_paths() -> Vec<PathBuf> {
-    if crate::paths::is_config_dir_overridden() {
-        return Vec::new();
-    }
-
-    [
-        crate::paths::legacy_dirs_cache_dir().map(|d| d.join(CACHE_FILENAME)),
-        crate::paths::legacy_dot_cache_tokscale_dir().map(|d| d.join(CACHE_FILENAME)),
-    ]
-    .into_iter()
-    .flatten()
-    .collect()
 }
 
 fn fallback_cache_dir() -> Option<PathBuf> {
@@ -192,6 +93,19 @@ fn ensure_cache_dir(dir: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+fn warn_cache_failure_once(context: &'static str, path: &Path, error: &impl std::fmt::Display) {
+    tracing::warn!(path = %path.display(), %error, %context, "source message cache failure");
+
+    // Most non-TUI commands (including `submit`) do not install a tracing
+    // subscriber. Surface persistence failures directly once per process so a
+    // permanently cold cache can never fail silently again.
+    static WARNED_CONTEXTS: OnceLock<Mutex<HashSet<&'static str>>> = OnceLock::new();
+    let warned = WARNED_CONTEXTS.get_or_init(|| Mutex::new(HashSet::new()));
+    if warned.lock().is_ok_and(|mut warned| warned.insert(context)) {
+        eprintln!("tokscale: warning: {context} ({}): {error}", path.display());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct FileSampleHash {
     pub offset: u64,
@@ -217,126 +131,65 @@ pub(crate) struct RelatedFileFingerprint {
     pub content_hash: [u8; 32],
 }
 
-/// Metadata siblings a Grok `updates.jsonl` session's parse depends on, in the
-/// same session directory. `parse_grok_updates_file` reconciles totals from
-/// `signals.json` and `read_metadata` additionally reads `summary.json` and
-/// `events.jsonl` for the model id. The fingerprint (`from_grok_path`) and every
-/// mtime change probe in `lib.rs` (`latest_source_mtime_ms`, `grok_source_mtime_ms`)
-/// must watch the *same* set, or a sibling-only write goes unnoticed and the
-/// cache serves a stale (fallback-model) session.
+/// Metadata siblings a Grok `updates.jsonl` session depends on.
+/// Keep this list aligned with the parser fingerprint and live-tail probes.
 pub(crate) const GROK_METADATA_SIBLINGS: [&str; 3] =
     ["signals.json", "summary.json", "events.jsonl"];
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum FingerprintStatus {
+    /// Size and nanosecond mtime still match for the source and every parser
+    /// sidecar, and their bounded samples still match. No full-file SHA-256 was
+    /// computed, so a warm scan reads at most 20 KiB per watched file.
+    Unchanged,
+    /// Metadata changed, so a complete fingerprint was rebuilt to distinguish
+    /// a real content change from a metadata-only touch.
+    Changed(SourceFingerprint),
+}
 
 impl SourceFingerprint {
     pub(crate) fn from_path(path: &Path) -> Option<Self> {
         Self::from_path_with_related(path, std::iter::empty())
     }
 
+    pub(crate) fn from_path_samples_only(path: &Path) -> Option<Self> {
+        Self::from_path_with_related_mode(path, std::iter::empty(), ContentHashMode::SamplesOnly)
+    }
+
     pub(crate) fn from_sqlite_path(path: &Path) -> Option<Self> {
         let related_paths = ["-wal"]
             .into_iter()
             .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
-        Self::from_path_with_related(path, related_paths)
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
     }
 
+    /// Fingerprint for Copilot Desktop's SQLite database, WAL, and dynamic
+    /// `session-state/*/events.jsonl` dependencies. Any unreadable dependency
+    /// fails open to a cache miss instead of serving a DB-only stale entry.
     pub(crate) fn from_copilot_desktop_path(path: &Path) -> Option<Self> {
-        let root = path.parent().unwrap_or_else(|| Path::new("."));
-        File::open(path).ok()?;
-        let events = crate::sessions::copilot_desktop::session_state_event_paths(path).ok()?;
-        let mut fingerprint = Self::from_path(path)?;
-        let wal_path = append_path_suffix(path, "-wal");
-        match fs::metadata(&wal_path) {
-            Ok(metadata) if metadata.is_file() => {
-                File::open(&wal_path).ok()?;
-                fingerprint
-                    .related_files
-                    .push(RelatedFileFingerprint::from_path(
-                        "-wal".to_string(),
-                        &wal_path,
-                    )?);
-            }
-            Ok(_) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => return None,
-        }
-        fingerprint.related_files.extend(
-            events
-                .into_iter()
-                .map(|event| {
-                    let label = event
-                        .strip_prefix(root)
-                        .unwrap_or(&event)
-                        .to_string_lossy()
-                        .into_owned();
-                    RelatedFileFingerprint::from_path(label, &event)
-                })
-                .collect::<Option<Vec<_>>>()?,
-        );
-        fingerprint
-            .related_files
-            .sort_by(|left, right| left.suffix.cmp(&right.suffix));
-        Some(fingerprint)
+        let related_paths = copilot_desktop_related_paths(path)?;
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
     }
 
-    /// Fingerprint for a jcode session snapshot plus its sibling
-    /// `<session>.journal.jsonl` append-log. jcode appends new turns to the
-    /// journal between snapshot rewrites, so a journal-only write leaves the
-    /// snapshot's size/mtime unchanged; including the journal in the fingerprint
-    /// invalidates the cache instead of serving stale (missing-turn) data.
+    pub(crate) fn check_copilot_desktop_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = copilot_desktop_related_paths(path)?;
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
     pub(crate) fn from_jcode_path(path: &Path) -> Option<Self> {
-        let related_paths =
-            std::iter::once((".journal.jsonl".to_string(), jcode_journal_path(path)));
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    /// Fingerprint a Droid settings snapshot together with the fallback JSONL
-    /// that supplies its model when the snapshot omits one.
-    pub(crate) fn from_droid_path(path: &Path) -> Option<Self> {
-        let Some(jsonl) = crate::sessions::droid::droid_jsonl_path(path) else {
-            return Self::from_path(path);
-        };
-        let related_paths = std::iter::once(("session.jsonl".to_string(), jsonl));
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    /// Fingerprint a legacy Kimi wire log together with the shared config that
-    /// supplies its model.
-    pub(crate) fn from_kimi_path(path: &Path) -> Option<Self> {
-        let Some(config) = crate::sessions::kimi::kimi_config_path(path) else {
-            return Self::from_path(path);
-        };
-        let related_paths = std::iter::once(("config.json".to_string(), config));
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    /// Fingerprint a Kiro file source together with the message sidecar it reads:
-    /// same-stem JSONL for CLI sessions, sibling `messages.jsonl` for IDE sessions.
-    pub(crate) fn from_kiro_path(path: &Path) -> Option<Self> {
-        let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
-            return Self::from_path(path);
-        };
-        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
-        Self::from_path_with_related(path, related_paths)
-    }
-
-    /// Fingerprint a Grok source. Legacy `updates.jsonl` output also depends on
-    /// sibling `signals.json`, `summary.json`, and `events.jsonl`; the global
-    /// `unified.jsonl` source is self-contained and uses the normal fingerprint.
-    ///
-    /// LOCAL DIVERGENCE from upstream junhoyeo/tokscale, which fingerprints only
-    /// `signals.json` for legacy sessions even though `read_metadata` reads all
-    /// three siblings — the same class of gap as our reported #741 (roo history
-    /// sibling). Must be re-applied on any re-vendor of `message_cache.rs`.
-    pub(crate) fn from_grok_path(path: &Path) -> Option<Self> {
-        if path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl") {
-            return Self::from_path(path);
-        }
-
-        let session_dir = path.parent().unwrap_or_else(|| Path::new("."));
-        let related_paths = GROK_METADATA_SIBLINGS
-            .into_iter()
-            .map(|name| (name.to_string(), session_dir.join(name)));
-        Self::from_path_with_related(path, related_paths)
+        let related_paths = std::iter::once((
+            ".journal.jsonl".to_string(),
+            crate::sessions::jcode::jcode_journal_path(path),
+        ));
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
     }
 
     /// Fingerprint for a Roo-family task (`ui_messages.json`) and its sibling
@@ -347,7 +200,7 @@ impl SourceFingerprint {
     pub(crate) fn from_roo_path(path: &Path) -> Option<Self> {
         let history = crate::sessions::roocode::history_path_for_ui_messages(path);
         let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
-        Self::from_path_with_related(path, related_paths)
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
     }
 
     /// Fingerprint for a Claude Code JSONL file that may have a sibling `.meta.json`
@@ -376,18 +229,299 @@ impl SourceFingerprint {
             related.push((format!("parent-session-{index}.jsonl"), parent_path));
         }
 
-        Self::from_path_with_related(path, related)
+        Self::from_path_with_related_mode(path, related, ContentHashMode::SamplesOnly)
+    }
+
+    /// Fingerprint for a Grok `updates.jsonl` session and every sibling read by
+    /// its parser for rollup and session metadata.
+    pub(crate) fn from_grok_path(path: &Path) -> Option<Self> {
+        if path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl") {
+            return Self::from_path_samples_only(path);
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let related_paths = ["signals.json", "summary.json", "events.jsonl"]
+            .into_iter()
+            .map(|name| (name.to_string(), parent.join(name)));
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
+    }
+
+    /// Fingerprint for a Kiro source file. IDE sessions consume a sibling
+    /// `messages.jsonl`, while CLI `*.json` headers consume same-stem `*.jsonl`.
+    /// Global-storage and `.chat` snapshots are self-contained.
+    pub(crate) fn from_kiro_path(path: &Path) -> Option<Self> {
+        let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
+            return Self::from_path_samples_only(path);
+        };
+        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
+    }
+
+    pub(crate) fn from_droid_path(path: &Path) -> Option<Self> {
+        let Some(jsonl) = crate::sessions::droid::droid_jsonl_path(path) else {
+            return Self::from_path_samples_only(path);
+        };
+        let related_paths = std::iter::once(("session.jsonl".to_string(), jsonl));
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
+    }
+
+    pub(crate) fn from_kimi_path(path: &Path) -> Option<Self> {
+        if crate::sessions::kimi::is_kimi_code_path(path) {
+            return Self::from_path_samples_only(path);
+        }
+        let Some(config) = crate::sessions::kimi::kimi_config_path(path) else {
+            return Self::from_path_samples_only(path);
+        };
+        let related_paths = std::iter::once(("config.json".to_string(), config));
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::SamplesOnly)
+    }
+
+    pub(crate) fn check_path(path: &Path, cached: Option<&Self>) -> Option<FingerprintStatus> {
+        Self::check_path_with_related(path, std::iter::empty(), cached)
+    }
+
+    /// Check a non-Codex source without rebuilding its write-only whole-file
+    /// hash when metadata or samples changed. Codex uses `check_path` because
+    /// its incremental resume state compares the full content hash; generic
+    /// parsers only need the bounded samples for invalidation.
+    pub(crate) fn check_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_path_with_related_mode(
+            path,
+            std::iter::empty(),
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
+    pub(crate) fn check_sqlite_path(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = ["-wal"]
+            .into_iter()
+            .map(|suffix| (suffix.to_string(), append_path_suffix(path, suffix)));
+        // SQLite databases can be tens of GB; skip the whole-file content hash
+        // (size + mtime + samples detect changes, and no SQLite source reads
+        // content_hash). See ContentHashMode.
+        Self::check_path_with_related_mode(
+            path,
+            related_paths,
+            cached,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
+    pub(crate) fn check_jcode_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_jcode_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_jcode_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let related_paths = std::iter::once((
+            ".journal.jsonl".to_string(),
+            crate::sessions::jcode::jcode_journal_path(path),
+        ));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_roo_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_roo_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_roo_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let history = crate::sessions::roocode::history_path_for_ui_messages(path);
+        let related_paths = std::iter::once(("api_conversation_history.json".to_string(), history));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_claude_code_path_with_home_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+        home_dir: Option<&Path>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_claude_code_path_with_home_mode(
+            path,
+            cached,
+            home_dir,
+            ContentHashMode::SamplesOnly,
+        )
+    }
+
+    fn check_claude_code_path_with_home_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        home_dir: Option<&Path>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let mut related = Vec::new();
+
+        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+            let meta_filename = format!("{}.meta.json", stem);
+            related.push((".meta.json".to_string(), path.with_file_name(meta_filename)));
+        }
+
+        if let Some(variant_path) = crate::cc_mirror::variant_file_for_session_path(path, home_dir)
+        {
+            related.push(("cc-mirror/variant.json".to_string(), variant_path));
+        }
+        for (index, parent_path) in
+            crate::sessions::claudecode::parent_session_paths_for_cache(path)
+                .into_iter()
+                .enumerate()
+        {
+            related.push((format!("parent-session-{index}.jsonl"), parent_path));
+        }
+
+        Self::check_path_with_related_mode(path, related, cached, mode)
+    }
+
+    pub(crate) fn check_grok_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_grok_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_grok_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        if path.file_name().and_then(|name| name.to_str()) == Some("unified.jsonl") {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        }
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let related_paths = ["signals.json", "summary.json", "events.jsonl"]
+            .into_iter()
+            .map(|name| (name.to_string(), parent.join(name)));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_kiro_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_kiro_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_kiro_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let Some(messages) = crate::sessions::kiro::kiro_related_messages_path(path) else {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        };
+        let related_paths = std::iter::once(("messages.jsonl".to_string(), messages));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_droid_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_droid_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_droid_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        let Some(jsonl) = crate::sessions::droid::droid_jsonl_path(path) else {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        };
+        let related_paths = std::iter::once(("session.jsonl".to_string(), jsonl));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    pub(crate) fn check_kimi_path_samples_only(
+        path: &Path,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus> {
+        Self::check_kimi_path_with_mode(path, cached, ContentHashMode::SamplesOnly)
+    }
+
+    fn check_kimi_path_with_mode(
+        path: &Path,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus> {
+        if crate::sessions::kimi::is_kimi_code_path(path) {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        }
+        let Some(config) = crate::sessions::kimi::kimi_config_path(path) else {
+            return Self::check_path_with_related_mode(path, std::iter::empty(), cached, mode);
+        };
+        let related_paths = std::iter::once(("config.json".to_string(), config));
+        Self::check_path_with_related_mode(path, related_paths, cached, mode)
+    }
+
+    fn check_path_with_related<I>(
+        path: &Path,
+        related_paths: I,
+        cached: Option<&Self>,
+    ) -> Option<FingerprintStatus>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        Self::check_path_with_related_mode(path, related_paths, cached, ContentHashMode::Full)
+    }
+
+    fn check_path_with_related_mode<I>(
+        path: &Path,
+        related_paths: I,
+        cached: Option<&Self>,
+        mode: ContentHashMode,
+    ) -> Option<FingerprintStatus>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        let related_paths: Vec<(String, PathBuf)> = related_paths.into_iter().collect();
+        if cached.is_some_and(|fingerprint| {
+            fingerprint_metadata_matches(path, &related_paths, fingerprint).unwrap_or(false)
+        }) {
+            return Some(FingerprintStatus::Unchanged);
+        }
+
+        Self::from_path_with_related_mode(path, related_paths, mode).map(FingerprintStatus::Changed)
     }
 
     fn from_path_with_related<I>(path: &Path, related_paths: I) -> Option<Self>
     where
         I: IntoIterator<Item = (String, PathBuf)>,
     {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
+        Self::from_path_with_related_mode(path, related_paths, ContentHashMode::Full)
+    }
+
+    fn from_path_with_related_mode<I>(
+        path: &Path,
+        related_paths: I,
+        mode: ContentHashMode,
+    ) -> Option<Self>
+    where
+        I: IntoIterator<Item = (String, PathBuf)>,
+    {
+        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
         let mut related_files: Vec<RelatedFileFingerprint> = related_paths
             .into_iter()
             .filter_map(|(suffix, related_path)| {
-                RelatedFileFingerprint::from_path(suffix, &related_path)
+                RelatedFileFingerprint::from_path(suffix, &related_path, mode)
             })
             .collect();
         related_files.sort_by(|left, right| left.suffix.cmp(&right.suffix));
@@ -402,9 +536,38 @@ impl SourceFingerprint {
     }
 }
 
+fn copilot_desktop_related_paths(path: &Path) -> Option<Vec<(String, PathBuf)>> {
+    let root = path.parent().unwrap_or_else(|| Path::new("."));
+    File::open(path).ok()?;
+    let events = crate::sessions::copilot_desktop::session_state_event_paths(path).ok()?;
+    let mut related_paths = Vec::new();
+
+    let wal_path = append_path_suffix(path, "-wal");
+    match fs::metadata(&wal_path) {
+        Ok(metadata) if metadata.is_file() => {
+            File::open(&wal_path).ok()?;
+            related_paths.push(("-wal".to_string(), wal_path));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => return None,
+    }
+
+    for event in events {
+        File::open(&event).ok()?;
+        let label = event
+            .strip_prefix(root)
+            .unwrap_or(&event)
+            .to_string_lossy()
+            .into_owned();
+        related_paths.push((label, event));
+    }
+    Some(related_paths)
+}
+
 impl RelatedFileFingerprint {
-    fn from_path(suffix: String, path: &Path) -> Option<Self> {
-        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path)?;
+    fn from_path(suffix: String, path: &Path, mode: ContentHashMode) -> Option<Self> {
+        let (size, modified_ns, sample_hashes, content_hash) = file_fingerprint_parts(path, mode)?;
         Some(Self {
             suffix,
             size,
@@ -413,6 +576,64 @@ impl RelatedFileFingerprint {
             content_hash,
         })
     }
+}
+
+fn metadata_signature(path: &Path) -> std::io::Result<(u64, u64)> {
+    let metadata = path.metadata()?;
+    let modified_ns = metadata
+        .modified()?
+        .duration_since(UNIX_EPOCH)
+        .map_err(std::io::Error::other)?
+        .as_nanos() as u64;
+    Ok((metadata.len(), modified_ns))
+}
+
+fn fingerprint_metadata_matches(
+    path: &Path,
+    related_paths: &[(String, PathBuf)],
+    cached: &SourceFingerprint,
+) -> Option<bool> {
+    let (size, modified_ns) = metadata_signature(path).ok()?;
+    if size != cached.size || modified_ns != cached.modified_ns {
+        return Some(false);
+    }
+    if compute_sample_hashes(path, size)? != cached.sample_hashes {
+        return Some(false);
+    }
+
+    let mut existing_related = 0;
+    for (suffix, related_path) in related_paths {
+        match metadata_signature(related_path) {
+            Ok((size, modified_ns)) => {
+                existing_related += 1;
+                let Some(related) = cached
+                    .related_files
+                    .iter()
+                    .find(|related| related.suffix == *suffix)
+                else {
+                    return Some(false);
+                };
+                if related.size != size || related.modified_ns != modified_ns {
+                    return Some(false);
+                }
+                if compute_sample_hashes(related_path, size)? != related.sample_hashes {
+                    return Some(false);
+                }
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                if cached
+                    .related_files
+                    .iter()
+                    .any(|related| related.suffix == *suffix)
+                {
+                    return Some(false);
+                }
+            }
+            Err(_) => return None,
+        }
+    }
+
+    Some(existing_related == cached.related_files.len())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -441,6 +662,10 @@ impl CachedPath {
 
         PathBuf::from(OsString::from_vec(self.0.clone()))
     }
+
+    fn update_digest(&self, hasher: &mut Sha256) {
+        hasher.update(&self.0);
+    }
 }
 
 #[cfg(windows)]
@@ -461,6 +686,12 @@ impl CachedPath {
 
         PathBuf::from(OsString::from_wide(&self.0))
     }
+
+    fn update_digest(&self, hasher: &mut Sha256) {
+        for code_unit in &self.0 {
+            hasher.update(code_unit.to_le_bytes());
+        }
+    }
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -476,10 +707,103 @@ impl CachedPath {
     pub(crate) fn to_path_buf(&self) -> PathBuf {
         PathBuf::from(&self.0)
     }
+
+    fn update_digest(&self, hasher: &mut Sha256) {
+        hasher.update(self.0.as_bytes());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct CacheIdentity {
+    namespace: &'static str,
+    parser_version: u32,
+}
+
+impl CacheIdentity {
+    pub(crate) fn for_client(client: ClientId) -> Self {
+        Self {
+            namespace: client.as_str(),
+            parser_version: parser_version(client),
+        }
+    }
+
+    pub(crate) const fn synthetic() -> Self {
+        Self {
+            namespace: "synthetic",
+            parser_version: 1,
+        }
+    }
+
+    fn current_for_namespace(namespace: &str) -> Option<Self> {
+        if namespace == "synthetic" {
+            return Some(Self::synthetic());
+        }
+        ClientId::from_str(namespace).map(Self::for_client)
+    }
+
+    fn all() -> impl Iterator<Item = Self> {
+        ClientId::iter()
+            .map(Self::for_client)
+            .chain(std::iter::once(Self::synthetic()))
+    }
+}
+
+fn parser_version(client: ClientId) -> u32 {
+    match client {
+        // These clients accumulated parser-only invalidations under the old
+        // global schema. Their independent counters start from those histories
+        // so future changes have an obvious local version to increment.
+        ClientId::Codex => 4,
+        ClientId::Jcode => 4,
+        ClientId::Copilot => 3,
+        _ => 1,
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct CacheKey {
+    namespace: String,
+    path: CachedPath,
+}
+
+impl CacheKey {
+    fn new(identity: CacheIdentity, path: &Path) -> Self {
+        Self {
+            namespace: identity.namespace.to_string(),
+            path: CachedPath::from_path(path),
+        }
+    }
+
+    fn from_entry(entry: &CachedSourceEntry) -> Self {
+        Self {
+            namespace: entry.parser_namespace.clone(),
+            path: entry.path.clone(),
+        }
+    }
+
+    fn shard(&self) -> CacheShardKey {
+        let mut hasher = Sha256::new();
+        hasher.update(self.namespace.as_bytes());
+        hasher.update([0]);
+        self.path.update_digest(&mut hasher);
+        let digest = hasher.finalize();
+        CacheShardKey {
+            namespace: self.namespace.clone(),
+            index: usize::from(digest[0]) % CACHE_SHARD_COUNT,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct CacheShardKey {
+    namespace: String,
+    index: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CachedSourceEntry {
+    parser_namespace: String,
+    parser_version: u32,
     pub path: CachedPath,
     pub fingerprint: SourceFingerprint,
     pub messages: Vec<UnifiedMessage>,
@@ -489,6 +813,7 @@ pub(crate) struct CachedSourceEntry {
 
 impl CachedSourceEntry {
     pub(crate) fn new(
+        identity: CacheIdentity,
         path: &Path,
         fingerprint: SourceFingerprint,
         messages: Vec<UnifiedMessage>,
@@ -496,6 +821,8 @@ impl CachedSourceEntry {
         codex_incremental: Option<CodexIncrementalCache>,
     ) -> Self {
         Self {
+            parser_namespace: identity.namespace.to_string(),
+            parser_version: identity.parser_version,
             path: CachedPath::from_path(path),
             fingerprint,
             messages,
@@ -503,254 +830,200 @@ impl CachedSourceEntry {
             codex_incremental,
         }
     }
+
+    fn identity_is_current(&self) -> bool {
+        CacheIdentity::current_for_namespace(&self.parser_namespace)
+            .is_some_and(|identity| identity.parser_version == self.parser_version)
+    }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct CachedSourceStore {
-    schema_version: u32,
-    entries: Vec<CachedSourceEntry>,
+/// The envelope is deliberately independent from CachedSourceEntry's binary
+/// layout. A parser version can therefore be checked before its payload is
+/// deserialized, so (for example) a CodexParseState layout change cannot make
+/// Claude's independently sharded cache unreadable.
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedShardEnvelope {
+    format_version: u32,
+    parser_namespace: String,
+    parser_version: u32,
+    payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+enum DeletionReason {
+    Invalidated(SourceFingerprint),
+    Missing,
 }
 
 #[derive(Default)]
 pub(crate) struct SourceMessageCache {
-    pub entries: HashMap<CachedPath, Arc<CachedSourceEntry>>,
+    pub entries: HashMap<CacheKey, CachedSourceEntry>,
     dirty: bool,
-    dirty_keys: HashSet<CachedPath>,
-    deleted_paths: HashSet<CachedPath>,
-}
-
-/// Return the memo's entry map if `path + size + mtime_ns` all match.
-/// Returns `None` on lock poison, stat failure, or any mismatch.
-fn store_memo_entries_if_current(
-    path: &Path,
-) -> Option<HashMap<CachedPath, Arc<CachedSourceEntry>>> {
-    let guard = STORE_MEMO.lock().ok()?;
-    let memo = guard.as_ref()?;
-    if memo.cache_file != path {
-        return None;
-    }
-    let meta = fs::metadata(path).ok()?;
-    let size = meta.len();
-    let modified_ns = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(duration_to_nanos)?;
-    if size != memo.file_size || modified_ns != memo.file_modified_ns {
-        return None;
-    }
-    Some(memo.entries.clone())
-}
-
-/// Write or replace the STORE_MEMO entry. Silently skips on lock poison or
-/// unreadable mtime — a miss on the next `load()` will just re-read disk.
-fn store_memo_update(
-    path: &Path,
-    meta: &std::fs::Metadata,
-    entries: &HashMap<CachedPath, Arc<CachedSourceEntry>>,
-) {
-    let size = meta.len();
-    let Some(modified_ns) = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-        .map(duration_to_nanos)
-    else {
-        return;
-    };
-    if let Ok(mut guard) = STORE_MEMO.lock() {
-        *guard = Some(StoreMemo {
-            cache_file: path.to_path_buf(),
-            file_size: size,
-            file_modified_ns: modified_ns,
-            entries: entries.clone(),
-        });
-    }
-}
-
-/// Load from legacy cache paths without memoizing (path would differ from
-/// the canonical path so the memo would never be a valid hit).
-fn load_from_legacy_paths() -> SourceMessageCache {
-    legacy_cache_paths()
-        .into_iter()
-        .find_map(|p| read_store_from_path(&p))
-        .map(|store| SourceMessageCache {
-            entries: store
-                .entries
-                .into_iter()
-                .map(|e| (e.path.clone(), Arc::new(e)))
-                .collect(),
-            dirty: false,
-            dirty_keys: HashSet::new(),
-            deleted_paths: HashSet::new(),
-        })
-        .unwrap_or_default()
-}
-
-/// Build the `merged_entries` base for `save_if_dirty`. Tries STORE_MEMO
-/// first to skip re-reading the on-disk store; falls back to disk on a miss.
-fn save_merge_base(
-    final_path: &Path,
-) -> HashMap<CachedPath, Arc<CachedSourceEntry>> {
-    if let Some(entries) = store_memo_entries_if_current(final_path) {
-        return entries;
-    }
-    read_store_from_path(final_path)
-        .map(|store| {
-            store
-                .entries
-                .into_iter()
-                .map(|e| (e.path.clone(), Arc::new(e)))
-                .collect()
-        })
-        .unwrap_or_default()
+    dirty_keys: HashSet<CacheKey>,
+    deleted_keys: HashMap<CacheKey, DeletionReason>,
+    rewrite_shards: HashSet<CacheShardKey>,
 }
 
 impl SourceMessageCache {
     pub(crate) fn load() -> Self {
-        let Some(path) = cache_path() else {
+        Self::load_with_limit(MAX_CACHE_SHARD_BYTES)
+    }
+
+    fn load_with_limit(max_shard_bytes: u64) -> Self {
+        let Some(shard_root) = cache_shard_dir() else {
             return Self::default();
         };
         let Some(lock_path) = cache_lock_path() else {
             return Self::default();
         };
-        if let Some(lock_dir) = lock_path.parent() {
-            if ensure_cache_dir(lock_dir).is_err() {
-                return Self::default();
-            }
+        if let Err(error) = ensure_cache_dir(&shard_root) {
+            warn_cache_failure_once(
+                "source message cache directory is unavailable",
+                &shard_root,
+                &error,
+            );
+            return Self::default();
         }
-
-        // Check STORE_MEMO before acquiring the file lock. A hit means the
-        // on-disk store is almost certainly unchanged — the stat is taken
-        // outside the file lock, so a concurrent atomic-rename writer can
-        // theoretically race it; (path, size, mtime_ns) collision makes a
-        // false hit vanishingly unlikely. Path is part of the key so a
-        // test-env config-dir switch never returns data from a different file.
-        if let Some(entries) = store_memo_entries_if_current(&path) {
-            return Self {
-                entries,
-                dirty: false,
-                dirty_keys: HashSet::new(),
-                deleted_paths: HashSet::new(),
-            };
-        }
-
         let lock_file = match OpenOptions::new()
             .read(true)
             .write(true)
             .create(true)
             .truncate(false)
-            .open(lock_path)
+            .open(&lock_path)
         {
             Ok(file) => file,
-            Err(_) => return Self::default(),
-        };
-        if fs2::FileExt::lock_shared(&lock_file).is_err() {
-            return Self::default();
-        }
-
-        // Stat inside the shared lock for a consistent size+mtime pair.
-        let locked_meta = fs::metadata(&path).ok();
-
-        let store = match read_store_from_path_status(&path) {
-            CacheReadStatus::Loaded(store) => Some(store),
-            CacheReadStatus::Missing => {
-                // Legacy paths: load but do not memoize (path mismatch).
-                return load_from_legacy_paths();
+            Err(error) => {
+                warn_cache_failure_once(
+                    "source message cache lock is unavailable",
+                    &lock_path,
+                    &error,
+                );
+                return Self::default();
             }
-            CacheReadStatus::Invalid => None,
         };
-        let Some(store) = store else {
+        if let Err(error) = fs2::FileExt::lock_shared(&lock_file) {
+            warn_cache_failure_once("source message cache lock failed", &lock_path, &error);
             return Self::default();
-        };
-
-        let entries: HashMap<CachedPath, Arc<CachedSourceEntry>> = store
-            .entries
-            .into_iter()
-            .map(|entry| (entry.path.clone(), Arc::new(entry)))
-            .collect();
-
-        // Update STORE_MEMO so the next load() on an unchanged file is free.
-        if let Some(meta) = locked_meta.as_ref() {
-            store_memo_update(&path, meta, &entries);
         }
 
-        Self {
-            entries,
-            dirty: false,
-            dirty_keys: HashSet::new(),
-            deleted_paths: HashSet::new(),
+        let mut cache = Self::default();
+        for identity in CacheIdentity::all() {
+            let parser_dir = shard_root.join(identity.namespace);
+            let read_dir = match fs::read_dir(&parser_dir) {
+                Ok(read_dir) => read_dir,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    warn_cache_failure_once(
+                        "source message cache parser directory is unreadable",
+                        &parser_dir,
+                        &error,
+                    );
+                    continue;
+                }
+            };
+
+            for dir_entry in read_dir.filter_map(Result::ok) {
+                let Some(index) = parse_shard_filename(&dir_entry.file_name()) else {
+                    continue;
+                };
+                let shard_key = CacheShardKey {
+                    namespace: identity.namespace.to_string(),
+                    index,
+                };
+                let path = dir_entry.path();
+                match read_shard_with_limit(&path, identity, max_shard_bytes) {
+                    ShardReadStatus::Loaded(entries) => {
+                        for entry in entries {
+                            let key = CacheKey::from_entry(&entry);
+                            if key.shard() == shard_key && entry.identity_is_current() {
+                                cache.entries.insert(key, entry);
+                            } else {
+                                cache.rewrite_shards.insert(shard_key.clone());
+                            }
+                        }
+                    }
+                    ShardReadStatus::Missing => {}
+                    ShardReadStatus::Stale => {
+                        cache.rewrite_shards.insert(shard_key);
+                    }
+                    ShardReadStatus::Invalid(error) => {
+                        warn_cache_failure_once(
+                            "source message cache shard is invalid",
+                            &path,
+                            &error,
+                        );
+                        cache.rewrite_shards.insert(shard_key);
+                    }
+                }
+            }
         }
+
+        cache.dirty = !cache.rewrite_shards.is_empty();
+        cache
     }
 
     pub(crate) fn insert(&mut self, entry: CachedSourceEntry) {
-        let key = entry.path.clone();
-        self.entries.insert(key.clone(), Arc::new(entry));
-        self.deleted_paths.remove(&key);
+        let key = CacheKey::from_entry(&entry);
+        self.entries.insert(key.clone(), entry);
+        self.deleted_keys.remove(&key);
         self.dirty_keys.insert(key);
         self.dirty = true;
     }
 
-    pub(crate) fn get(&self, path: &Path) -> Option<&CachedSourceEntry> {
-        let key = CachedPath::from_path(path);
-        self.entries.get(&key).map(|a| a.as_ref())
+    pub(crate) fn get(&self, identity: CacheIdentity, path: &Path) -> Option<&CachedSourceEntry> {
+        let key = CacheKey::new(identity, path);
+        self.entries.get(&key).filter(|entry| {
+            entry.parser_namespace == identity.namespace
+                && entry.parser_version == identity.parser_version
+        })
     }
 
-    pub(crate) fn remove(&mut self, path: &Path) {
-        let key = CachedPath::from_path(path);
-        if self.entries.remove(&key).is_some() {
+    pub(crate) fn remove(&mut self, identity: CacheIdentity, path: &Path) {
+        let key = CacheKey::new(identity, path);
+        if let Some(entry) = self.entries.remove(&key) {
             self.dirty_keys.remove(&key);
-            self.deleted_paths.insert(key);
+            self.deleted_keys
+                .insert(key, DeletionReason::Invalidated(entry.fingerprint));
             self.dirty = true;
-        }
-        // Evict from HASH_MEMO so a deleted session file leaves no stale memo
-        // entry. Lock poison → silently skip; next access recomputes.
-        if let Ok(mut memo) = HASH_MEMO.lock() {
-            memo.remove(path);
         }
     }
 
     pub(crate) fn prune_missing_files(&mut self) {
-        let removed_paths: Vec<CachedPath> = self
+        let removed_keys: Vec<CacheKey> = self
             .entries
             .keys()
-            .filter(|path| !path.to_path_buf().exists())
+            .filter(|key| !key.path.to_path_buf().exists())
             .cloned()
             .collect();
-        if removed_paths.is_empty() {
-            return;
-        }
 
-        for path in &removed_paths {
-            let path_buf = path.to_path_buf();
-            self.entries.remove(path);
-            self.dirty_keys.remove(path);
-            self.deleted_paths.insert(path.clone());
-            // Evict from HASH_MEMO so deleted session files leave no stale
-            // memo entries. Lock poison → silently skip; next access
-            // recomputes.
-            if let Ok(mut memo) = HASH_MEMO.lock() {
-                memo.remove(&path_buf);
-            }
+        for key in removed_keys {
+            self.entries.remove(&key);
+            self.dirty_keys.remove(&key);
+            self.deleted_keys.insert(key, DeletionReason::Missing);
+            self.dirty = true;
         }
-        self.dirty = true;
     }
 
     pub(crate) fn save_if_dirty(&mut self) {
+        self.save_if_dirty_with_limit(MAX_CACHE_SHARD_BYTES);
+    }
+
+    fn save_if_dirty_with_limit(&mut self, max_shard_bytes: u64) {
         if !self.dirty {
             return;
         }
 
-        let Some(dir) = cache_dir() else {
+        let Some(shard_root) = cache_shard_dir() else {
             return;
         };
-        if ensure_cache_dir(&dir).is_err() {
+        if let Err(error) = ensure_cache_dir(&shard_root) {
+            warn_cache_failure_once(
+                "source message cache directory is unavailable",
+                &shard_root,
+                &error,
+            );
             return;
         }
-
-        let Some(final_path) = cache_path() else {
-            return;
-        };
         let Some(lock_path) = cache_lock_path() else {
             return;
         };
@@ -759,138 +1032,262 @@ impl SourceMessageCache {
             .write(true)
             .create(true)
             .truncate(false)
-            .open(lock_path)
+            .open(&lock_path)
         {
             Ok(file) => file,
-            Err(_) => return,
+            Err(error) => {
+                warn_cache_failure_once(
+                    "source message cache lock is unavailable",
+                    &lock_path,
+                    &error,
+                );
+                return;
+            }
         };
-        if fs2::FileExt::lock_exclusive(&lock_file).is_err() {
+        if let Err(error) = fs2::FileExt::lock_exclusive(&lock_file) {
+            warn_cache_failure_once("source message cache lock failed", &lock_path, &error);
             return;
         }
 
-        // Build the merged entries. Try STORE_MEMO first to skip re-reading
-        // the on-disk store; fall back to disk read on a miss.
-        let mut merged_entries: HashMap<CachedPath, Arc<CachedSourceEntry>> =
-            save_merge_base(&final_path);
+        // Bucket dirty and deleted keys by shard up front. CacheKey::shard()
+        // computes a SHA-256 digest, so grouping once keeps hashing at O(keys).
+        // The previous per-shard `.filter(|k| k.shard() == shard_key)` recomputed
+        // that digest for every key on every shard — O(shards * keys) — which
+        // dominated cold-cache builds (hundreds of shards * tens of thousands of
+        // files re-hashed).
+        let mut dirty_by_shard: HashMap<CacheShardKey, Vec<CacheKey>> = HashMap::new();
+        for key in &self.dirty_keys {
+            dirty_by_shard
+                .entry(key.shard())
+                .or_default()
+                .push(key.clone());
+        }
+        let mut deleted_by_shard: HashMap<CacheShardKey, Vec<(CacheKey, DeletionReason)>> =
+            HashMap::new();
+        for (key, reason) in &self.deleted_keys {
+            deleted_by_shard
+                .entry(key.shard())
+                .or_default()
+                .push((key.clone(), reason.clone()));
+        }
 
-        for path in &self.deleted_paths {
-            if !path.to_path_buf().exists() {
-                merged_entries.remove(path);
+        let mut affected_shards = self.rewrite_shards.clone();
+        affected_shards.extend(dirty_by_shard.keys().cloned());
+        affected_shards.extend(deleted_by_shard.keys().cloned());
+
+        let mut successful_shards = HashSet::new();
+        for shard_key in affected_shards {
+            let Some(identity) = CacheIdentity::current_for_namespace(&shard_key.namespace) else {
+                continue;
+            };
+            let parser_dir = shard_root.join(identity.namespace);
+            if let Err(error) = ensure_cache_dir(&parser_dir) {
+                warn_cache_failure_once(
+                    "source message cache parser directory is unavailable",
+                    &parser_dir,
+                    &error,
+                );
+                continue;
+            }
+            let final_path = shard_path(&shard_root, &shard_key);
+
+            let mut merged_entries: HashMap<CacheKey, CachedSourceEntry> =
+                match read_shard_with_limit(&final_path, identity, max_shard_bytes) {
+                    ShardReadStatus::Loaded(entries) => entries
+                        .into_iter()
+                        .filter(|entry| entry.identity_is_current())
+                        .map(|entry| (CacheKey::from_entry(&entry), entry))
+                        .filter(|(key, _)| key.shard() == shard_key)
+                        .collect(),
+                    ShardReadStatus::Missing | ShardReadStatus::Stale => HashMap::new(),
+                    ShardReadStatus::Invalid(error) => {
+                        warn_cache_failure_once(
+                            "source message cache shard is invalid",
+                            &final_path,
+                            &error,
+                        );
+                        HashMap::new()
+                    }
+                };
+
+            if let Some(deleted) = deleted_by_shard.get(&shard_key) {
+                for (key, reason) in deleted {
+                    let should_remove = match reason {
+                        DeletionReason::Missing => !key.path.to_path_buf().exists(),
+                        DeletionReason::Invalidated(expected) => merged_entries
+                            .get(key)
+                            .is_some_and(|entry| entry.fingerprint == *expected),
+                    };
+                    if should_remove {
+                        merged_entries.remove(key);
+                    }
+                }
+            }
+            if let Some(dirty) = dirty_by_shard.get(&shard_key) {
+                for key in dirty {
+                    if let Some(entry) = self.entries.get(key) {
+                        merged_entries.insert(key.clone(), entry.clone());
+                    }
+                }
+            }
+
+            let mut entries: Vec<CachedSourceEntry> = merged_entries.into_values().collect();
+            entries.sort_by_key(|left| left.path.to_path_buf());
+            match write_shard_with_limit(&final_path, identity, &entries, max_shard_bytes) {
+                Ok(()) => {
+                    successful_shards.insert(shard_key);
+                }
+                Err(error) => {
+                    warn_cache_failure_once(
+                        "source message cache shard could not be saved; future scans may remain cold",
+                        &final_path,
+                        &error,
+                    );
+                }
             }
         }
-        for path in &self.dirty_keys {
-            if let Some(arc) = self.entries.get(path) {
-                merged_entries.insert(path.clone(), Arc::clone(arc));
-            }
-        }
 
-        let store = CachedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: merged_entries.values().map(|e| (**e).clone()).collect(),
-        };
-
-        let nanos = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(duration_to_nanos)
-            .unwrap_or(0);
-        let tmp_path = dir.join(format!(
-            ".{}.{}.{:x}.tmp",
-            CACHE_FILENAME,
-            std::process::id(),
-            nanos
-        ));
-
-        // INVARIANT: All cache writes use atomic temp-file rename. NEVER delete
-        // the canonical cache file before writing — a partial save or process
-        // crash between delete and rename would lose the cache. The temp-file
-        // pattern makes corruption-on-crash impossible.
-        let write_result = (|| -> std::io::Result<()> {
-            let file = File::create(&tmp_path)?;
-            let mut writer = BufWriter::new(file);
-            bincode::options()
-                .with_limit(MAX_CACHE_FILE_BYTES)
-                .serialize_into(&mut writer, &store)
-                .map_err(std::io::Error::other)?;
-            writer.flush()?;
-            writer.get_ref().sync_all()?;
-            drop(writer);
-            crate::fs_atomic::replace_file(&tmp_path, &final_path)?;
-            let final_file = OpenOptions::new()
-                .read(true)
-                .write(true)
-                .open(&final_path)?;
-            final_file.sync_all()?;
-            Ok(())
-        })();
-
-        if write_result.is_err() {
-            let _ = fs::remove_file(&tmp_path);
-            return;
-        }
-
-        // Stat final_path while exclusive lock is still held, then refresh
-        // STORE_MEMO so the next load() skips the disk read (race-safe).
-        if let Ok(meta) = fs::metadata(&final_path) {
-            store_memo_update(&final_path, &meta, &merged_entries);
-        }
-
-        self.entries = merged_entries;
-        self.dirty = false;
-        self.dirty_keys.clear();
-        self.deleted_paths.clear();
+        self.dirty_keys
+            .retain(|key| !successful_shards.contains(&key.shard()));
+        self.deleted_keys
+            .retain(|key, _| !successful_shards.contains(&key.shard()));
+        self.rewrite_shards
+            .retain(|shard| !successful_shards.contains(shard));
+        self.dirty = !(self.dirty_keys.is_empty()
+            && self.deleted_keys.is_empty()
+            && self.rewrite_shards.is_empty());
     }
 }
 
-fn read_store_from_path(path: &Path) -> Option<CachedSourceStore> {
-    let file = File::open(path).ok()?;
-    let metadata = file.metadata().ok()?;
-    if metadata.len() > MAX_CACHE_FILE_BYTES {
-        return None;
-    }
-
-    let reader = BufReader::new(file);
-    let store: CachedSourceStore = bincode::options()
-        .with_limit(MAX_CACHE_FILE_BYTES)
-        .deserialize_from(reader)
-        .ok()?;
-    if store.schema_version != CACHE_SCHEMA_VERSION {
-        return None;
-    }
-    Some(store)
+fn shard_filename(index: usize) -> String {
+    format!("shard-{index:02x}.bin")
 }
 
-enum CacheReadStatus {
+fn parse_shard_filename(filename: &std::ffi::OsStr) -> Option<usize> {
+    let filename = filename.to_str()?;
+    let encoded = filename.strip_prefix("shard-")?.strip_suffix(".bin")?;
+    let index = usize::from_str_radix(encoded, 16).ok()?;
+    (index < CACHE_SHARD_COUNT).then_some(index)
+}
+
+fn shard_path(root: &Path, key: &CacheShardKey) -> PathBuf {
+    root.join(&key.namespace).join(shard_filename(key.index))
+}
+
+enum ShardReadStatus {
     Missing,
-    Invalid,
-    Loaded(CachedSourceStore),
+    Stale,
+    Invalid(String),
+    Loaded(Vec<CachedSourceEntry>),
 }
 
-fn read_store_from_path_status(path: &Path) -> CacheReadStatus {
+#[cfg(test)]
+fn read_shard(path: &Path, identity: CacheIdentity) -> ShardReadStatus {
+    read_shard_with_limit(path, identity, MAX_CACHE_SHARD_BYTES)
+}
+
+fn read_shard_with_limit(
+    path: &Path,
+    identity: CacheIdentity,
+    max_shard_bytes: u64,
+) -> ShardReadStatus {
     let file = match File::open(path) {
         Ok(file) => file,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return CacheReadStatus::Missing,
-        Err(_) => return CacheReadStatus::Invalid,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return ShardReadStatus::Missing
+        }
+        Err(error) => return ShardReadStatus::Invalid(error.to_string()),
     };
     let metadata = match file.metadata() {
         Ok(metadata) => metadata,
-        Err(_) => return CacheReadStatus::Invalid,
+        Err(error) => return ShardReadStatus::Invalid(error.to_string()),
     };
-    if metadata.len() > MAX_CACHE_FILE_BYTES {
-        return CacheReadStatus::Invalid;
+    if metadata.len() > max_shard_bytes {
+        return ShardReadStatus::Invalid(format!(
+            "{} bytes exceeds the {}-byte shard limit",
+            metadata.len(),
+            max_shard_bytes
+        ));
     }
 
-    let reader = BufReader::new(file);
-    let store: CachedSourceStore = match bincode::options()
-        .with_limit(MAX_CACHE_FILE_BYTES)
-        .deserialize_from(reader)
+    let envelope: CachedShardEnvelope = match bincode::options()
+        .with_limit(max_shard_bytes)
+        .deserialize_from(BufReader::new(file))
     {
-        Ok(store) => store,
-        Err(_) => return CacheReadStatus::Invalid,
+        Ok(envelope) => envelope,
+        Err(error) => return ShardReadStatus::Invalid(error.to_string()),
     };
-    if store.schema_version != CACHE_SCHEMA_VERSION {
-        return CacheReadStatus::Invalid;
+    if envelope.format_version != CACHE_FORMAT_VERSION {
+        return ShardReadStatus::Stale;
     }
-    CacheReadStatus::Loaded(store)
+    if envelope.parser_namespace != identity.namespace
+        || envelope.parser_version != identity.parser_version
+    {
+        return ShardReadStatus::Stale;
+    }
+
+    match bincode::options()
+        .with_limit(max_shard_bytes)
+        .deserialize(&envelope.payload)
+    {
+        Ok(entries) => ShardReadStatus::Loaded(entries),
+        Err(error) => ShardReadStatus::Invalid(error.to_string()),
+    }
+}
+
+fn write_shard_with_limit(
+    final_path: &Path,
+    identity: CacheIdentity,
+    entries: &[CachedSourceEntry],
+    max_shard_bytes: u64,
+) -> std::io::Result<()> {
+    let payload = bincode::options()
+        .with_limit(max_shard_bytes)
+        .serialize(entries)
+        .map_err(std::io::Error::other)?;
+    let envelope = CachedShardEnvelope {
+        format_version: CACHE_FORMAT_VERSION,
+        parser_namespace: identity.namespace.to_string(),
+        parser_version: identity.parser_version,
+        payload,
+    };
+    let parent = final_path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("cache shard has no parent directory"))?;
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos() as u64)
+        .unwrap_or(0);
+    let tmp_path = parent.join(format!(
+        ".{}.{}.{nanos:x}.tmp",
+        final_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("source-message-cache"),
+        std::process::id(),
+    ));
+
+    // INVARIANT: shard writes use atomic temp-file replacement. Never remove
+    // the canonical shard before the replacement is completely serialized and
+    // fsynced, or one failed large shard write could destroy its last good copy.
+    let write_result = (|| -> std::io::Result<()> {
+        let file = File::create(&tmp_path)?;
+        let mut writer = BufWriter::new(file);
+        bincode::options()
+            .with_limit(max_shard_bytes)
+            .serialize_into(&mut writer, &envelope)
+            .map_err(std::io::Error::other)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        crate::fs_atomic::replace_file(&tmp_path, final_path)?;
+        File::open(final_path)?.sync_all()?;
+        Ok(())
+    })();
+
+    if write_result.is_err() {
+        let _ = fs::remove_file(&tmp_path);
+    }
+    write_result
 }
 
 fn read_sample_hash(file: &mut File, offset: u64, len: usize) -> Option<FileSampleHash> {
@@ -962,43 +1359,35 @@ fn hash_bytes(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn file_fingerprint_parts(path: &Path) -> Option<(u64, u64, Vec<FileSampleHash>, [u8; 32])> {
+/// Whether a fingerprint carries a whole-file `content_hash`.
+///
+/// Validation uses size + mtime + samples ([`fingerprint_metadata_matches`])
+/// for every source. Only Codex reads `content_hash` for incremental resume;
+/// generic parsers and SQLite sources store a zero sentinel so changed or cold
+/// files do not pay for a second whole-file hash that cannot affect parsing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContentHashMode {
+    Full,
+    SamplesOnly,
+}
+
+fn file_fingerprint_parts(
+    path: &Path,
+    mode: ContentHashMode,
+) -> Option<(u64, u64, Vec<FileSampleHash>, [u8; 32])> {
     let metadata = path.metadata().ok()?;
     let size = metadata.len();
     let modified_ns = metadata
         .modified()
         .ok()?
         .duration_since(UNIX_EPOCH)
-        .ok()
-        .map(duration_to_nanos)?;
-
-    // Check HASH_MEMO: if (path, size, modified_ns) all match, skip the
-    // expensive compute_sample_hashes + hash_prefix (file I/O + SHA-256).
-    // Lock poison or stat failure → fall through to full recompute (FAIL-LOUD).
-    if let Ok(memo) = HASH_MEMO.lock() {
-        if let Some(entry) = memo.get(path) {
-            if entry.size == size && entry.modified_ns == modified_ns {
-                return Some((size, modified_ns, entry.sample_hashes.clone(), entry.content_hash));
-            }
-        }
-    }
-
+        .ok()?
+        .as_nanos() as u64;
     let sample_hashes = compute_sample_hashes(path, size)?;
-    let content_hash = hash_prefix(path, size)?;
-
-    // Update HASH_MEMO. Silently skip on lock poison — next call recomputes.
-    if let Ok(mut memo) = HASH_MEMO.lock() {
-        memo.insert(
-            path.to_path_buf(),
-            HashMemoEntry {
-                size,
-                modified_ns,
-                sample_hashes: sample_hashes.clone(),
-                content_hash,
-            },
-        );
-    }
-
+    let content_hash = match mode {
+        ContentHashMode::Full => hash_prefix(path, size)?,
+        ContentHashMode::SamplesOnly => [0_u8; 32],
+    };
     Some((size, modified_ns, sample_hashes, content_hash))
 }
 
@@ -1008,22 +1397,15 @@ fn append_path_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(os)
 }
 
-/// Sibling journal path for a jcode session snapshot: `session_x.json` ->
-/// `session_x.journal.jsonl` (replacing the `.json` suffix; falling back to a
-/// plain append when the name has no `.json` suffix). `pub(crate)` so the
-/// live-tail change-token probe can stat the journal alongside the snapshot.
+/// Compatibility wrapper for the local live-tail mtime probe.
 pub(crate) fn jcode_journal_path(path: &Path) -> PathBuf {
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return append_path_suffix(path, ".journal.jsonl");
-    };
-    let journal_name = file_name
-        .strip_suffix(".json")
-        .map(|stem| format!("{stem}.journal.jsonl"))
-        .unwrap_or_else(|| format!("{file_name}.journal.jsonl"));
-    path.with_file_name(journal_name)
+    crate::sessions::jcode::jcode_journal_path(path)
 }
 
 fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
+    #[cfg(test)]
+    FULL_HASH_CALLS.with(|calls| calls.set(calls.get() + 1));
+
     let mut file = File::open(path).ok()?;
     let mut hasher = Sha256::new();
     let mut remaining = len;
@@ -1042,6 +1424,12 @@ fn hash_prefix(path: &Path, len: u64) -> Option<[u8; 32]> {
     Some(hasher.finalize().into())
 }
 
+#[cfg(test)]
+fn full_hash_call_count() -> usize {
+    FULL_HASH_CALLS.with(std::cell::Cell::get)
+}
+
+#[cfg(test)]
 pub(crate) fn build_codex_incremental_cache(
     path: &Path,
     consumed_offset: u64,
@@ -1057,6 +1445,29 @@ pub(crate) fn build_codex_incremental_cache(
         consumed_offset,
         ends_with_newline,
         prefix_hash: hash_prefix(path, consumed_offset)?,
+    })
+}
+
+/// Build Codex incremental state when the caller already hashed the complete
+/// consumed prefix. Full-file Codex fingerprints are also the prefix hash when
+/// `consumed_offset` equals the current file size, so accepting that digest
+/// avoids a second read of the transcript.
+pub(crate) fn build_codex_incremental_cache_with_prefix_hash(
+    path: &Path,
+    consumed_offset: u64,
+    state: CodexParseState,
+    prefix_hash: [u8; 32],
+) -> Option<CodexIncrementalCache> {
+    let ends_with_newline = consumed_offset == 0 || file_ends_with_newline(path, consumed_offset);
+    if !ends_with_newline {
+        return None;
+    }
+
+    Some(CodexIncrementalCache {
+        state,
+        consumed_offset,
+        ends_with_newline,
+        prefix_hash,
     })
 }
 
@@ -1109,40 +1520,6 @@ mod tests {
     use tempfile::{NamedTempFile, TempDir};
 
     #[test]
-    fn from_jcode_path_invalidates_on_journal_only_change() {
-        // jcode appends new turns to `<session>.journal.jsonl` between snapshot
-        // rewrites. The cache fingerprint must include the journal, or a
-        // journal-only write (snapshot byte-identical) serves stale data.
-        let dir = TempDir::new().unwrap();
-        let snapshot = dir.path().join("session_test.json");
-        std::fs::write(&snapshot, br#"{"id":"session_test","messages":[]}"#).unwrap();
-        let journal = dir.path().join("session_test.journal.jsonl");
-        std::fs::write(&journal, b"{\"append_messages\":[]}\n").unwrap();
-
-        let jcode_before = SourceFingerprint::from_jcode_path(&snapshot).unwrap();
-        let plain_before = SourceFingerprint::from_path(&snapshot).unwrap();
-
-        // Append to the journal only; leave the snapshot byte-identical.
-        std::fs::write(
-            &journal,
-            b"{\"append_messages\":[]}\n{\"append_messages\":[{\"id\":\"x\"}]}\n",
-        )
-        .unwrap();
-
-        let jcode_after = SourceFingerprint::from_jcode_path(&snapshot).unwrap();
-        let plain_after = SourceFingerprint::from_path(&snapshot).unwrap();
-
-        assert_ne!(
-            jcode_before, jcode_after,
-            "a journal-only change must alter the jcode fingerprint"
-        );
-        assert_eq!(
-            plain_before, plain_after,
-            "from_path ignores the journal sibling (control)"
-        );
-    }
-
-    #[test]
     fn from_roo_path_invalidates_on_history_only_change() {
         // parse_roo_kilo_file reads model/agent from the sibling
         // api_conversation_history.json, so a history-only rewrite (ui_messages
@@ -1173,310 +1550,52 @@ mod tests {
         );
     }
 
-    #[test]
-    fn from_roo_path_invalidates_when_history_appears() {
-        let dir = TempDir::new().unwrap();
-        let ui = dir.path().join("ui_messages.json");
-        std::fs::write(&ui, b"[]").unwrap();
-
-        let before = SourceFingerprint::from_roo_path(&ui).unwrap();
-        std::fs::write(
-            crate::sessions::roocode::history_path_for_ui_messages(&ui),
-            b"<environment_details><model>gpt-5</model></environment_details>",
-        )
-        .unwrap();
-        let after = SourceFingerprint::from_roo_path(&ui).unwrap();
-
-        assert_ne!(
-            before, after,
-            "creating the optional history sibling must invalidate the roo fingerprint"
-        );
-    }
-
-    #[test]
-    fn from_droid_path_invalidates_when_fallback_jsonl_appears() {
-        let dir = TempDir::new().unwrap();
-        let settings = dir.path().join("session.settings.json");
-        std::fs::write(&settings, br#"{"tokenUsage":{"inputTokens":1}}"#).unwrap();
-
-        let before = SourceFingerprint::from_droid_path(&settings).unwrap();
-        let plain_before = SourceFingerprint::from_path(&settings).unwrap();
-        let jsonl = crate::sessions::droid::droid_jsonl_path(&settings).unwrap();
-        assert_eq!(jsonl, dir.path().join("session.jsonl"));
-        assert!(before.related_files.is_empty());
-
-        std::fs::write(&jsonl, b"Model: Claude Sonnet 4\n").unwrap();
-
-        let after = SourceFingerprint::from_droid_path(&settings).unwrap();
-        let plain_after = SourceFingerprint::from_path(&settings).unwrap();
-        assert_ne!(before, after);
-        assert_eq!(plain_before, plain_after);
-        assert_eq!(after.related_files[0].suffix, "session.jsonl");
-
-        std::fs::write(&jsonl, b"Model: Claude Opus 4.5 Thinking\n").unwrap();
-        let rewritten = SourceFingerprint::from_droid_path(&settings).unwrap();
-        assert_ne!(after, rewritten);
-        assert_eq!(
-            plain_after,
-            SourceFingerprint::from_path(&settings).unwrap()
-        );
-    }
-
-    #[test]
-    fn from_kimi_path_invalidates_when_config_appears() {
-        let dir = TempDir::new().unwrap();
-        let wire = dir.path().join(".kimi/sessions/group/session/wire.jsonl");
-        std::fs::create_dir_all(wire.parent().unwrap()).unwrap();
-        std::fs::write(&wire, b"usage\n").unwrap();
-
-        let before = SourceFingerprint::from_kimi_path(&wire).unwrap();
-        let plain_before = SourceFingerprint::from_path(&wire).unwrap();
-        let config = crate::sessions::kimi::kimi_config_path(&wire).unwrap();
-        assert_eq!(config, dir.path().join(".kimi/config.json"));
-        assert!(before.related_files.is_empty());
-
-        std::fs::write(&config, br#"{"model":"kimi-k2"}"#).unwrap();
-
-        let after = SourceFingerprint::from_kimi_path(&wire).unwrap();
-        let plain_after = SourceFingerprint::from_path(&wire).unwrap();
-        assert_ne!(before, after);
-        assert_eq!(plain_before, plain_after);
-        assert_eq!(after.related_files[0].suffix, "config.json");
-
-        std::fs::write(&config, br#"{"model":"kimi-k2-thinking"}"#).unwrap();
-        let rewritten = SourceFingerprint::from_kimi_path(&wire).unwrap();
-        assert_ne!(after, rewritten);
-        assert_eq!(plain_after, SourceFingerprint::from_path(&wire).unwrap());
-    }
-
-    #[test]
-    fn from_kiro_path_invalidates_when_messages_sidecar_appears() {
-        let dir = TempDir::new().unwrap();
-        let session = dir.path().join("session.json");
-        std::fs::write(&session, b"{}").unwrap();
-
-        let before = SourceFingerprint::from_kiro_path(&session).unwrap();
-        let plain_before = SourceFingerprint::from_path(&session).unwrap();
-        let messages = crate::sessions::kiro::kiro_related_messages_path(&session).unwrap();
-        assert_eq!(messages, dir.path().join("session.jsonl"));
-        assert!(before.related_files.is_empty());
-
-        std::fs::write(&messages, b"message\n").unwrap();
-
-        let after = SourceFingerprint::from_kiro_path(&session).unwrap();
-        let plain_after = SourceFingerprint::from_path(&session).unwrap();
-        assert_ne!(before, after);
-        assert_eq!(plain_before, plain_after);
-        assert_eq!(after.related_files[0].suffix, "messages.jsonl");
-
-        std::fs::write(&messages, b"rewritten message sidecar\n").unwrap();
-        let rewritten = SourceFingerprint::from_kiro_path(&session).unwrap();
-        assert_ne!(after, rewritten);
-        assert_eq!(plain_after, SourceFingerprint::from_path(&session).unwrap());
-    }
-
-    #[test]
-    fn m15b_kiro_ide_fingerprint_tracks_messages_sidecar() {
-        let dir = TempDir::new().unwrap();
-        let sess_dir = dir.path().join("workspace-a/sess_02f1c107");
-        std::fs::create_dir_all(&sess_dir).unwrap();
-        let session = sess_dir.join("session.json");
-        std::fs::write(&session, br#"{"schemaVersion":"1.0.0"}"#).unwrap();
-
-        let before = SourceFingerprint::from_kiro_path(&session).unwrap();
-        let plain_before = SourceFingerprint::from_path(&session).unwrap();
-        let messages = crate::sessions::kiro::kiro_related_messages_path(&session).unwrap();
-        assert_eq!(messages, sess_dir.join("messages.jsonl"));
-        assert!(before.related_files.is_empty());
-
-        std::fs::write(&messages, b"first turn\n").unwrap();
-        let after = SourceFingerprint::from_kiro_path(&session).unwrap();
-        assert_ne!(before, after);
-        assert_eq!(
-            plain_before,
-            SourceFingerprint::from_path(&session).unwrap()
-        );
-        assert_eq!(after.related_files[0].suffix, "messages.jsonl");
-
-        std::fs::write(&messages, b"first turn\nsecond turn\n").unwrap();
-        let rewritten = SourceFingerprint::from_kiro_path(&session).unwrap();
-        assert_ne!(after, rewritten);
-        assert_eq!(
-            plain_before,
-            SourceFingerprint::from_path(&session).unwrap()
-        );
-    }
-
-    #[test]
-    fn from_grok_path_invalidates_on_summary_only_change() {
-        // read_metadata reads the model id (and timestamp) from the sibling
-        // summary.json when updates.jsonl carries no per-turn model, so a
-        // summary-only rewrite (updates.jsonl + signals.json byte-identical) must
-        // change the fingerprint or the cache keeps a session pinned to its
-        // fallback model. Local divergence: upstream fingerprints only
-        // signals.json here.
-        let dir = TempDir::new().unwrap();
-        let updates = dir.path().join("updates.jsonl");
-        std::fs::write(&updates, b"{\"totalTokens\":10}\n").unwrap();
-        let summary = dir.path().join("summary.json");
-        std::fs::write(&summary, br#"{"current_model_id":"grok-4"}"#).unwrap();
-
-        let grok_before = SourceFingerprint::from_grok_path(&updates).unwrap();
-        let plain_before = SourceFingerprint::from_path(&updates).unwrap();
-
-        // Rewrite summary.json only; leave updates.jsonl byte-identical.
-        std::fs::write(&summary, br#"{"current_model_id":"grok-4-fast"}"#).unwrap();
-
-        let grok_after = SourceFingerprint::from_grok_path(&updates).unwrap();
-        let plain_after = SourceFingerprint::from_path(&updates).unwrap();
-
-        assert_ne!(
-            grok_before, grok_after,
-            "a summary-only change must alter the grok fingerprint"
-        );
-        assert_eq!(
-            plain_before, plain_after,
-            "from_path ignores the summary sibling (control)"
-        );
-    }
-
-    #[test]
-    fn from_grok_path_invalidates_on_events_only_change() {
-        // events.jsonl is the other metadata sibling read_metadata consults for
-        // the model id / session id / timestamp, so an events-only rewrite must
-        // invalidate the cache too.
-        let dir = TempDir::new().unwrap();
-        let updates = dir.path().join("updates.jsonl");
-        std::fs::write(&updates, b"{\"totalTokens\":10}\n").unwrap();
-        let events = dir.path().join("events.jsonl");
-        std::fs::write(&events, b"{\"model_id\":\"grok-4\"}\n").unwrap();
-
-        let before = SourceFingerprint::from_grok_path(&updates).unwrap();
-
-        std::fs::write(&events, b"{\"model_id\":\"grok-4-fast\"}\n").unwrap();
-
-        let after = SourceFingerprint::from_grok_path(&updates).unwrap();
-
-        assert_ne!(
-            before, after,
-            "an events-only change must alter the grok fingerprint"
-        );
-    }
-
-    #[test]
-    fn from_grok_path_treats_unified_log_as_self_contained() {
-        let dir = TempDir::new().unwrap();
-        let unified = dir.path().join("unified.jsonl");
-        let unrelated_signals = dir.path().join("signals.json");
-        std::fs::write(&unified, b"first\n").unwrap();
-        std::fs::write(&unrelated_signals, b"one\n").unwrap();
-
-        let before = SourceFingerprint::from_grok_path(&unified).unwrap();
-        std::fs::write(&unrelated_signals, b"unrelated sibling rewrite\n").unwrap();
-        assert_eq!(
-            before,
-            SourceFingerprint::from_grok_path(&unified).unwrap(),
-            "unified.jsonl must not inherit legacy session siblings"
-        );
-
-        std::fs::write(&unified, b"first\nsecond\n").unwrap();
-        assert_ne!(before, SourceFingerprint::from_grok_path(&unified).unwrap());
-    }
-
-    struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
-
-    impl EnvGuard {
-        fn capture(keys: &[&'static str]) -> Self {
-            Self(
-                keys.iter()
-                    .map(|key| (*key, std::env::var_os(key)))
-                    .collect(),
-            )
-        }
-
-        fn set(&mut self, key: &'static str, value: impl AsRef<std::ffi::OsStr>) {
-            unsafe { std::env::set_var(key, value) };
-        }
-
-        fn remove(&mut self, key: &'static str) {
-            unsafe { std::env::remove_var(key) };
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                for (key, previous) in self.0.drain(..) {
-                    match previous {
-                        Some(value) => std::env::set_var(key, value),
-                        None => std::env::remove_var(key),
-                    }
-                }
+    fn restore_env_var(key: &str, value: Option<impl AsRef<std::ffi::OsStr>>) {
+        unsafe {
+            match value {
+                Some(value) => std::env::set_var(key, value),
+                None => std::env::remove_var(key),
             }
         }
     }
 
     /// Pin every env var the cache resolvers consult so the test stays
-    /// inside `temp_home`, including on Windows where HOME/XDG do not control
-    /// the platform known folders. The override also keeps canonical cache
-    /// tests from reading or writing a real profile.
-    fn sandbox_cache_env(temp_home: &std::path::Path) -> EnvGuard {
-        let config_dir = temp_home.join(".config");
-        let cache_dir = temp_home.join(".cache");
-        let mut guard = EnvGuard::capture(&[
-            "HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "TOKSCALE_CONFIG_DIR",
-        ]);
-        guard.set("HOME", temp_home);
-        guard.set("XDG_CONFIG_HOME", &config_dir);
-        guard.set("XDG_CACHE_HOME", &cache_dir);
-        guard.set("TOKSCALE_CONFIG_DIR", temp_home);
-        guard
-    }
-
-    /// Set legacy roots without the override for the non-Windows migration
-    /// tests. The returned guard restores every process environment variable
-    /// on normal return and during unwinding.
-    fn legacy_cache_env(
+    /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
+    /// `XDG_CACHE_HOME` from the host, which would resolve cache shards outside
+    /// the sandbox. Returns the previous values so the caller can restore.
+    fn sandbox_cache_env(
         temp_home: &std::path::Path,
-        xdg_cache: Option<&std::path::Path>,
-    ) -> EnvGuard {
-        let config_dir = temp_home.join(".config");
-        let mut guard = EnvGuard::capture(&[
-            "HOME",
-            "XDG_CONFIG_HOME",
-            "XDG_CACHE_HOME",
-            "TOKSCALE_CONFIG_DIR",
-        ]);
-        guard.set("HOME", temp_home);
-        guard.set("XDG_CONFIG_HOME", &config_dir);
-        match xdg_cache {
-            Some(path) => guard.set("XDG_CACHE_HOME", path),
-            None => guard.remove("XDG_CACHE_HOME"),
+    ) -> (
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+        Option<std::ffi::OsString>,
+    ) {
+        let prev_home = std::env::var_os("HOME");
+        let prev_xdg_config = std::env::var_os("XDG_CONFIG_HOME");
+        let prev_xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+        let prev_override = std::env::var_os("TOKSCALE_CONFIG_DIR");
+        unsafe {
+            std::env::set_var("HOME", temp_home);
+            std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
+            std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
+            std::env::remove_var("TOKSCALE_CONFIG_DIR");
         }
-        guard.remove("TOKSCALE_CONFIG_DIR");
-        guard
+        (prev_home, prev_xdg_config, prev_xdg_cache, prev_override)
     }
 
-    fn restore_cache_env(guard: EnvGuard) {
-        drop(guard);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_env_guard_restores_after_unwind() {
-        const KEY: &str = "TOKSCALE_MESSAGE_CACHE_ENV_GUARD_SELF_CHECK";
-        let mut outer = EnvGuard::capture(&[KEY]);
-        outer.set(KEY, "before");
-        let result = std::panic::catch_unwind(|| {
-            let mut inner = EnvGuard::capture(&[KEY]);
-            inner.set(KEY, "during");
-            panic!("exercise EnvGuard unwinding");
-        });
-        assert!(result.is_err());
-        assert_eq!(std::env::var_os(KEY), Some("before".into()));
+    fn restore_cache_env(
+        prev: (
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+            Option<std::ffi::OsString>,
+        ),
+    ) {
+        restore_env_var("HOME", prev.0);
+        restore_env_var("XDG_CONFIG_HOME", prev.1);
+        restore_env_var("XDG_CACHE_HOME", prev.2);
+        restore_env_var("TOKSCALE_CONFIG_DIR", prev.3);
     }
 
     fn write_temp_file(content: &[u8]) -> NamedTempFile {
@@ -1484,6 +1603,69 @@ mod tests {
         file.write_all(content).unwrap();
         file.flush().unwrap();
         file
+    }
+
+    fn test_entry(identity: CacheIdentity, path: &Path, session_id: &str) -> CachedSourceEntry {
+        CachedSourceEntry::new(
+            identity,
+            path,
+            SourceFingerprint::from_path(path).unwrap(),
+            vec![UnifiedMessage::new(
+                identity.namespace,
+                "gpt-5",
+                "provider",
+                session_id,
+                1,
+                TokenBreakdown {
+                    input: 1,
+                    output: 2,
+                    cache_read: 3,
+                    cache_write: 0,
+                    reasoning: 0,
+                },
+                0.0,
+            )],
+            Vec::new(),
+            None,
+        )
+    }
+
+    fn write_sources_in_distinct_shards(
+        dir: &TempDir,
+        identity: CacheIdentity,
+    ) -> (PathBuf, PathBuf) {
+        let first = dir.path().join("source-0.jsonl");
+        std::fs::write(&first, b"source-0\n").unwrap();
+        let first_shard = CacheKey::new(identity, &first).shard();
+
+        for index in 1..=CACHE_SHARD_COUNT * 2 {
+            let candidate = dir.path().join(format!("source-{index}.jsonl"));
+            std::fs::write(&candidate, format!("source-{index}\n")).unwrap();
+            if CacheKey::new(identity, &candidate).shard() != first_shard {
+                return (first, candidate);
+            }
+        }
+
+        panic!("failed to find paths in distinct cache shards");
+    }
+
+    fn write_sources_in_same_shard(dir: &TempDir, identity: CacheIdentity) -> (PathBuf, PathBuf) {
+        let mut paths_by_shard = HashMap::new();
+        for index in 0..=CACHE_SHARD_COUNT * 4 {
+            let candidate = dir.path().join(format!("source-{index}.jsonl"));
+            std::fs::write(&candidate, format!("source-{index}\n")).unwrap();
+            let shard = CacheKey::new(identity, &candidate).shard();
+            if let Some(first) = paths_by_shard.insert(shard, candidate.clone()) {
+                return (first, candidate);
+            }
+        }
+
+        panic!("failed to find paths in the same cache shard");
+    }
+
+    fn cache_shard_path(identity: CacheIdentity, path: &Path) -> PathBuf {
+        let root = cache_shard_dir().unwrap();
+        shard_path(&root, &CacheKey::new(identity, path).shard())
     }
 
     #[test]
@@ -1506,18 +1688,179 @@ mod tests {
     }
 
     #[test]
+    fn test_codex_incremental_cache_reuses_full_hash() {
+        let file = write_temp_file(b"line-1\nline-2\n");
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let full_hashes_before = full_hash_call_count();
+
+        let incremental_cache = build_codex_incremental_cache_with_prefix_hash(
+            file.path(),
+            fingerprint.size,
+            CodexParseState::default(),
+            fingerprint.content_hash,
+        )
+        .unwrap();
+
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "a supplied Codex fingerprint must avoid a second whole-file SHA-256"
+        );
+        assert_eq!(incremental_cache.prefix_hash, fingerprint.content_hash);
+        assert!(incremental_cache.ends_with_newline);
+    }
+
+    #[test]
+    fn test_check_path_returns_unchanged_for_matching_metadata_and_samples() {
+        let file = write_temp_file(&vec![b'a'; 32 * 1024]);
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let full_hashes_before = full_hash_call_count();
+
+        let status = SourceFingerprint::check_path(file.path(), Some(&fingerprint)).unwrap();
+
+        assert!(matches!(status, FingerprintStatus::Unchanged));
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "an unchanged fingerprint must not compute a full SHA-256"
+        );
+    }
+
+    #[test]
+    fn test_check_path_returns_changed_when_sample_changes_with_same_metadata() {
+        let original = vec![b'a'; 32 * 1024];
+        let file = write_temp_file(&original);
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let original_signature = metadata_signature(file.path()).unwrap();
+        let original_modified = std::fs::metadata(file.path()).unwrap().modified().unwrap();
+
+        let mut rewritten = original;
+        rewritten[0] = b'z';
+        std::fs::write(file.path(), rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(metadata_signature(file.path()).unwrap(), original_signature);
+        let full_hashes_before = full_hash_call_count();
+
+        let status = SourceFingerprint::check_path(file.path(), Some(&fingerprint)).unwrap();
+
+        let FingerprintStatus::Changed(changed) = status else {
+            panic!("changed sample must rebuild the full fingerprint");
+        };
+        assert_ne!(changed, fingerprint);
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before + 1,
+            "a changed sample must rebuild the full fingerprint"
+        );
+    }
+
+    #[test]
+    fn test_generic_sources_skip_full_hash() {
+        let original = vec![b'a'; 64 * 1024];
+        let file = write_temp_file(&original);
+        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
+        let original_signature = metadata_signature(file.path()).unwrap();
+        let original_modified = std::fs::metadata(file.path()).unwrap().modified().unwrap();
+
+        let mut rewritten = original;
+        rewritten[0] = b'z';
+        std::fs::write(file.path(), rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+        assert_eq!(metadata_signature(file.path()).unwrap(), original_signature);
+
+        let full_hashes_before = full_hash_call_count();
+        let status =
+            SourceFingerprint::check_path_samples_only(file.path(), Some(&fingerprint)).unwrap();
+        let FingerprintStatus::Changed(changed) = status else {
+            panic!("changed sample must invalidate a generic source");
+        };
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "generic source fingerprints must not compute a whole-file SHA-256"
+        );
+        assert_eq!(changed.content_hash, [0_u8; 32]);
+
+        let full_hashes_before = full_hash_call_count();
+        let cold = SourceFingerprint::check_path_samples_only(file.path(), None).unwrap();
+        let FingerprintStatus::Changed(cold) = cold else {
+            panic!("an uncached generic source must build a fingerprint");
+        };
+        assert_eq!(full_hash_call_count(), full_hashes_before);
+        assert_eq!(cold.content_hash, [0_u8; 32]);
+    }
+
+    #[test]
+    fn test_sqlite_fingerprint_skips_full_hash() {
+        let file = write_temp_file(&vec![b'a'; 64 * 1024]);
+        let full_hashes_before = full_hash_call_count();
+
+        let fingerprint = SourceFingerprint::from_sqlite_path(file.path()).unwrap();
+
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "a SQLite fingerprint must not compute a whole-file SHA-256"
+        );
+        assert_eq!(
+            fingerprint.content_hash, [0_u8; 32],
+            "a SQLite fingerprint stores a zero content_hash sentinel"
+        );
+        assert!(
+            !fingerprint.sample_hashes.is_empty(),
+            "samples still guard SQLite change detection"
+        );
+    }
+
+    #[test]
+    fn test_sqlite_check_detects_change_without_full_hash() {
+        let original = vec![b'a'; 64 * 1024];
+        let file = write_temp_file(&original);
+        let fingerprint = SourceFingerprint::from_sqlite_path(file.path()).unwrap();
+
+        // Unchanged: metadata + samples match, no full hash.
+        let full_hashes_before = full_hash_call_count();
+        let status = SourceFingerprint::check_sqlite_path(file.path(), Some(&fingerprint)).unwrap();
+        assert!(matches!(status, FingerprintStatus::Unchanged));
+
+        // Changed: a same-size rewrite with a rolled-back mtime is still caught
+        // by the samples, and still without a whole-file hash.
+        let original_modified = std::fs::metadata(file.path()).unwrap().modified().unwrap();
+        let mut rewritten = original;
+        rewritten[0] = b'z';
+        std::fs::write(file.path(), rewritten).unwrap();
+        File::options()
+            .write(true)
+            .open(file.path())
+            .unwrap()
+            .set_times(std::fs::FileTimes::new().set_modified(original_modified))
+            .unwrap();
+
+        let status = SourceFingerprint::check_sqlite_path(file.path(), Some(&fingerprint)).unwrap();
+        assert!(matches!(status, FingerprintStatus::Changed(_)));
+        assert_eq!(
+            full_hash_call_count(),
+            full_hashes_before,
+            "SQLite change detection must never compute a whole-file SHA-256"
+        );
+    }
+
+    #[test]
     fn test_source_fingerprint_changes_for_same_size_rewrite() {
         let file = write_temp_file(b"aaaa\nbbbb\ncccc\n");
         let before = SourceFingerprint::from_path(file.path()).unwrap();
 
-        // Windows can retain the same timestamp for a fast same-size rewrite;
-        // use a changed-length fixture there instead of sleeping or changing
-        // the production fingerprint memo semantics.
-        #[cfg(not(target_os = "windows"))]
-        let rewritten = b"aaaa\nzzzz\ncccc\n";
-        #[cfg(target_os = "windows")]
-        let rewritten = b"aaaa\nzzzz\ncccc\nchanged-length\n";
-        std::fs::write(file.path(), rewritten).unwrap();
+        std::fs::write(file.path(), b"aaaa\nzzzz\ncccc\n").unwrap();
 
         let after = SourceFingerprint::from_path(file.path()).unwrap();
         assert_ne!(before, after);
@@ -1532,11 +1875,6 @@ mod tests {
 
         let mut rewritten = original.clone();
         rewritten[73 * 1024] = b'z';
-        // Keep the unsampled same-size rewrite on Unix. Windows filesystem
-        // timestamp precision can memoize a rapid rewrite, so make its
-        // fixture length-changing without adding a sleep.
-        #[cfg(target_os = "windows")]
-        rewritten.extend_from_slice(b"changed-length\n");
         std::fs::write(file.path(), &rewritten).unwrap();
 
         let after = SourceFingerprint::from_path(file.path()).unwrap();
@@ -1556,7 +1894,7 @@ mod tests {
         let with_wal = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_ne!(base, with_wal);
 
-        std::fs::write(&wal_path, b"wal-2-changed-length").unwrap();
+        std::fs::write(&wal_path, b"wal-2").unwrap();
         let updated_wal = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_ne!(with_wal, updated_wal);
 
@@ -1565,6 +1903,192 @@ mod tests {
         std::fs::write(&shm_path, b"shm-1").unwrap();
         let with_shm = SourceFingerprint::from_sqlite_path(&db_path).unwrap();
         assert_eq!(before_shm, with_shm);
+    }
+
+    #[test]
+    fn test_jcode_fingerprint_tracks_journal_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("session_fixture.json");
+        std::fs::write(&session_path, br#"{"messages":[]}"#).unwrap();
+
+        let base = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+
+        let journal_path = dir.path().join("session_fixture.journal.jsonl");
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[]}
+"#,
+        )
+        .unwrap();
+        let with_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(base, with_journal);
+
+        std::fs::write(
+            &journal_path,
+            br#"{"append_messages":[{"id":"assistant_1"}]}
+"#,
+        )
+        .unwrap();
+        let updated_journal = SourceFingerprint::from_jcode_path(&session_path).unwrap();
+        assert_ne!(with_journal, updated_journal);
+    }
+
+    #[test]
+    fn test_grok_fingerprint_tracks_signals_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let updates_path = dir.path().join("updates.jsonl");
+        std::fs::write(&updates_path, b"update\n").unwrap();
+
+        let base = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+
+        let signals_path = dir.path().join("signals.json");
+        std::fs::write(&signals_path, br#"{"input":1}"#).unwrap();
+        let with_signals = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(base, with_signals);
+
+        std::fs::write(&signals_path, br#"{"input":2}"#).unwrap();
+        let updated_signals = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(with_signals, updated_signals);
+    }
+
+    #[test]
+    fn test_grok_fingerprint_tracks_summary_and_events_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let updates_path = dir.path().join("updates.jsonl");
+        std::fs::write(&updates_path, b"update\n").unwrap();
+
+        let base = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+
+        let summary_path = dir.path().join("summary.json");
+        std::fs::write(&summary_path, br#"{"model":"grok-3"}"#).unwrap();
+        let with_summary = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(base, with_summary);
+
+        std::fs::write(&summary_path, br#"{"model":"grok-4"}"#).unwrap();
+        let updated_summary = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(with_summary, updated_summary);
+
+        let events_path = dir.path().join("events.jsonl");
+        std::fs::write(&events_path, b"event-1\n").unwrap();
+        let with_events = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(updated_summary, with_events);
+
+        std::fs::write(&events_path, b"event-2\n").unwrap();
+        let updated_events = SourceFingerprint::from_grok_path(&updates_path).unwrap();
+        assert_ne!(with_events, updated_events);
+    }
+
+    #[test]
+    fn test_kiro_ide_fingerprint_tracks_messages_sidecar_changes() {
+        let dir = TempDir::new().unwrap();
+        let sess_dir = dir.path().join("workspace-a/sess_02f1c107");
+        std::fs::create_dir_all(&sess_dir).unwrap();
+        let session_path = sess_dir.join("session.json");
+        std::fs::write(&session_path, br#"{"schemaVersion":"1.0.0"}"#).unwrap();
+
+        let base = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+
+        // messages.jsonl appearing (session.json untouched) must invalidate.
+        let messages_path = sess_dir.join("messages.jsonl");
+        std::fs::write(
+            &messages_path,
+            br#"{"role":"user","content":"hello"}
+"#,
+        )
+        .unwrap();
+        let with_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(base, with_messages);
+
+        // An append landing after the last session.json write must invalidate.
+        std::fs::write(
+            &messages_path,
+            br#"{"role":"user","content":"hello"}
+{"role":"assistant","content":"world"}
+"#,
+        )
+        .unwrap();
+        let updated_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(with_messages, updated_messages);
+
+        // A CLI source initially matches the plain fingerprint while its
+        // same-stem JSONL sidecar is absent.
+        let cli_path = dir.path().join("cli-session.json");
+        std::fs::write(&cli_path, b"{}").unwrap();
+        assert_eq!(
+            SourceFingerprint::from_kiro_path(&cli_path),
+            SourceFingerprint::from_path_samples_only(&cli_path)
+        );
+    }
+
+    #[test]
+    fn test_kiro_cli_fingerprint_tracks_same_stem_jsonl_changes() {
+        let dir = TempDir::new().unwrap();
+        let session_path = dir.path().join("cli-session.json");
+        std::fs::write(&session_path, br#"{"sessionId":"session-1"}"#).unwrap();
+
+        let base = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+
+        let messages_path = dir.path().join("cli-session.jsonl");
+        std::fs::write(&messages_path, b"message-1\n").unwrap();
+        let with_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(base, with_messages);
+
+        std::fs::write(&messages_path, b"message-2\n").unwrap();
+        let updated_messages = SourceFingerprint::from_kiro_path(&session_path).unwrap();
+        assert_ne!(with_messages, updated_messages);
+    }
+
+    #[test]
+    fn test_droid_fingerprint_tracks_fallback_jsonl_changes() {
+        let dir = TempDir::new().unwrap();
+        let settings_path = dir.path().join("session.settings.json");
+        std::fs::write(&settings_path, br#"{"tokenUsage":{"inputTokens":1}}"#).unwrap();
+
+        let base = SourceFingerprint::from_droid_path(&settings_path).unwrap();
+
+        let jsonl_path = dir.path().join("session.jsonl");
+        std::fs::write(&jsonl_path, b"Model: Claude Sonnet 4\n").unwrap();
+        let with_jsonl = SourceFingerprint::from_droid_path(&settings_path).unwrap();
+        assert_ne!(base, with_jsonl);
+
+        std::fs::write(&jsonl_path, b"Model: Claude Opus 4\n").unwrap();
+        let updated_jsonl = SourceFingerprint::from_droid_path(&settings_path).unwrap();
+        assert_ne!(with_jsonl, updated_jsonl);
+    }
+
+    #[test]
+    fn test_kimi_fingerprint_tracks_legacy_config_but_keeps_kimi_code_self_contained() {
+        let dir = TempDir::new().unwrap();
+        let legacy_path = dir.path().join(".kimi/sessions/group/session/wire.jsonl");
+        std::fs::create_dir_all(legacy_path.parent().unwrap()).unwrap();
+        std::fs::write(&legacy_path, b"usage\n").unwrap();
+
+        let legacy_base = SourceFingerprint::from_kimi_path(&legacy_path).unwrap();
+        let legacy_config = dir.path().join(".kimi/config.json");
+        std::fs::write(&legacy_config, br#"{"model":"kimi-k2"}"#).unwrap();
+        let legacy_with_config = SourceFingerprint::from_kimi_path(&legacy_path).unwrap();
+        assert_ne!(legacy_base, legacy_with_config);
+
+        std::fs::write(&legacy_config, br#"{"model":"kimi-k3"}"#).unwrap();
+        let legacy_updated_config = SourceFingerprint::from_kimi_path(&legacy_path).unwrap();
+        assert_ne!(legacy_with_config, legacy_updated_config);
+
+        let code_path = dir
+            .path()
+            .join(".kimi-code/sessions/workspace/session/agents/main/wire.jsonl");
+        std::fs::create_dir_all(code_path.parent().unwrap()).unwrap();
+        std::fs::write(&code_path, b"usage.record\n").unwrap();
+        let code_base = SourceFingerprint::from_kimi_path(&code_path).unwrap();
+        assert_eq!(
+            code_base,
+            SourceFingerprint::from_path_samples_only(&code_path).unwrap()
+        );
+
+        assert!(crate::sessions::kimi::kimi_config_path(&code_path).is_none());
+        let unrelated_config = dir.path().join(".kimi-code/config.json");
+        std::fs::write(&unrelated_config, br#"{"model":"unrelated"}"#).unwrap();
+        let code_with_config = SourceFingerprint::from_kimi_path(&code_path).unwrap();
+        assert_eq!(code_base, code_with_config);
     }
 
     #[test]
@@ -1598,7 +2122,7 @@ mod tests {
             SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
         assert_ne!(base, with_parent);
 
-        std::fs::write(&parent_path, b"parent transcript 2 with changed length\n").unwrap();
+        std::fs::write(&parent_path, b"parent transcript 2\n").unwrap();
         let updated_parent =
             SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
         assert_ne!(with_parent, updated_parent);
@@ -1631,7 +2155,7 @@ mod tests {
             SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
         assert_ne!(base, with_parent);
 
-        std::fs::write(&parent_path, b"flat parent 2 with changed length\n").unwrap();
+        std::fs::write(&parent_path, b"flat parent 2\n").unwrap();
         let updated_parent =
             SourceFingerprint::from_claude_code_path_with_home(&sidechain_path, None).unwrap();
         assert_ne!(with_parent, updated_parent);
@@ -1694,12 +2218,10 @@ mod tests {
         let variant_path = variant_dir.join("variant.json");
         std::fs::write(
             &variant_path,
-            serde_json::json!({
-                "name": "kimi-code",
-                "provider": "kimi",
-                "configDir": config_dir,
-            })
-            .to_string(),
+            format!(
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
         )
         .unwrap();
         let with_kimi =
@@ -1707,12 +2229,10 @@ mod tests {
 
         std::fs::write(
             &variant_path,
-            serde_json::json!({
-                "name": "kimi-code",
-                "provider": "minimax",
-                "configDir": config_dir,
-            })
-            .to_string(),
+            format!(
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
         )
         .unwrap();
         let with_minimax =
@@ -1738,12 +2258,10 @@ mod tests {
         let variant_path = variant_dir.join("variant.json");
         std::fs::write(
             &variant_path,
-            serde_json::json!({
-                "name": "kimi-code",
-                "provider": "kimi",
-                "configDir": config_dir,
-            })
-            .to_string(),
+            format!(
+                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
         )
         .unwrap();
         let with_kimi =
@@ -1752,12 +2270,10 @@ mod tests {
 
         std::fs::write(
             &variant_path,
-            serde_json::json!({
-                "name": "kimi-code",
-                "provider": "minimax",
-                "configDir": config_dir,
-            })
-            .to_string(),
+            format!(
+                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
+                config_dir.display()
+            ),
         )
         .unwrap();
         let with_minimax =
@@ -1821,41 +2337,217 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_source_message_cache_round_trip() {
+    fn test_source_message_cache_round_trips_across_distinct_shards() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
-
-        let file = write_temp_file(b"{}\n");
-        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
-        let entry = CachedSourceEntry::new(
-            file.path(),
-            fingerprint,
-            vec![UnifiedMessage::new(
-                "client",
-                "gpt-5",
-                "provider",
-                "session-1",
-                1,
-                TokenBreakdown {
-                    input: 1,
-                    output: 2,
-                    cache_read: 3,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                0.0,
-            )],
-            Vec::new(),
-            None,
-        );
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
+        let shard_one = cache_shard_path(identity, &path_one);
+        let shard_two = cache_shard_path(identity, &path_two);
+        assert_ne!(shard_one, shard_two);
 
         let mut cache = SourceMessageCache::default();
-        cache.insert(entry);
+        cache.insert(test_entry(identity, &path_one, "session-1"));
+        cache.insert(test_entry(identity, &path_two, "session-2"));
         cache.save_if_dirty();
 
+        assert!(shard_one.is_file());
+        assert!(shard_two.is_file());
         let loaded = SourceMessageCache::load();
+        assert_eq!(loaded.entries.len(), 2);
+        assert!(loaded.get(identity, &path_one).is_some());
+        assert!(loaded.get(identity, &path_two).is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_aggregate_cache_can_exceed_individual_shard_limit() {
+        const TEST_SHARD_LIMIT: u64 = 32 * 1024;
+
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (path_one, path_two) = write_sources_in_distinct_shards(&source_dir, identity);
+
+        let mut entry_one = test_entry(identity, &path_one, "session-1");
+        entry_one.messages[0].model_id = "a".repeat(20 * 1024);
+        let mut entry_two = test_entry(identity, &path_two, "session-2");
+        entry_two.messages[0].model_id = "b".repeat(20 * 1024);
+
+        let mut cache = SourceMessageCache::default();
+        cache.insert(entry_one);
+        cache.insert(entry_two);
+        cache.save_if_dirty_with_limit(TEST_SHARD_LIMIT);
+        assert!(
+            !cache.dirty,
+            "both independently bounded shards should save"
+        );
+
+        let shard_one = cache_shard_path(identity, &path_one);
+        let shard_two = cache_shard_path(identity, &path_two);
+        let size_one = std::fs::metadata(&shard_one).unwrap().len();
+        let size_two = std::fs::metadata(&shard_two).unwrap().len();
+        assert!(size_one <= TEST_SHARD_LIMIT);
+        assert!(size_two <= TEST_SHARD_LIMIT);
+        assert!(size_one + size_two > TEST_SHARD_LIMIT);
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(identity, &path_one).is_some());
+        assert!(loaded.get(identity, &path_two).is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_corrupt_shard_does_not_hide_entries_from_other_shards() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (corrupt_path, valid_path) = write_sources_in_distinct_shards(&source_dir, identity);
+
+        let mut cache = SourceMessageCache::default();
+        cache.insert(test_entry(identity, &corrupt_path, "corrupt-session"));
+        cache.insert(test_entry(identity, &valid_path, "valid-session"));
+        cache.save_if_dirty();
+
+        let corrupt_shard = cache_shard_path(identity, &corrupt_path);
+        std::fs::write(&corrupt_shard, b"not a bincode shard").unwrap();
+        assert!(matches!(
+            read_shard(&corrupt_shard, identity),
+            ShardReadStatus::Invalid(_)
+        ));
+
+        let loaded = SourceMessageCache::load();
+        assert!(loaded.get(identity, &corrupt_path).is_none());
+        assert_eq!(
+            loaded.get(identity, &valid_path).unwrap().messages[0].session_id,
+            "valid-session"
+        );
+        assert!(
+            loaded.dirty,
+            "the corrupt shard should be scheduled for rewrite"
+        );
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stale_parser_shard_is_skipped_before_decoding_garbage_payload() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"claude\n");
+        let claude = CacheIdentity::for_client(ClientId::Claude);
+        let codex = CacheIdentity::for_client(ClientId::Codex);
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(claude, source.path(), "claude-session"));
+        seed.save_if_dirty();
+
+        let stale_key = CacheShardKey {
+            namespace: codex.namespace.to_string(),
+            index: 0,
+        };
+        let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        let stale_envelope = CachedShardEnvelope {
+            format_version: CACHE_FORMAT_VERSION,
+            parser_namespace: codex.namespace.to_string(),
+            parser_version: codex.parser_version.saturating_sub(1),
+            payload: b"deliberately invalid entry payload".to_vec(),
+        };
+        let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &stale_envelope)
+            .unwrap();
+        writer.flush().unwrap();
+
+        assert!(matches!(
+            read_shard(&stale_path, codex),
+            ShardReadStatus::Stale
+        ));
+        let mut loaded = SourceMessageCache::load();
         assert_eq!(loaded.entries.len(), 1);
-        assert!(loaded.get(file.path()).is_some());
+        assert!(loaded.get(claude, source.path()).is_some());
+        assert!(loaded.rewrite_shards.contains(&stale_key));
+
+        loaded.save_if_dirty();
+        assert!(matches!(
+            read_shard(&stale_path, codex),
+            ShardReadStatus::Loaded(entries) if entries.is_empty()
+        ));
+        assert!(SourceMessageCache::load()
+            .get(claude, source.path())
+            .is_some());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_explicit_invalidation_of_existing_path_persists() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(b"still exists\n");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, source.path(), "session-1"));
+        seed.save_if_dirty();
+        assert!(SourceMessageCache::load()
+            .get(identity, source.path())
+            .is_some());
+
+        let mut cache = SourceMessageCache::load();
+        cache.remove(identity, source.path());
+        cache.save_if_dirty();
+
+        assert!(
+            source.path().is_file(),
+            "invalidation must not remove the source"
+        );
+        assert!(SourceMessageCache::load()
+            .get(identity, source.path())
+            .is_none());
+
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_stale_invalidation_preserves_concurrently_refreshed_entry() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let path = source_dir.path().join("session.jsonl");
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        std::fs::write(&path, b"old\n").unwrap();
+
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, &path, "old-session"));
+        seed.save_if_dirty();
+
+        let mut stale_invalidator = SourceMessageCache::load();
+        stale_invalidator.remove(identity, &path);
+
+        std::fs::write(&path, b"fresh-content\n").unwrap();
+        let mut fresh_writer = SourceMessageCache::load();
+        fresh_writer.insert(test_entry(identity, &path, "fresh-session"));
+        fresh_writer.save_if_dirty();
+
+        stale_invalidator.save_if_dirty();
+
+        let loaded = SourceMessageCache::load();
+        assert_eq!(
+            loaded.get(identity, &path).unwrap().messages[0].session_id,
+            "fresh-session"
+        );
 
         restore_cache_env(prev_env);
     }
@@ -1863,17 +2555,11 @@ mod tests {
     #[test]
     fn test_prune_missing_files_removes_deleted_entries() {
         let file = write_temp_file(b"{}\n");
-        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
         let path = file.path().to_path_buf();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
 
         let mut cache = SourceMessageCache::default();
-        cache.insert(CachedSourceEntry::new(
-            &path,
-            fingerprint,
-            Vec::new(),
-            Vec::new(),
-            None,
-        ));
+        cache.insert(test_entry(identity, &path, "session-1"));
 
         std::fs::remove_file(&path).unwrap();
         cache.prune_missing_files();
@@ -1883,658 +2569,73 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn test_load_ignores_oversized_cache_file() {
-        let temp_home = TempDir::new().unwrap();
-        let _env = sandbox_cache_env(temp_home.path());
-
-        let cache_file = cache_path().unwrap();
-        ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-        let file = File::create(&cache_file).unwrap();
-        file.set_len(MAX_CACHE_FILE_BYTES + 1).unwrap();
-
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.entries.is_empty());
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_schema_24_cache_is_stale_and_rebuilt_as_current_schema() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            let source = write_temp_file(b"schema-migration\n");
-            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
-            let mut stale_message = UnifiedMessage::new(
-                "client",
-                "model",
-                "provider",
-                "stale-session",
-                1,
-                TokenBreakdown::default(),
-                0.0,
-            );
-            stale_message.is_turn_start = true;
-            let stale_entry = CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint.clone(),
-                vec![stale_message],
-                Vec::new(),
-                None,
-            );
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let stale_store = CachedSourceStore {
-                schema_version: 24,
-                entries: vec![stale_entry],
-            };
-
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options()
-                .serialize_into(writer, &stale_store)
-                .unwrap();
-
-            let mut loaded = SourceMessageCache::load();
-            assert!(loaded.entries.is_empty(), "schema-24 entries must be stale");
-            assert_eq!(
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                source_fingerprint,
-                "the stale cache entry and rebuilt parse have the same source fingerprint"
-            );
-
-            let rebuilt_message = UnifiedMessage::new(
-                "client",
-                "model",
-                "provider",
-                "rebuilt-session",
-                2,
-                TokenBreakdown::default(),
-                0.0,
-            );
-            loaded.insert(CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint,
-                vec![rebuilt_message],
-                Vec::new(),
-                None,
-            ));
-            loaded.save_if_dirty();
-
-            let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
-            assert_eq!(rebuilt.entries.len(), 1);
-            assert_eq!(
-                rebuilt.entries[0].messages[0].cost_source,
-                crate::sessions::CostSource::Unknown
-            );
-            assert_eq!(rebuilt.entries[0].messages[0].session_id, "rebuilt-session");
-            assert!(
-                !rebuilt.entries[0].messages[0].is_turn_start,
-                "stale schema-24 turn flags must not survive the rebuild"
-            );
-        }
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_schema_25_pi_cache_is_stale_and_rebuilt_with_agent() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            let source = write_temp_file(b"pi-schema-migration\n");
-            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
-            let stale_message = UnifiedMessage::new(
-                "pi",
-                "gpt-5",
-                "openai",
-                "pi-session",
-                1,
-                TokenBreakdown::default(),
-                0.0,
-            );
-            let stale_entry = CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint.clone(),
-                vec![stale_message],
-                Vec::new(),
-                None,
-            );
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let stale_store = CachedSourceStore {
-                schema_version: 25,
-                entries: vec![stale_entry],
-            };
-
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options()
-                .serialize_into(writer, &stale_store)
-                .unwrap();
-
-            let mut loaded = SourceMessageCache::load();
-            assert!(
-                loaded.entries.is_empty(),
-                "schema-25 Pi entries must be stale"
-            );
-            assert_eq!(
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                source_fingerprint,
-                "the stale cache entry and rebuilt parse have the same source fingerprint"
-            );
-
-            let rebuilt_message = UnifiedMessage::new_with_agent(
-                "pi",
-                "gpt-5",
-                "openai",
-                "pi-session",
-                2,
-                TokenBreakdown::default(),
-                0.0,
-                Some("go-reviewer".to_string()),
-            );
-            loaded.insert(CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint,
-                vec![rebuilt_message],
-                Vec::new(),
-                None,
-            ));
-            loaded.save_if_dirty();
-
-            let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
-            assert_eq!(rebuilt.entries.len(), 1);
-
-            let reloaded = SourceMessageCache::load();
-            assert_eq!(reloaded.entries.len(), 1);
-            assert_eq!(
-                reloaded.entries.values().next().unwrap().messages[0]
-                    .agent
-                    .as_deref(),
-                Some("go-reviewer")
-            );
-        }
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_schema_26_claude_workflow_cache_is_stale_and_rebuilt_with_parent_agent() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            let project_dir = temp_home.path().join(".claude/projects/project-one");
-            let parent_session_id = "claude-schema-parent";
-            let parent_path = project_dir.join(format!("{parent_session_id}.jsonl"));
-            let workflow_dir = project_dir
-                .join(parent_session_id)
-                .join("subagents")
-                .join("workflows")
-                .join("wf_schema");
-            let sidechain_path = workflow_dir.join("agent-deepagent1.jsonl");
-            std::fs::create_dir_all(&workflow_dir).unwrap();
-
-            std::fs::write(
-                &parent_path,
-                r#"{"type":"assistant","timestamp":"2024-12-01T10:00:00.000Z","message":{"id":"msg_parent","model":"claude-3-5-sonnet","role":"assistant","content":[{"type":"tool_use","id":"toolu_schema","name":"Agent","input":{"subagent_type":"code-reviewer","prompt":"review"}}],"usage":{"input_tokens":80,"output_tokens":40}}}
-{"type":"user","timestamp":"2024-12-01T10:00:01.000Z","message":{"role":"user","content":[{"tool_use_id":"toolu_schema","type":"tool_result","content":[{"type":"text","text":"agentId: deepagent1 (use SendMessage)"}]}]}}"#,
-            )
-            .unwrap();
-            std::fs::write(
-                &sidechain_path,
-                r#"{"type":"user","isSidechain":true,"sessionId":"claude-schema-parent","agentId":"deepagent1","timestamp":"2024-12-01T10:00:00.500Z","message":{"content":"task"}}
-{"type":"assistant","isSidechain":true,"sessionId":"claude-schema-parent","agentId":"deepagent1","timestamp":"2024-12-01T10:00:01.000Z","requestId":"req_schema","message":{"id":"msg_schema","model":"claude-3-5-sonnet","usage":{"input_tokens":300,"output_tokens":120}}}"#,
-            )
-            .unwrap();
-
-            let source_fingerprint = SourceFingerprint::from_claude_code_path_with_home(
-                &sidechain_path,
-                Some(temp_home.path()),
-            )
-            .unwrap();
-            let stale_message = UnifiedMessage::new(
-                "claude",
-                "claude-sonnet-4",
-                "anthropic",
-                parent_session_id,
-                1,
-                TokenBreakdown {
-                    input: 300,
-                    output: 120,
-                    cache_read: 0,
-                    cache_write: 0,
-                    reasoning: 0,
-                },
-                0.0,
-            );
-            assert!(stale_message.agent.is_none());
-            let stale_entry = CachedSourceEntry::new(
-                &sidechain_path,
-                source_fingerprint.clone(),
-                vec![stale_message],
-                Vec::new(),
-                None,
-            );
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let stale_store = CachedSourceStore {
-                schema_version: 26,
-                entries: vec![stale_entry],
-            };
-
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options()
-                .serialize_into(writer, &stale_store)
-                .unwrap();
-
-            let mut loaded = SourceMessageCache::load();
-            assert!(
-                loaded.entries.is_empty(),
-                "schema-26 Claude workflow entries must be stale"
-            );
-            assert_eq!(
-                SourceFingerprint::from_claude_code_path_with_home(
-                    &sidechain_path,
-                    Some(temp_home.path())
-                )
-                .unwrap(),
-                source_fingerprint,
-                "the stale cache entry and rebuilt parse have the same source fingerprint"
-            );
-
-            let rebuilt_messages = crate::sessions::claudecode::parse_claude_file_with_home(
-                &sidechain_path,
-                Some(temp_home.path()),
-            );
-            assert_eq!(rebuilt_messages.len(), 1);
-            assert_eq!(
-                rebuilt_messages[0].agent.as_deref(),
-                Some("Code Reviewer"),
-                "rebuilding must recover Tier-2 attribution from the parent session"
-            );
-            loaded.insert(CachedSourceEntry::new(
-                &sidechain_path,
-                source_fingerprint,
-                rebuilt_messages,
-                Vec::new(),
-                None,
-            ));
-            loaded.save_if_dirty();
-
-            let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
-            assert_eq!(rebuilt.entries.len(), 1);
-            assert_eq!(
-                rebuilt.entries[0].messages[0].agent.as_deref(),
-                Some("Code Reviewer")
-            );
-
-            let reloaded = SourceMessageCache::load();
-            assert_eq!(reloaded.entries.len(), 1);
-            assert_eq!(
-                reloaded.entries.values().next().unwrap().messages[0]
-                    .agent
-                    .as_deref(),
-                Some("Code Reviewer")
-            );
-        }
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_schema_27_copilot_cache_is_stale_and_rebuilt_with_root_agent() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            // The nested invoke_agent is exported before the root invoke_agent,
-            // while the agentless chat turn is covered by the root span. The
-            // intermediate tool-task span deliberately has no attributes: the
-            // pre-hardening resolver dropped its tool-task -> invoke-root edge,
-            // making the nested invoke look like a root and poisoning the
-            // schema-27 fallback.
-            let source = write_temp_file(
-                br#"{"type":"span","traceId":"trace-nested","spanId":"invoke-sub","parentSpanId":"tool-task","name":"invoke_agent","endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.subagent"}}
-{"type":"span","traceId":"trace-nested","spanId":"chat-sub","parentSpanId":"invoke-sub","name":"chat claude-sonnet-4.6","endTime":[1775934262,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.response.model":"claude-sonnet-4.6","gen_ai.response.id":"resp-sub","gen_ai.agent.id":"github.copilot.subagent","gen_ai.usage.input_tokens":100,"gen_ai.usage.output_tokens":10}}
-{"type":"span","traceId":"trace-nested","spanId":"tool-task","parentSpanId":"invoke-root","name":"execute_tool task","endTime":[1775934263,0]}
-{"type":"span","traceId":"trace-nested","spanId":"invoke-root","name":"invoke_agent","endTime":[1775934260,0],"attributes":{"gen_ai.operation.name":"invoke_agent","gen_ai.provider.name":"github","gen_ai.request.model":"claude-sonnet-4.6","gen_ai.agent.id":"github.copilot.default"}}
-{"type":"span","traceId":"trace-nested","spanId":"chat-plain","parentSpanId":"invoke-root","name":"chat gpt-5.4-mini","endTime":[1775934264,967317833],"attributes":{"gen_ai.operation.name":"chat","gen_ai.provider.name":"github","gen_ai.request.model":"gpt-5.4-mini","gen_ai.response.model":"gpt-5.4-mini","gen_ai.response.id":"resp-plain","gen_ai.usage.input_tokens":200,"gen_ai.usage.output_tokens":20}}"#,
-            );
-            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
-            let parsed_messages = crate::sessions::copilot::parse_copilot_file(source.path());
-            assert_eq!(parsed_messages.len(), 2);
-            assert_eq!(
-                parsed_messages
-                    .iter()
-                    .find(|message| message.model_id == "gpt-5.4-mini")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.default")
-            );
-            assert_eq!(
-                parsed_messages
-                    .iter()
-                    .find(|message| message.model_id == "claude-sonnet-4.6")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.subagent")
-            );
-
-            // Reproduce a schema-27 entry produced by the first-invoke resolver:
-            // the agentless turn incorrectly inherits the nested sub-agent.
-            let mut stale_messages = parsed_messages.clone();
-            let stale_plain = stale_messages
-                .iter_mut()
-                .find(|message| message.model_id == "gpt-5.4-mini")
-                .unwrap();
-            stale_plain.agent = Some("github.copilot.subagent".to_string());
-            assert_eq!(
-                stale_plain.agent.as_deref(),
-                Some("github.copilot.subagent")
-            );
-            let stale_entry = CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint.clone(),
-                stale_messages,
-                Vec::new(),
-                None,
-            );
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let stale_store = CachedSourceStore {
-                schema_version: 27,
-                entries: vec![stale_entry],
-            };
-
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options()
-                .serialize_into(writer, &stale_store)
-                .unwrap();
-
-            let mut loaded = SourceMessageCache::load();
-            assert!(
-                loaded.entries.is_empty(),
-                "schema-27 Copilot entries must be stale"
-            );
-            assert_eq!(
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                source_fingerprint,
-                "the stale cache entry and rebuilt parse have the same source fingerprint"
-            );
-
-            let rebuilt_messages = crate::sessions::copilot::parse_copilot_file(source.path());
-            let rebuilt_plain = rebuilt_messages
-                .iter()
-                .find(|message| message.model_id == "gpt-5.4-mini")
-                .unwrap();
-            assert_eq!(
-                rebuilt_plain.agent.as_deref(),
-                Some("github.copilot.default"),
-                "reparse must use the root invoke_agent for the agentless turn"
-            );
-            let rebuilt_sub = rebuilt_messages
-                .iter()
-                .find(|message| message.model_id == "claude-sonnet-4.6")
-                .unwrap();
-            assert_eq!(
-                rebuilt_sub.agent.as_deref(),
-                Some("github.copilot.subagent"),
-                "per-record nested attribution must remain unchanged"
-            );
-            loaded.insert(CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint,
-                rebuilt_messages,
-                Vec::new(),
-                None,
-            ));
-            loaded.save_if_dirty();
-
-            let rebuilt = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(rebuilt.schema_version, CACHE_SCHEMA_VERSION);
-            assert_eq!(rebuilt.entries.len(), 1);
-            let rebuilt_entry = &rebuilt.entries[0];
-            assert_eq!(
-                rebuilt_entry
-                    .messages
-                    .iter()
-                    .find(|message| message.model_id == "gpt-5.4-mini")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.default")
-            );
-            assert_eq!(
-                rebuilt_entry
-                    .messages
-                    .iter()
-                    .find(|message| message.model_id == "claude-sonnet-4.6")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.subagent")
-            );
-
-            let reloaded = SourceMessageCache::load();
-            let reloaded_entry = reloaded.get(source.path()).unwrap();
-            assert_eq!(
-                reloaded_entry
-                    .messages
-                    .iter()
-                    .find(|message| message.model_id == "gpt-5.4-mini")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.default")
-            );
-            assert_eq!(
-                reloaded_entry
-                    .messages
-                    .iter()
-                    .find(|message| message.model_id == "claude-sonnet-4.6")
-                    .unwrap()
-                    .agent
-                    .as_deref(),
-                Some("github.copilot.subagent")
-            );
-        }
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
-    fn test_schema_28_codex_cache_is_stale_and_rebuilt_with_non_overlapping_durations() {
-        let temp_home = TempDir::new().unwrap();
-        let prev_env = sandbox_cache_env(temp_home.path());
-
-        {
-            let source = write_temp_file(include_bytes!(
-                "../tests/fixtures/codex_duration_timing.jsonl"
-            ));
-            let source_fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
-            let parsed = crate::sessions::codex::parse_codex_file_incremental(
-                source.path(),
-                0,
-                CodexParseState::default(),
-            );
-            assert!(parsed.parse_succeeded);
-            assert_eq!(
-                parsed
-                    .messages
-                    .iter()
-                    .map(|message| message.duration_ms)
-                    .collect::<Vec<_>>(),
-                vec![Some(1_000), Some(4_000), Some(2_000)]
-            );
-
-            let mut stale_messages = parsed.messages.clone();
-            stale_messages[1].duration_ms = Some(5_000);
-            let stale_incremental =
-                build_codex_incremental_cache(source.path(), parsed.consumed_offset, parsed.state)
-                    .unwrap();
-            let stale_entry = CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint.clone(),
-                stale_messages,
-                Vec::new(),
-                Some(stale_incremental),
-            );
-            let cache_file = cache_path().unwrap();
-            ensure_cache_dir(cache_file.parent().unwrap()).unwrap();
-            let stale_store = CachedSourceStore {
-                schema_version: 28,
-                entries: vec![stale_entry],
-            };
-
-            let writer = BufWriter::new(File::create(&cache_file).unwrap());
-            bincode::options()
-                .serialize_into(writer, &stale_store)
-                .unwrap();
-
-            let mut loaded = SourceMessageCache::load();
-            assert!(
-                loaded.entries.is_empty(),
-                "schema-28 Codex durations and incremental state must be stale"
-            );
-            assert_eq!(
-                SourceFingerprint::from_path(source.path()).unwrap(),
-                source_fingerprint,
-                "the stale entry and rebuilt parse have the same source fingerprint"
-            );
-
-            let rebuilt = crate::sessions::codex::parse_codex_file_incremental(
-                source.path(),
-                0,
-                CodexParseState::default(),
-            );
-            assert!(rebuilt.parse_succeeded);
-            assert_eq!(
-                rebuilt
-                    .messages
-                    .iter()
-                    .map(|message| message.duration_ms)
-                    .collect::<Vec<_>>(),
-                vec![Some(1_000), Some(4_000), Some(2_000)]
-            );
-            assert!(rebuilt.state.last_accepted_token_timestamp_ms.is_some());
-            let rebuilt_incremental = build_codex_incremental_cache(
-                source.path(),
-                rebuilt.consumed_offset,
-                rebuilt.state,
-            )
-            .unwrap();
-            loaded.insert(CachedSourceEntry::new(
-                source.path(),
-                source_fingerprint,
-                rebuilt.messages,
-                rebuilt.fallback_timestamp_indices,
-                Some(rebuilt_incremental),
-            ));
-            loaded.save_if_dirty();
-
-            let persisted = read_store_from_path(&cache_file).unwrap();
-            assert_eq!(persisted.schema_version, CACHE_SCHEMA_VERSION);
-            assert_eq!(persisted.entries.len(), 1);
-            assert_eq!(
-                persisted.entries[0]
-                    .messages
-                    .iter()
-                    .map(|message| message.duration_ms)
-                    .collect::<Vec<_>>(),
-                vec![Some(1_000), Some(4_000), Some(2_000)]
-            );
-            assert!(persisted.entries[0]
-                .codex_incremental
-                .as_ref()
-                .unwrap()
-                .state
-                .last_accepted_token_timestamp_ms
-                .is_some());
-        }
-
-        restore_cache_env(prev_env);
-    }
-
-    #[test]
-    #[serial_test::serial]
     fn test_fallback_cache_dir_prefers_runtime_dir() {
         let runtime_dir = TempDir::new().unwrap();
-        let mut _env = EnvGuard::capture(&["XDG_RUNTIME_DIR"]);
-        _env.set("XDG_RUNTIME_DIR", runtime_dir.path());
+        let original_xdg_runtime_dir = std::env::var("XDG_RUNTIME_DIR").ok();
+        restore_env_var("XDG_RUNTIME_DIR", Some(runtime_dir.path()));
 
-        assert_eq!(
-            fallback_cache_dir(),
-            Some(runtime_dir.path().join("tokscale"))
-        );
+        {
+            assert_eq!(
+                fallback_cache_dir(),
+                Some(runtime_dir.path().join("tokscale"))
+            );
+        }
+
+        restore_env_var("XDG_RUNTIME_DIR", original_xdg_runtime_dir);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_save_if_dirty_marks_cache_clean() {
         let temp_home = TempDir::new().unwrap();
-        let _env = sandbox_cache_env(temp_home.path());
+        let prev_env = sandbox_cache_env(temp_home.path());
 
         let mut cache = SourceMessageCache::default();
         assert!(!cache.dirty);
 
-        let file = write_temp_file(b"{}\n");
-        let fingerprint = SourceFingerprint::from_path(file.path()).unwrap();
-        cache.insert(CachedSourceEntry::new(
-            file.path(),
-            fingerprint,
-            Vec::new(),
-            Vec::new(),
-            None,
-        ));
-        assert!(cache.dirty);
+        {
+            let file = write_temp_file(b"{}\n");
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            cache.insert(test_entry(identity, file.path(), "session-1"));
+            assert!(cache.dirty);
 
-        cache.save_if_dirty();
-        assert!(!cache.dirty);
+            cache.save_if_dirty();
+            assert!(!cache.dirty);
+        }
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
     #[serial_test::serial]
     fn test_save_if_dirty_merges_concurrent_writers() {
         let temp_home = TempDir::new().unwrap();
-        let _env = sandbox_cache_env(temp_home.path());
+        let prev_env = sandbox_cache_env(temp_home.path());
 
-        let file_one = write_temp_file(b"{\"id\":1}\n");
-        let file_two = write_temp_file(b"{\"id\":2}\n");
+        {
+            let source_dir = TempDir::new().unwrap();
+            let identity = CacheIdentity::for_client(ClientId::Claude);
+            let (path_one, path_two) = write_sources_in_same_shard(&source_dir, identity);
+            assert_eq!(
+                CacheKey::new(identity, &path_one).shard(),
+                CacheKey::new(identity, &path_two).shard()
+            );
 
-        let mut writer_one = SourceMessageCache::load();
-        let mut writer_two = SourceMessageCache::load();
+            let mut writer_one = SourceMessageCache::load();
+            let mut writer_two = SourceMessageCache::load();
 
-        writer_one.insert(CachedSourceEntry::new(
-            file_one.path(),
-            SourceFingerprint::from_path(file_one.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        ));
-        writer_two.insert(CachedSourceEntry::new(
-            file_two.path(),
-            SourceFingerprint::from_path(file_two.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        ));
+            writer_one.insert(test_entry(identity, &path_one, "session-1"));
+            writer_two.insert(test_entry(identity, &path_two, "session-2"));
 
-        writer_one.save_if_dirty();
-        writer_two.save_if_dirty();
+            writer_one.save_if_dirty();
+            writer_two.save_if_dirty();
 
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.get(file_one.path()).is_some());
-        assert!(loaded.get(file_two.path()).is_some());
+            let loaded = SourceMessageCache::load();
+            assert!(loaded.get(identity, &path_one).is_some());
+            assert!(loaded.get(identity, &path_two).is_some());
+        }
+
+        restore_cache_env(prev_env);
     }
 
     #[test]
@@ -2547,29 +2648,10 @@ mod tests {
             let source_dir = TempDir::new().unwrap();
             let path = source_dir.path().join("session.jsonl");
             std::fs::write(&path, b"{\"id\":\"old\"}\n").unwrap();
+            let identity = CacheIdentity::for_client(ClientId::Claude);
 
             let mut seed = SourceMessageCache::default();
-            seed.insert(CachedSourceEntry::new(
-                &path,
-                SourceFingerprint::from_path(&path).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "old-session",
-                    1,
-                    TokenBreakdown {
-                        input: 1,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )],
-                Vec::new(),
-                None,
-            ));
+            seed.insert(test_entry(identity, &path, "old-session"));
             seed.save_if_dirty();
 
             let mut stale_deleter = SourceMessageCache::load();
@@ -2578,34 +2660,14 @@ mod tests {
 
             std::fs::write(&path, b"{\"id\":\"fresh\"}\n").unwrap();
             let mut fresh_writer = SourceMessageCache::load();
-            fresh_writer.insert(CachedSourceEntry::new(
-                &path,
-                SourceFingerprint::from_path(&path).unwrap(),
-                vec![UnifiedMessage::new(
-                    "client",
-                    "gpt-5",
-                    "provider",
-                    "fresh-session",
-                    2,
-                    TokenBreakdown {
-                        input: 2,
-                        output: 0,
-                        cache_read: 0,
-                        cache_write: 0,
-                        reasoning: 0,
-                    },
-                    0.0,
-                )],
-                Vec::new(),
-                None,
-            ));
+            fresh_writer.insert(test_entry(identity, &path, "fresh-session"));
             fresh_writer.save_if_dirty();
 
             stale_deleter.save_if_dirty();
 
             let loaded = SourceMessageCache::load();
             let entry = loaded
-                .get(&path)
+                .get(identity, &path)
                 .expect("recreated source cache entry should survive stale delete");
             assert_eq!(entry.messages[0].session_id, "fresh-session");
         }
@@ -2615,94 +2677,125 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    #[cfg(not(target_os = "windows"))]
-    fn load_falls_back_to_legacy_dirs_cache_path() {
-        let temp_home = TempDir::new().unwrap();
-        let temp_xdg_cache = TempDir::new().unwrap();
-        let _env = legacy_cache_env(temp_home.path(), Some(temp_xdg_cache.path()));
+    fn test_parser_versions_are_identity_scoped() {
+        assert_eq!(parser_version(ClientId::Codex), 4);
+        assert_eq!(parser_version(ClientId::Jcode), 4);
+        assert_eq!(parser_version(ClientId::Copilot), 3);
+        assert_eq!(CacheIdentity::synthetic().parser_version, 1);
+        for client in ClientId::iter() {
+            if !matches!(
+                client,
+                ClientId::Codex | ClientId::Jcode | ClientId::Copilot
+            ) {
+                assert_eq!(
+                    parser_version(client),
+                    1,
+                    "{} parser version",
+                    client.as_str()
+                );
+            }
+        }
+        assert!(ClientId::from_str("pi").is_some());
+        assert!(CacheIdentity::current_for_namespace("devin").is_none());
+    }
 
-        let source = write_temp_file(b"legacy-dirs\n");
-        let entry = CachedSourceEntry::new(
-            source.path(),
-            SourceFingerprint::from_path(source.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
-
-        let legacy_path = crate::paths::legacy_dirs_cache_dir()
-            .unwrap()
-            .join(CACHE_FILENAME);
-        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
-        let store = CachedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: vec![entry],
-        };
-        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
-        bincode::options().serialize_into(writer, &store).unwrap();
-
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.get(source.path()).is_some());
+    #[test]
+    fn test_cache_key_namespace_prevents_path_collision() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("same-source.jsonl");
+        std::fs::write(&path, b"same\n").unwrap();
+        let claude = CacheKey::new(CacheIdentity::for_client(ClientId::Claude), &path);
+        let codex = CacheKey::new(CacheIdentity::for_client(ClientId::Codex), &path);
+        assert_ne!(claude, codex);
+        assert_ne!(claude.namespace, codex.namespace);
     }
 
     #[test]
     #[serial_test::serial]
-    #[cfg(not(target_os = "windows"))]
-    fn load_falls_back_to_legacy_dot_cache_path() {
+    fn test_legacy_monolith_is_inert_and_untouched() {
         let temp_home = TempDir::new().unwrap();
-        let _env = legacy_cache_env(temp_home.path(), None);
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let legacy = cache_dir().unwrap().join("source-message-cache.bin");
+        ensure_cache_dir(legacy.parent().unwrap()).unwrap();
+        std::fs::write(&legacy, b"legacy sentinel bytes\n").unwrap();
+        let before = std::fs::metadata(&legacy).unwrap();
+        let bytes = std::fs::read(&legacy).unwrap();
 
-        let source = write_temp_file(b"legacy-dot\n");
-        let entry = CachedSourceEntry::new(
+        let mut cache = SourceMessageCache::load();
+        let source = write_temp_file(b"cold-build\n");
+        cache.insert(test_entry(
+            CacheIdentity::for_client(ClientId::Claude),
             source.path(),
-            SourceFingerprint::from_path(source.path()).unwrap(),
-            Vec::new(),
-            Vec::new(),
-            None,
-        );
+            "cold",
+        ));
+        cache.save_if_dirty();
 
-        let legacy_path = crate::paths::legacy_dot_cache_tokscale_dir()
-            .unwrap()
-            .join(CACHE_FILENAME);
-        ensure_cache_dir(legacy_path.parent().unwrap()).unwrap();
-        let store = CachedSourceStore {
-            schema_version: CACHE_SCHEMA_VERSION,
-            entries: vec![entry],
-        };
-        let writer = BufWriter::new(File::create(&legacy_path).unwrap());
-        bincode::options().serialize_into(writer, &store).unwrap();
-
-        let loaded = SourceMessageCache::load();
-        assert!(loaded.get(source.path()).is_some());
+        assert_eq!(std::fs::read(&legacy).unwrap(), bytes);
+        let after = std::fs::metadata(&legacy).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+        assert!(cache_shard_dir().unwrap().is_dir());
+        assert!(cache_shard_dir().unwrap().join("claude").is_dir());
+        restore_cache_env(prev_env);
     }
 
-    #[cfg(windows)]
     #[test]
     #[serial_test::serial]
-    fn legacy_cache_paths_are_ordered_and_override_gated_without_io() {
+    fn test_oversized_shard_is_isolated_and_rewritten() {
+        const TEST_LIMIT: u64 = 1024;
         let temp_home = TempDir::new().unwrap();
-        let _env = legacy_cache_env(temp_home.path(), None);
-        let candidates = legacy_cache_paths();
-        assert_eq!(candidates.len(), 2);
-        assert_eq!(
-            candidates[0],
-            dirs::cache_dir()
-                .expect("Windows exposes a cache directory")
-                .join("tokscale")
-                .join(CACHE_FILENAME)
-        );
-        assert_eq!(
-            candidates[1],
-            dirs::home_dir()
-                .expect("Windows exposes a home directory")
-                .join(".cache")
-                .join("tokscale")
-                .join(CACHE_FILENAME)
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (oversized_path, valid_path) = write_sources_in_distinct_shards(&source_dir, identity);
+        let mut seed = SourceMessageCache::default();
+        seed.insert(test_entry(identity, &oversized_path, "oversized"));
+        seed.insert(test_entry(identity, &valid_path, "valid"));
+        seed.save_if_dirty_with_limit(1024 * 1024);
+        let oversized_shard = cache_shard_path(identity, &oversized_path);
+        let mut oversized_bytes = std::fs::read(&oversized_shard).unwrap();
+        oversized_bytes.resize((TEST_LIMIT + 1) as usize, 0);
+        std::fs::write(&oversized_shard, oversized_bytes).unwrap();
+        assert!(
+            std::fs::metadata(cache_shard_path(identity, &valid_path))
+                .unwrap()
+                .len()
+                <= TEST_LIMIT
         );
 
-        let mut override_env = EnvGuard::capture(&["TOKSCALE_CONFIG_DIR"]);
-        override_env.set("TOKSCALE_CONFIG_DIR", temp_home.path());
-        assert!(legacy_cache_paths().is_empty());
+        // Exercise the production decode path with an injected limit instead
+        // of relying on the 256 MiB default merely because this fixture is
+        // larger than an arbitrary test constant.
+        let mut loaded = SourceMessageCache::load_with_limit(TEST_LIMIT);
+        assert!(loaded.get(identity, &oversized_path).is_none());
+        assert!(loaded.get(identity, &valid_path).is_some());
+        assert!(loaded.dirty);
+        loaded.save_if_dirty_with_limit(1024 * 1024);
+        assert!(loaded.get(identity, &valid_path).is_some());
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_dirty_shard_only_rewrites_affected_file() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source_dir = TempDir::new().unwrap();
+        let identity = CacheIdentity::for_client(ClientId::Claude);
+        let (first, second) = write_sources_in_distinct_shards(&source_dir, identity);
+        let mut cache = SourceMessageCache::default();
+        cache.insert(test_entry(identity, &first, "first"));
+        cache.insert(test_entry(identity, &second, "second"));
+        cache.save_if_dirty();
+        let first_shard = cache_shard_path(identity, &first);
+        let second_shard = cache_shard_path(identity, &second);
+        let first_bytes = std::fs::read(&first_shard).unwrap();
+        let second_bytes = std::fs::read(&second_shard).unwrap();
+        cache.insert(test_entry(identity, &first, "first-updated"));
+        cache.save_if_dirty();
+        assert_eq!(std::fs::read(&second_shard).unwrap(), second_bytes);
+        assert_ne!(std::fs::read(&first_shard).unwrap(), first_bytes);
+        restore_cache_env(prev_env);
     }
 
     #[cfg(unix)]

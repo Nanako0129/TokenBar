@@ -28,7 +28,9 @@ M23 was split after PR #74 (`e274f2ad`) reached about 3.1x Copilot production dr
 
 The Copilot duplicate-span contribution reached upstream in issue [#938](https://github.com/junhoyeo/tokscale/issues/938) and merged PR [#939](https://github.com/junhoyeo/tokscale/pull/939) at merge commit [`1652852f`](https://github.com/junhoyeo/tokscale/commit/1652852f0f35d14fe4ff87f6cc32cc9d02a2ddd8). Post-merge verification found deterministic agent-attribution and partial-timestamp gaps, tracked in issue [#942](https://github.com/junhoyeo/tokscale/issues/942) and follow-up PR [#943](https://github.com/junhoyeo/tokscale/pull/943). PR #943 head `9c399cc5` is maintainer-ready: current-head Codex is clean, all CI checks pass, no review threads remain unresolved, the full upstream format/clippy/test/release-build gates pass, and fresh verification confirms parser-version 7 invalidation plus the agent/timing regressions. These upstream-only commits are outside the fixed 111-row audit range and do not change this vendor tree, its ledger counts, or local cache schema 32.
 
-M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) is closed unmerged as fidelity evidence; its [close rationale](https://github.com/Nanako0129/TokenBar/pull/86#issuecomment-5047332480) records the public stop decision. Current-head Codex found four independent security/state-machine defects, and the first local fix round was rejected by fresh security verification because process-local Warp source/revocation state could race with the shared cross-process singleton app cache: one process handling a 401 or Disconnect for scope B could delete another process's valid scope-A cache. Holding the refresh lock through remote I/O violates the approved network boundary; releasing it exposes the cache-ownership conflict. The second consecutive review round therefore triggered the M24 stop condition. No review fix was pushed, `main` remains unchanged, schema stays 32, and `63a44d7c` moves from `TAKE` to `DEFER`, producing `78/2/0/17/13/1`.
+M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) is closed unmerged as fidelity evidence; its [close rationale](https://github.com/Nanako0129/TokenBar/pull/86#issuecomment-5047332480) records the public stop decision. Current-head Codex found four independent security/state-machine defects, and the first local fix round was rejected by fresh security verification because process-local Warp source/revocation state could race with the shared cross-process singleton app cache: one process handling a 401 or Disconnect for scope B could delete another process's valid scope-A cache. Holding the refresh lock through remote I/O violates the approved network boundary; releasing it exposes the cache-ownership conflict. The second consecutive review round therefore triggered the M24 stop condition. No review fix was pushed, `63a44d7c` moved from `TAKE` to `DEFER`, and the resulting checkpoint was `78/2/0/17/13/1`.
+
+The approved replacement delivery graph removes M24 from the cache dependency chain without reviving Warp: `M26-A → M26-B → M19-B0 → M19-B1 → D2`. M26-A selectively ports `ae36db5c`'s identity-aware format-1 shard engine while preserving TokenBar's streaming and source-specific cache seams, moving `ae36db5c` to `ALREADY_VENDORED` and producing `79/1/0/17/13/1`. Warp remains `parse_local: false`; `cd07bf78` remains the sole `TAKE` row for M26-B.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -42,8 +44,8 @@ The classification union has no duplicates and no symmetric difference from that
 
 | Classification | Count |
 |---|---:|
-| `ALREADY_VENDORED` | 78 |
-| `TAKE` | 2 |
+| `ALREADY_VENDORED` | 79 |
+| `TAKE` | 1 |
 | `ADAPT_FOR_STREAMING` | 0 |
 | `DEFER` | 17 |
 | `SKIP` | 13 |
@@ -53,7 +55,7 @@ The classification union has no duplicates and no symmetric difference from that
 ### Exact 111-commit classification
 
 <details>
-<summary><code>ALREADY_VENDORED</code> — 78</summary>
+<summary><code>ALREADY_VENDORED</code> — 79</summary>
 
 ```text
 6dfd79f5 d9f2a9b7 44055841 1a305f0f 5c1fe659 7500b303 8493048f 2d90f41d
@@ -65,16 +67,16 @@ d4a3bd32 1492b962 b43dc5f8 4101711b 28aec200 aebe4ea8 5017eefb 0ce3d73f
 d50da475 24e3771c e5cfbae2 b64e4f14 72bf6667 46e01977 31bfd167 09344531
 163ec570 a2f7cef5 a0929482 366ce643 405ded4a 315549b4 6899ea03 b59979c5
 9155018c 18cd13cc a87f0ab6 959cce84 6c804711 839ce378 052f43de 633ea946
-77948d9d 302d39c3 9a5aeb65 c1aef5e9 f6f7eced 0b454e60
+77948d9d 302d39c3 9a5aeb65 c1aef5e9 f6f7eced 0b454e60 ae36db5c
 ```
 
 </details>
 
 <details>
-<summary><code>TAKE</code> — 2</summary>
+<summary><code>TAKE</code> — 1</summary>
 
 ```text
-ae36db5c cd07bf78
+cd07bf78
 ```
 
 </details>
@@ -120,7 +122,7 @@ b2b8c1fc 7ddfa748 b48af31e e644f966 010acd85 46f8fff9 c634d1a5
 
 ### Selected work
 
-M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 PR #86 is closed unmerged, so `63a44d7c` moves from `TAKE` to `DEFER` and no Warp runtime code enters main. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
+M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4`; M16 moved `6899ea03`, `b59979c5`, `9155018c`, and `18cd13cc` to `ALREADY_VENDORED` while `34cfbb50` moved to `DEFER`; M19-A moved `a87f0ab6` after taking only its Windows atomic-replacement hunk; M17 used a non-main source and left the audited counts unchanged; M18 moved `959cce84` and `6c804711`; M21 moved `839ce378`, `052f43de`, `633ea946`, `77948d9d`, and `302d39c3` to `ALREADY_VENDORED`. M22 is closed unmerged, so no implementation row moved to `ALREADY_VENDORED`; the product decision instead reclassified its five Zcode-bearing rows from `TAKE` to `DEFER`. M25 moved `9a5aeb65` to `ALREADY_VENDORED`. M23-H moved `c1aef5e9` to `ALREADY_VENDORED` and reclassified `074619f7` to `DEFER`; merged M23-D moved `f6f7eced` and `0b454e60` to `ALREADY_VENDORED`. M24 PR #86 is closed unmerged, so `63a44d7c` moves from `TAKE` to `DEFER` and no Warp runtime code enters main. M26-A moves `ae36db5c` to `ALREADY_VENDORED` after selectively adopting the format-1 shard engine and adapting both Native cache lanes; `cd07bf78` remains `TAKE` for M26-B. Mixed `b64d861e` remains one `DEFER` row because only its Kiro, Jcode, Junie, and OpenCodeReview hunks are vendored while Zcode and Devin remain excluded.
 
 | Milestone | Selected scope | Audited-range commits |
 |---|---|---|
@@ -137,8 +139,8 @@ M20 moved `366ce643` to `ALREADY_VENDORED`; M15-B moved `405ded4a` and `315549b4
 | M25 — merged in PR #75 | Reloadable configurable model aliases | `9a5aeb65` |
 | M24 — PR #86 closed unmerged / DEFER | Warp producer and local reporting; process-local source ownership conflicts with the shared cross-process singleton cache | `63a44d7c` remains unvendored and deferred |
 | M19-A — merged in PR #68 | Windows atomic replacement retry in the canonical Native source | `a87f0ab6` Windows hunk |
-| M26-A — blocked | Full source-message shard cache using upstream format 1; do not start until the M24 dependency is redesigned or explicitly removed by a new plan | `ae36db5c` remains `TAKE` |
-| M26-B — blocked by M26-A | Format-2 generic related-file path/existence metadata | `cd07bf78` remains `TAKE`; Devin hunks excluded |
+| M26-A — format 1 | Identity-aware 256-shard source-message cache with per-parser versions, bounded generic/SQLite sampling, Codex prefix state, concurrent-writer merge, and legacy-monolith preservation; Warp stays disabled | `ae36db5c: TAKE → ALREADY_VENDORED` |
+| M26-B — next after M26-A | Format-2 generic related-file path/existence metadata | `cd07bf78` remains `TAKE`; Pi/Devin hunks excluded |
 
 The selected non-main semantic sources stay outside the 111-row ledger: Grok unified-log `ed798642` (#849) for M17, request-level long-context pricing `548dc124` (#862) and routed prefix/suffix composition `6ea27ca1` (#846) for M18. Warp producer commit `d1cd03c2` (#636) predates the audited anchor and is only a semantic source for M24.
 
@@ -151,7 +153,7 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `DEFER` | Zcode legacy / v2 | `640e97b9 f7a124da ed6f8b95 65f8f3e2` plus the Zcode hunk of mixed `b64d861e`; PR #72 closed unmerged after exceeding the fidelity threshold |
 | `DEFER` | Copilot VS Code `chatSessions` | `074619f7`; PR #74 reached about 3.1x Copilot production drift and still mis-replays ObjectMutationLog `kind:2`, so reassess only after upstream format semantics converge |
 | `DEFER` | Warp producer and local reporting | `63a44d7c`; PR #86 closed unmerged after two consecutive review rounds exposed new security failure classes, culminating in a process-local state versus cross-process singleton-cache ownership conflict |
-| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; `cd07bf78` remains wholly `TAKE` while M26 is blocked, and any future generic-cache port must leave its Devin hunks deferred |
+| `DEFER` | Devin CLI / Desktop | `0097ba7e ed64e77b` plus the Devin hunk of mixed `b64d861e`; `cd07bf78` remains wholly `TAKE` pending M26-B, whose generic format-2 port must leave its Devin hunks deferred |
 | `DEFER` | 9Router | `34cfbb50`; M16 takes only its provider hardening, leaving the bridge and 9Router product integration excluded |
 | `SKIP` | Sakana subscription billing-console scrape | `c634d1a5` (#745); Fugu model pricing is selected separately in M18 |
 
@@ -163,8 +165,8 @@ The selected non-main semantic sources stay outside the 111-row ledger: Grok uni
 | `b64d861e` | Kiro, Jcode, Junie, and OpenCodeReview start-anchor hunks are vendored through M21; Zcode did not merge | `DEFER`; its remaining Zcode and Devin hunks both wait for upstream convergence |
 | `c1aef5e9` | `ALREADY_VENDORED`; M11 carried the macOS/profile scope and M23-H adds the remaining Windows home candidates without widening explicit `HERMES_HOME` | Remains `ALREADY_VENDORED` |
 | `63a44d7c` | `DEFER`; the active-day aggregator hunk was already vendored earlier, but PR #86's Warp enablement/local producer did not merge | Reassess only after a coherent cross-process source/cache ownership contract exists |
-| `ae36db5c` | Claude parent-session dependency already vendored, shard architecture not vendored; row remains `TAKE` | A new approved plan must redefine the blocked M26-A dependency before any transition |
-| `cd07bf78` | Generic cache format 2, related-file metadata, and Devin hunks all remain unvendored; row remains `TAKE` | Reassess only after M26-A is explicitly reopened; any selective port must continue excluding Devin |
+| `ae36db5c` | `ALREADY_VENDORED`; M26-A adopts the format-1 shard architecture and retains the previously vendored Claude/Droid/Kimi/Kiro dependency seams | Per-client parser versions are append-only after this checkpoint |
+| `cd07bf78` | Generic cache format 2, related-file metadata, and Devin hunks remain unvendored; row remains `TAKE` | M26-B may take only generic format-2 metadata and Claude cached-parent recovery; Pi/Devin remain excluded |
 
 ### Execution order and ledger transitions
 
@@ -179,13 +181,14 @@ flowchart TD
     H --> D[M23-D Copilot Desktop]
     C --> P[M18 Sakana + long-context + routed pricing]
     P --> A[M25 reloadable model aliases]
-    A --> W[M24 fidelity stop — PR #86]
+    A --> W[M24 fidelity stop — PR #86 / DEFER]
     T --> F[M19-A Windows atomic retry]
-    D --> SA[M26-A blocked]
-    W -. unresolved dependency .-> SA
+    D --> SA[M26-A format-1 shards]
     F --> SA
-    SA --> SB[M26-B blocked]
-    SB --> WS[M19-B blocked]
+    SA --> SB[M26-B format-2 metadata]
+    SB --> W0[M19-B0 Native canonicalization]
+    W0 --> W1[M19-B1 Windows final sync]
+    W1 --> D2[D2 final docs checkpoint]
 ```
 
 | Milestone | Ledger transition or current state |
@@ -203,13 +206,13 @@ flowchart TD
 | M25 | `9a5aeb65: TAKE → ALREADY_VENDORED` |
 | M24 | PR #86 closed unmerged; `63a44d7c: TAKE → DEFER` after the security fidelity stop |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
-| M26-A | Blocked; `ae36db5c` remains `TAKE` until a new plan resolves or removes the M24 dependency |
-| M26-B | Blocked by M26-A; `cd07bf78` remains `TAKE` |
-| M19-B | Blocked by the shard-cache sequence; counts unchanged |
+| M26-A | `ae36db5c: TAKE → ALREADY_VENDORED`; format-1 identity-aware shards become active while M24 remains excluded |
+| M26-B | Next milestone; `cd07bf78` remains `TAKE` and Pi/Devin stay excluded |
+| M19-B0 / M19-B1 | Follow M26-B; counts unchanged |
 
-The current checkpoint is `ALREADY_VENDORED 78`, `TAKE 2`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. The prior terminal forecast is no longer an active delivery schedule: M24 is deferred, so M26-A, M26-B, and M19-B stop until a new approved plan either establishes coherent cross-process Warp source/cache ownership or explicitly removes M24 from the cache dependency graph. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
+The current checkpoint is `ALREADY_VENDORED 79`, `TAKE 1`, `ADAPT_FOR_STREAMING 0`, `DEFER 17`, `SKIP 13`, and `SUPERSEDED 1`, total 111. M24 remains deferred and outside the cache dependency graph; the approved sequence is now M26-A, M26-B, M19-B0, M19-B1, then D2. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
 
-The active monolithic cache remains schema 32 after PR #77. M23-H changes discovery only, M23-D adds a new independently fingerprinted source, and M24 did not merge. No shard format is active; the legacy schema-32 monolith remains the current cache contract.
+M26-A makes shard format 1 active at `source-message-cache-v2/<namespace>/shard-XX.bin`. The former schema-32 `source-message-cache.bin` is inert provenance: the shard reader does not load, migrate, rewrite, or delete it. Format 1 starts cold, and per-client parser versions replace global monolith bumps for later parser-output changes.
 
 Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
@@ -325,7 +328,28 @@ M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) proposed a Rust-own
 
 Current-head Codex found four new failure classes: an inactive 401 could purge an unrelated account cache, an old refresh failure could stale or clear a newer source, a failed Disconnect could forget the only purge-retry state, and a stale bearer connect could replace a newer source. The first local fix round added generation guards, matching-scope inactive purge, retryable Disconnect cleanup, and remote I/O outside the refresh/storage transaction. That round was not pushed because fresh security verification reproduced a further production interleaving: Warp source and revoked-scope state are process-local, but `warp-usage-v1.json` is one cross-process singleton. While process P1 waits on remote I/O for scope B, process P2 can write scope A; P1 can then reacquire the provider lock and delete A during same-scope 401 handling or Disconnect. Keeping the lock across remote I/O would avoid that interleaving but violate the approved network boundary.
 
-This second consecutive review round triggers the fidelity stop rather than another local patch. PR #86 is closed unmerged, its rejected fix remains unpushed, and the remote branch is retained as evidence. Main has no M24 runtime, schema stays 32, and `63a44d7c` moves from `TAKE` to `DEFER`, producing `78/2/0/17/13/1`. M26-A, M26-B, and M19-B are blocked until a new approved plan either defines coherent cross-process Warp source/cache ownership or removes M24 from the shard-cache dependency graph.
+This second consecutive review round triggers the fidelity stop rather than another local patch. PR #86 is closed unmerged, its rejected fix remains unpushed, and the remote branch is retained as evidence. Main has no M24 runtime, schema stays 32, and `63a44d7c` moves from `TAKE` to `DEFER`, producing `78/2/0/17/13/1`. The approved replacement plan then removes M24 from the cache dependency graph without reviving Warp.
+
+## M26-A identity-aware shard cache
+
+M26-A selectively ports upstream [#856](https://github.com/junhoyeo/tokscale/pull/856) / [`ae36db5c`](https://github.com/junhoyeo/tokscale/commit/ae36db5cd1f23e24b93768f9c2f169ef825072ef) as a cache-engine boundary replacement. Active storage is format 1 under `source-message-cache-v2/<namespace>/shard-XX.bin`: 256 shards, a 256 MiB per-shard decode/write limit, identity keys containing parser namespace plus path, and payload envelopes that validate format/namespace/parser version before decoding entries. Initial parser versions are Codex 4, Jcode 4, Copilot 3, synthetic 1, and every other current Native client 1. Generic and SQLite sources use at most five 4 KiB sample windows; Codex retains full prefix hashing and incremental state. The selected WalkDir fast path reuses each entry's known file type instead of repeating `stat()` for regular files while preserving followed metadata for file symlinks. Dirty/deleted keys are bucketed once, affected shards are reread under the existing cross-process lock, stale deletes compare their old fingerprint before removal, and durable writes reuse `fs_atomic::replace_file`.
+
+The former schema-32 `source-message-cache.bin` is deliberately inert: M26-A never reads, migrates, rewrites, or deletes it, and the byte/metadata sentinel verifies a cold shard build leaves it untouched. `HASH_MEMO` and monolith-only `STORE_MEMO` are retired rather than layered over bounded sampling or shard persistence. Cache entries remain raw per-source parser output; cohort authority, dedup, pricing, filters, and reports still run after cache retrieval. Warp stays `parse_local: false`, and no M24 producer, credential, account scope, network, settings, or ABI code is introduced.
+
+| Parser identity | Preserved dependencies and authority | Format-1 evidence | Format-2 follow-up |
+|---|---|---|---|
+| Claude | `.meta.json`, cc-mirror variant, nested/flat parent transcripts | Sidecar/parent invalidation, materialized and streaming cache paths | Persist exact paths and absent candidates; recover cached parent paths |
+| Copilot | OTEL files plus Desktop DB, optional WAL, dynamic `session-state/*/events.jsonl`; OTEL whole-session authority stays post-cache | WAL/event invalidation and unreadable-dependency fail-open | Exact dynamic related-set path/cardinality validation |
+| Jcode | Snapshot plus `.journal.jsonl` | Journal-only mutation invalidates warm cache | Persist absent journal candidate and detect creation/removal |
+| Droid | Settings snapshot plus fallback `session.jsonl` | Fallback-only mutation invalidates warm cache | Persist absent fallback candidate and detect creation/removal |
+| Kimi | Legacy `config.json`; Kimi Code remains self-contained | Legacy config mutations invalidate; nearby Kimi Code config does not | Preserve path identity without adding a Code dependency |
+| Kiro | CLI same-stem JSONL and IDE `messages.jsonl`; suppression remains post-cache | Both sibling forms invalidate independently | Persist exact candidate path/existence |
+| Roo / Kilo / Cline | `api_conversation_history.json` | History-only model/agent mutation invalidates | Persist exact history path/existence |
+| Grok | Legacy `signals.json`, `summary.json`, `events.jsonl`; unified log remains self-contained and precedence stays post-cache | All legacy siblings invalidate independently | Persist exact sibling paths/existence |
+| Codex | `consumed_offset`, newline boundary, prefix hash, parse state | Full-prefix reuse, append resume, mismatch cold parse | No generic related-file expansion |
+| Generic / SQLite | Primary samples; SQLite `-wal` | Same-size restored-mtime mutation in a sampled window invalidates without full hashing | Persist related path/existence where applicable |
+
+The ledger transition is `ae36db5c: TAKE → ALREADY_VENDORED`, producing `79/1/0/17/13/1`. `cd07bf78` remains the single `TAKE` row for M26-B; only its generic format-2 metadata and Claude cached-parent recovery are eligible, while Pi and Devin remain excluded.
 
 ## M19-A Windows atomic-replacement completion
 
@@ -355,14 +379,14 @@ these are upstream fixes a sync will *gain*.)
 
 | Patch | Files | Status upstream |
 |---|---|---|
-| PR #2 (perf): `HASH_MEMO` + `STORE_MEMO` process-level memos; `LocalParseOptions.modified_after` mtime pruning; `latest_source_mtime_ms()` change probe | `src/message_cache.rs`, `src/lib.rs` | not yet forwarded to junhoyeo/tokscale |
+| PR #2 (perf, partially retired by M26-A): `LocalParseOptions.modified_after` mtime pruning and `latest_source_mtime_ms()` change probing remain active. M26-A removes `HASH_MEMO` because path/size/mtime memoization can bypass bounded sample validation, and removes monolith-only `STORE_MEMO` because shard dirty tracking owns persistence | `src/message_cache.rs`, `src/lib.rs` | Remaining mtime/pruning seam not yet forwarded; retired memos must not be re-applied |
 | PR #3 (perf): streaming per-file aggregation replaces materialize-then-aggregate for the graph/model/monthly/hourly reports — `StreamingAggregator` + `SessionizeAccumulator` folded by `scan_messages_streaming` in one cache-aware pass (no full-history `Vec`). Each client lane owns its dedup set (follow-up `0752e35`: prevents cross-client `dedup_key` collisions). | `src/aggregator.rs`, `src/lib.rs`, `src/sessionize.rs`, `tests/streaming_snapshot.rs` | not yet forwarded to junhoyeo/tokscale |
 | #6 (fix): the **agents report** now folds over `scan_messages_streaming` too — new `get_agents_report` (mirrors `get_model_report`, `resolve_report_clients` + a single streaming pass into `AgentAccumulator`), so it shares the one deduped/per-client-gated/priced stream as every other report (resolves the issue #6 divergence: agents no longer over-counts copilot/codebuff/kimi/cursor/warp/… duplicate `dedup_key`s, and scans the same client set). `parse_local_unified_messages` survives as public API only (footgun-documented, no in-repo callers). `crates/tb_core_ffi/src/agents_report.rs` is now a thin mapper like `model_report.rs` (no longer byte-identical to the archived Tauri original — accepted). | `src/lib.rs`, `crates/tb_core_ffi/src/agents_report.rs` | not yet forwarded to junhoyeo/tokscale |
 | #35/#36 (fix): **two-level client filter for the hourly & agents reports.** TokenBar passes the user's displayed client slice into `ReportOptions.clients` so shared hour/agent buckets carry only the selected clients' totals (a Swift membership filter can't split a mixed fold). But `scan_messages_streaming` selects scanner *lanes* from that list, and a `cc-mirror/<variant>` id (produced during Claude-lane parsing, #659) is not a lane — requesting it alone would scan nothing. New `split_report_client_filter` / `report_message_client_passes` helpers split the request into (a) lanes to scan (each `cc-mirror/*` → its producing `claude` lane) and (b) an EXACT client-id set the fold keeps; `get_agents_report` **and** `get_hourly_report` call the split + gate `msg_filter` on it. Unlike the scan's built-in `retain_for_requested_clients`, requesting `claude` here excludes the distinct `cc-mirror/*` variants (they are their own client ids in the graph/model/daily payloads); the `synthetic` special-case is preserved. `get_hourly_report` was previously byte-upstream — this makes it a local patch; **re-apply on any re-vendor of `lib.rs`.** | `src/lib.rs`, `crates/tb_core_ffi/src/lib.rs`, `crates/tb_core_ffi/src/{hourly,agents}_report.rs` | not yet forwarded to junhoyeo/tokscale |
 | #5 (feat): discover Claude desktop "Cowork" (local-agent-mode) transcripts. `discover_cowork_project_roots()` recurses `~/Library/Application Support/Claude/local-agent-mode-sessions/**/.claude/projects` and feeds the roots into `built_in_extra_scan_paths_for` as `ClientId::Claude`. Returns the per-session `projects` roots only, so the sibling `audit.jsonl` (a mirror of the same `usage` records) is never scanned — scanning it would double-count. | `src/scanner.rs` | Covered by closed-unmerged upstream PR #708 together with `<synthetic>` filtering; revive that PR rather than opening a duplicate. |
 | pricing (fix): **cache-rate backfill** — `choose_best_source_result` is wrapped so the chosen pricing source has any missing cache read/write rates grafted from the runner-up source (`backfill_cache_costs` + `prefer_litellm_over_openrouter`). Without it, a provider-hint that selects an entry lacking cache rates (e.g. an OpenRouter row) bills cache reads at $0 (fable-5 showed $11.50 instead of $45). Upstream `#658`/`#707` do **not** subsume this: `has_any_usable_pricing` is an `.any()` gate, so a row that prices everything *except* cache still passes through unfilled — the root cause stays ours to fix. | `src/pricing/lookup.rs` | not yet forwarded to junhoyeo/tokscale |
 | pricing (perf): **in-memory auto-refresh** — `PRICING_SERVICE` is a `RwLock<Option<CachedService>>` with `IN_MEMORY_TTL = 3600s` (was a never-refreshing `OnceCell`), so prices re-read the file cache / network roughly hourly instead of being frozen for the process lifetime; adds `pricing_cached_at()` (Models card "Prices updated …"). Spans `mod.rs` + the additive `litellm::cached_at` / `cache::cache_timestamp` helpers. | `src/pricing/mod.rs`, `src/pricing/litellm.rs`, `src/pricing/cache.rs` | not yet forwarded to junhoyeo/tokscale |
-| streaming `simple_lane!` fingerprint-fn arm (M4 enabler): the local streaming-aggregation `simple_lane!` macro (part of PR #3 — it does **not** exist upstream) gained a 3-arg arm taking a custom fingerprint fn; the 2-arg arm delegates to it with `SourceFingerprint::from_path` (no behaviour change for the existing callers). jcode passes `from_jcode_path` (snapshot + `.journal.jsonl`) and micode passes `from_sqlite_path`. **Must be re-applied on any re-vendor of `lib.rs`** — dropping it reverts jcode/micode to a snapshot-only fingerprint and reintroduces stale (missing-turn) data after a sibling-only write. | `src/lib.rs` | local (the macro is local; not forwardable as-is) |
+| streaming `simple_lane!` fingerprint-fn arm (M4 enabler, adapted for M26-A): the local streaming-aggregation macro (part of PR #3 — it does **not** exist upstream) retains its custom fingerprint arm and identity-aware shard lookup/writeback. Default sources use bounded sample fingerprints; Jcode, Droid, Kimi, Roo/Kilo/Cline, and Micode retain specialized dependency functions. **Must be re-applied on any re-vendor of `lib.rs`** — dropping it reverts sibling-aware streaming invalidation or loses parser namespace isolation. | `src/lib.rs` | local streaming adaptation over upstream's format-1 cache contract |
 | streaming `simple_lane!` cost-guarded arm + `reprice_lane_message` (M7 — #742 Part 2): the `simple_lane!` macro gained a 4-arg arm `(client, parse, fingerprint, guard_authoritative_cost: bool)`; the 2-/3-arg arms delegate with `false` (unconditional reprice — unchanged behaviour). The body reprices via `reprice_lane_message`, which for `guard=true` only reprices when the message's embedded cost is `<= 0.0`. **micode** passes `true` so MiMo Code's authoritative per-message cost is never overwritten by a recomputed `tokens*rate` when a MiMo model resolves to a price (today a no-op — MiMo models are unpriced — but future-proof). The M8 `CostSource` port intentionally does **not** mark Micode provider-reported: this lane-specific guard remains the Micode source of truth. The micode materialized path (dead code, public API only) is guarded the same way (loader called with `pricing: None`, then reprice-if-`cost<=0.0`). Upstream's #742 guard is in its materialized lane (dead code for us), so this is the local equivalent. **Must be re-applied on any re-vendor of `lib.rs`** — dropping it reverts micode to unconditional repricing (clobbers the authoritative cost once MiMo is priced). | `src/lib.rs` | local (streaming lane + cost-guard are local; upstream guards its own materialized path) |
 | mux dedup key workspace-scoped (fix, over `#760`): upstream #760 keys mux's cross-file dedup on `mux:<model>:<HashMap iteration index>`. The index is unstable across re-parses, and `mux:<model>:0` collides cross-workspace — so in our per-client streaming seen set two `.mux/sessions/<workspaceId>/session-usage.json` files with the same model drop one, a net regression vs the pre-#760 `None` key that kept everything. We key on `mux:<workspaceId>:<model>` (workspace = the session file's parent-dir name): stable across re-parses and unique per workspace. **Re-apply on any re-vendor of `mux.rs`** (do not restore the upstream index key). | `src/sessions/mux.rs` | Already fixed upstream via PR #817; retain the local key when selectively re-vendoring because upstream does not consume this dedup key in its materialized path. |
 | drop synthetic Claude placeholder rows (fix, PR #30 by @starburst3190): claudecode parsing discards assistant turns whose model is the literal `<synthetic>` placeholder. Claude Code fabricates these locally (cancelled requests, injected continuations); they never hit a real model and carry zero tokens/cost (verified against real-world data: every sampled `<synthetic>` record carried an all-zero `usage`), so they only surface as a phantom zero-token model row. Guarded at all four message-emitting sites (`parse_claude_file_with_cache_and_home`, `extract_claude_tool_result_message`, `extract_claude_headless_message`, `finalize_headless_state`); the streaming lane inherits it because it calls `parse_claude_file_with_cache_and_home`. `CACHE_SCHEMA_VERSION` bumped 22→23 so sessions cached with the phantom row reparse. **Re-apply on any re-vendor of `claudecode.rs`.** | `src/sessions/claudecode.rs`, `src/message_cache.rs` | Covered by closed-unmerged upstream PR #708; revive that existing PR rather than opening a duplicate. |
