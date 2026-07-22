@@ -1,3 +1,8 @@
-Fixes:
-- Opening the popover no longer causes TokenBar to quit on some installations after v1.6.1.
-- Quota bars now keep a consistent thickness whether or not a pace marker is available.
+New:
+- Copilot Desktop token-bearing local sessions are now counted with model, workspace, and agent details. Copilot OTEL remains authoritative when both sources contain the same session, so overlapping usage is not counted twice. Totals may increase because previously invisible Desktop usage is now included, not because the update created new spend.
+
+Improved:
+- Hovered Token Usage and Models bars now gain adaptive outlines and glow in light and dark appearances. Model markers glow with their rows, and Daily/Monthly drill-downs show detailed Input, Output, Cache read, Cache write, and Reasoning tooltips above neighboring rows.
+
+Under the hood:
+- Hermes discovery supports native Windows layouts for the downstream Windows build without changing the macOS app.
