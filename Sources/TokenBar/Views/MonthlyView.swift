@@ -17,6 +17,9 @@ struct MonthlyView: View {
     let colors: ModelColorMap
 
     @State private var openMonth: String?
+    @State private var hover: HoverState?
+    @State private var tooltipSize: CGSize = .zero
+    @Environment(\.popoverScrollViewport) private var popoverScrollViewport
 
     struct MonthRow {
         let month: String  // "YYYY-MM"
@@ -31,9 +34,21 @@ struct MonthlyView: View {
         let model: String
         let provider: String
         let color: String
+        var input: Int64
+        var output: Int64
+        var cacheRead: Int64
+        var cacheWrite: Int64
+        var reasoning: Int64
         var tokens: Int64
         var cost: Double
     }
+
+    private struct HoverState {
+        let slice: ModelSlice
+        let point: CGPoint
+    }
+
+    private static let rowsSpace = "monthly-model-rows"
 
     /// Pure bucketing, internal (not private) so SelfTest can pin it.
     static func monthRows(payload: UsagePayload, clientIds: [String]) -> [MonthRow] {
@@ -78,7 +93,14 @@ struct MonthlyView: View {
                 let key = "\(model)|\(cc.providerId)"
                 var slot = grouped[key] ?? ModelSlice(
                     key: key, model: model, provider: cc.providerId,
-                    color: colors.color(cc.providerId, model), tokens: 0, cost: 0)
+                    color: colors.color(cc.providerId, model),
+                    input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0,
+                    tokens: 0, cost: 0)
+                slot.input = slot.input.saturatingAdding(cc.tokens.input)
+                slot.output = slot.output.saturatingAdding(cc.tokens.output)
+                slot.cacheRead = slot.cacheRead.saturatingAdding(cc.tokens.cacheRead)
+                slot.cacheWrite = slot.cacheWrite.saturatingAdding(cc.tokens.cacheWrite)
+                slot.reasoning = slot.reasoning.saturatingAdding(cc.tokens.reasoning)
                 slot.tokens = slot.tokens.saturatingAdding(tokens)
                 slot.cost += cc.cost
                 grouped[key] = slot
@@ -111,12 +133,14 @@ struct MonthlyView: View {
                 }
             }
         }
+        .zIndex(hover == nil ? 0 : 1)
     }
 
     @ViewBuilder private func monthItem(_ row: MonthRow) -> some View {
         let isOpen = openMonth == row.month
         VStack(spacing: 4) {
             Button {
+                hover = nil
                 withAnimation(.easeOut(duration: 0.15)) {
                     openMonth = isOpen ? nil : row.month
                 }
@@ -148,15 +172,23 @@ struct MonthlyView: View {
                 VStack(spacing: 4) {
                     ForEach(Self.modelSlices(for: row, clientIds: clientIds, colors: colors),
                             id: \.key) { slice in
+                        let isHovered = hover?.slice.key == slice.key
                         HStack(spacing: 8) {
                             Circle()
                                 .fill(Color(hex: slice.color))
                                 .frame(width: 6, height: 6)
+                                .overlay {
+                                    Circle().stroke(
+                                        Color.primary.opacity(isHovered ? 0.85 : 0),
+                                        lineWidth: 1)
+                                }
+                                .shadow(
+                                    color: Color.primary.opacity(isHovered ? 0.65 : 0),
+                                    radius: isHovered ? 3 : 0)
                             Text(slice.model)
                                 .font(.caption2)
                                 .lineLimit(1)
                                 .truncationMode(.middle)
-                                .help("\(slice.model) · \(slice.provider)")
                             Spacer()
                             Text(Format.compactTokens(slice.tokens))
                                 .font(.caption2.monospacedDigit())
@@ -165,11 +197,57 @@ struct MonthlyView: View {
                                 .font(.caption2.monospacedDigit())
                                 .frame(minWidth: 50, alignment: .trailing)
                         }
+                        .contentShape(Rectangle())
+                        .onContinuousHover(coordinateSpace: .named(Self.rowsSpace)) { phase in
+                            switch phase {
+                            case let .active(point):
+                                hover = HoverState(slice: slice, point: point)
+                            case .ended:
+                                if hover?.slice.key == slice.key {
+                                    hover = nil
+                                }
+                            }
+                        }
+                    }
+                }
+                .coordinateSpace(name: Self.rowsSpace)
+                .overlay(alignment: .topLeading) {
+                    if let hover {
+                        GeometryReader { geo in
+                            let measuredSize = tooltipSize == .zero
+                                ? CGSize(width: ModelUsageTooltip.width, height: 120)
+                                : tooltipSize
+                            let offset = PopoverTooltipPlacement.offset(
+                                anchor: hover.point,
+                                tooltipSize: measuredSize,
+                                containerFrame: geo.frame(in: .global),
+                                viewport: popoverScrollViewport)
+                            tooltip(hover.slice)
+                                .offset(offset ?? .zero)
+                        }
+                        .allowsHitTesting(false)
                     }
                 }
                 .padding(.leading, 18)
                 .padding(.bottom, 6)
             }
         }
+        .zIndex(isOpen ? 1 : 0)
+    }
+
+    private func tooltip(_ slice: ModelSlice) -> some View {
+        ModelUsageTooltip(
+            model: slice.model,
+            provider: slice.provider,
+            context: nil,
+            color: slice.color,
+            input: slice.input,
+            output: slice.output,
+            cacheRead: slice.cacheRead,
+            cacheWrite: slice.cacheWrite,
+            reasoning: slice.reasoning,
+            total: slice.tokens,
+            cost: slice.cost,
+            measuredSize: $tooltipSize)
     }
 }

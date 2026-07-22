@@ -923,8 +923,11 @@ enum SelfTest {
             "empty client selection shows no months")
         let mSlices = MonthlyView.modelSlices(
             for: mRows[0], clientIds: ["a"], colors: ModelColorMap(report: nil))
-        expect(mSlices.count == 1 && mSlices[0].key == "m1|p" && mSlices[0].tokens == .max,
-            "drill-down merges the month's model slices across days with saturation")
+        expect(
+            mSlices.count == 1 && mSlices[0].key == "m1|p"
+                && mSlices[0].tokens == .max && mSlices[0].input == .max
+                && mSlices[0].output == 0,
+            "drill-down merges the month's model token lanes across days with saturation")
         expect(MonthlyView.modelSlices(
                 for: mRows[0], clientIds: ["a", "b"], colors: ModelColorMap(report: nil)).count == 2,
             "drill-down shows client b's model when b is selected")
@@ -1135,6 +1138,15 @@ enum SelfTest {
             "bar starts hit their own index")
         expect(UsageChartGeometry.barIndex(atX: lastFrame.maxX + barGap + 1, barWidth: barWidth, count: 3) == nil,
             "past the last stride is out of range")
+
+        let modelWidths = ModelBarGeometry.widths(
+            values: [1_000_000, 1, 1, 1, 1], totalWidth: 120)
+        let renderedModelWidth = modelWidths.reduce(0, +)
+            + ModelBarGeometry.gap * CGFloat(modelWidths.count - 1)
+        expect(
+            abs(renderedModelWidth - 120) < 0.0001
+                && modelWidths.dropFirst().allSatisfy { $0 >= 1 },
+            "model bar widths preserve tiny segments without trailing overflow")
 
         // Synthetic --demo source: one fixture must drive every usage lens,
         // quota card, trace row, tray rate, and year selection without a live

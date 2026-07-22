@@ -197,6 +197,18 @@ struct UsageChartCard: View {
                 canvas(bars: bars, barWidth: barWidth, maxValue: maxValue)
                 if let index = hoverIndex, bars.indices.contains(index),
                    !bars[index].isEmpty {
+                    let bar = bars[index]
+                    let total = barTotal(bar)
+                    if total > 0 {
+                        let frame = UsageChartGeometry.barFrame(index: index, barWidth: barWidth)
+                        let height = CGFloat(total / maxValue) * (geo.size.height - 8)
+                        RoundedRectangle(cornerRadius: min(2, height / 2))
+                            .stroke(Color.primary.opacity(0.85), lineWidth: 1)
+                            .frame(width: barWidth, height: height)
+                            .position(x: frame.midX, y: geo.size.height - 1 - height / 2)
+                            .shadow(color: Color.primary.opacity(0.65), radius: 3)
+                            .allowsHitTesting(false)
+                    }
                     let measuredSize = tooltipSize == .zero
                         ? CGSize(width: Self.tooltipWidth, height: 120)
                         : tooltipSize
@@ -205,7 +217,7 @@ struct UsageChartCard: View {
                         tooltipSize: measuredSize,
                         containerFrame: geo.frame(in: .global),
                         viewport: popoverScrollViewport)
-                    tooltip(bars[index])
+                    tooltip(bar)
                         .offset(offset ?? .zero)
                 }
             }
