@@ -1060,8 +1060,8 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
         "Contents/Resources/app/out/main.js",
     ];
     let mut roots = vec![PathBuf::from("/Applications/Antigravity.app")];
-    if let Some(home) = std::env::var_os("HOME") {
-        roots.push(PathBuf::from(home).join("Applications/Antigravity.app"));
+    if let Some(home) = crate::user_home_dir() {
+        roots.push(home.join("Applications/Antigravity.app"));
     }
     roots
         .iter()
@@ -1148,7 +1148,7 @@ fn preferred_client(ids: &[String], secrets: &[String]) -> Option<(String, Strin
 // ── shared ────────────────────────────────────────────────────────────────────
 
 fn gemini_home() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".gemini"))
+    crate::user_home_dir().map(|home| home.join(".gemini"))
 }
 
 #[cfg(test)]

@@ -47,13 +47,9 @@ struct ModelReportData {
 }
 
 /// Build the per-model report for `year` (empty string = all time).
-pub fn run(year: &str) -> Result<Value, String> {
+pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Value, String> {
     let year = normalize_year(year)?;
-
-    let options = tokscale_core::ReportOptions {
-        year,
-        ..Default::default()
-    };
+    let options = context.report_options(year, None);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

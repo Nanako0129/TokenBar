@@ -890,7 +890,7 @@ fn grok_home() -> PathBuf {
     std::env::var_os("GROK_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".grok")))
+        .or_else(|| crate::user_home_dir().map(|home| home.join(".grok")))
         .unwrap_or_else(|| PathBuf::from(".grok"))
 }
 

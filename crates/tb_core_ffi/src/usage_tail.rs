@@ -87,11 +87,10 @@ impl UsageTailer {
         // only files active within the window — plus a small margin for write
         // latency and clock skew — are re-parsed each tick.
         let window_reach_ms = (EVENT_WINDOW_SECS + 300) * 1000;
-        let options = tokscale_core::LocalParseOptions {
-            since: Some(since),
-            modified_after: Some((now_ms() - window_reach_ms) as u64),
-            ..Default::default()
-        };
+        let context = crate::LocalSourceContext::current();
+        let mut options = context.parse_options(None, None);
+        options.since = Some(since);
+        options.modified_after = Some((now_ms() - window_reach_ms) as u64);
 
         // No source changed since the last parse → the window is already
         // correct; skip the parse. Probe failure falls through to a parse.

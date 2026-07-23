@@ -59,7 +59,7 @@ fn subscription_label(provider: &str) -> String {
 }
 
 fn auth_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share/opencode/auth.json"))
+    crate::user_home_dir().map(|home| home.join(".local/share/opencode/auth.json"))
 }
 
 pub(crate) struct GitHubCopilotCredential {

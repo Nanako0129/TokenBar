@@ -42,14 +42,13 @@ struct AgentsReportData {
 /// streaming scan, so an agent bucket shared across clients carries only the
 /// selected clients' tokens/cost — a membership filter downstream cannot do
 /// this because each `AgentAccumulator` folds all clients into one mixed total.
-pub fn run(year: &str, clients: Option<Vec<String>>) -> Result<Value, String> {
+pub(crate) fn run(
+    context: &crate::LocalSourceContext,
+    year: &str,
+    clients: Option<Vec<String>>,
+) -> Result<Value, String> {
     let year = normalize_year(year)?;
-
-    let options = tokscale_core::ReportOptions {
-        year,
-        clients,
-        ..Default::default()
-    };
+    let options = context.report_options(year, clients);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()

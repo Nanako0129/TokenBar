@@ -3039,13 +3039,13 @@ fn codex_home() -> PathBuf {
     std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
         .filter(|p| !p.as_os_str().is_empty())
-        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".codex")))
+        .or_else(|| crate::user_home_dir().map(|home| home.join(".codex")))
         .unwrap_or_else(|| PathBuf::from(".codex"))
 }
 
 fn claude_credentials_path() -> PathBuf {
-    std::env::var_os("HOME")
-        .map(|home| PathBuf::from(home).join(".claude/.credentials.json"))
+    crate::user_home_dir()
+        .map(|home| home.join(".claude/.credentials.json"))
         .unwrap_or_else(|| PathBuf::from(".claude/.credentials.json"))
 }
 

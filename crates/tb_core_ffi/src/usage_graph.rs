@@ -103,13 +103,9 @@ struct TokenContributionData {
 /// the async `generate_local_graph_report`. That entry point uses cached
 /// pricing with a graceful offline fallback, and `PricingService` is a process
 /// -wide `OnceCell`, so the network fetch happens at most once per launch.
-pub fn run(year: &str) -> Result<Value, String> {
+pub(crate) fn run(context: &crate::LocalSourceContext, year: &str) -> Result<Value, String> {
     let year = normalize_year(year)?;
-
-    let options = tokscale_core::ReportOptions {
-        year,
-        ..Default::default()
-    };
+    let options = context.report_options(year, None);
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
