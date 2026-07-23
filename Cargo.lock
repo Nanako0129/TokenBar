@@ -1635,6 +1635,7 @@ dependencies = [
  "sha2",
  "tokio",
  "tokscale-core",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

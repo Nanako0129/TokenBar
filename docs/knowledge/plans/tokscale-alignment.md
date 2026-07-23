@@ -32,7 +32,7 @@ TokenBar follows upstream `tokscale` as a rolling source and selects bounded mil
 
 | Surface | Current value |
 |---|---|
-| TokenBar execution baseline | M26-A merged in PR #90 at [`95c819c7`](https://github.com/Nanako0129/TokenBar/commit/95c819c7cf6532be7276b64386490b1b03a0c1ae); M26-B merged in PR #91 at [`cc52c3b9`](https://github.com/Nanako0129/TokenBar/commit/cc52c3b9e01836cbf1c7ab7c77b4dd8b5e2df7b2). M23-H PR #82, M23-D PR #83, and the M24 docs checkpoint are already included |
+| TokenBar execution baseline | M26-A merged in PR #90 at [`95c819c7`](https://github.com/Nanako0129/TokenBar/commit/95c819c7cf6532be7276b64386490b1b03a0c1ae); M26-B merged in PR #91 at [`cc52c3b9`](https://github.com/Nanako0129/TokenBar/commit/cc52c3b9e01836cbf1c7ab7c77b4dd8b5e2df7b2); M19-BP merged in PR #92 at [`81d99ecd`](https://github.com/Nanako0129/TokenBar/commit/81d99ecd4f35807566caa96f9fad4343b4e1b70b). M23-H PR #82, M23-D PR #83, and the M24 docs checkpoint are already included |
 | tokscale target | [`366ce643`](https://github.com/junhoyeo/tokscale/commit/366ce64395594abf111e0409581d91016561b25a), 111 commits |
 | Fidelity stops | M22 PR #72, M23 PR #74, and M24 PR #86 are closed unmerged; M23-H + M23-D replaced the bounded parts of PR #74, while M23-V and M24 remain deferred. M24 is removed from the cache dependency graph without reviving Warp. M26-B takes only generic `cd07bf78` format-2 metadata and Claude cached-parent recovery; its Devin residual remains excluded |
 | 111-row classification | `ALREADY_VENDORED 79`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 18`, `SKIP 13`, `SUPERSEDED 1` |
@@ -69,7 +69,7 @@ The following capabilities are selected for this alignment cycle:
 | Money correctness | Sakana/Fugu pricing, verified request-level long-context pricing, and the complete routed-pricing precedence pipeline |
 | Runtime configuration | Reloadable configurable model aliases that affect grouping only, not raw model identity, pricing, or persistence |
 | Cache architecture | M26-A merged format-1 identity-aware source-message shards; M26-B merged in PR #91 at `cc52c3b9` and made format 2 active with generic related-file path/existence metadata and Claude cached-parent recovery. Format-1 shards rebuild cold locally, the schema-32 monolith remains unread/unmodified/undeleted, and Warp stays excluded from both |
-| Windows parity | Atomic replacement retry is merged; M19-BP Native shared-root canonicalization, M19-B0 residuals, and M19-B1 exact Windows sync follow M26-B |
+| Windows parity | Atomic replacement retry is merged; M19-BP Native shared-root canonicalization, M19-BQ Claude version probe, M19-B0 residuals, and M19-B1 exact Windows sync follow M26-B |
 
 The following product features remain deliberately deferred: Zcode legacy/v2, Copilot VS Code `chatSessions`, Warp producer/local reporting, Command Code, CodeBuddy/WorkBuddy, Devin CLI/Desktop, and 9Router. Zcode was selected originally, but PR #72 demonstrated that safe adoption required systemic repair and downstream invention beyond the upstream scope. VS Code was likewise selected originally, but PR #74 exposed unresolved upstream ObjectMutationLog replay semantics and expanding local authority heuristics; reassess only after upstream or a reproducible format contract converges. Warp was selected originally, but PR #86 exposed an unresolved ownership conflict between process-local source/revocation state and one cross-process singleton app cache; reassess only under a new approved design with coherent destructive-cache ownership. Sakana subscription billing-console scraping remains skipped; selecting Fugu model pricing does not select the subscription usage provider.
 
@@ -96,12 +96,13 @@ flowchart TD
     F --> SA
     SA --> SB[M26-B format-2 metadata]
     SB --> BP[M19-BP Native shared-root canonicalization]
-    BP --> W0[M19-B0 Native residuals]
+    BP --> BQ[M19-BQ Claude version probe]
+    BQ --> W0[M19-B0 Native residuals]
     W0 --> W1[M19-B1 Windows final sync]
     W1 --> D2[D2 final docs checkpoint]
 ```
 
-The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, M21, M25, M23-H, and M23-D are merged. M22, M23-V, and M24 remain closed-unmerged or deferred fidelity stops. The approved replacement graph explicitly removes M24 from M26's dependencies while preserving its fidelity decision and disabled Warp registry state. M26-A merged in PR #90 at `95c819c7`; M26-B merged in PR #91 at `cc52c3b9` with format 2 active and the Devin residual deferred. The next graph is M19-BP, M19-B0, M19-B1, then D2.
+The shared-parser critical path through M17, the money-correctness M18 checkpoint, the independent M19-A filesystem checkpoint, M21, M25, M23-H, and M23-D are merged. M22, M23-V, and M24 remain closed-unmerged or deferred fidelity stops. The approved replacement graph explicitly removes M24 from M26's dependencies while preserving its fidelity decision and disabled Warp registry state. M26-A merged in PR #90 at `95c819c7`; M26-B merged in PR #91 at `cc52c3b9` with format 2 active and the Devin residual deferred. The next graph is M19-BQ, M19-B0, M19-B1, then D2.
 
 ## Milestone queue
 
@@ -123,11 +124,12 @@ The shared-parser critical path through M17, the money-correctness M18 checkpoin
 | M19-A | M15-T | Merged as PR #68 at `11ae1bed`: retry only Windows atomic-replacement errors 5/32 for at most five attempts with exact bounded backoff; preserve non-Windows rename and exclude TUI signal behavior | Keep schema 31 |
 | M26-A | M23-D + M19-A; M24 explicitly excluded | Merged in PR #90 at `95c819c7`: selectively port `ae36db5c` format 1, migrate all cache callers to parser identity, preserve Native sibling/streaming/authority seams, adopt its WalkDir file-type fast path with file-symlink preservation, and keep Warp disabled | Format-1 shards were active at its checkpoint; legacy schema-32 monolith inert and untouched; `ae36db5c: TAKE → ALREADY_VENDORED` |
 | M26-B | M26-A merged; implementation base `43fa8ad6` | Merged in PR #91 at `cc52c3b9`: took only `cd07bf78` generic format-2 path/existence metadata and Claude cached-parent recovery; excluded Pi/Devin and preserved all Native source/authority/report seams | Format 2 active; format-1 shards rebuild cold locally; legacy schema-32 monolith remains unread/unmodified/undeleted; `cd07bf78: TAKE → DEFER` |
-| M19-BP | M26-B merged in PR #91 at `cc52c3b9` | Implement Native shared-root canonicalization: shared `user_home_dir()` provider paths plus one FFI-local `LocalSourceContext` for explicit home, `use_env_roots=true`, year, and clients across report/parse shipping paths; preserve C ABI, provider behavior, cache identity, and ledger counts | Format 2 remains active; no cache fingerprint or schema change |
-| M19-B0 | M19-BP merged | Canonicalize the exact Windows shared-crate security/storage residual allowlist in Native | Ledger unchanged |
+| M19-BP | M26-B merged in PR #91 at `cc52c3b9` | Merged in PR #92 at `81d99ecd`: canonicalize shared `user_home_dir()` provider paths plus one FFI-local `LocalSourceContext` for explicit home, `use_env_roots=true`, year, and clients across report/parse shipping paths; preserve C ABI, provider behavior, cache identity, and ledger counts | Format 2 remains active; no cache fingerprint or schema change |
+| M19-BQ | M19-BP | Make Claude quota refresh resolve a process-wide cached User-Agent from one `claude --version` probe, use a no-window Windows child process, parse the first version token safely, and preserve the existing fallback; keep request flow and provider semantics unchanged | Ledger, cache, and C ABI unchanged |
+| M19-B0 | M19-BQ | Canonicalize the exact Windows shared-crate security/storage residual allowlist in Native | Ledger unchanged |
 | M19-B1 | M19-B0 merged | Exact Native → Windows shared-tree/header sync plus x64, cross-check, and real ARM64 runtime gates | Ledger unchanged |
 
-Every runtime merge applies the deterministic ledger delta recorded in [`vendor/README.md`](../../../vendor/README.md), regenerates all six hash sets, and rechecks duplicates plus both symmetric-difference directions. The merged M23 checkpoint was `78/3/0/16/13/1`; M24's fidelity stop produced `78/2/0/17/13/1`. M26-A merged in PR #90 at `95c819c7`, moved `ae36db5c` to `ALREADY_VENDORED`, and produced `79/1/0/17/13/1`. M26-B merged in PR #91 at `cc52c3b9`, took only generic format-2 metadata and Claude cached-parent recovery, deferred the excluded Devin residual, and produced the current exact `79/0/0/18/13/1`, total 111. The next graph is M19-BP → M19-B0 → M19-B1 → D2. Fidelity rule: preserve necessary TokenBar streaming/FFI seams, but stop when core parser/authority needs continuous systematic repair, custom algorithm scope exceeds upstream, or review exposes new failure classes; defer until upstream converges rather than continuing by sunk cost.
+Every runtime merge applies the deterministic ledger delta recorded in [`vendor/README.md`](../../../vendor/README.md), regenerates all six hash sets, and rechecks duplicates plus both symmetric-difference directions. The merged M23 checkpoint was `78/3/0/16/13/1`; M24's fidelity stop produced `78/2/0/17/13/1`. M26-A merged in PR #90 at `95c819c7`, moved `ae36db5c` to `ALREADY_VENDORED`, and produced `79/1/0/17/13/1`. M26-B merged in PR #91 at `cc52c3b9`, took only generic format-2 metadata and Claude cached-parent recovery, deferred the excluded Devin residual, and produced the current exact `79/0/0/18/13/1`, total 111. The next graph is M19-BQ → M19-B0 → M19-B1 → D2. Fidelity rule: preserve necessary TokenBar streaming/FFI seams, but stop when core parser/authority needs continuous systematic repair, custom algorithm scope exceeds upstream, or review exposes new failure classes; defer until upstream converges rather than continuing by sunk cost.
 
 ## Ownership and integration
 
@@ -156,7 +158,7 @@ Prepared parser/specialist patches must not carry shared registry, scanner, cach
 | M24 fidelity stop | PR #86 closed unmerged; keep schema 32 and do not activate the separate Warp app-cache envelope |
 | M26-A | Format 1 at `source-message-cache-v2/<namespace>/shard-XX.bin`; fixed initial parser versions; legacy schema-32 bytes remain unread, unmodified, and undeleted at the PR #90 checkpoint |
 | M26-B | Format 2 is now active: generic related-file path/existence metadata and Claude cached-parent recovery; format-1 shards are locally stale and rebuild cold; legacy schema-32 bytes remain unread, unmodified, and undeleted |
-| M19-BP / M19-B0 / M19-B1 | Format 2 remains canonical across Native and Windows; no independent Windows shared-cache fork |
+| M19-BP / M19-BQ / M19-B0 / M19-B1 | Format 2 remains canonical across Native and Windows; M19-BQ does not alter cache identity or schema; no independent Windows shared-cache fork |
 
 Any newly discovered serialized-output change outside this schedule is a stop condition, not permission to invent another global monolith bump. After M26-A, parser-only changes increment only the owning client's append-only parser version.
 
@@ -182,7 +184,7 @@ A milestone is complete only after its implementation and mandatory docs share o
 | Surface | Responsibility |
 |---|---|
 | [`vendor/README.md`](../../../vendor/README.md) | Exact 111-row classification, selected/mixed commit accounting, transition matrix, cache provenance, and local patch ledger |
-| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; M23-H and M23-D are recorded as merged in PRs #82 and #83, M26-A is merged in PR #90 at `95c819c7`, and M26-B is merged in PR #91 at `cc52c3b9`, while PRs #74 and #86 remain closed unmerged as fidelity evidence. Record M19-BP and the next graph M19-BP → M19-B0 → M19-B1 → D2 only after its actual delivery surface is observable |
+| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; M23-H and M23-D are recorded as merged in PRs #82 and #83, M26-A is merged in PR #90 at `95c819c7`, M26-B is merged in PR #91 at `cc52c3b9`, and M19-BP is merged in PR #92 at `81d99ecd`, while PRs #74 and #86 remain closed unmerged as fidelity evidence. Record M19-BQ and the next graph M19-BQ → M19-B0 → M19-B1 → D2 only after its actual delivery surface is observable |
 | Private Project #1 | Executable milestone cards only; no duplicate commit-by-commit ledger and no parser-preparation branches |
 | This plan | Product decisions, dependency graph, ownership, cache schedule, and milestone completion contract |
 | [`current-state.md`](../current-state.md) | Concise current queue and maintenance handoff |
