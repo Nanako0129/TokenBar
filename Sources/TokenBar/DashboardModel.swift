@@ -42,6 +42,38 @@ enum AppView: String, CaseIterable {
     }
 }
 
+/// Value-only apply guard for generated agent-usage payloads. Legacy/demo
+/// payloads omit the generation and pass through without changing this state.
+struct AgentUsagePublicationState {
+    private var latestGeneration: UInt64?
+    private var latestPayload: AgentUsagePayload?
+
+    var latest: AgentUsagePayload? { latestPayload }
+
+    mutating func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
+        guard let generation = candidate.publicationGeneration else { return candidate }
+        if let latestGeneration, generation < latestGeneration {
+            return latestPayload ?? candidate
+        }
+        latestGeneration = generation
+        latestPayload = candidate
+        return candidate
+    }
+}
+
+/// Process-lifetime MainActor state shared by every UI consumer, including the
+/// dashboard models and the independent tray poller.
+@MainActor
+enum AgentUsagePublicationCoordinator {
+    private static var state = AgentUsagePublicationState()
+
+    static var latestPayload: AgentUsagePayload? { state.latest }
+
+    static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
+        state.resolve(candidate)
+    }
+}
+
 /// Snapshot of the model's essential state, captured on each successful
 /// load so a fresh DashboardModel can start in `.ready` state instead of
 /// flashing "Loading usage…" every time the popover reopens.
@@ -130,7 +162,9 @@ private struct DashboardSnapshot {
             modelReport = snap.modelReport
             colors = snap.colors
             knownYears = snap.knownYears
-            agentUsage = snap.agentUsage
+            agentUsage = snap.agentUsage.map {
+                AgentUsagePublicationCoordinator.resolve($0)
+            }
             trace = snap.trace
             phase = .ready
         } else {
@@ -393,6 +427,18 @@ private struct DashboardSnapshot {
         }
     }
 
+    private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
+        guard source.allowsQuotaCachePersistence else { return }
+        let defaults = UserDefaults.standard
+        _ = TrayAnimator.applyQuotaRemaining(
+            payload: payload,
+            persistedSelection: defaults.string(forKey: TrayAnimator.quotaSourceKey)
+                ?? QuotaResolver.auto,
+            excluding: ClientRegistry.quotaExcludedClients(),
+            cachedRemaining: defaults.object(forKey: TrayAnimator.lastRemainingKey) as? Double,
+            defaults: defaults)
+    }
+
     /// Poll the OAuth quota snapshots while the popover is open. The fetch is
     /// network-bound (up to ~30s when a provider hangs), so failures keep the
     /// previous payload; per-provider errors live inside each snapshot.
@@ -401,7 +447,9 @@ private struct DashboardSnapshot {
             let payload = try? await source.agentUsage()
             if Task.isCancelled { break }
             if let payload {
-                agentUsage = payload
+                let resolved = AgentUsagePublicationCoordinator.resolve(payload)
+                agentUsage = resolved
+                reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
             }
             try? await Task.sleep(for: .seconds(60))

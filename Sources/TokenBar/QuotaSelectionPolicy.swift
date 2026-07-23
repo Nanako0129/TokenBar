@@ -35,4 +35,22 @@ enum QuotaSelectionPolicy {
         return QuotaResolver.resolve(
             payload: payload, selection: selection, excluding: excluding)
     }
+
+    /// A missing outer payload may reuse the last-good scalar. Once a payload
+    /// arrives, only a finite value resolved from that payload is valid.
+    static func resolveRemainingPercent(
+        payload: AgentUsagePayload?,
+        persistedSelection: String,
+        excluding: Set<String>,
+        cachedRemaining: Double?
+    ) -> Double? {
+        guard payload != nil else { return cachedRemaining }
+        guard let remaining = resolve(
+            payload: payload,
+            persistedSelection: persistedSelection,
+            excluding: excluding)?.window.remainingPercent,
+            remaining.isFinite
+        else { return nil }
+        return remaining
+    }
 }

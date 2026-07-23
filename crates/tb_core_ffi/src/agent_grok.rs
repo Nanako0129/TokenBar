@@ -21,7 +21,10 @@ use crate::agent_account_scope::{
     self, AccountScope, AccountScopeError, RefreshCheckpoint, RefreshScopeTransaction,
 };
 use crate::agent_quota_duration::DurationEvidence;
-use crate::agent_usage::{AgentIdentity, UsageWindow};
+use crate::agent_usage::{
+    read_response_body, request_after_verified_binding, AgentIdentity, ProviderCacheBinding,
+    ProviderFetchFailure, ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
+};
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
 use serde_json::{value::RawValue, Value};
@@ -52,6 +55,7 @@ const MONTHLY_WINDOW_KEY: &str = "billing.monthly.v1";
 pub(crate) struct GrokData {
     pub identity: Option<AgentIdentity>,
     pub account_scope: Result<AccountScope, AccountScopeError>,
+    pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
 }
 
@@ -69,8 +73,9 @@ struct GrokCredentials {
 }
 
 impl GrokCredentials {
-    fn scope_marker(&self) -> Option<&[u8]> {
-        (!self.refresh_token.is_empty()).then_some(self.refresh_token.as_bytes())
+    fn scope_marker(&self) -> Option<&str> {
+        let marker = self.refresh_token.trim();
+        (!marker.is_empty()).then_some(marker)
     }
 
     fn scope_location(&self) -> Result<String, AccountScopeError> {
@@ -85,7 +90,7 @@ impl GrokCredentials {
             "grok",
             "grok-auth-json",
             &self.scope_location()?,
-            marker,
+            marker.as_bytes(),
         )
     }
 }
@@ -167,108 +172,140 @@ struct TokenResponse {
     expires_in: Option<i64>,
 }
 
-/// Fetch Grok quota when local auth exists. Returns `None` when the user has
-/// never signed into Grok Build (no card). Returns `Err` when auth exists but
-/// the fetch fails so the card can show an error state.
-pub(crate) async fn fetch(now: DateTime<Utc>) -> Option<Result<GrokData, String>> {
+/// Fetch Grok quota when local auth exists. A genuinely absent credential
+/// omits the optional card; every present-credential failure stays typed.
+pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Option<GrokData>, ProviderFetchFailure> {
     let credentials = match load_credentials() {
-        Ok(Some(c)) => c,
-        Ok(None) => return None,
-        Err(e) => return Some(Err(e)),
+        Ok(Some(credentials)) => credentials,
+        Ok(None) => return Ok(None),
+        Err(_) => {
+            return Err(ProviderFetchFailure::terminal(
+                "Grok credentials could not be loaded.",
+            ));
+        }
     };
-    Some(fetch_with_credentials(credentials, now).await)
+    fetch_with_credentials(credentials, now).await.map(Some)
 }
 
 async fn fetch_with_credentials(
-    mut credentials: GrokCredentials,
+    credentials: GrokCredentials,
     now: DateTime<Utc>,
-) -> Result<GrokData, String> {
-    let mut refreshed_scope = None;
-    if credentials_needs_refresh(&credentials, now) {
-        let refreshed =
-            refresh_credentials(&credentials.auth_path, &credentials.entry_key, false).await?;
-        credentials = refreshed.0;
-        refreshed_scope = merge_refreshed_scope(refreshed_scope, refreshed.1);
-    }
+) -> Result<GrokData, ProviderFetchFailure> {
+    let verified = if credentials_needs_refresh(&credentials, now) {
+        refresh_credentials(&credentials.auth_path, &credentials.entry_key, false).await
+    } else {
+        credentials
+            .resolve_account_scope()
+            .map(|account_scope| {
+                let cache_binding = ProviderCacheBinding::primary(account_scope.clone());
+                (credentials, account_scope, Some(cache_binding))
+            })
+            .map_err(|_| {
+                ProviderFetchFailure::terminal("Grok account identity could not be verified.")
+            })
+    };
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("build Grok billing client: {e}"))?;
+    let (mut credentials, mut account_scope, mut cache_binding, client, response) =
+        request_after_verified_binding(
+            verified,
+            |(credentials, account_scope, cache_binding)| async move {
+                let client = reqwest::Client::builder()
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .map_err(|_| {
+                        ProviderFetchFailure::terminal("Grok billing client could not be created.")
+                    })?;
+                let response = client
+                    .get(GROK_CREDITS_URL)
+                    .bearer_auth(&credentials.access_token)
+                    .header(reqwest::header::ACCEPT, "application/json")
+                    .header(reqwest::header::USER_AGENT, "TokenBar")
+                    .send()
+                    .await
+                    .map_err(|error| {
+                        ProviderFetchFailure::from_send_error(
+                            "Grok weekly billing request failed. Retrying automatically.",
+                            cache_binding.clone(),
+                            &error,
+                        )
+                    })?;
+                Ok((credentials, account_scope, cache_binding, client, response))
+            },
+        )
+        .await?;
+    let status = response.status().as_u16();
 
-    // Weekly SuperGrok credits view is the primary meter and owns the full
-    // 401 -> refresh -> retry that repairs a mid-window token revocation.
-    let response = client
-        .get(GROK_CREDITS_URL)
-        .bearer_auth(&credentials.access_token)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .header(reqwest::header::USER_AGENT, "TokenBar")
-        .send()
-        .await
-        .map_err(|e| format!("Grok billing request failed: {e}"))?;
-
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Grok billing response: {e}"))?;
-
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        // One retry after a forced refresh in case the access token was revoked
-        // mid-window while the refresh token still works.
-        if !credentials.refresh_token.is_empty() {
-            let refreshed =
-                refresh_credentials(&credentials.auth_path, &credentials.entry_key, true).await?;
-            credentials = refreshed.0;
-            refreshed_scope = merge_refreshed_scope(refreshed_scope, refreshed.1);
-            let retry = client
-                .get(GROK_CREDITS_URL)
-                .bearer_auth(&credentials.access_token)
-                .header(reqwest::header::ACCEPT, "application/json")
-                .header(reqwest::header::USER_AGENT, "TokenBar")
-                .send()
-                .await
-                .map_err(|e| format!("Grok billing retry failed: {e}"))?;
-            let retry_status = retry.status();
-            let retry_body = retry
-                .text()
-                .await
-                .map_err(|e| format!("read Grok billing retry: {e}"))?;
-            if !retry_status.is_success() {
-                return Err(format!(
-                    "Grok billing API returned {}.",
-                    retry_status.as_u16()
-                ));
-            }
-            let account_scope =
-                refreshed_scope.unwrap_or_else(|| credentials.resolve_account_scope());
-            // Monthly is additive; never let its failure sink a successful weekly.
-            let monthly_body = fetch_monthly_best_effort(&credentials).await;
-            return build_grok_data(
-                &retry_body,
-                monthly_body.as_deref(),
-                &credentials,
-                now,
-                account_scope,
-            );
+    let weekly_body = if matches!(status, 401 | 403) {
+        if credentials.scope_marker().is_none() {
+            return Err(ProviderFetchFailure::terminal(
+                "Grok OAuth token expired or invalid. Run `grok` to log in again.",
+            ));
         }
-        return Err("Grok OAuth token expired or invalid. Run `grok` to log in again.".to_string());
-    }
-    if !status.is_success() {
-        return Err(format!("Grok billing API returned {}.", status.as_u16()));
-    }
+        let (refreshed, scope, binding) =
+            refresh_credentials(&credentials.auth_path, &credentials.entry_key, true).await?;
+        credentials = refreshed;
+        account_scope = scope;
+        cache_binding = binding;
+        let retry = client
+            .get(GROK_CREDITS_URL)
+            .bearer_auth(&credentials.access_token)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::USER_AGENT, "TokenBar")
+            .send()
+            .await
+            .map_err(|error| {
+                ProviderFetchFailure::from_send_error(
+                    "Grok weekly billing retry failed. Retrying automatically.",
+                    cache_binding.clone(),
+                    &error,
+                )
+            })?;
+        let retry_status = retry.status().as_u16();
+        read_response_body(retry_status, false, || async {
+            retry.text().await.map_err(|error| {
+                TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+            })
+        })
+        .await
+        .map_err(|failure| grok_response_failure(failure, cache_binding.clone()))?
+    } else {
+        read_response_body(status, false, || async {
+            response.text().await.map_err(|error| {
+                TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+            })
+        })
+        .await
+        .map_err(|failure| grok_response_failure(failure, cache_binding.clone()))?
+    };
 
-    let account_scope = refreshed_scope.unwrap_or_else(|| credentials.resolve_account_scope());
-    // Monthly unified-billing view is best-effort: short timeout, no OAuth
-    // refresh/rotate on 4xx (weekly just proved the token valid).
     let monthly_body = fetch_monthly_best_effort(&credentials).await;
     build_grok_data(
-        &body,
+        &weekly_body,
         monthly_body.as_deref(),
         &credentials,
         now,
-        account_scope,
+        Ok(account_scope),
+        cache_binding,
     )
+}
+
+fn grok_response_failure(
+    failure: ResponseReadFailure,
+    attempt_binding: Option<ProviderCacheBinding>,
+) -> ProviderFetchFailure {
+    match failure {
+        ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+            "Grok weekly billing request failed. Retrying automatically.",
+            attempt_binding,
+            diagnostic,
+        ),
+        ResponseReadFailure::Terminal(401 | 403) => ProviderFetchFailure::terminal(
+            "Grok OAuth token expired or invalid. Run `grok` to log in again.",
+        ),
+        ResponseReadFailure::Terminal(status) => ProviderFetchFailure::terminal(format!(
+            "Grok billing API rejected the request (status {status})."
+        )),
+    }
 }
 
 /// GET the monthly default billing view. Never refreshes credentials on 4xx —
@@ -293,21 +330,6 @@ async fn fetch_monthly_best_effort(credentials: &GrokCredentials) -> Option<Stri
     response.text().await.ok()
 }
 
-fn merge_refreshed_scope(
-    current: Option<Result<AccountScope, AccountScopeError>>,
-    next: Result<AccountScope, AccountScopeError>,
-) -> Option<Result<AccountScope, AccountScopeError>> {
-    Some(match current {
-        None => next,
-        Some(Err(first_error)) => Err(first_error),
-        Some(Ok(current_scope)) => match next {
-            Err(error) => Err(error),
-            Ok(next_scope) if next_scope == current_scope => Ok(current_scope),
-            Ok(_) => Err(AccountScopeError::MetadataConflict),
-        },
-    })
-}
-
 /// Assemble the card's windows from the weekly credits view (required) and the
 /// monthly unified view (additive only). Success requires a weekly window —
 /// monthly-only is not enough to show the card, so a missing/unusable weekly
@@ -318,16 +340,18 @@ fn build_grok_data(
     credentials: &GrokCredentials,
     now: DateTime<Utc>,
     account_scope: Result<AccountScope, AccountScopeError>,
-) -> Result<GrokData, String> {
-    let credits: BillingResponse = serde_json::from_str(credits_body)
-        .map_err(|e| format!("decode Grok billing response: {e}"))?;
+    cache_binding: Option<ProviderCacheBinding>,
+) -> Result<GrokData, ProviderFetchFailure> {
+    let credits: BillingResponse = serde_json::from_str(credits_body).map_err(|_| {
+        ProviderFetchFailure::terminal("Grok billing response could not be decoded.")
+    })?;
 
     let weekly = credits
         .config
         .as_ref()
         .and_then(|config| weekly_window(config, now))
         .ok_or_else(|| {
-            "Grok billing response had no usable weekly usage.".to_string()
+            ProviderFetchFailure::terminal("Grok billing response had no usable weekly usage.")
         })?;
 
     let mut windows = vec![weekly];
@@ -350,6 +374,7 @@ fn build_grok_data(
                 .map(|s| s.trim().to_string()),
         }),
         account_scope,
+        cache_binding,
         windows,
     })
 }
@@ -559,9 +584,10 @@ async fn refresh_credentials(
     auth_path: &Path,
     entry_key: &str,
     force: bool,
-) -> Result<(GrokCredentials, Result<AccountScope, AccountScopeError>), String> {
-    let refresh = agent_account_scope::begin_refresh("grok")
-        .map_err(|_| "Grok credential refresh lock is unavailable.".to_string())?;
+) -> Result<(GrokCredentials, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure> {
+    let refresh = agent_account_scope::begin_refresh("grok").map_err(|_| {
+        ProviderFetchFailure::terminal("Grok credential refresh lock is unavailable.")
+    })?;
     refresh_credentials_with(
         auth_path,
         entry_key,
@@ -577,11 +603,12 @@ async fn refresh_credentials(
 async fn request_refresh(
     refresh_token: String,
     client_id: String,
-) -> Result<TokenResponse, String> {
+    attempt_binding: ProviderCacheBinding,
+) -> Result<TokenResponse, ProviderFetchFailure> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build Grok token client: {e}"))?;
+        .map_err(|_| ProviderFetchFailure::terminal("Grok refresh client could not be created."))?;
     let form = [
         ("grant_type", "refresh_token"),
         ("refresh_token", refresh_token.as_str()),
@@ -609,21 +636,35 @@ async fn request_refresh(
         .body(form)
         .send()
         .await
-        .map_err(|e| format!("Grok token refresh failed: {e}"))?;
+        .map_err(|error| {
+            ProviderFetchFailure::from_send_error(
+                "Grok token refresh failed. Retrying automatically.",
+                Some(attempt_binding.clone()),
+                &error,
+            )
+        })?;
 
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Grok token refresh response: {e}"))?;
-    if !status.is_success() {
-        return Err(format!(
-            "Grok token refresh returned {}. Run `grok` to log in again.",
-            status.as_u16()
-        ));
-    }
+    let status = response.status().as_u16();
+    let body = read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    .map_err(|failure| match failure {
+        ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+            "Grok token refresh failed. Retrying automatically.",
+            Some(attempt_binding),
+            diagnostic,
+        ),
+        ResponseReadFailure::Terminal(_) => ProviderFetchFailure::terminal(
+            "Grok token refresh was rejected. Run `grok` to log in again.",
+        ),
+    })?;
 
-    serde_json::from_str(&body).map_err(|e| format!("decode Grok token refresh: {e}"))
+    serde_json::from_str(&body).map_err(|_| {
+        ProviderFetchFailure::terminal("Grok token refresh response could not be decoded.")
+    })
 }
 
 async fn refresh_credentials_with<R, Request, RequestFuture, Save, Checkpoint>(
@@ -634,75 +675,107 @@ async fn refresh_credentials_with<R, Request, RequestFuture, Save, Checkpoint>(
     request: Request,
     save: Save,
     mut checkpoint: Checkpoint,
-) -> Result<(GrokCredentials, Result<AccountScope, AccountScopeError>), String>
+) -> Result<(GrokCredentials, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure>
 where
     R: RefreshScopeTransaction + ?Sized,
-    Request: FnOnce(String, String) -> RequestFuture,
-    RequestFuture: std::future::Future<Output = Result<TokenResponse, String>>,
+    Request: FnOnce(String, String, ProviderCacheBinding) -> RequestFuture,
+    RequestFuture: std::future::Future<Output = Result<TokenResponse, ProviderFetchFailure>>,
     Save: FnOnce(&GrokCredentials) -> Result<(), String>,
-    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), String>,
+    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure>,
 {
-    let mut credentials = load_credentials_entry_from(auth_path, Some(entry_key))?
-        .ok_or_else(|| "Grok auth entry disappeared during refresh.".to_string())?;
+    let mut credentials = load_credentials_entry_from(auth_path, Some(entry_key))
+        .map_err(|_| ProviderFetchFailure::terminal("Grok credentials could not be reloaded."))?
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal("Grok auth entry disappeared during refresh.")
+        })?;
     checkpoint(RefreshCheckpoint::Reloaded)?;
-    if !force && !credentials_needs_refresh(&credentials, Utc::now()) {
-        let scope = refresh.resolve_current(
-            "grok-auth-json",
-            &credentials
-                .scope_location()
-                .map_err(|_| "Grok auth location cannot be scoped safely.".to_string())?,
-            credentials.refresh_token.as_bytes(),
-        );
-        return Ok((credentials, scope));
+    let needs_refresh = force || credentials_needs_refresh(&credentials, Utc::now());
+    let old_marker = credentials
+        .scope_marker()
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal("Grok OAuth credential has no trusted refresh token.")
+        })?
+        .to_string();
+    if needs_refresh && credentials.client_id.trim().is_empty() {
+        return Err(ProviderFetchFailure::terminal(
+            "Grok auth.json is missing oidc_client_id.",
+        ));
     }
-    if credentials.refresh_token.trim().is_empty() {
-        return Err(
-            "Grok OAuth token needs refresh but auth.json has no refresh token.".to_string(),
-        );
-    }
-    if credentials.client_id.trim().is_empty() {
-        return Err("Grok auth.json is missing oidc_client_id.".to_string());
+    let location = credentials
+        .scope_location()
+        .map_err(|_| ProviderFetchFailure::terminal("Grok auth location could not be verified."))?;
+    let pre_scope = refresh
+        .resolve_current("grok-auth-json", &location, old_marker.as_bytes())
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Grok account identity could not be verified.")
+        })?;
+    let pre_binding = ProviderCacheBinding::primary(pre_scope.clone());
+    if !needs_refresh {
+        return Ok((credentials, pre_scope, Some(pre_binding)));
     }
 
-    let old_marker = credentials.refresh_token.as_bytes().to_vec();
     let tokens = request(
-        credentials.refresh_token.clone(),
+        old_marker.clone(),
         credentials.client_id.clone(),
+        pre_binding,
     )
     .await?;
     checkpoint(RefreshCheckpoint::NetworkReturned)?;
-    credentials.access_token = tokens.access_token;
-    if let Some(refresh_token) = tokens.refresh_token.filter(|s| !s.trim().is_empty()) {
-        credentials.refresh_token = refresh_token;
+    let access_token = tokens.access_token.trim();
+    if access_token.is_empty() {
+        return Err(ProviderFetchFailure::terminal(
+            "Grok token refresh response had no access token.",
+        ));
+    }
+    credentials.access_token = access_token.to_string();
+    if let Some(refresh_token) = tokens
+        .refresh_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        credentials.refresh_token = refresh_token.to_string();
     }
     if let Some(expires_in) = tokens.expires_in {
         credentials.expires_at = Some(Utc::now() + chrono::Duration::seconds(expires_in.max(0)));
     }
-    let refresh_token_rotated = credentials.refresh_token.as_bytes() != old_marker.as_slice();
-    let location = credentials
-        .scope_location()
-        .map_err(|_| "Grok auth location cannot be scoped safely.".to_string())?;
-    let scope = refresh.transfer(
-        "grok-auth-json",
-        &location,
-        &old_marker,
-        credentials.refresh_token.as_bytes(),
-    );
+    let new_marker = credentials
+        .scope_marker()
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal(
+                "Grok refreshed credential has no trusted refresh token.",
+            )
+        })?
+        .to_string();
+    let scope = refresh
+        .transfer(
+            "grok-auth-json",
+            &location,
+            old_marker.as_bytes(),
+            new_marker.as_bytes(),
+        )
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Grok credential lineage could not be preserved.")
+        })?;
     checkpoint(RefreshCheckpoint::MetadataHandled)?;
 
-    // A rotated marker may reach disk only after its lineage transfer is durable.
-    // The refreshed access token remains usable in memory for this poll.
-    if refresh_token_rotated && scope.is_err() {
-        return Ok((credentials, scope));
-    }
-
-    // If write-back fails, the still-stored old marker resolves the same scope.
-    if let Err(error) = save(&credentials) {
-        eprintln!("tb_core_ffi: failed to persist refreshed Grok credentials: {error}");
-    }
+    let persisted = save(&credentials).is_ok();
     checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
+    let cache_binding = if persisted {
+        Some(ProviderCacheBinding::primary(
+            refresh
+                .resolve_current("grok-auth-json", &location, new_marker.as_bytes())
+                .map_err(|_| {
+                    ProviderFetchFailure::terminal(
+                        "Grok account identity could not be verified after refresh.",
+                    )
+                })?,
+        ))
+    } else {
+        None
+    };
 
-    Ok((credentials, scope))
+    Ok((credentials, scope, cache_binding))
 }
 
 fn load_credentials() -> Result<Option<GrokCredentials>, String> {
@@ -711,6 +784,20 @@ fn load_credentials() -> Result<Option<GrokCredentials>, String> {
 
 fn load_credentials_from(auth_path: &Path) -> Result<Option<GrokCredentials>, String> {
     load_credentials_entry_from(auth_path, None)
+}
+
+fn credential_token(
+    entry: &serde_json::Map<String, Value>,
+    field: &str,
+) -> Result<Option<String>, String> {
+    match entry.get(field) {
+        None => Ok(None),
+        Some(Value::String(token)) => {
+            let token = token.trim();
+            Ok((!token.is_empty()).then(|| token.to_string()))
+        }
+        Some(_) => Err(format!("Grok auth entry {field} is not a string.")),
+    }
 }
 
 fn load_credentials_entry_from(
@@ -751,17 +838,9 @@ fn load_credentials_entry_from(
         .as_object()
         .ok_or_else(|| "Grok auth entry is not an object.".to_string())?;
 
-    let access_token = obj
-        .get("key")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let refresh_token = obj
-        .get("refresh_token")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if access_token.is_empty() && refresh_token.is_empty() {
+    let access_token = credential_token(obj, "key")?;
+    let refresh_token = credential_token(obj, "refresh_token")?;
+    if access_token.is_none() && refresh_token.is_none() {
         return Ok(None);
     }
 
@@ -785,8 +864,8 @@ fn load_credentials_entry_from(
     Ok(Some(GrokCredentials {
         auth_path: auth_path.to_path_buf(),
         entry_key,
-        access_token,
-        refresh_token,
+        access_token: access_token.unwrap_or_default(),
+        refresh_token: refresh_token.unwrap_or_default(),
         client_id,
         expires_at,
         email,
@@ -815,12 +894,27 @@ fn client_id_from_entry_key(key: &str) -> Option<String> {
 }
 
 fn save_credentials(credentials: &GrokCredentials) -> Result<(), String> {
-    let mut raw = credentials.raw_json.clone();
+    let expected_entry = credentials
+        .raw_json
+        .as_object()
+        .and_then(|map| map.get(&credentials.entry_key))
+        .ok_or_else(|| "Grok auth entry missing from the loaded credentials.".to_string())?;
+    let data = fs::read(&credentials.auth_path)
+        .map_err(|error| format!("reload Grok auth.json before saving: {error}"))?;
+    let mut raw: Value = serde_json::from_slice(&data)
+        .map_err(|error| format!("parse Grok auth.json before saving: {error}"))?;
+    let current_entry = raw
+        .as_object()
+        .and_then(|map| map.get(&credentials.entry_key))
+        .ok_or_else(|| "Grok auth entry disappeared before saving.".to_string())?;
+    if current_entry != expected_entry {
+        return Err("Grok auth entry changed during refresh.".to_string());
+    }
     let entry = raw
         .as_object_mut()
-        .and_then(|m| m.get_mut(&credentials.entry_key))
-        .and_then(|v| v.as_object_mut())
-        .ok_or_else(|| "Grok auth entry missing while saving.".to_string())?;
+        .and_then(|map| map.get_mut(&credentials.entry_key))
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Grok auth entry is not an object while saving.".to_string())?;
 
     entry.insert(
         "key".to_string(),
@@ -898,6 +992,11 @@ fn grok_home() -> PathBuf {
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+    use crate::agent_usage::SafeTransportDiagnostic;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
 
     /// The two real payloads captured from the live endpoint, side by side.
     const WEEKLY_CREDITS_BODY: &str = r#"{
@@ -969,6 +1068,7 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         )
         .unwrap();
         assert_eq!(data.windows.len(), 2);
@@ -1008,6 +1108,7 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         )
         .unwrap();
         assert_eq!(data.windows.len(), 1);
@@ -1016,19 +1117,30 @@ mod tests {
     }
 
     #[test]
-    fn monthly_failure_still_shows_weekly() {
-        // The monthly view is best-effort: an unparseable monthly body must not
-        // sink the card when the weekly meter succeeded.
-        let data = build_grok_data(
-            WEEKLY_CREDITS_BODY,
-            Some("not json"),
-            &test_credentials(),
-            now(),
-            scope_none(),
-        )
-        .unwrap();
-        assert_eq!(data.windows.len(), 1);
-        assert_eq!(data.windows[0].label_for_test(), "Weekly");
+    fn monthly_timeout_server_error_malformed_or_invalid_still_shows_weekly() {
+        // Timeout and non-success status both collapse to None at the additive
+        // fetch boundary; malformed or invalid success bodies are ignored here.
+        for (label, monthly_body) in [
+            ("timeout", None),
+            ("server error", None),
+            ("malformed body", Some("not json")),
+            (
+                "invalid meter",
+                Some(r#"{ "config": { "monthlyLimit": { "val": 0 }, "used": { "val": 10 } } }"#),
+            ),
+        ] {
+            let data = build_grok_data(
+                WEEKLY_CREDITS_BODY,
+                monthly_body,
+                &test_credentials(),
+                now(),
+                scope_none(),
+                None,
+            )
+            .unwrap();
+            assert_eq!(data.windows.len(), 1, "{label}");
+            assert_eq!(data.windows[0].label_for_test(), "Weekly", "{label}");
+        }
     }
 
     #[test]
@@ -1041,6 +1153,7 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         );
         assert!(data.is_err());
     }
@@ -1055,13 +1168,17 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         ) {
             Err(e) => e,
             Ok(_) => panic!("monthly-only must not succeed"),
         };
+        let ProviderFetchFailure::Terminal { display } = err else {
+            panic!("missing weekly meter must be terminal");
+        };
         assert!(
-            err.contains("weekly"),
-            "error should name the missing weekly meter: {err}"
+            display.contains("weekly"),
+            "error should name the missing weekly meter: {display}"
         );
 
         // Non-weekly period on the credits view is also insufficient, even with
@@ -1081,6 +1198,7 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         )
         .is_err());
     }
@@ -1176,10 +1294,8 @@ mod tests {
         assert_eq!(weekly_used_percent(&bad_credit), WeeklyPercent::Invalid);
 
         // Truly absent percent fields.
-        let absent: BillingConfig = serde_json::from_str(
-            r#"{ "productUsage": [ { "product": "GrokChat" } ] }"#,
-        )
-        .unwrap();
+        let absent: BillingConfig =
+            serde_json::from_str(r#"{ "productUsage": [ { "product": "GrokChat" } ] }"#).unwrap();
         assert_eq!(weekly_used_percent(&absent), WeeklyPercent::Absent);
     }
 
@@ -1224,6 +1340,7 @@ mod tests {
             &test_credentials(),
             now(),
             scope_none(),
+            None,
         )
         .is_err());
     }
@@ -1246,11 +1363,11 @@ mod tests {
             "subscriptionTiers": "X Premium+"
         }"#;
         let credentials = test_credentials();
-        assert_eq!(credentials.scope_marker(), Some(b"r".as_slice()));
+        assert_eq!(credentials.scope_marker(), Some("r"));
         let now = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let data = build_grok_data(body, None, &credentials, now, scope_none()).unwrap();
+        let data = build_grok_data(body, None, &credentials, now, scope_none(), None).unwrap();
         assert_eq!(data.windows.len(), 1);
         assert_eq!(data.windows[0].label_for_test(), "Weekly");
         assert_eq!(data.windows[0].window_minutes_for_test(), Some(10_080));
@@ -1273,15 +1390,13 @@ mod tests {
     fn weekly_window_rejects_malformed_or_nonweekly_period_without_percent() {
         // An empty period object is not a "meter exists" signal — no dates, no
         // type => unknown, not 0%.
-        let config: BillingConfig =
-            serde_json::from_str(r#"{ "currentPeriod": {} }"#).unwrap();
+        let config: BillingConfig = serde_json::from_str(r#"{ "currentPeriod": {} }"#).unwrap();
         assert!(weekly_window(&config, now()).is_none());
 
         // A weekly type but no parseable start/end window is still unknown.
-        let config: BillingConfig = serde_json::from_str(
-            r#"{ "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY" } }"#,
-        )
-        .unwrap();
+        let config: BillingConfig =
+            serde_json::from_str(r#"{ "currentPeriod": { "type": "USAGE_PERIOD_TYPE_WEEKLY" } }"#)
+                .unwrap();
         assert!(weekly_window(&config, now()).is_none());
 
         // An explicit MONTHLY period with no percent must NOT be fabricated into
@@ -1350,7 +1465,9 @@ mod tests {
         let config: BillingConfig =
             serde_json::from_str(r#"{ "monthlyLimit": { "val": 15000 }, "used": { "val": 0 } }"#)
                 .unwrap();
-        assert!((monthly_window(&config, now()).unwrap().remaining_for_test() - 100.0).abs() < 0.01);
+        assert!(
+            (monthly_window(&config, now()).unwrap().remaining_for_test() - 100.0).abs() < 0.01
+        );
     }
 
     #[test]
@@ -1371,10 +1488,9 @@ mod tests {
     #[test]
     fn monthly_window_rejects_negative_used() {
         // Negative consumption is invalid meter data — do not clamp to 0% healthy.
-        let config: BillingConfig = serde_json::from_str(
-            r#"{ "monthlyLimit": { "val": 15000 }, "used": { "val": -1 } }"#,
-        )
-        .unwrap();
+        let config: BillingConfig =
+            serde_json::from_str(r#"{ "monthlyLimit": { "val": 15000 }, "used": { "val": -1 } }"#)
+                .unwrap();
         assert!(monthly_window(&config, now()).is_none());
 
         let config: BillingConfig = serde_json::from_str(
@@ -1687,6 +1803,50 @@ mod tests {
         );
     }
 
+    #[test]
+    fn save_credentials_preserves_concurrent_login_and_sibling_changes() {
+        let original = serde_json::json!({
+            (TEST_ENTRY): {
+                "key": "account-a-access",
+                "refresh_token": "account-a-refresh",
+                "oidc_client_id": "fixture-client"
+            },
+            "sibling": { "value": "before" }
+        });
+        let (dir, path) = temp_auth_json("save-race", &original.to_string());
+        let mut credentials = load_credentials_from(&path).unwrap().unwrap();
+        credentials.access_token = "account-a-refreshed-access".to_string();
+        credentials.refresh_token = "account-a-refreshed-refresh".to_string();
+
+        let switched = serde_json::json!({
+            (TEST_ENTRY): {
+                "key": "account-b-access",
+                "refresh_token": "account-b-refresh",
+                "oidc_client_id": "fixture-client"
+            },
+            "sibling": { "value": "after-switch" }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&switched).unwrap()).unwrap();
+        assert!(save_credentials(&credentials).is_err());
+        let after_switch: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(after_switch, switched, "account B must not be overwritten");
+
+        let sibling_changed = serde_json::json!({
+            (TEST_ENTRY): original.get(TEST_ENTRY).unwrap().clone(),
+            "sibling": { "value": "after-sibling-update" }
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&sibling_changed).unwrap()).unwrap();
+        save_credentials(&credentials).unwrap();
+        let saved: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["sibling"], sibling_changed["sibling"]);
+        assert_eq!(saved[TEST_ENTRY]["key"], "account-a-refreshed-access");
+        assert_eq!(
+            saved[TEST_ENTRY]["refresh_token"],
+            "account-a-refreshed-refresh"
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
     #[cfg(unix)]
     #[test]
     fn atomic_write_preserves_private_permissions() {
@@ -1717,22 +1877,159 @@ mod tests {
 
     const TEST_ENTRY: &str = "https://auth.x.ai::fixture-client";
 
+    #[test]
+    fn matching_entry_logout_remains_absent() {
+        let (dir, path) = temp_auth_json(
+            "logout",
+            &serde_json::json!({
+                (TEST_ENTRY): {
+                    "key": "  ",
+                    "refresh_token": "\t\n"
+                }
+            })
+            .to_string(),
+        );
+        assert!(load_credentials_from(&path).unwrap().is_none());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matching_entry_tokens_are_trimmed_at_load() {
+        let (dir, path) = temp_auth_json(
+            "trimmed",
+            &serde_json::json!({
+                (TEST_ENTRY): {
+                    "key": "  access-token\n",
+                    "refresh_token": "\trefresh-token  "
+                }
+            })
+            .to_string(),
+        );
+        let credentials = load_credentials_from(&path).unwrap().unwrap();
+        assert_eq!(credentials.access_token, "access-token");
+        assert_eq!(credentials.refresh_token, "refresh-token");
+        assert_eq!(credentials.scope_marker(), Some("refresh-token"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn matching_entry_non_string_tokens_are_terminal() {
+        for (tag, field, value) in [
+            ("object-access", "key", serde_json::json!({ "token": "x" })),
+            ("number-access", "key", serde_json::json!(42)),
+            (
+                "object-refresh",
+                "refresh_token",
+                serde_json::json!({ "token": "x" }),
+            ),
+            ("number-refresh", "refresh_token", serde_json::json!(42)),
+        ] {
+            let mut auth = serde_json::json!({
+                (TEST_ENTRY): {
+                    "key": "access-token",
+                    "refresh_token": "refresh-token"
+                }
+            });
+            auth.get_mut(TEST_ENTRY)
+                .unwrap()
+                .as_object_mut()
+                .unwrap()
+                .insert(field.to_string(), value);
+            let (dir, path) = temp_auth_json(tag, &auth.to_string());
+            assert!(
+                load_credentials_from(&path).is_err(),
+                "{tag} must be terminal, not absent"
+            );
+            let _ = fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn whitespace_refresh_token_is_not_a_scope_marker() {
+        let mut credentials = test_credentials();
+        credentials.refresh_token = " \t\r\n ".to_string();
+        assert_eq!(credentials.scope_marker(), None);
+        assert!(matches!(
+            credentials.resolve_account_scope(),
+            Err(AccountScopeError::NoTrustedEvidence)
+        ));
+    }
+
     fn checkpoint_at(
         target: Option<RefreshCheckpoint>,
-    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), String> {
+    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure> {
         move |checkpoint| {
             if Some(checkpoint) == target {
-                Err("injected crash".to_string())
+                Err(ProviderFetchFailure::terminal("injected crash"))
             } else {
                 Ok(())
             }
         }
     }
 
+    #[tokio::test]
+    async fn whitespace_refresh_evidence_never_binds_across_access_tokens() {
+        let scope = TestRefreshScope::new("grok", "grok-whitespace-binding");
+        scope
+            .resolve_current("fixture", "baseline", b"baseline-marker")
+            .unwrap();
+        let before = scope.metadata_bytes();
+        let path = scope.root().join("grok/auth.json");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+
+        for access_token in ["account-a-access", "account-b-access"] {
+            fs::write(
+                &path,
+                serde_json::to_vec_pretty(&serde_json::json!({
+                    (TEST_ENTRY): {
+                        "key": access_token,
+                        "refresh_token": " \t ",
+                        "oidc_client_id": "fixture-client",
+                        "expires_at": "1970-01-01T00:00:00Z"
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            let loaded = load_credentials_entry_from(&path, Some(TEST_ENTRY))
+                .unwrap()
+                .unwrap();
+            assert_eq!(loaded.access_token, access_token);
+            assert_eq!(loaded.scope_marker(), None);
+
+            let send_count = Arc::new(AtomicUsize::new(0));
+            let request_send_count = Arc::clone(&send_count);
+            let failure = refresh_credentials_with(
+                &path,
+                TEST_ENTRY,
+                true,
+                &scope,
+                move |_, _, _| async move {
+                    request_send_count.fetch_add(1, Ordering::SeqCst);
+                    Ok(TokenResponse {
+                        access_token: "unexpected-access".to_string(),
+                        refresh_token: Some("unexpected-refresh".to_string()),
+                        expires_in: Some(3_600),
+                    })
+                },
+                save_credentials,
+                checkpoint_at(None),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+            assert_eq!(send_count.load(Ordering::SeqCst), 0);
+            assert_eq!(scope.metadata_bytes(), before);
+        }
+        scope.cleanup();
+    }
+
     async fn grok_test_response(
         refresh_token: String,
         client_id: String,
-    ) -> Result<TokenResponse, String> {
+        _attempt_binding: ProviderCacheBinding,
+    ) -> Result<TokenResponse, ProviderFetchFailure> {
         assert_eq!(refresh_token, "grok-old-refresh");
         assert_eq!(client_id, "fixture-client");
         Ok(TokenResponse {
@@ -1767,7 +2064,7 @@ mod tests {
             .resolve_current(
                 "grok-auth-json",
                 &location,
-                credentials.refresh_token.as_bytes(),
+                credentials.scope_marker().unwrap().as_bytes(),
             )
             .unwrap();
         let metadata = scope.metadata_bytes();
@@ -1778,7 +2075,8 @@ mod tests {
         scope: &TestRefreshScope,
         path: &Path,
         crash: Option<RefreshCheckpoint>,
-    ) -> Result<(GrokCredentials, Result<AccountScope, AccountScopeError>), String> {
+    ) -> Result<(GrokCredentials, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure>
+    {
         refresh_credentials_with(
             path,
             TEST_ENTRY,
@@ -1798,59 +2096,6 @@ mod tests {
             .refresh_token
     }
 
-    #[test]
-    fn refresh_scope_merge_is_sticky_and_reaches_billing_map() {
-        let (scope, path, scope_a, _, location) = setup_refresh("grok-scope-merge");
-        let scope_b = scope
-            .resolve_current("grok-auth-json", &location, b"different-refresh")
-            .unwrap();
-        assert_ne!(scope_a, scope_b);
-        let credentials = load_credentials_entry_from(&path, Some(TEST_ENTRY))
-            .unwrap()
-            .unwrap();
-        let now = DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
-        let body = r#"{
-            "config": {
-                "creditUsagePercent": 4.0
-            }
-        }"#;
-
-        let cases = vec![
-            (
-                "error then success keeps first failure",
-                vec![Err(AccountScopeError::MetadataWrite), Ok(scope_a.clone())],
-                Err(AccountScopeError::MetadataWrite),
-            ),
-            (
-                "success then error stays failed",
-                vec![Ok(scope_a.clone()), Err(AccountScopeError::MetadataRead)],
-                Err(AccountScopeError::MetadataRead),
-            ),
-            (
-                "matching successes keep scope",
-                vec![Ok(scope_a.clone()), Ok(scope_a.clone())],
-                Ok(scope_a.clone()),
-            ),
-            (
-                "different successes fail closed",
-                vec![Ok(scope_a.clone()), Ok(scope_b)],
-                Err(AccountScopeError::MetadataConflict),
-            ),
-        ];
-
-        for (label, outcomes, expected) in cases {
-            let merged = outcomes
-                .into_iter()
-                .fold(None, merge_refreshed_scope)
-                .unwrap();
-            let mapped = build_grok_data(body, None, &credentials, now, merged).unwrap();
-            assert_eq!(mapped.account_scope, expected, "{label}");
-        }
-        scope.cleanup();
-    }
-
     #[tokio::test]
     async fn refresh_crash_boundaries_and_scope_gate_use_production_sequence() {
         for boundary in [
@@ -1860,12 +2105,13 @@ mod tests {
             RefreshCheckpoint::CredentialsPersisted,
         ] {
             let (scope, path, old_scope, before, location) = setup_refresh("grok-crash");
-            assert_eq!(
-                run_refresh(&scope, &path, Some(boundary))
-                    .await
-                    .unwrap_err(),
-                "injected crash"
-            );
+            let failure = run_refresh(&scope, &path, Some(boundary))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display } if display == "injected crash"
+            ));
             assert_eq!(
                 stored_refresh_token(&path),
                 if boundary == RefreshCheckpoint::CredentialsPersisted {
@@ -1899,9 +2145,8 @@ mod tests {
 
         let (scope, path, old_scope, before, location) = setup_refresh("grok-metadata-fail");
         scope.fail_metadata_save();
-        let (refreshed, scope_outcome) = run_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(refreshed.access_token, "grok-new-access");
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
+        let failure = run_refresh(&scope, &path, None).await.unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert_eq!(scope.metadata_bytes(), before);
         let persisted_marker = stored_refresh_token(&path);
         assert_eq!(persisted_marker, "grok-old-refresh");
@@ -1914,14 +2159,91 @@ mod tests {
         scope.cleanup();
 
         let (scope, path, old_scope, _, location) = setup_refresh("grok-success");
-        let (_, scope_outcome) = run_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(scope_outcome.unwrap(), old_scope);
+        let (_, scope_outcome, cache_binding) = run_refresh(&scope, &path, None).await.unwrap();
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(
+            cache_binding,
+            Some(ProviderCacheBinding::primary(old_scope.clone()))
+        );
         assert_eq!(
             scope
                 .resolve_current("grok-auth-json", &location, b"grok-new-refresh")
                 .unwrap(),
             old_scope
         );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn refresh_persistence_failure_keeps_usage_fresh_but_uncacheable() {
+        let (scope, path, old_scope, _, location) = setup_refresh("grok-save-fail");
+        let (refreshed, scope_outcome, cache_binding) = refresh_credentials_with(
+            &path,
+            TEST_ENTRY,
+            true,
+            &scope,
+            grok_test_response,
+            |_| Err("injected save failure".to_string()),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refreshed.access_token, "grok-new-access");
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(cache_binding, None);
+        assert_eq!(stored_refresh_token(&path), "grok-old-refresh");
+        assert_eq!(
+            scope
+                .resolve_current("grok-auth-json", &location, b"grok-new-refresh")
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn refresh_transient_uses_lock_reloaded_binding_not_outer_binding() {
+        let (scope, path, inner_scope, _, location) = setup_refresh("grok-lock-binding");
+        let outer_scope = scope
+            .resolve_current("grok-auth-json", &location, b"outer-refresh-a")
+            .unwrap();
+        assert_ne!(outer_scope, inner_scope);
+        let expected = ProviderCacheBinding::primary(inner_scope);
+        let request_expected = expected.clone();
+
+        let failure = refresh_credentials_with(
+            &path,
+            TEST_ENTRY,
+            true,
+            &scope,
+            move |refresh_token, client_id, attempt_binding| async move {
+                assert_eq!(refresh_token, "grok-old-refresh");
+                assert_eq!(client_id, "fixture-client");
+                assert_eq!(attempt_binding, request_expected);
+                Err(ProviderFetchFailure::transient(
+                    "Grok token refresh failed. Retrying automatically.",
+                    Some(attempt_binding),
+                    SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                        true,
+                        false,
+                        TransportPhase::Request,
+                        None,
+                    )),
+                ))
+            },
+            save_credentials,
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        match failure {
+            ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
+        }
         scope.cleanup();
     }
 }

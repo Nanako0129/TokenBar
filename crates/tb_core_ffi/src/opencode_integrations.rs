@@ -69,39 +69,114 @@ pub(crate) struct GitHubCopilotCredential {
     pub(crate) canonical_location: String,
 }
 
-/// The durable GitHub OAuth credential opencode stored for its Copilot login.
-/// A non-empty refresh string is both the request token and lineage marker;
-/// missing or invalid refresh values fall back to a non-empty access string.
-pub(crate) fn github_copilot_credential() -> Option<GitHubCopilotCredential> {
-    let path = auth_path()?;
-    let raw = std::fs::read_to_string(&path).ok()?;
-    let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
-    github_copilot_credential_from(&path, &json)
+pub(crate) enum GitHubCopilotCredentialLoad {
+    Absent,
+    Present(GitHubCopilotCredential),
+    Terminal(String),
+}
+
+/// Load only the durable GitHub OAuth credential used by Copilot. A missing
+/// file/entry or explicit logout is `Absent`; storage, syntax, canonicalization,
+/// or a present malformed OAuth entry is `Terminal` and must not be hidden as a
+/// signed-out state.
+pub(crate) fn github_copilot_credential() -> GitHubCopilotCredentialLoad {
+    let Some(path) = auth_path() else {
+        return GitHubCopilotCredentialLoad::Terminal(
+            "OpenCode auth location could not be resolved.".to_string(),
+        );
+    };
+    github_copilot_credential_at(&path)
+}
+
+fn github_copilot_credential_at(path: &std::path::Path) -> GitHubCopilotCredentialLoad {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return GitHubCopilotCredentialLoad::Absent;
+        }
+        Err(_) => {
+            return GitHubCopilotCredentialLoad::Terminal(
+                "OpenCode auth file could not be read.".to_string(),
+            );
+        }
+    };
+    let json = match serde_json::from_str::<serde_json::Value>(&raw) {
+        Ok(json) => json,
+        Err(_) => {
+            return GitHubCopilotCredentialLoad::Terminal(
+                "OpenCode auth file could not be decoded.".to_string(),
+            );
+        }
+    };
+    github_copilot_credential_from(path, &json)
 }
 
 fn github_copilot_credential_from(
     path: &std::path::Path,
     json: &serde_json::Value,
-) -> Option<GitHubCopilotCredential> {
-    let entry = json.get("github-copilot")?;
-    if entry.get("type").and_then(|t| t.as_str()) != Some("oauth") {
-        return None;
+) -> GitHubCopilotCredentialLoad {
+    let Some(entry) = json.get("github-copilot") else {
+        return GitHubCopilotCredentialLoad::Absent;
+    };
+    let Some(entry) = entry.as_object() else {
+        return GitHubCopilotCredentialLoad::Terminal(
+            "OpenCode Copilot OAuth entry is malformed.".to_string(),
+        );
+    };
+    match entry.get("type") {
+        Some(serde_json::Value::String(kind)) if kind.eq_ignore_ascii_case("oauth") => {}
+        Some(serde_json::Value::String(_)) => return GitHubCopilotCredentialLoad::Absent,
+        _ => {
+            return GitHubCopilotCredentialLoad::Terminal(
+                "OpenCode Copilot OAuth entry is malformed.".to_string(),
+            );
+        }
     }
-    let token = ["refresh", "access"]
-        .into_iter()
-        .filter_map(|key| entry.get(key).and_then(serde_json::Value::as_str))
-        .map(str::trim)
-        .find(|token| !token.is_empty())?
-        .to_string();
-    Some(GitHubCopilotCredential {
+
+    let mut token = None;
+    let mut saw_token_field = false;
+    for key in ["refresh", "access"] {
+        match entry.get(key) {
+            None => {}
+            Some(serde_json::Value::Null) => saw_token_field = true,
+            Some(serde_json::Value::String(value)) if value.trim().is_empty() => {
+                saw_token_field = true;
+            }
+            Some(serde_json::Value::String(value)) if token.is_none() => {
+                saw_token_field = true;
+                token = Some(value.trim().to_string());
+            }
+            Some(serde_json::Value::String(_)) => saw_token_field = true,
+            Some(_) => {
+                return GitHubCopilotCredentialLoad::Terminal(
+                    "OpenCode Copilot OAuth entry is malformed.".to_string(),
+                );
+            }
+        }
+    }
+    let Some(token) = token else {
+        return if saw_token_field {
+            GitHubCopilotCredentialLoad::Absent
+        } else {
+            GitHubCopilotCredentialLoad::Terminal(
+                "OpenCode Copilot OAuth entry is malformed.".to_string(),
+            )
+        };
+    };
+    let canonical_location =
+        match crate::agent_account_scope::canonical_file_location(path, Some("github-copilot")) {
+            Ok(location) => location,
+            Err(_) => {
+                return GitHubCopilotCredentialLoad::Terminal(
+                    "OpenCode Copilot auth location could not be verified.".to_string(),
+                );
+            }
+        };
+    GitHubCopilotCredentialLoad::Present(GitHubCopilotCredential {
         request_token: token.clone(),
         marker: token.into_bytes(),
         semantic_source: "opencode-auth-json",
-        canonical_location: crate::agent_account_scope::canonical_file_location(
-            path,
-            Some("github-copilot"),
-        )
-        .ok()?,
+        canonical_location,
     })
 }
 
@@ -184,7 +259,7 @@ mod tests {
                         "access": "access-marker"
                     }
                 }),
-                Some("access-marker"),
+                None,
             ),
             (
                 "both invalid",
@@ -202,13 +277,124 @@ mod tests {
         for (label, json, expected) in cases {
             let credential = github_copilot_credential_from(&path, &json);
             match expected {
-                Some(expected) => {
-                    let credential = credential.unwrap_or_else(|| panic!("{label}"));
-                    assert_eq!(credential.request_token, expected, "{label}");
-                    assert_eq!(credential.marker, expected.as_bytes(), "{label}");
-                }
-                None => assert!(credential.is_none(), "{label}"),
+                Some(expected) => match credential {
+                    GitHubCopilotCredentialLoad::Present(credential) => {
+                        assert_eq!(credential.request_token, expected, "{label}");
+                        assert_eq!(credential.marker, expected.as_bytes(), "{label}");
+                    }
+                    GitHubCopilotCredentialLoad::Absent => panic!("{label}: unexpectedly absent"),
+                    GitHubCopilotCredentialLoad::Terminal(display) => {
+                        panic!("{label}: unexpectedly terminal: {display}")
+                    }
+                },
+                None => assert!(
+                    matches!(credential, GitHubCopilotCredentialLoad::Terminal(_)),
+                    "{label}"
+                ),
             }
         }
+    }
+
+    #[test]
+    fn copilot_loader_distinguishes_absent_from_terminal_evidence() {
+        let path = std::env::temp_dir().join("fixture-opencode-auth.json");
+        for (label, json) in [
+            ("missing entry", serde_json::json!({})),
+            (
+                "non-oauth entry",
+                serde_json::json!({ "github-copilot": { "type": "api" } }),
+            ),
+            (
+                "logged out entry",
+                serde_json::json!({
+                    "github-copilot": {
+                        "type": "oauth",
+                        "refresh": null,
+                        "access": "  "
+                    }
+                }),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    github_copilot_credential_from(&path, &json),
+                    GitHubCopilotCredentialLoad::Absent
+                ),
+                "{label}"
+            );
+        }
+
+        for (label, json) in [
+            (
+                "non-object entry",
+                serde_json::json!({ "github-copilot": "oauth" }),
+            ),
+            (
+                "oauth entry without token fields",
+                serde_json::json!({ "github-copilot": { "type": "oauth" } }),
+            ),
+            (
+                "missing type",
+                serde_json::json!({ "github-copilot": { "access": "token" } }),
+            ),
+            (
+                "malformed token sibling",
+                serde_json::json!({
+                    "github-copilot": {
+                        "type": "oauth",
+                        "refresh": false,
+                        "access": "token"
+                    }
+                }),
+            ),
+        ] {
+            assert!(
+                matches!(
+                    github_copilot_credential_from(&path, &json),
+                    GitHubCopilotCredentialLoad::Terminal(_)
+                ),
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn copilot_file_loader_treats_missing_as_absent_and_io_or_json_as_terminal() {
+        let root =
+            std::env::temp_dir().join(format!("tokenbar-copilot-loader-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+
+        assert!(matches!(
+            github_copilot_credential_at(&root.join("missing.json")),
+            GitHubCopilotCredentialLoad::Absent
+        ));
+        assert!(matches!(
+            github_copilot_credential_at(&root),
+            GitHubCopilotCredentialLoad::Terminal(_)
+        ));
+
+        let invalid = root.join("invalid.json");
+        std::fs::write(&invalid, "not json").unwrap();
+        assert!(matches!(
+            github_copilot_credential_at(&invalid),
+            GitHubCopilotCredentialLoad::Terminal(_)
+        ));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn copilot_loader_rejects_non_utf8_canonical_location() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let path = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+        let json = serde_json::json!({
+            "github-copilot": { "type": "oauth", "access": "token" }
+        });
+        assert!(matches!(
+            github_copilot_credential_from(&path, &json),
+            GitHubCopilotCredentialLoad::Terminal(_)
+        ));
     }
 }

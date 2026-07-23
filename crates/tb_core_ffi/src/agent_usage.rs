@@ -14,7 +14,7 @@ use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
@@ -42,6 +42,9 @@ const CLAUDE_RAW_TOKEN_KEYCHAIN_SERVICE: &str = "tokenbar-claude-oauth-token";
 #[serde(rename_all = "camelCase")]
 pub struct AgentUsagePayload {
     generated_at: String,
+    /// Monotonic order assigned by the Rust publication gate, not by wall time
+    /// or provider completion order.
+    publication_generation: u64,
     agents: Vec<AgentUsageSnapshot>,
     /// Subscription-type providers opencode is authenticated against (its
     /// `auth.json` `type: "oauth"` entries), e.g. ["Codex", "Copilot"]. Surfaced
@@ -62,7 +65,291 @@ pub struct AgentUsageSnapshot {
     windows: Vec<UsageWindow>,
     credits: Option<CreditsSnapshot>,
     error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    transport_diagnostic: Option<SafeTransportDiagnostic>,
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum TransportCategory {
+    Timeout,
+    Dns,
+    Tls,
+    ConnectionRefused,
+    ConnectionReset,
+    Connect,
+    Request,
+    ResponseBody,
+    RateLimited,
+    ServerError,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SafeTransportDiagnostic {
+    category: TransportCategory,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    os_code: Option<i32>,
+}
+
+impl SafeTransportDiagnostic {
+    pub(crate) fn from_facts(facts: TransportErrorFacts) -> Self {
+        let category = if facts.is_timeout {
+            TransportCategory::Timeout
+        } else {
+            match facts.raw_os_code {
+                Some(61 | 111 | 10061) => TransportCategory::ConnectionRefused,
+                Some(54 | 104 | 10054) => TransportCategory::ConnectionReset,
+                _ if facts.is_connect => TransportCategory::Connect,
+                _ if facts.phase == TransportPhase::ResponseBody => TransportCategory::ResponseBody,
+                _ => TransportCategory::Request,
+            }
+        };
+        Self {
+            category,
+            status: None,
+            os_code: facts.raw_os_code,
+        }
+    }
+
+    fn rate_limited(status: u16) -> Self {
+        Self {
+            category: TransportCategory::RateLimited,
+            status: (100..=599).contains(&status).then_some(status),
+            os_code: None,
+        }
+    }
+
+    fn server_error(status: u16) -> Self {
+        Self {
+            category: TransportCategory::ServerError,
+            status: (100..=599).contains(&status).then_some(status),
+            os_code: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransportPhase {
+    Request,
+    ResponseBody,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TransportErrorFacts {
+    is_timeout: bool,
+    is_connect: bool,
+    phase: TransportPhase,
+    raw_os_code: Option<i32>,
+}
+
+impl TransportErrorFacts {
+    pub(crate) fn from_reqwest(error: &reqwest::Error, phase: TransportPhase) -> Self {
+        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
+        let mut raw_os_code = None;
+        while let Some(current) = source {
+            if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+                raw_os_code = io_error.raw_os_error();
+                break;
+            }
+            source = current.source();
+        }
+        Self {
+            is_timeout: error.is_timeout(),
+            is_connect: error.is_connect(),
+            phase,
+            raw_os_code,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn synthetic(
+        is_timeout: bool,
+        is_connect: bool,
+        phase: TransportPhase,
+        raw_os_code: Option<i32>,
+    ) -> Self {
+        Self {
+            is_timeout,
+            is_connect,
+            phase,
+            raw_os_code,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProviderCacheBinding {
+    primary: AccountScope,
+    corroborating: Option<AccountScope>,
+}
+
+impl ProviderCacheBinding {
+    pub(crate) fn new(primary: AccountScope, corroborating: Option<AccountScope>) -> Self {
+        Self {
+            primary,
+            corroborating,
+        }
+    }
+
+    pub(crate) fn primary(primary: AccountScope) -> Self {
+        Self::new(primary, None)
+    }
+}
+
+pub(crate) async fn request_after_verified_binding<B, T, E, F, Future>(
+    binding: Result<B, E>,
+    request: F,
+) -> Result<T, E>
+where
+    F: FnOnce(B) -> Future,
+    Future: std::future::Future<Output = Result<T, E>>,
+{
+    request(binding?).await
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProviderFetchFailure {
+    Transient {
+        display: String,
+        attempt_binding: Option<ProviderCacheBinding>,
+        transport_diagnostic: SafeTransportDiagnostic,
+    },
+    Terminal {
+        display: String,
+    },
+}
+
+impl ProviderFetchFailure {
+    pub(crate) fn transient(
+        display: impl Into<String>,
+        attempt_binding: Option<ProviderCacheBinding>,
+        transport_diagnostic: SafeTransportDiagnostic,
+    ) -> Self {
+        Self::Transient {
+            display: display.into(),
+            attempt_binding,
+            transport_diagnostic,
+        }
+    }
+
+    pub(crate) fn terminal(display: impl Into<String>) -> Self {
+        Self::Terminal {
+            display: display.into(),
+        }
+    }
+
+    pub(crate) fn from_send_error(
+        display: impl Into<String>,
+        attempt_binding: Option<ProviderCacheBinding>,
+        error: &reqwest::Error,
+    ) -> Self {
+        if error.is_builder() {
+            return Self::terminal(display);
+        }
+        Self::transient(
+            display,
+            attempt_binding,
+            SafeTransportDiagnostic::from_facts(TransportErrorFacts::from_reqwest(
+                error,
+                TransportPhase::Request,
+            )),
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum ProviderFetchOutcome {
+    Absent,
+    Success {
+        snapshot: AgentUsageSnapshot,
+        cache_binding: Option<ProviderCacheBinding>,
+    },
+    Failure(ProviderFetchFailure),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ResponseReadFailure {
+    Transient(SafeTransportDiagnostic),
+    Terminal(u16),
+}
+
+pub(crate) async fn read_response_body<F, Future>(
+    status: u16,
+    allow_forbidden_body: bool,
+    read: F,
+) -> Result<String, ResponseReadFailure>
+where
+    F: FnOnce() -> Future,
+    Future: std::future::Future<Output = Result<String, TransportErrorFacts>>,
+{
+    if status == 429 {
+        return Err(ResponseReadFailure::Transient(
+            SafeTransportDiagnostic::rate_limited(status),
+        ));
+    }
+    if (500..=599).contains(&status) {
+        return Err(ResponseReadFailure::Transient(
+            SafeTransportDiagnostic::server_error(status),
+        ));
+    }
+    let may_read = (200..=299).contains(&status) || (allow_forbidden_body && status == 403);
+    if !may_read {
+        return Err(ResponseReadFailure::Terminal(status));
+    }
+    match read().await {
+        Ok(body) => Ok(body),
+        Err(_) if status == 403 => Err(ResponseReadFailure::Terminal(status)),
+        Err(facts) => Err(ResponseReadFailure::Transient(
+            SafeTransportDiagnostic::from_facts(facts),
+        )),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct LastGoodEntry {
+    binding: ProviderCacheBinding,
+    snapshot: AgentUsageSnapshot,
+}
+
+#[derive(Debug, Default)]
+struct ProviderLastGoodCache {
+    entries: HashMap<String, LastGoodEntry>,
+}
+
+impl ProviderLastGoodCache {
+    fn clean_for(
+        &self,
+        client_id: &str,
+        binding: &ProviderCacheBinding,
+    ) -> Option<AgentUsageSnapshot> {
+        self.entries
+            .get(client_id)
+            .filter(|entry| &entry.binding == binding)
+            .map(|entry| entry.snapshot.clone())
+    }
+
+    fn replace(
+        &mut self,
+        client_id: &str,
+        binding: ProviderCacheBinding,
+        mut snapshot: AgentUsageSnapshot,
+    ) {
+        snapshot.error = None;
+        snapshot.transport_diagnostic = None;
+        self.entries
+            .insert(client_id.to_string(), LastGoodEntry { binding, snapshot });
+    }
+
+    fn clear(&mut self, client_id: &str) {
+        self.entries.remove(client_id);
+    }
+}
+
+static PROVIDER_LAST_GOOD: LazyLock<Mutex<ProviderLastGoodCache>> =
+    LazyLock::new(|| Mutex::new(ProviderLastGoodCache::default()));
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -518,6 +805,13 @@ struct CodexCredentials {
     scope_slot: CredentialSlot,
 }
 
+#[derive(Debug)]
+struct CodexCredentialWriteReceipt {
+    path: PathBuf,
+    previous_root: Value,
+    persisted_root: Value,
+}
+
 impl CodexCredentials {
     fn scope_marker(&self) -> &[u8] {
         self.refresh_token
@@ -540,9 +834,13 @@ struct ClaudeCredentials {
     /// Where the credentials were read from, so a rotated token can be written
     /// back to the same place (the Claude CLI shares this store).
     source: ClaudeCredentialSource,
-    /// Full credentials JSON as loaded, so a write-back preserves fields we
-    /// don't model (merge-update rather than overwrite).
+    /// Full credentials JSON captured at reload. The target object is the
+    /// optimistic write guard; top-level siblings are merged from the current
+    /// store at save time.
     raw_root: Option<Value>,
+    /// Exact Keychain account whose item was read at refresh reload. A later
+    /// write-back may validate this identity, but must never retarget it.
+    keychain_account: Option<String>,
     scope_slot: CredentialSlot,
 }
 
@@ -577,6 +875,14 @@ enum ClaudeCredentialSource {
     File,
     /// Token injected via env var — read-only, has no refresh token.
     Environment,
+}
+
+#[derive(Debug)]
+enum ClaudeLoginResolution {
+    Absent,
+    ExplicitLogout,
+    Ready(ClaudeCredentials),
+    Terminal,
 }
 
 #[derive(Debug, Deserialize)]
@@ -639,6 +945,12 @@ struct CodexCredits {
     unlimited: bool,
     #[serde(default, deserialize_with = "deserialize_optional_f64")]
     balance: Option<f64>,
+}
+
+fn finite_codex_balance(credits: Option<&CodexCredits>) -> Option<f64> {
+    credits
+        .and_then(|credits| credits.balance)
+        .filter(|balance| balance.is_finite())
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -722,7 +1034,156 @@ struct ClaudeRefreshResponse {
     expires_in: i64,
 }
 
-pub async fn run() -> AgentUsagePayload {
+fn empty_error_snapshot(
+    client_id: &str,
+    source: &str,
+    now: DateTime<Utc>,
+    display: String,
+    transport_diagnostic: Option<SafeTransportDiagnostic>,
+) -> AgentUsageSnapshot {
+    AgentUsageSnapshot {
+        client_id: client_id.to_string(),
+        source: source.to_string(),
+        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+        identity: None,
+        account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        windows: Vec::new(),
+        credits: None,
+        error: Some(display),
+        transport_diagnostic,
+    }
+}
+
+fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
+    match snapshot.client_id.as_str() {
+        "codex" => {
+            !snapshot.windows.is_empty()
+                || snapshot
+                    .credits
+                    .as_ref()
+                    .and_then(|credits| credits.remaining)
+                    .is_some_and(f64::is_finite)
+        }
+        "grok" => snapshot
+            .windows
+            .iter()
+            .any(|window| window.card_id == "billing.weekly.v1"),
+        "claude" | "copilot" | "antigravity" => !snapshot.windows.is_empty(),
+        _ => false,
+    }
+}
+
+fn lock_last_good(
+    cache: &Mutex<ProviderLastGoodCache>,
+) -> std::sync::MutexGuard<'_, ProviderLastGoodCache> {
+    cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn apply_provider_outcome_with<F>(
+    cache: &Mutex<ProviderLastGoodCache>,
+    client_id: &str,
+    failure_source: &str,
+    now: DateTime<Utc>,
+    outcome: ProviderFetchOutcome,
+    mut enrich: F,
+) -> Option<AgentUsageSnapshot>
+where
+    F: FnMut(&mut AgentUsageSnapshot),
+{
+    match outcome {
+        ProviderFetchOutcome::Absent => {
+            lock_last_good(cache).clear(client_id);
+            None
+        }
+        ProviderFetchOutcome::Success {
+            mut snapshot,
+            cache_binding,
+        } => {
+            match snapshot.account_scope.as_ref() {
+                Ok(_) | Err(AccountScopeError::NoTrustedEvidence) => {}
+                Err(_) => {
+                    lock_last_good(cache).clear(client_id);
+                    let source = snapshot.source.clone();
+                    return Some(empty_error_snapshot(
+                        client_id,
+                        &source,
+                        now,
+                        format!(
+                            "{} account identity could not be verified.",
+                            clean_plan(client_id)
+                        ),
+                        None,
+                    ));
+                }
+            }
+
+            enrich(&mut snapshot);
+            let cacheable = snapshot.account_scope.is_ok()
+                && snapshot.error.is_none()
+                && snapshot.transport_diagnostic.is_none()
+                && usable_success(&snapshot);
+            let mut cache = lock_last_good(cache);
+            match (cacheable, cache_binding) {
+                (true, Some(binding)) => cache.replace(client_id, binding, snapshot.clone()),
+                _ => cache.clear(client_id),
+            }
+            Some(snapshot)
+        }
+        ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) => {
+            lock_last_good(cache).clear(client_id);
+            Some(empty_error_snapshot(
+                client_id,
+                failure_source,
+                now,
+                display,
+                None,
+            ))
+        }
+        ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient {
+            display,
+            attempt_binding,
+            transport_diagnostic,
+        }) => {
+            let fallback = attempt_binding
+                .as_ref()
+                .and_then(|binding| lock_last_good(cache).clean_for(client_id, binding));
+            let Some(mut snapshot) = fallback else {
+                lock_last_good(cache).clear(client_id);
+                return Some(empty_error_snapshot(
+                    client_id,
+                    failure_source,
+                    now,
+                    display,
+                    Some(transport_diagnostic),
+                ));
+            };
+            snapshot.account_scope = Err(AccountScopeError::NoTrustedEvidence);
+            snapshot.error = Some(display);
+            snapshot.transport_diagnostic = Some(transport_diagnostic);
+            Some(snapshot)
+        }
+    }
+}
+
+fn apply_provider_outcome(
+    client_id: &str,
+    failure_source: &str,
+    now: DateTime<Utc>,
+    outcome: ProviderFetchOutcome,
+) -> Option<AgentUsageSnapshot> {
+    apply_provider_outcome_with(
+        &PROVIDER_LAST_GOOD,
+        client_id,
+        failure_source,
+        now,
+        outcome,
+        |snapshot| enrich_snapshot(snapshot, now.timestamp()),
+    )
+}
+
+pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
     let (codex, claude, antigravity, copilot, grok) = tokio::join!(
         fetch_codex(),
@@ -742,6 +1203,7 @@ pub async fn run() -> AgentUsagePayload {
     }
     AgentUsagePayload {
         generated_at,
+        publication_generation,
         agents,
         opencode_subscriptions: crate::opencode_integrations::detect_subscriptions(),
     }
@@ -749,181 +1211,163 @@ pub async fn run() -> AgentUsagePayload {
 
 async fn fetch_grok() -> Option<AgentUsageSnapshot> {
     let now = Utc::now();
-    let mut snapshot = match agent_grok::fetch(now).await? {
-        Ok(data) => AgentUsageSnapshot {
-            client_id: "grok".to_string(),
-            source: "oauth".to_string(),
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: data.identity,
-            account_scope: data.account_scope,
-            windows: data.windows,
-            credits: None,
-            error: None,
+    let outcome = match agent_grok::fetch(now).await {
+        Ok(Some(data)) => ProviderFetchOutcome::Success {
+            cache_binding: data.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                client_id: "grok".to_string(),
+                source: "oauth".to_string(),
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: data.identity,
+                account_scope: data.account_scope,
+                windows: data.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
         },
-        Err(error) => AgentUsageSnapshot {
-            client_id: "grok".to_string(),
-            source: "oauth".to_string(),
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: None,
-            account_scope: Err(AccountScopeError::NoTrustedEvidence),
-            windows: Vec::new(),
-            credits: None,
-            error: Some(error),
-        },
+        Ok(None) => ProviderFetchOutcome::Absent,
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    enrich_snapshot(&mut snapshot, now.timestamp());
-    Some(snapshot)
+    apply_provider_outcome("grok", "oauth", now, outcome)
 }
 
 async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
-    // No opencode Copilot auth → no card at all (rather than an error row).
-    let credential = crate::opencode_integrations::github_copilot_credential()?;
     let now = Utc::now();
-    let mut snapshot = match agent_copilot::fetch(now, credential).await {
-        Ok(data) => AgentUsageSnapshot {
-            client_id: "copilot".to_string(),
-            source: "oauth".to_string(),
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: data.identity,
-            account_scope: data.account_scope,
-            windows: data.windows,
-            credits: None,
-            error: None,
-        },
-        Err(error) => AgentUsageSnapshot {
-            client_id: "copilot".to_string(),
-            source: "oauth".to_string(),
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: None,
-            account_scope: Err(AccountScopeError::NoTrustedEvidence),
-            windows: Vec::new(),
-            credits: None,
-            error: Some(error),
-        },
+    let outcome = match crate::opencode_integrations::github_copilot_credential() {
+        crate::opencode_integrations::GitHubCopilotCredentialLoad::Absent => {
+            ProviderFetchOutcome::Absent
+        }
+        crate::opencode_integrations::GitHubCopilotCredentialLoad::Terminal(display) => {
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display))
+        }
+        crate::opencode_integrations::GitHubCopilotCredentialLoad::Present(credential) => {
+            match agent_copilot::fetch(now, credential).await {
+                Ok(data) => ProviderFetchOutcome::Success {
+                    cache_binding: Some(data.cache_binding),
+                    snapshot: AgentUsageSnapshot {
+                        client_id: "copilot".to_string(),
+                        source: "oauth".to_string(),
+                        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                        identity: data.identity,
+                        account_scope: data.account_scope,
+                        windows: data.windows,
+                        credits: None,
+                        error: None,
+                        transport_diagnostic: None,
+                    },
+                },
+                Err(failure) => ProviderFetchOutcome::Failure(failure),
+            }
+        }
     };
-    enrich_snapshot(&mut snapshot, now.timestamp());
-    Some(snapshot)
+    apply_provider_outcome("copilot", "oauth", now, outcome)
 }
 
 async fn fetch_antigravity() -> AgentUsageSnapshot {
     let now = Utc::now();
-    let mut snapshot = match agent_antigravity::fetch(now).await {
-        Ok(fetched) => AgentUsageSnapshot {
-            client_id: "antigravity".to_string(),
-            source: fetched.source,
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: fetched.identity,
-            account_scope: fetched.account_scope,
-            windows: fetched.windows,
-            credits: None,
-            error: None,
+    let outcome = match agent_antigravity::fetch(now).await {
+        Ok(fetched) => ProviderFetchOutcome::Success {
+            cache_binding: fetched.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                client_id: "antigravity".to_string(),
+                source: fetched.source,
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: fetched.identity,
+                account_scope: fetched.account_scope,
+                windows: fetched.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
         },
-        Err(error) => AgentUsageSnapshot {
-            client_id: "antigravity".to_string(),
-            source: "oauth".to_string(),
-            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: None,
-            account_scope: Err(AccountScopeError::NoTrustedEvidence),
-            windows: Vec::new(),
-            credits: None,
-            error: Some(error),
-        },
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    enrich_snapshot(&mut snapshot, now.timestamp());
-    snapshot
+    apply_provider_outcome("antigravity", "oauth", now, outcome)
+        .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
-    match fetch_codex_inner().await {
-        Ok(snapshot) => snapshot,
-        Err(error) => AgentUsageSnapshot {
-            client_id: "codex".to_string(),
-            source: "oauth".to_string(),
-            updated_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: None,
-            account_scope: Err(AccountScopeError::NoTrustedEvidence),
-            windows: Vec::new(),
-            credits: None,
-            error: Some(error),
-        },
-    }
+    let now = Utc::now();
+    apply_provider_outcome("codex", "oauth", now, fetch_codex_inner().await)
+        .expect("Codex is a required provider card")
 }
 
-/// Claude's `/api/oauth/usage` rate-limits aggressively (and the budget is
-/// shared with any other monitor on the account, e.g. codexbar). Modeled on
-/// codexbar's ClaudeOAuthUsageRateLimitGate: after a 429, stop hitting the
-/// endpoint until Retry-After (default 5 min) and serve the last good
-/// snapshot so the card keeps its data instead of flashing an error.
+/// Claude's `/api/oauth/usage` rate-limits aggressively. The gate stores only
+/// the cooldown deadline and the exact opaque binding that triggered it; display
+/// snapshots live exclusively in the provider last-good cache.
+#[derive(Debug, Default)]
 struct ClaudeUsageGate {
     blocked_until: Option<DateTime<Utc>>,
-    last_good: Option<AgentUsageSnapshot>,
+    binding: Option<ProviderCacheBinding>,
+}
+
+impl ClaudeUsageGate {
+    fn blocked_until_for(
+        &mut self,
+        binding: &ProviderCacheBinding,
+        now: DateTime<Utc>,
+    ) -> Option<DateTime<Utc>> {
+        if self.binding.as_ref() != Some(binding) {
+            self.blocked_until = None;
+            self.binding = None;
+            return None;
+        }
+        match self.blocked_until {
+            Some(until) if until > now => Some(until),
+            Some(_) => {
+                self.blocked_until = None;
+                self.binding = None;
+                None
+            }
+            None => None,
+        }
+    }
+
+    fn record_rate_limit(
+        &mut self,
+        binding: ProviderCacheBinding,
+        retry_after: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) {
+        self.blocked_until = Some(
+            retry_after
+                .filter(|until| *until > now)
+                .unwrap_or_else(|| now + chrono::Duration::minutes(5)),
+        );
+        self.binding = Some(binding);
+    }
+
+    fn clear(&mut self) {
+        self.blocked_until = None;
+        self.binding = None;
+    }
 }
 
 static CLAUDE_USAGE_GATE: Mutex<ClaudeUsageGate> = Mutex::new(ClaudeUsageGate {
     blocked_until: None,
-    last_good: None,
+    binding: None,
 });
 
-/// Lock the gate, recovering from a poisoned mutex instead of panicking. Under
-/// the release profile's unwind + FFI-boundary `catch_unwind` (see `guarded` in
-/// lib.rs), a panic caught mid-section poisons this static; `into_inner()` keeps
-/// the 429 gate working for the rest of the process instead of wedging every
-/// later `tb_agent_usage` call — same stance as the live-tail lock in lib.rs.
 fn lock_gate() -> std::sync::MutexGuard<'static, ClaudeUsageGate> {
     CLAUDE_USAGE_GATE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn claude_gate_blocked_until(now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let mut gate = lock_gate();
-    match gate.blocked_until {
-        Some(until) if until > now => Some(until),
-        Some(_) => {
-            gate.blocked_until = None;
-            None
-        }
-        None => None,
-    }
-}
-
-fn claude_gate_record_rate_limit(retry_after: Option<DateTime<Utc>>, now: DateTime<Utc>) {
-    let blocked_until = retry_after
-        .filter(|until| *until > now)
-        .unwrap_or_else(|| now + chrono::Duration::minutes(5));
-    lock_gate().blocked_until = Some(blocked_until);
-}
-
-fn claude_gate_record_success(snapshot: &AgentUsageSnapshot) {
-    let mut gate = lock_gate();
-    gate.blocked_until = None;
-    gate.last_good = Some(snapshot.clone());
-}
-
-/// While the gate is closed, prefer the cached snapshot (its `updated_at`
-/// stays honest); with nothing cached yet, surface a countdown error.
-fn claude_gate_fallback(blocked_until: DateTime<Utc>, now: DateTime<Utc>) -> AgentUsageSnapshot {
-    if let Some(mut snapshot) = lock_gate().last_good.clone() {
-        // A cached 429 response is not current account-scope evidence. Keeping
-        // the stale scope here would let the next enrichment write history for
-        // an account that was not authenticated by this poll.
-        snapshot.account_scope = Err(AccountScopeError::NoTrustedEvidence);
-        return snapshot;
-    }
+fn claude_gate_failure(
+    binding: ProviderCacheBinding,
+    blocked_until: DateTime<Utc>,
+    now: DateTime<Utc>,
+) -> ProviderFetchFailure {
     let wait_secs = (blocked_until - now).num_seconds().max(0);
-    AgentUsageSnapshot {
-        client_id: "claude".to_string(),
-        source: "oauth".to_string(),
-        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-        identity: None,
-        account_scope: Err(AccountScopeError::NoTrustedEvidence),
-        windows: Vec::new(),
-        credits: None,
-        error: Some(format!(
-            "Claude OAuth usage endpoint is rate limited. Retrying automatically in ~{}s.",
-            wait_secs
-        )),
-    }
+    ProviderFetchFailure::transient(
+        format!(
+            "Claude OAuth usage endpoint is rate limited. Retrying automatically in ~{wait_secs}s."
+        ),
+        Some(binding),
+        SafeTransportDiagnostic::rate_limited(429),
+    )
 }
 
 fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<DateTime<Utc>> {
@@ -941,129 +1385,108 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
 
 async fn fetch_claude() -> AgentUsageSnapshot {
     let now = Utc::now();
-    if let Some(blocked_until) = claude_gate_blocked_until(now) {
-        return claude_gate_fallback(blocked_until, now);
-    }
-
-    match fetch_claude_inner().await {
-        Ok(mut snapshot) => {
-            enrich_snapshot(&mut snapshot, now.timestamp());
-            // Cache the display-ready snapshot. A later 429 fallback returns it
-            // without another enrichment pass, so no history write occurs and
-            // the last-good typed pace remains intact.
-            claude_gate_record_success(&snapshot);
-            snapshot
-        }
-        Err(error) => {
-            // A 429 inside fetch_claude_inner arms the gate; fall back to the
-            // cached, already-enriched snapshot rather than blanking the card.
-            let now = Utc::now();
-            if let Some(blocked_until) = claude_gate_blocked_until(now) {
-                return claude_gate_fallback(blocked_until, now);
-            }
-
-            // "unconfigured" == no credential at all, so the UI shows a setup
-            // prompt; every other error is a real failure of a present credential.
-            let source = if error.as_str() == CLAUDE_UNCONFIGURED_ERROR {
-                "unconfigured"
-            } else {
-                "oauth"
-            };
-            let mut snapshot = AgentUsageSnapshot {
-                client_id: "claude".to_string(),
-                source: source.to_string(),
-                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-                identity: None,
-                account_scope: Err(AccountScopeError::NoTrustedEvidence),
-                windows: Vec::new(),
-                credits: None,
-                error: Some(error),
-            };
-            enrich_snapshot(&mut snapshot, now.timestamp());
-            snapshot
-        }
-    }
+    let (failure_source, outcome) = fetch_claude_inner().await;
+    apply_provider_outcome("claude", failure_source, now, outcome)
+        .expect("Claude is a required provider card")
 }
 
-async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
-    let mut credentials = load_codex_credentials()?;
-    let mut refreshed_scope = None;
-    if credentials_needs_refresh(credentials.last_refresh) {
-        if credentials
-            .refresh_token
-            .as_deref()
-            .unwrap_or("")
-            .is_empty()
-        {
-            return Err(
-                "Codex OAuth token needs refresh but auth.json has no refresh token.".to_string(),
-            );
+async fn fetch_codex_inner() -> ProviderFetchOutcome {
+    let loaded = match load_codex_credentials() {
+        Ok(credentials) => credentials,
+        Err(display) => {
+            return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display));
         }
-        let refreshed = refresh_codex_credentials(&credentials.auth_path).await?;
-        credentials = refreshed.0;
-        refreshed_scope = Some(refreshed.1);
-    }
-
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("build Codex OAuth client: {}", e))?;
-
-    let mut request = client
-        .get(CODEX_USAGE_URL)
-        .bearer_auth(&credentials.access_token)
-        .header(reqwest::header::ACCEPT, "application/json")
-        .header(reqwest::header::USER_AGENT, "TokenBar");
+    };
+    let verified = if credentials_needs_refresh(loaded.last_refresh) {
+        refresh_codex_credentials(&loaded.auth_path).await
+    } else {
+        resolve_codex_cache_binding(&loaded)
+            .map(|binding| (loaded, binding))
+            .map_err(|_| {
+                ProviderFetchFailure::terminal("Codex account identity could not be verified.")
+            })
+    };
+    let (credentials, cache_binding, response) =
+        match request_after_verified_binding(verified, |(credentials, cache_binding)| async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|_| {
+                    ProviderFetchFailure::terminal("Codex usage client could not be created.")
+                })?;
+            let request_account_id = credentials
+                .account_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty());
+            let mut request = client
+                .get(CODEX_USAGE_URL)
+                .bearer_auth(&credentials.access_token)
+                .header(reqwest::header::ACCEPT, "application/json")
+                .header(reqwest::header::USER_AGENT, "TokenBar");
+            if let Some(account_id) = request_account_id {
+                request = request.header("ChatGPT-Account-Id", account_id);
+            }
+            let response = request.send().await.map_err(|error| {
+                ProviderFetchFailure::from_send_error(
+                    "Codex usage request failed. Retrying automatically.",
+                    Some(cache_binding.clone()),
+                    &error,
+                )
+            })?;
+            Ok((credentials, cache_binding, response))
+        })
+        .await
+        {
+            Ok(verified) => verified,
+            Err(failure) => return ProviderFetchOutcome::Failure(failure),
+        };
     let request_account_id = credentials
         .account_id
         .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty());
-    if let Some(account_id) = request_account_id {
-        request = request.header("ChatGPT-Account-Id", account_id);
-    }
+    let status = response.status().as_u16();
+    let body = match read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    {
+        Ok(body) => body,
+        Err(ResponseReadFailure::Transient(diagnostic)) => {
+            return ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Codex usage request failed. Retrying automatically.",
+                Some(cache_binding),
+                diagnostic,
+            ));
+        }
+        Err(ResponseReadFailure::Terminal(401 | 403)) => {
+            return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                "Codex OAuth token expired or invalid. Run `codex` to log in again.",
+            ));
+        }
+        Err(ResponseReadFailure::Terminal(status)) => {
+            return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(format!(
+                "Codex usage API rejected the request (status {status})."
+            )));
+        }
+    };
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("Codex OAuth request failed: {}", e))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Codex OAuth response: {}", e))?;
-
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(
-            "Codex OAuth token expired or invalid. Run `codex` to log in again.".to_string(),
-        );
-    }
-    if !status.is_success() {
-        return Err(format!("Codex usage API returned {}.", status.as_u16()));
-    }
-
-    let usage: CodexUsageResponse =
-        serde_json::from_str(&body).map_err(|e| format!("decode Codex usage response: {}", e))?;
+    let mut usage: CodexUsageResponse = match serde_json::from_str(&body) {
+        Ok(usage) => usage,
+        Err(_) => {
+            return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                "Codex usage response could not be decoded.",
+            ));
+        }
+    };
     let now = Utc::now();
-    let account_scope = resolve_codex_account_scope(
-        refreshed_scope,
-        request_account_id,
-        |account_id| {
-            agent_account_scope::resolve_authoritative(
-                "codex",
-                AuthoritativeIdKind::OpaqueId,
-                account_id,
-            )
-        },
-        || {
-            agent_account_scope::resolve_credential(
-                "codex",
-                credentials.scope_slot.semantic_source,
-                &credentials.scope_slot.canonical_location,
-                credentials.scope_marker(),
-            )
-        },
-    );
+    let account_scope = cache_binding
+        .corroborating
+        .clone()
+        .unwrap_or_else(|| cache_binding.primary.clone());
     let identity = Some(AgentIdentity {
         email: credentials.id_token.as_deref().and_then(jwt_email),
         plan: usage.plan_type.as_deref().map(clean_plan).or_else(|| {
@@ -1079,128 +1502,301 @@ async fn fetch_codex_inner() -> Result<AgentUsageSnapshot, String> {
         usage.additional_rate_limits.as_deref(),
         now,
     );
-    if windows.is_empty() && usage.credits.as_ref().and_then(|c| c.balance).is_none() {
-        return Err("Codex usage API returned no rate-limit windows.".to_string());
+    let finite_balance = finite_codex_balance(usage.credits.as_ref());
+    if let Some(credits) = usage.credits.as_mut() {
+        credits.balance = finite_balance;
+    }
+    if windows.is_empty() && finite_balance.is_none() {
+        return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+            "Codex usage API returned no usable quota data.",
+        ));
     }
 
-    // Legacy v2 migration is deliberately gated on the successful request that
-    // actually carried this account header and on the accepted scope result.
-    if let (Some(request_account_id), Ok(scope)) = (request_account_id, &account_scope) {
+    if let Some(request_account_id) = request_account_id {
         let _ = crate::agent_quota_history::migrate_codex_v2(
             request_account_id,
-            scope.as_str(),
+            account_scope.as_str(),
             now.timestamp(),
         );
     }
 
-    let mut snapshot = AgentUsageSnapshot {
-        client_id: "codex".to_string(),
-        source: "oauth".to_string(),
-        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-        identity,
-        account_scope,
-        windows,
-        credits: usage.credits.map(|credits| CreditsSnapshot {
-            remaining: credits.balance,
-            unlimited: credits.unlimited,
-        }),
-        error: None,
-    };
-    enrich_snapshot(&mut snapshot, now.timestamp());
-    Ok(snapshot)
-}
-
-fn resolve_codex_account_scope<ResolveAuthoritative, ResolveCredential>(
-    refreshed_scope: Option<Result<AccountScope, AccountScopeError>>,
-    request_account_id: Option<&str>,
-    resolve_authoritative: ResolveAuthoritative,
-    resolve_credential: ResolveCredential,
-) -> Result<AccountScope, AccountScopeError>
-where
-    ResolveAuthoritative: FnOnce(&str) -> Result<AccountScope, AccountScopeError>,
-    ResolveCredential: FnOnce() -> Result<AccountScope, AccountScopeError>,
-{
-    if let Some(Err(error)) = refreshed_scope.as_ref() {
-        return Err(*error);
-    }
-    if let Some(account_id) = request_account_id {
-        return resolve_authoritative(account_id);
-    }
-    refreshed_scope.unwrap_or_else(resolve_credential)
-}
-
-async fn fetch_claude_inner() -> Result<AgentUsageSnapshot, String> {
-    // Mirror Claude Code's auth precedence: CLAUDE_CODE_OAUTH_TOKEN (our env, or
-    // harvested from the user's ~/.zshrc) outranks a stored subscription /login,
-    // because Claude Code itself consumes that token first. So TokenBar reports
-    // the account Claude Code is actually spending against, read from the
-    // ratelimit headers. (This is why the harvest runs even for /login users.)
-    if let Some(token) = resolve_claude_code_oauth_token().await {
-        return claude_header_snapshot(
-            &claude_credentials_from_access_token(token),
-            Utc::now(),
-            None,
-        )
-        .await;
-    }
-
-    // A stored full login (TokenBar env override / Keychain / file) uses the
-    // richer oauth/usage endpoint. Any failure -- a login that can't refresh, or
-    // a credentials file that exists but can't be read (permissions / I/O) -- is
-    // deferred: we still try the tokenbar Keychain setup-token below, and surface
-    // the error only if that misses too. So a stale login / read error never
-    // strands a working setup-token, yet a genuine failure isn't masked by the
-    // generic "unconfigured" setup prompt.
-    let deferred_error: Option<String> = match load_claude_login_credentials() {
-        Ok(Some(credentials)) => match fetch_claude_oauth_usage(credentials).await {
-            Ok(snapshot) => return Ok(snapshot),
-            Err(login_error) => Some(login_error),
+    ProviderFetchOutcome::Success {
+        snapshot: AgentUsageSnapshot {
+            client_id: "codex".to_string(),
+            source: "oauth".to_string(),
+            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            identity,
+            account_scope: Ok(account_scope),
+            windows,
+            credits: usage.credits.map(|credits| CreditsSnapshot {
+                remaining: credits.balance,
+                unlimited: credits.unlimited,
+            }),
+            error: None,
+            transport_diagnostic: None,
         },
-        Ok(None) => None,
-        Err(read_error) => Some(read_error),
-    };
+        cache_binding: Some(cache_binding),
+    }
+}
 
-    // Last resort: the tokenbar-claude-oauth-token Keychain item reads limits
-    // straight from the ratelimit headers (no oauth/usage GET, no 429 gate).
-    if let Some(token) = resolve_claude_keychain_token() {
-        return claude_header_snapshot(
-            &claude_credentials_from_access_token(token),
-            Utc::now(),
-            None,
-        )
-        .await;
+fn resolve_codex_cache_binding(
+    credentials: &CodexCredentials,
+) -> Result<ProviderCacheBinding, AccountScopeError> {
+    let primary = agent_account_scope::resolve_credential(
+        "codex",
+        credentials.scope_slot.semantic_source,
+        &credentials.scope_slot.canonical_location,
+        credentials.scope_marker(),
+    )?;
+    let corroborating = credentials
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|account_id| {
+            agent_account_scope::resolve_authoritative(
+                "codex",
+                AuthoritativeIdKind::OpaqueId,
+                account_id,
+            )
+        })
+        .transpose()?;
+    Ok(ProviderCacheBinding::new(primary, corroborating))
+}
+
+fn claude_cache_binding(
+    credentials: &ClaudeCredentials,
+) -> Result<ProviderCacheBinding, AccountScopeError> {
+    credentials
+        .resolve_account_scope()
+        .map(ProviderCacheBinding::primary)
+}
+
+fn clear_claude_gate_for_login_resolution(
+    login: &ClaudeLoginResolution,
+    gate: &mut ClaudeUsageGate,
+) {
+    if matches!(
+        login,
+        ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout
+    ) {
+        gate.clear();
+    }
+}
+
+async fn fetch_claude_inner() -> (&'static str, ProviderFetchOutcome) {
+    if let Some(token) = resolve_claude_code_oauth_token().await {
+        return fetch_claude_setup_token(token).await;
     }
 
-    Err(deferred_error.unwrap_or_else(|| CLAUDE_UNCONFIGURED_ERROR.to_string()))
+    let login = load_claude_login_credentials();
+    clear_claude_gate_for_login_resolution(&login, &mut lock_gate());
+    fetch_claude_login_or_setup_with(
+        login,
+        |credentials| async move {
+            let verified = claude_cache_binding(&credentials).map_err(|_| {
+                ProviderFetchFailure::terminal("Claude account identity could not be verified.")
+            });
+            request_after_verified_binding(verified, |binding| async move {
+                Ok(fetch_claude_oauth_usage(credentials, binding).await)
+            })
+            .await
+            .unwrap_or_else(|failure| ("oauth", ProviderFetchOutcome::Failure(failure)))
+        },
+        resolve_claude_keychain_token,
+        fetch_claude_setup_token,
+    )
+    .await
+}
+
+async fn fetch_claude_setup_token(
+    token: ResolvedClaudeToken,
+) -> (&'static str, ProviderFetchOutcome) {
+    let credentials = claude_credentials_from_access_token(token);
+    let verified = claude_cache_binding(&credentials).map_err(|_| {
+        ProviderFetchFailure::terminal("Claude setup-token account identity could not be verified.")
+    });
+    let outcome = request_after_verified_binding(verified, |binding| async move {
+        Ok(claude_header_snapshot(
+            &credentials,
+            Utc::now(),
+            Ok(binding.primary.clone()),
+            Some(binding),
+        )
+        .await)
+    })
+    .await
+    .unwrap_or_else(ProviderFetchOutcome::Failure);
+    ("setup-token", outcome)
+}
+
+async fn fetch_claude_login_or_setup_with<Login, LoginFuture, LoadSetup, Setup, SetupFuture>(
+    login: ClaudeLoginResolution,
+    request_login: Login,
+    load_setup: LoadSetup,
+    request_setup: Setup,
+) -> (&'static str, ProviderFetchOutcome)
+where
+    Login: FnOnce(ClaudeCredentials) -> LoginFuture,
+    LoginFuture: std::future::Future<Output = (&'static str, ProviderFetchOutcome)>,
+    LoadSetup: FnOnce() -> Result<Option<ResolvedClaudeToken>, String>,
+    Setup: FnOnce(ResolvedClaudeToken) -> SetupFuture,
+    SetupFuture: std::future::Future<Output = (&'static str, ProviderFetchOutcome)>,
+{
+    match login {
+        ClaudeLoginResolution::Ready(credentials) => request_login(credentials).await,
+        ClaudeLoginResolution::Terminal => (
+            "oauth",
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                CLAUDE_CREDENTIALS_LOAD_ERROR,
+            )),
+        ),
+        ClaudeLoginResolution::Absent | ClaudeLoginResolution::ExplicitLogout => {
+            match load_setup() {
+                Ok(Some(token)) => request_setup(token).await,
+                Ok(None) => (
+                    "unconfigured",
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                        CLAUDE_UNCONFIGURED_ERROR,
+                    )),
+                ),
+                Err(_) => (
+                    "setup-token",
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                        CLAUDE_CREDENTIALS_LOAD_ERROR,
+                    )),
+                ),
+            }
+        }
+    }
 }
 
 async fn fetch_claude_oauth_usage(
-    mut credentials: ClaudeCredentials,
-) -> Result<AgentUsageSnapshot, String> {
-    let mut refreshed_scope = None;
-    if claude_credentials_expired(&credentials) {
-        let refreshed = refresh_claude_credentials(&credentials).await?;
-        credentials = refreshed.0;
-        refreshed_scope = Some(refreshed.1);
-    }
+    credentials: ClaudeCredentials,
+    pre_binding: ProviderCacheBinding,
+) -> (&'static str, ProviderFetchOutcome) {
+    fetch_claude_login_usage_with(
+        credentials,
+        pre_binding,
+        Utc::now(),
+        |binding, now| {
+            let mut gate = lock_gate();
+            gate.blocked_until_for(binding, now)
+        },
+        |credentials| async move { refresh_claude_credentials(&credentials).await },
+        |credentials, account_scope, cache_binding| async move {
+            claude_header_snapshot(&credentials, Utc::now(), Ok(account_scope), cache_binding).await
+        },
+        |credentials, account_scope, cache_binding, gate_binding| async move {
+            fetch_claude_oauth_usage_request(
+                &credentials,
+                account_scope,
+                cache_binding,
+                gate_binding,
+            )
+            .await
+        },
+    )
+    .await
+}
 
-    if !credentials.scopes.is_empty()
+async fn fetch_claude_login_usage_with<
+    Gate,
+    Refresh,
+    RefreshFuture,
+    Header,
+    HeaderFuture,
+    Oauth,
+    OauthFuture,
+>(
+    credentials: ClaudeCredentials,
+    pre_binding: ProviderCacheBinding,
+    now: DateTime<Utc>,
+    blocked_until_for: Gate,
+    refresh: Refresh,
+    header: Header,
+    oauth: Oauth,
+) -> (&'static str, ProviderFetchOutcome)
+where
+    Gate: FnOnce(&ProviderCacheBinding, DateTime<Utc>) -> Option<DateTime<Utc>>,
+    Refresh: FnOnce(ClaudeCredentials) -> RefreshFuture,
+    RefreshFuture: std::future::Future<
+        Output = Result<
+            (
+                ClaudeCredentials,
+                AccountScope,
+                Option<ProviderCacheBinding>,
+            ),
+            ProviderFetchFailure,
+        >,
+    >,
+    Header: FnOnce(ClaudeCredentials, AccountScope, Option<ProviderCacheBinding>) -> HeaderFuture,
+    HeaderFuture: std::future::Future<Output = ProviderFetchOutcome>,
+    Oauth: FnOnce(
+        ClaudeCredentials,
+        AccountScope,
+        Option<ProviderCacheBinding>,
+        ProviderCacheBinding,
+    ) -> OauthFuture,
+    OauthFuture: std::future::Future<Output = (&'static str, ProviderFetchOutcome)>,
+{
+    let header_route = !credentials.scopes.is_empty()
         && !credentials
             .scopes
             .iter()
-            .any(|scope| scope == "user:profile")
-    {
-        // Inference-only token declared explicit non-user:profile scopes — skip
-        // the (guaranteed-403) oauth/usage GET and read limits from headers.
-        return claude_header_snapshot(&credentials, Utc::now(), refreshed_scope).await;
+            .any(|scope| scope == "user:profile");
+    if !header_route {
+        if let Some(blocked_until) = blocked_until_for(&pre_binding, now) {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(claude_gate_failure(pre_binding, blocked_until, now)),
+            );
+        }
     }
 
-    let client = reqwest::Client::builder()
+    let (credentials, account_scope, cache_binding) = if claude_credentials_expired(&credentials) {
+        match refresh(credentials).await {
+            Ok(refreshed) => refreshed,
+            Err(failure) => return ("oauth", ProviderFetchOutcome::Failure(failure)),
+        }
+    } else {
+        let account_scope = pre_binding.primary.clone();
+        (credentials, account_scope, Some(pre_binding))
+    };
+
+    if header_route {
+        return (
+            "setup-token",
+            header(credentials, account_scope, cache_binding).await,
+        );
+    }
+
+    let gate_binding = ProviderCacheBinding::primary(account_scope.clone());
+    oauth(credentials, account_scope, cache_binding, gate_binding).await
+}
+
+async fn fetch_claude_oauth_usage_request(
+    credentials: &ClaudeCredentials,
+    account_scope: AccountScope,
+    cache_binding: Option<ProviderCacheBinding>,
+    gate_binding: ProviderCacheBinding,
+) -> (&'static str, ProviderFetchOutcome) {
+    let client = match reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build Claude OAuth client: {}", e))?;
+    {
+        Ok(client) => client,
+        Err(_) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude usage client could not be created.",
+                )),
+            );
+        }
+    };
 
-    let response = client
+    let response = match client
         .get(CLAUDE_USAGE_URL)
         .bearer_auth(&credentials.access_token)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -1209,73 +1805,133 @@ async fn fetch_claude_oauth_usage(
         .header("anthropic-beta", "oauth-2025-04-20")
         .send()
         .await
-        .map_err(|e| format!("Claude OAuth request failed: {}", e))?;
-    let status = response.status();
-    let retry_after = if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER))
-    } else {
-        None
-    };
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Claude OAuth response: {}", e))?;
-
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err(
-            "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.".to_string(),
-        );
-    }
-    if status == reqwest::StatusCode::FORBIDDEN {
-        // oauth/usage requires user:profile. An inference-only token (e.g.
-        // `claude setup-token`) is denied *specifically* for that scope — fall
-        // back to the unified rate-limit headers, which it *is* allowed to read.
-        // Any other 403 keeps the actionable re-auth error (and skips the probe,
-        // so we don't spend an inference call on an unrelated denial).
-        if body.contains("user:profile") {
-            return claude_header_snapshot(&credentials, Utc::now(), refreshed_scope).await;
+    {
+        Ok(response) => response,
+        Err(error) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::from_send_error(
+                    "Claude usage request failed. Retrying automatically.",
+                    cache_binding,
+                    &error,
+                )),
+            );
         }
-        return Err(
-            "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile."
-                .to_string(),
+    };
+    let status = response.status().as_u16();
+    let retry_after = (status == 429)
+        .then(|| parse_retry_after(response.headers().get(reqwest::header::RETRY_AFTER)))
+        .flatten();
+    let body = match read_response_body(status, true, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    {
+        Ok(body) => body,
+        Err(ResponseReadFailure::Transient(diagnostic)) => {
+            if status == 429 {
+                lock_gate().record_rate_limit(gate_binding, retry_after, Utc::now());
+            }
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                    "Claude usage request failed. Retrying automatically.",
+                    cache_binding,
+                    diagnostic,
+                )),
+            );
+        }
+        Err(ResponseReadFailure::Terminal(401)) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+                )),
+            );
+        }
+        Err(ResponseReadFailure::Terminal(403)) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
+                )),
+            );
+        }
+        Err(ResponseReadFailure::Terminal(status)) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(format!(
+                    "Claude usage API rejected the request (status {status})."
+                ))),
+            );
+        }
+    };
+
+    if status == 403 {
+        if body.contains("user:profile") {
+            return (
+                "setup-token",
+                claude_header_snapshot(credentials, Utc::now(), Ok(account_scope), cache_binding)
+                    .await,
+            );
+        }
+        return (
+            "oauth",
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                "Claude OAuth usage was denied. Run `claude logout && claude login` to grant user:profile.",
+            )),
         );
-    }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        claude_gate_record_rate_limit(retry_after, Utc::now());
-        return Err(
-            "Claude OAuth usage endpoint is rate limited. Backing off automatically.".to_string(),
-        );
-    }
-    if !status.is_success() {
-        return Err(format!("Claude usage API returned {}.", status.as_u16()));
     }
 
-    let usage: ClaudeUsageResponse =
-        serde_json::from_str(&body).map_err(|e| format!("decode Claude usage response: {}", e))?;
+    let usage: ClaudeUsageResponse = match serde_json::from_str(&body) {
+        Ok(usage) => usage,
+        Err(_) => {
+            return (
+                "oauth",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude usage response could not be decoded.",
+                )),
+            );
+        }
+    };
     let now = Utc::now();
     let windows = claude_windows(&usage, now);
     if windows.is_empty() {
-        return Err("Claude usage API returned no rate-limit windows.".to_string());
+        return (
+            "oauth",
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                "Claude usage API returned no usable quota windows.",
+            )),
+        );
     }
-    let account_scope = refreshed_scope.unwrap_or_else(|| credentials.resolve_account_scope());
+    lock_gate().clear();
 
-    Ok(AgentUsageSnapshot {
-        client_id: "claude".to_string(),
-        source: "oauth".to_string(),
-        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-        identity: Some(AgentIdentity {
-            email: None,
-            plan: first_non_empty([
-                credentials.subscription_type.as_deref(),
-                credentials.rate_limit_tier.as_deref(),
-            ])
-            .map(clean_plan),
-        }),
-        account_scope,
-        windows,
-        credits: claude_credits(usage.extra_usage.as_ref()),
-        error: None,
-    })
+    (
+        "oauth",
+        ProviderFetchOutcome::Success {
+            snapshot: AgentUsageSnapshot {
+                client_id: "claude".to_string(),
+                source: "oauth".to_string(),
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: Some(AgentIdentity {
+                    email: None,
+                    plan: first_non_empty([
+                        credentials.subscription_type.as_deref(),
+                        credentials.rate_limit_tier.as_deref(),
+                    ])
+                    .map(clean_plan),
+                }),
+                account_scope: Ok(account_scope),
+                windows,
+                credits: claude_credits(usage.extra_usage.as_ref()),
+                error: None,
+                transport_diagnostic: None,
+            },
+            cache_binding,
+        },
+    )
 }
 
 /// Fallback for inference-only tokens (`claude setup-token`): the oauth/usage
@@ -1312,7 +1968,10 @@ fn refresh_cached_windows(windows: &[UsageWindow], now: DateTime<Utc>) -> Option
     Some(refreshed)
 }
 
-async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>, String> {
+async fn fetch_claude_via_headers(
+    access_token: &str,
+    attempt_binding: Option<ProviderCacheBinding>,
+) -> Result<Vec<UsageWindow>, ProviderFetchFailure> {
     {
         let now = Utc::now();
         let guard = CLAUDE_HEADER_CACHE
@@ -1330,7 +1989,9 @@ async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build Claude header-probe client: {}", e))?;
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Claude header-probe client could not be created.")
+        })?;
 
     let response = client
         .post(CLAUDE_MESSAGES_URL)
@@ -1347,63 +2008,83 @@ async fn fetch_claude_via_headers(access_token: &str) -> Result<Vec<UsageWindow>
         }))
         .send()
         .await
-        .map_err(|e| format!("Claude header probe failed: {}", e))?;
+        .map_err(|error| {
+            ProviderFetchFailure::from_send_error(
+                "Claude header probe failed. Retrying automatically.",
+                attempt_binding.clone(),
+                &error,
+            )
+        })?;
 
-    let status = response.status();
-    // Read headers before consuming the body — this returns an owned Vec, ending
-    // the borrow of `response`.
+    let status = response.status().as_u16();
     let windows = parse_unified_ratelimit_windows(response.headers(), Utc::now());
-
-    if status.is_success() || status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+    if (200..=299).contains(&status) || status == 429 {
         if windows.is_empty() {
-            return Err("Claude header probe returned no unified rate-limit headers.".to_string());
+            if status == 429 {
+                return Err(ProviderFetchFailure::transient(
+                    "Claude header probe is rate limited. Retrying automatically.",
+                    attempt_binding,
+                    SafeTransportDiagnostic::rate_limited(status),
+                ));
+            }
+            return Err(ProviderFetchFailure::terminal(
+                "Claude header probe returned no usable rate-limit headers.",
+            ));
         }
-        {
-            let mut guard = CLAUDE_HEADER_CACHE
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
-            *guard = Some((Utc::now(), access_token.to_string(), windows.clone()));
-        }
+        let mut guard = CLAUDE_HEADER_CACHE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        *guard = Some((Utc::now(), access_token.to_string(), windows.clone()));
         return Ok(windows);
     }
-
-    let body = response.text().await.unwrap_or_default();
-    Err(format!(
-        "Claude header probe returned {} ({}).",
-        status.as_u16(),
-        body.chars().take(200).collect::<String>()
+    if (500..=599).contains(&status) {
+        return Err(ProviderFetchFailure::transient(
+            "Claude header probe failed. Retrying automatically.",
+            attempt_binding,
+            SafeTransportDiagnostic::server_error(status),
+        ));
+    }
+    Err(ProviderFetchFailure::terminal(
+        if matches!(status, 401 | 403) {
+            "Claude setup-token expired or lacks access.".to_string()
+        } else {
+            format!("Claude header probe rejected the request (status {status}).")
+        },
     ))
 }
 
-/// Build a Claude snapshot from the unified rate-limit headers. Shared by the
-/// scope-guard and HTTP-403 branches of `fetch_claude_inner`. `source` is
-/// `"setup-token"` — it doubles as the limits-card badge, so it names the auth
-/// method the user recognizes rather than the fetch mechanism, and still lets
-/// telemetry tell it apart from the richer oauth/usage path.
 async fn claude_header_snapshot(
     credentials: &ClaudeCredentials,
     now: DateTime<Utc>,
-    account_scope: Option<Result<AccountScope, AccountScopeError>>,
-) -> Result<AgentUsageSnapshot, String> {
-    let windows = fetch_claude_via_headers(&credentials.access_token).await?;
-    let account_scope = account_scope.unwrap_or_else(|| credentials.resolve_account_scope());
-    Ok(AgentUsageSnapshot {
-        client_id: "claude".to_string(),
-        source: "setup-token".to_string(),
-        updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-        identity: Some(AgentIdentity {
-            email: None,
-            plan: first_non_empty([
-                credentials.subscription_type.as_deref(),
-                credentials.rate_limit_tier.as_deref(),
-            ])
-            .map(clean_plan),
-        }),
-        account_scope,
-        windows,
-        credits: None,
-        error: None,
-    })
+    account_scope: Result<AccountScope, AccountScopeError>,
+    cache_binding: Option<ProviderCacheBinding>,
+) -> ProviderFetchOutcome {
+    let windows =
+        match fetch_claude_via_headers(&credentials.access_token, cache_binding.clone()).await {
+            Ok(windows) => windows,
+            Err(failure) => return ProviderFetchOutcome::Failure(failure),
+        };
+    ProviderFetchOutcome::Success {
+        snapshot: AgentUsageSnapshot {
+            client_id: "claude".to_string(),
+            source: "setup-token".to_string(),
+            updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            identity: Some(AgentIdentity {
+                email: None,
+                plan: first_non_empty([
+                    credentials.subscription_type.as_deref(),
+                    credentials.rate_limit_tier.as_deref(),
+                ])
+                .map(clean_plan),
+            }),
+            account_scope,
+            windows,
+            credits: None,
+            error: None,
+            transport_diagnostic: None,
+        },
+        cache_binding,
+    }
 }
 
 fn load_codex_credentials() -> Result<CodexCredentials, String> {
@@ -1464,45 +2145,72 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// with `source == "unconfigured"`, so the UI shows a setup prompt rather than a
 /// red error.
 const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
+const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
 /// `Claude Code-credentials`, then `~/.claude/.credentials.json`) plus the
-/// TokenBar env override. These carry refresh tokens / scopes / expiry and go
-/// through the richer oauth/usage endpoint. A present-but-logged-out entry (has
-/// `claudeAiOauth` but no `accessToken` — the #26 daily-logout state) or an
-/// unparseable blob is skipped, not treated as a hard error, so a configured
-/// setup-token can still take over.
-fn load_claude_login_credentials() -> Result<Option<ClaudeCredentials>, String> {
-    if let Some(credentials) = load_claude_credentials_from_environment()? {
-        return Ok(Some(credentials));
+/// TokenBar env override. Only a genuinely missing higher-priority store falls
+/// through; the explicit #26 logout shape stops full-login precedence.
+fn load_claude_login_credentials() -> ClaudeLoginResolution {
+    match load_claude_credentials_from_environment() {
+        Ok(Some(credentials)) => return ClaudeLoginResolution::Ready(credentials),
+        Ok(None) => {}
+        Err(_) => return ClaudeLoginResolution::Terminal,
     }
-    if let Some(raw) = load_claude_credentials_from_keychain()? {
-        if let Ok(credentials) =
-            parse_claude_credentials_data(&raw, ClaudeCredentialSource::Keychain)
-        {
-            return Ok(Some(credentials));
+    load_stored_claude_login_with(
+        load_claude_credentials_from_keychain,
+        || match fs::read_to_string(claude_credentials_path()) {
+            Ok(raw) => Ok(Some(raw)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(_) => Err("Claude credentials file could not be read.".to_string()),
+        },
+    )
+}
+
+fn load_stored_claude_login_with<LoadKeychain, LoadFile>(
+    load_keychain: LoadKeychain,
+    load_file: LoadFile,
+) -> ClaudeLoginResolution
+where
+    LoadKeychain: FnOnce() -> Result<Option<String>, String>,
+    LoadFile: FnOnce() -> Result<Option<String>, String>,
+{
+    match load_keychain() {
+        Ok(Some(raw)) => {
+            return resolve_stored_claude_login(&raw, ClaudeCredentialSource::Keychain);
         }
+        Ok(None) => {}
+        Err(_) => return ClaudeLoginResolution::Terminal,
     }
-    match fs::read_to_string(claude_credentials_path()) {
-        Ok(raw) => {
-            if let Ok(credentials) =
-                parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)
-            {
-                return Ok(Some(credentials));
-            }
-            // Parsed but unusable (logged-out / no accessToken): fall through.
-            Ok(None)
-        }
-        // Absent is normal (no file login). A genuine read failure (permissions /
-        // I/O) is a real problem — return it so the caller can surface the
-        // actionable error after setup-token fallbacks miss, rather than the
-        // generic "unconfigured" setup prompt.
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!(
-            "read Claude credentials file {}: {}",
-            claude_credentials_path().display(),
-            error
-        )),
+    match load_file() {
+        Ok(Some(raw)) => resolve_stored_claude_login(&raw, ClaudeCredentialSource::File),
+        Ok(None) => ClaudeLoginResolution::Absent,
+        Err(_) => ClaudeLoginResolution::Terminal,
+    }
+}
+
+fn resolve_stored_claude_login(raw: &str, source: ClaudeCredentialSource) -> ClaudeLoginResolution {
+    let raw_root: Value = match serde_json::from_str(raw) {
+        Ok(root) => root,
+        Err(_) => return ClaudeLoginResolution::Terminal,
+    };
+    let explicitly_logged_out = raw_root
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .is_some_and(|oauth| {
+            oauth.contains_key("refreshToken")
+                && match oauth.get("accessToken") {
+                    None | Some(Value::Null) => true,
+                    Some(Value::String(token)) => token.trim().is_empty(),
+                    _ => false,
+                }
+        });
+    if explicitly_logged_out {
+        return ClaudeLoginResolution::ExplicitLogout;
+    }
+    match parse_claude_credentials_data(raw, source) {
+        Ok(credentials) => ClaudeLoginResolution::Ready(credentials),
+        Err(_) => ClaudeLoginResolution::Terminal,
     }
 }
 
@@ -1534,17 +2242,16 @@ async fn resolve_claude_code_oauth_token() -> Option<ResolvedClaudeToken> {
 
 /// The `tokenbar-claude-oauth-token` Keychain item (a TokenBar-specific setup
 /// token). A last-resort fallback, below the stored `/login`.
-fn resolve_claude_keychain_token() -> Option<ResolvedClaudeToken> {
-    load_claude_raw_token_from_keychain()
-        .ok()
-        .flatten()
-        .map(|access_token| ResolvedClaudeToken {
+fn resolve_claude_keychain_token() -> Result<Option<ResolvedClaudeToken>, String> {
+    load_claude_raw_token_from_keychain().map(|token| {
+        token.map(|access_token| ResolvedClaudeToken {
             access_token,
             scope_slot: CredentialSlot {
                 semantic_source: "claude-setup-keychain",
                 canonical_location: CLAUDE_RAW_TOKEN_KEYCHAIN_SERVICE.to_string(),
             },
         })
+    })
 }
 
 fn load_claude_credentials_from_environment() -> Result<Option<ClaudeCredentials>, String> {
@@ -1582,6 +2289,7 @@ fn load_claude_credentials_from_environment() -> Result<Option<ClaudeCredentials
         subscription_type: None,
         source: ClaudeCredentialSource::Environment,
         raw_root: None,
+        keychain_account: None,
         scope_slot: CredentialSlot {
             semantic_source: "claude-environment",
             canonical_location: source_name.to_string(),
@@ -1620,6 +2328,7 @@ fn parse_claude_credentials_data(
         subscription_type: oauth.subscription_type,
         source,
         raw_root: Some(raw_root),
+        keychain_account: None,
         scope_slot: claude_login_scope_slot(source)?,
     })
 }
@@ -1645,32 +2354,52 @@ fn claude_login_scope_slot(source: ClaudeCredentialSource) -> Result<CredentialS
 }
 
 #[cfg(target_os = "macos")]
+fn keychain_item_not_found(status: &std::process::ExitStatus) -> bool {
+    status.code() == Some(44)
+}
+
 fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
-    let output = std::process::Command::new("/usr/bin/security")
-        .args(["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"])
+    load_claude_credentials_from_keychain_item(None)
+}
+
+#[cfg(target_os = "macos")]
+fn load_claude_credentials_from_keychain_item(
+    account: Option<&str>,
+) -> Result<Option<String>, String> {
+    let mut command = std::process::Command::new("/usr/bin/security");
+    command.args(["find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE]);
+    if let Some(account) = account {
+        command.args(["-a", account]);
+    }
+    let output = command
+        .arg("-w")
         .output()
         .map_err(|e| format!("read Claude Keychain credentials: {}", e))?;
     if !output.status.success() {
-        return Ok(None);
+        return if keychain_item_not_found(&output.status) {
+            Ok(None)
+        } else {
+            Err("Claude Keychain credentials could not be read.".to_string())
+        };
     }
     let raw = String::from_utf8(output.stdout)
         .map_err(|_| "Claude Keychain credentials are not UTF-8 JSON.".to_string())?;
     let raw = raw.trim_matches(['\r', '\n']).to_string();
     if raw.trim().is_empty() {
-        return Ok(None);
+        return Err("Claude Keychain credentials are empty.".to_string());
     }
     Ok(Some(raw))
 }
 
 #[cfg(not(target_os = "macos"))]
-fn load_claude_credentials_from_keychain() -> Result<Option<String>, String> {
+fn load_claude_credentials_from_keychain_item(
+    _account: Option<&str>,
+) -> Result<Option<String>, String> {
     Ok(None)
 }
 
 /// Build credentials from a bare access token (no refresh/expiry/scope metadata).
-/// Used by the setup-token delivery paths (env var, shell harvest, raw keychain);
-/// empty scopes make `fetch_claude_inner` skip the scope guard and reach the
-/// header fallback on the resulting oauth/usage 403.
+/// Setup-token delivery paths use these credentials only for the header probe.
 fn claude_credentials_from_access_token(token: ResolvedClaudeToken) -> ClaudeCredentials {
     ClaudeCredentials {
         access_token: token.access_token,
@@ -1683,6 +2412,7 @@ fn claude_credentials_from_access_token(token: ResolvedClaudeToken) -> ClaudeCre
         // to, so treat it as read-only — save_claude_credentials skips it.
         source: ClaudeCredentialSource::Environment,
         raw_root: None,
+        keychain_account: None,
         scope_slot: token.scope_slot,
     }
 }
@@ -1842,13 +2572,17 @@ fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
         .output()
         .map_err(|e| format!("read TokenBar Claude token from Keychain: {}", e))?;
     if !output.status.success() {
-        return Ok(None);
+        return if keychain_item_not_found(&output.status) {
+            Ok(None)
+        } else {
+            Err("TokenBar Claude Keychain token could not be read.".to_string())
+        };
     }
     let raw = String::from_utf8(output.stdout)
         .map_err(|_| "TokenBar Claude Keychain token is not UTF-8.".to_string())?;
     let raw = raw.trim().to_string();
     if raw.is_empty() {
-        return Ok(None);
+        return Err("TokenBar Claude Keychain token is empty.".to_string());
     }
     Ok(Some(raw))
 }
@@ -1860,9 +2594,10 @@ fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
 
 async fn refresh_codex_credentials(
     auth_path: &Path,
-) -> Result<(CodexCredentials, Result<AccountScope, AccountScopeError>), String> {
-    let refresh = agent_account_scope::begin_refresh("codex")
-        .map_err(|_| "Codex credential refresh lock is unavailable.".to_string())?;
+) -> Result<(CodexCredentials, ProviderCacheBinding), ProviderFetchFailure> {
+    let refresh = agent_account_scope::begin_refresh("codex").map_err(|_| {
+        ProviderFetchFailure::terminal("Codex credential refresh lock is unavailable.")
+    })?;
     refresh_codex_credentials_with(
         auth_path,
         &refresh,
@@ -1873,11 +2608,16 @@ async fn refresh_codex_credentials(
     .await
 }
 
-async fn request_codex_refresh(refresh_token: String) -> Result<Value, String> {
+async fn request_codex_refresh(
+    refresh_token: String,
+    attempt_binding: ProviderCacheBinding,
+) -> Result<Value, ProviderFetchFailure> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build Codex refresh client: {}", e))?;
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Codex refresh client could not be created.")
+        })?;
     let body = serde_json::json!({
         "client_id": CODEX_CLIENT_ID,
         "grant_type": "refresh_token",
@@ -1890,16 +2630,58 @@ async fn request_codex_refresh(refresh_token: String) -> Result<Value, String> {
         .json(&body)
         .send()
         .await
-        .map_err(|e| format!("Codex token refresh failed: {}", e))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Codex refresh response: {}", e))?;
-    if !status.is_success() {
-        return Err("Codex OAuth refresh failed. Run `codex` to log in again.".to_string());
-    }
-    serde_json::from_str(&body).map_err(|e| format!("decode Codex refresh response: {}", e))
+        .map_err(|error| {
+            ProviderFetchFailure::from_send_error(
+                "Codex token refresh failed. Retrying automatically.",
+                Some(attempt_binding.clone()),
+                &error,
+            )
+        })?;
+    let status = response.status().as_u16();
+    let body = read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    .map_err(|failure| match failure {
+        ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+            "Codex token refresh failed. Retrying automatically.",
+            Some(attempt_binding),
+            diagnostic,
+        ),
+        ResponseReadFailure::Terminal(_) => ProviderFetchFailure::terminal(
+            "Codex OAuth refresh failed. Run `codex` to log in again.",
+        ),
+    })?;
+    serde_json::from_str(&body).map_err(|_| {
+        ProviderFetchFailure::terminal("Codex OAuth refresh response could not be decoded.")
+    })
+}
+
+fn resolve_codex_cache_binding_with<R: RefreshScopeTransaction + ?Sized>(
+    credentials: &CodexCredentials,
+    refresh: &R,
+) -> Result<ProviderCacheBinding, AccountScopeError> {
+    let primary = refresh.resolve_current(
+        credentials.scope_slot.semantic_source,
+        &credentials.scope_slot.canonical_location,
+        credentials.scope_marker(),
+    )?;
+    let corroborating = credentials
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|account_id| {
+            agent_account_scope::resolve_authoritative(
+                "codex",
+                AuthoritativeIdKind::OpaqueId,
+                account_id,
+            )
+        })
+        .transpose()?;
+    Ok(ProviderCacheBinding::new(primary, corroborating))
 }
 
 async fn refresh_codex_credentials_with<R, Request, RequestFuture, Save, Checkpoint>(
@@ -1908,25 +2690,22 @@ async fn refresh_codex_credentials_with<R, Request, RequestFuture, Save, Checkpo
     request: Request,
     save: Save,
     mut checkpoint: Checkpoint,
-) -> Result<(CodexCredentials, Result<AccountScope, AccountScopeError>), String>
+) -> Result<(CodexCredentials, ProviderCacheBinding), ProviderFetchFailure>
 where
     R: RefreshScopeTransaction + ?Sized,
-    Request: FnOnce(String) -> RequestFuture,
-    RequestFuture: std::future::Future<Output = Result<Value, String>>,
-    Save: FnOnce(&CodexCredentials) -> Result<(), String>,
-    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), String>,
+    Request: FnOnce(String, ProviderCacheBinding) -> RequestFuture,
+    RequestFuture: std::future::Future<Output = Result<Value, ProviderFetchFailure>>,
+    Save: FnOnce(&CodexCredentials) -> Result<CodexCredentialWriteReceipt, String>,
+    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure>,
 {
-    // Another TokenBar process may have refreshed while this caller waited.
-    // Reload the exact request-bearing record only after the refresh lock.
-    let credentials = load_codex_credentials_from(auth_path)?;
+    let credentials =
+        load_codex_credentials_from(auth_path).map_err(ProviderFetchFailure::terminal)?;
     checkpoint(RefreshCheckpoint::Reloaded)?;
+    let pre_binding = resolve_codex_cache_binding_with(&credentials, refresh).map_err(|_| {
+        ProviderFetchFailure::terminal("Codex account identity could not be verified.")
+    })?;
     if !credentials_needs_refresh(credentials.last_refresh) {
-        let scope = refresh.resolve_current(
-            credentials.scope_slot.semantic_source,
-            &credentials.scope_slot.canonical_location,
-            credentials.scope_marker(),
-        );
-        return Ok((credentials, scope));
+        return Ok((credentials, pre_binding));
     }
 
     let refresh_token = credentials
@@ -1934,52 +2713,70 @@ where
         .as_deref()
         .map(str::trim)
         .filter(|token| !token.is_empty())
-        .ok_or_else(|| "Codex auth.json has no refresh token.".to_string())?
+        .ok_or_else(|| ProviderFetchFailure::terminal("Codex auth.json has no refresh token."))?
         .to_string();
     let old_marker = credentials.scope_marker().to_vec();
-    let json = request(refresh_token).await?;
+    let json = request(refresh_token, pre_binding.clone()).await?;
     checkpoint(RefreshCheckpoint::NetworkReturned)?;
 
-    let response = json.as_object();
+    let response = json.as_object().ok_or_else(|| {
+        ProviderFetchFailure::terminal("Codex OAuth refresh response was not a JSON object.")
+    })?;
+    let access_token = string_key(response, "access_token", "accessToken").ok_or_else(|| {
+        ProviderFetchFailure::terminal(
+            "Codex OAuth refresh response contained no usable access token.",
+        )
+    })?;
     let refreshed = CodexCredentials {
-        access_token: response
-            .and_then(|tokens| string_key(tokens, "access_token", "accessToken"))
-            .unwrap_or(credentials.access_token),
-        refresh_token: response
-            .and_then(|tokens| string_key(tokens, "refresh_token", "refreshToken"))
+        access_token,
+        refresh_token: string_key(response, "refresh_token", "refreshToken")
             .or(credentials.refresh_token),
-        id_token: response
-            .and_then(|tokens| string_key(tokens, "id_token", "idToken"))
-            .or(credentials.id_token),
+        id_token: string_key(response, "id_token", "idToken").or(credentials.id_token),
         account_id: credentials.account_id,
         last_refresh: Some(Utc::now()),
         auth_path: credentials.auth_path,
         raw_json: credentials.raw_json,
         scope_slot: credentials.scope_slot,
     };
-    let marker_rotated = refreshed.scope_marker() != old_marker.as_slice();
-    let scope = refresh.transfer(
+    let write_receipt = save(&refreshed).map_err(|_| {
+        ProviderFetchFailure::terminal("Codex refreshed credentials could not be saved.")
+    })?;
+    checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
+    let post_primary = match refresh.transfer(
         refreshed.scope_slot.semantic_source,
         &refreshed.scope_slot.canonical_location,
         &old_marker,
         refreshed.scope_marker(),
-    );
+    ) {
+        Ok(account_scope) => account_scope,
+        Err(_) => {
+            let _ = rollback_codex_credentials_if_unchanged(&write_receipt);
+            return Err(ProviderFetchFailure::terminal(
+                "Codex credential lineage could not be preserved.",
+            ));
+        }
+    };
     checkpoint(RefreshCheckpoint::MetadataHandled)?;
-    // A rotated marker may reach disk only after its lineage transfer is durable.
-    // The refreshed access token remains usable in memory for this poll.
-    if marker_rotated && scope.is_err() {
-        return Ok((refreshed, scope));
-    }
-    save(&refreshed)?;
-    checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
-    Ok((refreshed, scope))
+    // The account ID is unchanged by refresh and was already verified in the
+    // pre-request binding. Reuse it instead of performing a second fallible
+    // metadata resolution after credentials and lineage are durable.
+    let post_binding = ProviderCacheBinding::new(post_primary, pre_binding.corroborating);
+    Ok((refreshed, post_binding))
 }
 
 async fn refresh_claude_credentials(
     original: &ClaudeCredentials,
-) -> Result<(ClaudeCredentials, Result<AccountScope, AccountScopeError>), String> {
-    let refresh = agent_account_scope::begin_refresh("claude")
-        .map_err(|_| "Claude credential refresh lock is unavailable.".to_string())?;
+) -> Result<
+    (
+        ClaudeCredentials,
+        AccountScope,
+        Option<ProviderCacheBinding>,
+    ),
+    ProviderFetchFailure,
+> {
+    let refresh = agent_account_scope::begin_refresh("claude").map_err(|_| {
+        ProviderFetchFailure::terminal("Claude credential refresh lock is unavailable.")
+    })?;
     refresh_claude_credentials_with(
         original,
         &refresh,
@@ -1991,11 +2788,16 @@ async fn refresh_claude_credentials(
     .await
 }
 
-async fn request_claude_refresh(refresh_token: String) -> Result<ClaudeRefreshResponse, String> {
+async fn request_claude_refresh(
+    refresh_token: String,
+    attempt_binding: ProviderCacheBinding,
+) -> Result<ClaudeRefreshResponse, ProviderFetchFailure> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build Claude refresh client: {}", e))?;
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Claude refresh client could not be created.")
+        })?;
     let response = client
         .post(CLAUDE_REFRESH_URL)
         .header(reqwest::header::ACCEPT, "application/json")
@@ -2010,16 +2812,33 @@ async fn request_claude_refresh(refresh_token: String) -> Result<ClaudeRefreshRe
         ]))
         .send()
         .await
-        .map_err(|e| format!("Claude OAuth refresh failed: {}", e))?;
-    let status = response.status();
-    let body = response
-        .text()
-        .await
-        .map_err(|e| format!("read Claude refresh response: {}", e))?;
-    if !status.is_success() {
-        return Err("Claude OAuth refresh failed. Run `claude` to re-authenticate.".to_string());
-    }
-    serde_json::from_str(&body).map_err(|e| format!("decode Claude refresh response: {}", e))
+        .map_err(|error| {
+            ProviderFetchFailure::from_send_error(
+                "Claude OAuth refresh failed. Retrying automatically.",
+                Some(attempt_binding.clone()),
+                &error,
+            )
+        })?;
+    let status = response.status().as_u16();
+    let body = read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    .map_err(|failure| match failure {
+        ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+            "Claude OAuth refresh failed. Retrying automatically.",
+            Some(attempt_binding),
+            diagnostic,
+        ),
+        ResponseReadFailure::Terminal(_) => ProviderFetchFailure::terminal(
+            "Claude OAuth refresh failed. Run `claude` to re-authenticate.",
+        ),
+    })?;
+    serde_json::from_str(&body).map_err(|_| {
+        ProviderFetchFailure::terminal("Claude OAuth refresh response could not be decoded.")
+    })
 }
 
 async fn refresh_claude_credentials_with<R, Reload, Request, RequestFuture, Save, Checkpoint>(
@@ -2029,27 +2848,40 @@ async fn refresh_claude_credentials_with<R, Reload, Request, RequestFuture, Save
     request: Request,
     save: Save,
     mut checkpoint: Checkpoint,
-) -> Result<(ClaudeCredentials, Result<AccountScope, AccountScopeError>), String>
+) -> Result<
+    (
+        ClaudeCredentials,
+        AccountScope,
+        Option<ProviderCacheBinding>,
+    ),
+    ProviderFetchFailure,
+>
 where
     R: RefreshScopeTransaction + ?Sized,
     Reload: FnOnce(&ClaudeCredentials) -> Result<ClaudeCredentials, String>,
-    Request: FnOnce(String) -> RequestFuture,
-    RequestFuture: std::future::Future<Output = Result<ClaudeRefreshResponse, String>>,
+    Request: FnOnce(String, ProviderCacheBinding) -> RequestFuture,
+    RequestFuture:
+        std::future::Future<Output = Result<ClaudeRefreshResponse, ProviderFetchFailure>>,
     Save: FnOnce(&ClaudeCredentials) -> Result<(), String>,
-    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), String>,
+    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure>,
 {
-    let credentials = reload(original)?;
+    let credentials = reload(original).map_err(ProviderFetchFailure::terminal)?;
     checkpoint(RefreshCheckpoint::Reloaded)?;
+    let marker = credentials.scope_marker().ok_or_else(|| {
+        ProviderFetchFailure::terminal("Claude credential has no trusted account marker.")
+    })?;
+    let pre_scope = refresh
+        .resolve_current(
+            credentials.scope_slot.semantic_source,
+            &credentials.scope_slot.canonical_location,
+            marker,
+        )
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Claude account identity could not be verified.")
+        })?;
+    let pre_binding = ProviderCacheBinding::primary(pre_scope.clone());
     if !claude_credentials_expired(&credentials) {
-        let scope = match credentials.scope_marker() {
-            Some(marker) => refresh.resolve_current(
-                credentials.scope_slot.semantic_source,
-                &credentials.scope_slot.canonical_location,
-                marker,
-            ),
-            None => Err(AccountScopeError::NoTrustedEvidence),
-        };
-        return Ok((credentials, scope));
+        return Ok((credentials, pre_scope, Some(pre_binding)));
     }
 
     let refresh_token = credentials
@@ -2057,14 +2889,22 @@ where
         .as_deref()
         .filter(|token| !token.is_empty())
         .ok_or_else(|| {
-            "Claude OAuth token is expired and has no refresh token. Run `claude`.".to_string()
+            ProviderFetchFailure::terminal(
+                "Claude OAuth token is expired and has no refresh token. Run `claude`.",
+            )
         })?
         .to_string();
     let old_marker = refresh_token.as_bytes().to_vec();
-    let token_response = request(refresh_token).await?;
+    let token_response = request(refresh_token, pre_binding).await?;
     checkpoint(RefreshCheckpoint::NetworkReturned)?;
+    let access_token = token_response.access_token.trim();
+    if access_token.is_empty() {
+        return Err(ProviderFetchFailure::terminal(
+            "Claude OAuth refresh response has no access token.",
+        ));
+    }
     let refreshed = ClaudeCredentials {
-        access_token: token_response.access_token,
+        access_token: access_token.to_string(),
         refresh_token: token_response
             .refresh_token
             .as_deref()
@@ -2078,40 +2918,59 @@ where
         subscription_type: credentials.subscription_type.clone(),
         source: credentials.source,
         raw_root: credentials.raw_root.clone(),
+        keychain_account: credentials.keychain_account.clone(),
         scope_slot: credentials.scope_slot.clone(),
     };
-    let new_marker = refreshed.scope_marker();
-    let marker_rotated = new_marker.is_some_and(|marker| marker != old_marker.as_slice());
-    let scope = match new_marker {
-        Some(new_marker) => refresh.transfer(
+    let new_marker = refreshed.scope_marker().ok_or_else(|| {
+        ProviderFetchFailure::terminal("Claude refreshed credential has no trusted marker.")
+    })?;
+    let scope = refresh
+        .transfer(
             refreshed.scope_slot.semantic_source,
             &refreshed.scope_slot.canonical_location,
             &old_marker,
             new_marker,
-        ),
-        None => Err(AccountScopeError::NoTrustedEvidence),
-    };
+        )
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Claude credential lineage could not be preserved.")
+        })?;
     checkpoint(RefreshCheckpoint::MetadataHandled)?;
-    // A rotated marker may reach the shared provider store only after its
-    // lineage transfer is durable. The new access token remains usable in
-    // memory for this poll.
-    if marker_rotated && scope.is_err() {
-        return Ok((refreshed, scope));
-    }
-    if let Err(error) = save(&refreshed) {
-        eprintln!("tb_core_ffi: failed to persist refreshed Claude credentials: {error}");
-    }
+    let persisted = save(&refreshed).is_ok();
     checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
-    Ok((refreshed, scope))
+    let cache_binding = if persisted {
+        Some(ProviderCacheBinding::primary(
+            refresh
+                .resolve_current(
+                    refreshed.scope_slot.semantic_source,
+                    &refreshed.scope_slot.canonical_location,
+                    new_marker,
+                )
+                .map_err(|_| {
+                    ProviderFetchFailure::terminal(
+                        "Claude account identity could not be verified after refresh.",
+                    )
+                })?,
+        ))
+    } else {
+        None
+    };
+    Ok((refreshed, scope, cache_binding))
 }
 
 fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCredentials, String> {
     match original.source {
         ClaudeCredentialSource::Keychain => {
-            let raw = load_claude_credentials_from_keychain()?.ok_or_else(|| {
-                "Claude Keychain credentials disappeared during refresh.".to_string()
+            let account = claude_keychain_account().ok_or_else(|| {
+                "Claude Keychain account could not be captured during refresh.".to_string()
             })?;
-            parse_claude_credentials_data(&raw, ClaudeCredentialSource::Keychain)
+            let raw =
+                load_claude_credentials_from_keychain_item(Some(&account))?.ok_or_else(|| {
+                    "Claude Keychain credentials disappeared during refresh.".to_string()
+                })?;
+            let mut credentials =
+                parse_claude_credentials_data(&raw, ClaudeCredentialSource::Keychain)?;
+            credentials.keychain_account = Some(account);
+            Ok(credentials)
         }
         ClaudeCredentialSource::File => {
             let raw = fs::read_to_string(claude_credentials_path())
@@ -2128,9 +2987,7 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
 /// came from, preserving every other field the Claude CLI wrote.
 fn save_claude_credentials(credentials: &ClaudeCredentials) -> Result<(), String> {
     match credentials.source {
-        ClaudeCredentialSource::Keychain => {
-            save_claude_credentials_to_keychain(&merge_claude_credentials_json(credentials)?)
-        }
+        ClaudeCredentialSource::Keychain => save_claude_credentials_to_keychain(credentials),
         ClaudeCredentialSource::File => {
             save_claude_credentials_to_file(credentials, &claude_credentials_path())
         }
@@ -2142,7 +2999,10 @@ fn save_claude_credentials_to_file(
     credentials: &ClaudeCredentials,
     path: &Path,
 ) -> Result<(), String> {
-    atomic_write(path, &merge_claude_credentials_json(credentials)?)
+    let current_raw = fs::read_to_string(path)
+        .map_err(|e| format!("read current Claude credentials file: {e}"))?;
+    let data = merge_claude_credentials_json(credentials, &current_raw)?;
+    atomic_write(path, &data)
 }
 
 /// Replace `path` atomically: write a sibling temp file, then rename over the
@@ -2212,17 +3072,36 @@ fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Merge the rotated tokens into the loaded credentials JSON, preserving any
-/// other fields, and return it serialized. Pure so it's unit-testable.
-fn merge_claude_credentials_json(credentials: &ClaudeCredentials) -> Result<String, String> {
-    let mut root = credentials
+/// Merge rotated tokens into the current credentials JSON only when the
+/// `claudeAiOauth` object still matches the one captured at refresh reload.
+/// Top-level siblings come from `current_raw`, so unrelated concurrent writes
+/// survive. Pure so both file and Keychain decisions are fixture-testable.
+fn merge_claude_credentials_json(
+    credentials: &ClaudeCredentials,
+    current_raw: &str,
+) -> Result<String, String> {
+    let expected_oauth = credentials
         .raw_root
-        .clone()
-        .unwrap_or_else(|| serde_json::json!({ "claudeAiOauth": {} }));
-    let oauth = root
+        .as_ref()
+        .and_then(|root| root.get("claudeAiOauth"))
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Reloaded Claude credentials have no claudeAiOauth object.".to_string())?;
+    let mut current_root: Value = serde_json::from_str(current_raw)
+        .map_err(|e| format!("decode current Claude credentials: {e}"))?;
+    let current_oauth = current_root
+        .get("claudeAiOauth")
+        .and_then(Value::as_object)
+        .ok_or_else(|| "Current Claude credentials have no claudeAiOauth object.".to_string())?;
+    if current_oauth != expected_oauth {
+        return Err(
+            "Claude credentials changed during refresh; refusing stale write-back.".to_string(),
+        );
+    }
+
+    let oauth = current_root
         .get_mut("claudeAiOauth")
         .and_then(Value::as_object_mut)
-        .ok_or_else(|| "Claude credentials JSON has no claudeAiOauth object.".to_string())?;
+        .ok_or_else(|| "Current Claude credentials have no claudeAiOauth object.".to_string())?;
     oauth.insert(
         "accessToken".to_string(),
         Value::String(credentials.access_token.clone()),
@@ -2236,27 +3115,44 @@ fn merge_claude_credentials_json(credentials: &ClaudeCredentials) -> Result<Stri
             Value::Number(expires_at.timestamp_millis().into()),
         );
     }
-    serde_json::to_string(&root).map_err(|e| format!("encode Claude credentials: {}", e))
+    serde_json::to_string(&current_root).map_err(|e| format!("encode Claude credentials: {}", e))
+}
+
+fn prepare_claude_keychain_write<'a>(
+    credentials: &'a ClaudeCredentials,
+    current_account: Option<&str>,
+    current_raw: &str,
+) -> Result<(&'a str, String), String> {
+    let captured_account = credentials.keychain_account.as_deref().ok_or_else(|| {
+        "Claude Keychain refresh has no captured account; refusing write-back.".to_string()
+    })?;
+    if current_account != Some(captured_account) {
+        return Err(
+            "Claude Keychain account changed during refresh; refusing write-back.".to_string(),
+        );
+    }
+    let data = merge_claude_credentials_json(credentials, current_raw)?;
+    Ok((captured_account, data))
 }
 
 #[cfg(target_os = "macos")]
-fn save_claude_credentials_to_keychain(data: &str) -> Result<(), String> {
-    // Fail closed: only update the item once we can confirm the exact account
-    // the Claude CLI stored it under. `add-generic-password -U` matches on
-    // (service, account), so updating with the wrong or an empty account would
-    // create a SECOND "Claude Code-credentials" item and confuse the store the
-    // CLI shares — worse than not persisting. If the account can't be read,
-    // skip the write-back (the caller logs it); the next refresh retries.
-    let account = claude_keychain_account().ok_or_else(|| {
-        "could not resolve the Claude Keychain account; skipping write-back to avoid a duplicate item"
-            .to_string()
+fn save_claude_credentials_to_keychain(credentials: &ClaudeCredentials) -> Result<(), String> {
+    let captured_account = credentials.keychain_account.as_deref().ok_or_else(|| {
+        "Claude Keychain refresh has no captured account; refusing write-back.".to_string()
     })?;
-    // NOTE: `-w <data>` puts the credential JSON on the argv, briefly visible via
-    // `ps` to same-user processes. security(1) has no stdin form for
-    // add-generic-password (only an interactive `-w` prompt, unusable from a
-    // background app) and the item is already same-user-readable once the
-    // keychain is unlocked, so on a single-user Mac this narrow window is an
-    // accepted trade-off; move to the SecItem API if that assumption changes.
+    let current_raw = load_claude_credentials_from_keychain_item(Some(captured_account))?
+        .ok_or_else(|| "Claude Keychain credentials disappeared during refresh.".to_string())?;
+    let current_account = claude_keychain_account();
+    let (account, data) =
+        prepare_claude_keychain_write(credentials, current_account.as_deref(), &current_raw)?;
+
+    // NOTE: security(1) has no compare-and-swap operation. The exact-item read,
+    // account guard, and target comparison close the network-wait race and the
+    // write always stays pinned to the captured account. A same-item mutation
+    // between this check and `-U` remains the existing CLI platform limitation.
+    // `-w <data>` also puts the JSON on argv briefly; the item is already
+    // same-user-readable while the Keychain is unlocked. Move to SecItem only if
+    // either platform assumption changes.
     let status = std::process::Command::new("/usr/bin/security")
         .args([
             "add-generic-password",
@@ -2264,9 +3160,9 @@ fn save_claude_credentials_to_keychain(data: &str) -> Result<(), String> {
             "-s",
             CLAUDE_KEYCHAIN_SERVICE,
             "-a",
-            &account,
+            account,
             "-w",
-            data,
+            &data,
         ])
         .status()
         .map_err(|e| format!("write Claude Keychain credentials: {}", e))?;
@@ -2277,7 +3173,7 @@ fn save_claude_credentials_to_keychain(data: &str) -> Result<(), String> {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn save_claude_credentials_to_keychain(_data: &str) -> Result<(), String> {
+fn save_claude_credentials_to_keychain(_credentials: &ClaudeCredentials) -> Result<(), String> {
     Err("Keychain writes are only supported on macOS.".to_string())
 }
 
@@ -2317,22 +3213,80 @@ fn claude_keychain_account() -> Option<String> {
     None
 }
 
-fn save_codex_credentials(credentials: &CodexCredentials) -> Result<(), String> {
-    let mut raw = credentials.raw_json.clone();
-    raw["tokens"]["access_token"] = Value::String(credentials.access_token.clone());
+#[cfg(not(target_os = "macos"))]
+fn claude_keychain_account() -> Option<String> {
+    None
+}
+
+fn save_codex_credentials(
+    credentials: &CodexCredentials,
+) -> Result<CodexCredentialWriteReceipt, String> {
+    let expected_tokens = credentials
+        .raw_json
+        .get("tokens")
+        .ok_or_else(|| "Codex tokens missing from the loaded credentials.".to_string())?;
+    let mut raw = load_codex_credentials_from(&credentials.auth_path)
+        .map_err(|e| format!("reload Codex auth.json before saving: {}", e))?
+        .raw_json;
+    let current_tokens = raw
+        .get("tokens")
+        .ok_or_else(|| "Codex tokens disappeared before saving.".to_string())?;
+    if current_tokens != expected_tokens {
+        return Err("Codex tokens changed during refresh.".to_string());
+    }
+    let previous_root = raw.clone();
+    let tokens = raw
+        .get_mut("tokens")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| "Codex tokens are not an object while saving.".to_string())?;
+
+    tokens.insert(
+        "access_token".to_string(),
+        Value::String(credentials.access_token.clone()),
+    );
     if let Some(refresh_token) = &credentials.refresh_token {
-        raw["tokens"]["refresh_token"] = Value::String(refresh_token.clone());
+        tokens.insert(
+            "refresh_token".to_string(),
+            Value::String(refresh_token.clone()),
+        );
     }
     if let Some(id_token) = &credentials.id_token {
-        raw["tokens"]["id_token"] = Value::String(id_token.clone());
+        tokens.insert("id_token".to_string(), Value::String(id_token.clone()));
     }
     if let Some(account_id) = &credentials.account_id {
-        raw["tokens"]["account_id"] = Value::String(account_id.clone());
+        tokens.insert("account_id".to_string(), Value::String(account_id.clone()));
     }
     raw["last_refresh"] = Value::String(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
     let data =
         serde_json::to_string_pretty(&raw).map_err(|e| format!("encode Codex auth.json: {}", e))?;
-    atomic_write(&credentials.auth_path, &data).map_err(|e| format!("save Codex auth.json: {}", e))
+    atomic_write(&credentials.auth_path, &data)
+        .map_err(|e| format!("save Codex auth.json: {}", e))?;
+    Ok(CodexCredentialWriteReceipt {
+        path: credentials.auth_path.clone(),
+        previous_root,
+        persisted_root: raw,
+    })
+}
+
+/// Restore the pre-refresh Codex root only while this refresh still owns the
+/// exact root it persisted. External Codex writers do not share TokenBar's
+/// refresh lock, so the compare-to-rename interval remains a known residual
+/// window rather than a filesystem compare-and-swap.
+fn rollback_codex_credentials_if_unchanged(
+    receipt: &CodexCredentialWriteReceipt,
+) -> Result<bool, String> {
+    let current_raw = fs::read_to_string(&receipt.path)
+        .map_err(|e| format!("read Codex auth.json before rollback: {}", e))?;
+    let current_root: Value = serde_json::from_str(&current_raw)
+        .map_err(|e| format!("decode Codex auth.json before rollback: {}", e))?;
+    if current_root != receipt.persisted_root {
+        return Ok(false);
+    }
+    let previous_data = serde_json::to_string_pretty(&receipt.previous_root)
+        .map_err(|e| format!("encode Codex auth.json rollback: {}", e))?;
+    atomic_write(&receipt.path, &previous_data)
+        .map_err(|e| format!("rollback Codex auth.json: {}", e))?;
+    Ok(true)
 }
 
 fn enrich_snapshot(snapshot: &mut AgentUsageSnapshot, now: i64) {
@@ -3391,41 +4345,188 @@ mod tests {
         .is_err());
     }
 
-    // Single test for the whole gate lifecycle — the gate is a process-wide
-    // static, so split tests would race under the parallel test runner.
     #[test]
-    fn claude_gate_blocks_then_clears() {
+    fn claude_gate_is_binding_scoped_and_expires() {
         let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
-        assert!(claude_gate_blocked_until(now).is_none());
+        let scope = TestRefreshScope::new("claude", "local-gate");
+        let binding_a = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "account-a", b"marker-a")
+                .unwrap(),
+        );
+        let binding_b = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "account-b", b"marker-b")
+                .unwrap(),
+        );
+        let mut gate = ClaudeUsageGate::default();
 
-        // 429 with no Retry-After → default 5-minute cooldown.
-        claude_gate_record_rate_limit(None, now);
-        let until = claude_gate_blocked_until(now).unwrap();
+        gate.record_rate_limit(binding_a.clone(), None, now);
+        let until = gate.blocked_until_for(&binding_a, now).unwrap();
         assert_eq!((until - now).num_seconds(), 300);
 
-        // No cached snapshot yet → countdown error.
-        let fallback = claude_gate_fallback(until, now);
-        assert!(fallback.error.unwrap().contains("~300s"));
-        assert!(fallback.windows.is_empty());
+        assert!(gate.blocked_until_for(&binding_b, now).is_none());
+        assert!(gate.blocked_until_for(&binding_a, now).is_none());
 
-        // Cooldown expiry clears the gate lazily.
-        let later = now + chrono::Duration::seconds(301);
-        assert!(claude_gate_blocked_until(later).is_none());
+        gate.record_rate_limit(
+            binding_a.clone(),
+            Some(now + chrono::Duration::seconds(60)),
+            now,
+        );
+        assert!(gate
+            .blocked_until_for(&binding_a, now + chrono::Duration::seconds(61))
+            .is_none());
+        gate.clear();
+        assert!(gate.blocked_until_for(&binding_a, now).is_none());
+        scope.cleanup();
+    }
 
-        // Success caches the display-ready snapshot; a later OAuth 429 serves
-        // those rows unchanged while dropping the stale account scope. The
-        // fetch path returns this fallback without another enrichment/history
-        // pass, preserving the last-good typed pace.
-        let scope = TestRefreshScope::new("claude", "cached-429");
-        let account_scope = scope
-            .resolve_current("fixture", "cached-429", b"cached-429-marker")
-            .unwrap();
-        let mut snapshot = AgentUsageSnapshot {
-            client_id: "claude".to_string(),
+    #[tokio::test]
+    async fn claude_login_usage_gates_current_binding_before_refresh_and_request() {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "routed-gate");
+        let binding_a = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "account-a", b"marker-a")
+                .unwrap(),
+        );
+        let binding_b = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "account-b", b"marker-b")
+                .unwrap(),
+        );
+        let mut credentials = ClaudeCredentials {
+            access_token: "claude-access".to_string(),
+            refresh_token: Some("claude-refresh".to_string()),
+            expires_at: Some(Utc::now() - chrono::Duration::minutes(1)),
+            scopes: vec!["user:profile".to_string()],
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::File,
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture",
+                canonical_location: "fixture".to_string(),
+            },
+        };
+        let mut gate = ClaudeUsageGate::default();
+        gate.record_rate_limit(binding_a.clone(), None, now);
+        let refresh_calls = std::cell::Cell::new(0);
+        let header_calls = std::cell::Cell::new(0);
+        let usage_calls = std::cell::Cell::new(0);
+
+        let (source, outcome) = fetch_claude_login_usage_with(
+            credentials.clone(),
+            binding_a.clone(),
+            now,
+            |binding, at| gate.blocked_until_for(binding, at),
+            |credentials| {
+                refresh_calls.set(refresh_calls.get() + 1);
+                let binding = binding_a.clone();
+                async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+            },
+            |_, _, _| async {
+                header_calls.set(header_calls.get() + 1);
+                claude_test_success_outcome()
+            },
+            |_, _, _, _| async {
+                usage_calls.set(usage_calls.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "oauth");
+        assert!(matches!(
+            outcome,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient {
+                attempt_binding: Some(ref binding),
+                transport_diagnostic: SafeTransportDiagnostic {
+                    category: TransportCategory::RateLimited,
+                    status: Some(429),
+                    ..
+                },
+                ..
+            }) if binding == &binding_a
+        ));
+        assert_eq!(refresh_calls.get(), 0);
+        assert_eq!(header_calls.get(), 0);
+        assert_eq!(usage_calls.get(), 0);
+
+        credentials.expires_at = None;
+        credentials.scopes = vec!["org:create_api_key".to_string()];
+        gate.record_rate_limit(binding_a.clone(), None, now);
+        let (source, outcome) = fetch_claude_login_usage_with(
+            credentials.clone(),
+            binding_a.clone(),
+            now,
+            |binding, at| gate.blocked_until_for(binding, at),
+            |credentials| {
+                refresh_calls.set(refresh_calls.get() + 1);
+                let binding = binding_a.clone();
+                async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+            },
+            |_, _, _| async {
+                header_calls.set(header_calls.get() + 1);
+                claude_test_success_outcome()
+            },
+            |_, _, _, _| async {
+                usage_calls.set(usage_calls.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "setup-token");
+        assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+        assert_eq!(refresh_calls.get(), 0);
+        assert_eq!(header_calls.get(), 1);
+        assert_eq!(usage_calls.get(), 0);
+        assert!(gate.blocked_until_for(&binding_a, now).is_some());
+
+        credentials.scopes = vec!["user:profile".to_string()];
+        gate.record_rate_limit(binding_a.clone(), None, now);
+        let (source, outcome) = fetch_claude_login_usage_with(
+            credentials,
+            binding_b.clone(),
+            now,
+            |binding, at| gate.blocked_until_for(binding, at),
+            |credentials| {
+                refresh_calls.set(refresh_calls.get() + 1);
+                let binding = binding_b.clone();
+                async move { Ok((credentials, binding.primary.clone(), Some(binding))) }
+            },
+            |_, _, _| async {
+                header_calls.set(header_calls.get() + 1);
+                claude_test_success_outcome()
+            },
+            |_, _, _, _| async {
+                usage_calls.set(usage_calls.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "oauth");
+        assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+        assert_eq!(refresh_calls.get(), 0);
+        assert_eq!(header_calls.get(), 1);
+        assert_eq!(usage_calls.get(), 1);
+        scope.cleanup();
+    }
+
+    fn cache_test_snapshot(
+        client_id: &str,
+        account_scope: Result<AccountScope, AccountScopeError>,
+        now: DateTime<Utc>,
+    ) -> AgentUsageSnapshot {
+        AgentUsageSnapshot {
+            client_id: client_id.to_string(),
             source: "oauth".to_string(),
             updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
-            identity: None,
-            account_scope: Ok(account_scope),
+            identity: Some(AgentIdentity {
+                email: Some("fixture@example.invalid".to_string()),
+                plan: Some("Fixture".to_string()),
+            }),
+            account_scope,
             windows: vec![UsageWindow::from_provider_used_percent(
                 "Session".to_string(),
                 20.0,
@@ -3433,40 +4534,331 @@ mod tests {
                 now,
             )
             .with_identity(
-                "session.v1",
-                Some("session.v1".to_string()),
+                "main.session.v1",
+                Some("main.session.v1".to_string()),
                 None,
                 Some(DurationEvidence::contract(300 * 60)),
             )],
-            credits: None,
+            credits: Some(CreditsSnapshot {
+                remaining: Some(-2.5),
+                unlimited: false,
+            }),
             error: None,
-        };
-        snapshot.windows[0].pace_status = PaceStatusPayload {
-            state: PaceState::Available,
-            window_key: Some("session.v1".to_string()),
-            duration_seconds: Some(300 * 60),
-            duration_source: Some(DurationSource::Contract),
-            complete_cycles: 6,
-            reason: None,
-        };
-        snapshot.windows[0].historical_pace = Some(HistoricalPacePayload {
-            expected_used_percent: 35.0,
-            eta_seconds: Some(1_800.0),
-            will_last_to_reset: false,
-            run_out_probability: Some(0.42),
-        });
-        claude_gate_record_success(&snapshot);
-        assert!(claude_gate_blocked_until(later).is_none());
-        claude_gate_record_rate_limit(Some(later + chrono::Duration::seconds(60)), later);
-        let until = claude_gate_blocked_until(later).unwrap();
-        let fallback = claude_gate_fallback(until, later);
-        assert!(fallback.error.is_none());
-        assert_eq!(fallback.windows.len(), 1);
+            transport_diagnostic: None,
+        }
+    }
+
+    fn claude_test_login_credentials() -> ClaudeCredentials {
+        ClaudeCredentials {
+            access_token: "claude-access".to_string(),
+            refresh_token: Some("claude-refresh".to_string()),
+            expires_at: None,
+            scopes: vec!["user:profile".to_string()],
+            rate_limit_tier: None,
+            subscription_type: None,
+            source: ClaudeCredentialSource::File,
+            raw_root: None,
+            keychain_account: None,
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture",
+                canonical_location: "fixture".to_string(),
+            },
+        }
+    }
+
+    fn claude_test_setup_token() -> ResolvedClaudeToken {
+        ResolvedClaudeToken {
+            access_token: "setup-access".to_string(),
+            scope_slot: CredentialSlot {
+                semantic_source: "fixture-setup",
+                canonical_location: "fixture-setup".to_string(),
+            },
+        }
+    }
+
+    fn claude_test_success_outcome() -> ProviderFetchOutcome {
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        ProviderFetchOutcome::Success {
+            snapshot: cache_test_snapshot("claude", Err(AccountScopeError::NoTrustedEvidence), now),
+            cache_binding: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_login_precedence_falls_through_only_for_absent_credentials() {
+        {
+            let primary_calls = std::cell::Cell::new(0);
+            let setup_loads = std::cell::Cell::new(0);
+            let setup_calls = std::cell::Cell::new(0);
+            let (source, outcome) = fetch_claude_login_or_setup_with(
+                resolve_stored_claude_login("{", ClaudeCredentialSource::File),
+                |_| async {
+                    primary_calls.set(primary_calls.get() + 1);
+                    ("oauth", claude_test_success_outcome())
+                },
+                || {
+                    setup_loads.set(setup_loads.get() + 1);
+                    Ok(Some(claude_test_setup_token()))
+                },
+                |_| async {
+                    setup_calls.set(setup_calls.get() + 1);
+                    ("setup-token", claude_test_success_outcome())
+                },
+            )
+            .await;
+            assert_eq!(source, "oauth");
+            assert!(matches!(
+                outcome,
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { .. })
+            ));
+            assert_eq!(primary_calls.get(), 0);
+            assert_eq!(setup_loads.get(), 0);
+            assert_eq!(setup_calls.get(), 0);
+        }
+
+        for (label, primary_outcome) in [
+            (
+                "401",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+                    "Claude OAuth token expired or invalid. Run `claude` to re-authenticate.",
+                )),
+            ),
+            (
+                "transient",
+                ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                    "Claude usage request failed. Retrying automatically.",
+                    None,
+                    SafeTransportDiagnostic::server_error(503),
+                )),
+            ),
+        ] {
+            let primary_calls = std::cell::Cell::new(0);
+            let setup_loads = std::cell::Cell::new(0);
+            let setup_calls = std::cell::Cell::new(0);
+            let (source, outcome) = fetch_claude_login_or_setup_with(
+                ClaudeLoginResolution::Ready(claude_test_login_credentials()),
+                |_| {
+                    primary_calls.set(primary_calls.get() + 1);
+                    async move { ("oauth", primary_outcome) }
+                },
+                || {
+                    setup_loads.set(setup_loads.get() + 1);
+                    Ok(Some(claude_test_setup_token()))
+                },
+                |_| async {
+                    setup_calls.set(setup_calls.get() + 1);
+                    ("setup-token", claude_test_success_outcome())
+                },
+            )
+            .await;
+            assert_eq!(source, "oauth", "{label}");
+            match label {
+                "401" => assert!(matches!(
+                    outcome,
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { .. })
+                )),
+                _ => assert!(matches!(
+                    outcome,
+                    ProviderFetchOutcome::Failure(ProviderFetchFailure::Transient { .. })
+                )),
+            }
+            assert_eq!(primary_calls.get(), 1, "{label}");
+            assert_eq!(setup_loads.get(), 0, "{label}");
+            assert_eq!(setup_calls.get(), 0, "{label}");
+        }
+
+        {
+            let primary_calls = std::cell::Cell::new(0);
+            let setup_loads = std::cell::Cell::new(0);
+            let setup_calls = std::cell::Cell::new(0);
+            let logged_out = resolve_stored_claude_login(
+                r#"{"claudeAiOauth":{"refreshToken":"stale"}}"#,
+                ClaudeCredentialSource::File,
+            );
+            assert!(matches!(logged_out, ClaudeLoginResolution::ExplicitLogout));
+            let (source, outcome) = fetch_claude_login_or_setup_with(
+                logged_out,
+                |_| async {
+                    primary_calls.set(primary_calls.get() + 1);
+                    ("oauth", claude_test_success_outcome())
+                },
+                || {
+                    setup_loads.set(setup_loads.get() + 1);
+                    Ok(Some(claude_test_setup_token()))
+                },
+                |_| async {
+                    setup_calls.set(setup_calls.get() + 1);
+                    ("setup-token", claude_test_success_outcome())
+                },
+            )
+            .await;
+            assert_eq!(source, "setup-token");
+            assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+            assert_eq!(primary_calls.get(), 0);
+            assert_eq!(setup_loads.get(), 1);
+            assert_eq!(setup_calls.get(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn claude_keychain_logout_blocks_stale_file_login_and_allows_setup_token() {
+        const VALID_FILE_LOGIN: &str =
+            r#"{"claudeAiOauth":{"accessToken":"file-access","refreshToken":"file-refresh"}}"#;
+
+        for malformed in [
+            r#"{"claudeAiOauth":{}}"#,
+            r#"{"claudeAiOauth":{"accessToken":null}}"#,
+        ] {
+            assert!(matches!(
+                resolve_stored_claude_login(malformed, ClaudeCredentialSource::Keychain),
+                ClaudeLoginResolution::Terminal
+            ));
+        }
+
+        let missing_file_loads = std::cell::Cell::new(0);
+        let missing = load_stored_claude_login_with(
+            || Ok(None),
+            || {
+                missing_file_loads.set(missing_file_loads.get() + 1);
+                Ok(Some(VALID_FILE_LOGIN.to_string()))
+            },
+        );
         assert!(matches!(
-            &fallback.account_scope,
-            Err(AccountScopeError::NoTrustedEvidence)
+            missing,
+            ClaudeLoginResolution::Ready(ClaudeCredentials {
+                source: ClaudeCredentialSource::File,
+                ..
+            })
         ));
-        assert_eq!(fallback.windows[0].pace_status.state, PaceState::Available);
+        assert_eq!(missing_file_loads.get(), 1);
+
+        let file_loads = std::cell::Cell::new(0);
+        let login = load_stored_claude_login_with(
+            || {
+                Ok(Some(
+                    r#"{"claudeAiOauth":{"refreshToken":"stale-file-shape"}}"#.to_string(),
+                ))
+            },
+            || {
+                file_loads.set(file_loads.get() + 1);
+                Ok(Some(VALID_FILE_LOGIN.to_string()))
+            },
+        );
+        assert!(matches!(login, ClaudeLoginResolution::ExplicitLogout));
+        assert_eq!(file_loads.get(), 0);
+
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let scope = TestRefreshScope::new("claude", "keychain-explicit-logout");
+        let binding = ProviderCacheBinding::primary(
+            scope
+                .resolve_current("fixture", "logged-in-account", b"marker")
+                .unwrap(),
+        );
+        let mut gate = ClaudeUsageGate::default();
+        gate.record_rate_limit(binding.clone(), None, now);
+        assert!(gate.blocked_until_for(&binding, now).is_some());
+        clear_claude_gate_for_login_resolution(&login, &mut gate);
+        assert!(gate.blocked_until_for(&binding, now).is_none());
+
+        let oauth_calls = std::cell::Cell::new(0);
+        let setup_loads = std::cell::Cell::new(0);
+        let setup_calls = std::cell::Cell::new(0);
+        let (source, outcome) = fetch_claude_login_or_setup_with(
+            login,
+            |_| async {
+                oauth_calls.set(oauth_calls.get() + 1);
+                ("oauth", claude_test_success_outcome())
+            },
+            || {
+                setup_loads.set(setup_loads.get() + 1);
+                Ok(Some(claude_test_setup_token()))
+            },
+            |_| async {
+                setup_calls.set(setup_calls.get() + 1);
+                ("setup-token", claude_test_success_outcome())
+            },
+        )
+        .await;
+        assert_eq!(source, "setup-token");
+        assert!(matches!(outcome, ProviderFetchOutcome::Success { .. }));
+        assert_eq!(oauth_calls.get(), 0);
+        assert_eq!(setup_loads.get(), 1);
+        assert_eq!(setup_calls.get(), 1);
+        scope.cleanup();
+    }
+
+    fn timeout_diagnostic() -> SafeTransportDiagnostic {
+        SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+            true,
+            false,
+            TransportPhase::Request,
+            None,
+        ))
+    }
+
+    #[test]
+    fn last_good_same_binding_fallback_preserves_clean_snapshot_without_enrichment() {
+        let scope = TestRefreshScope::new("codex", "last-good-same-binding");
+        let account_scope = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let fresh_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let failure_at = fresh_at + chrono::Duration::minutes(1);
+        let enrich_calls = std::cell::Cell::new(0);
+
+        let fresh = apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            fresh_at,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("codex", Ok(account_scope), fresh_at),
+                cache_binding: Some(binding.clone()),
+            },
+            |snapshot| {
+                enrich_calls.set(enrich_calls.get() + 1);
+                snapshot.windows[0].pace_status = PaceStatusPayload {
+                    state: PaceState::Available,
+                    window_key: Some("main.session.v1".to_string()),
+                    duration_seconds: Some(300 * 60),
+                    duration_source: Some(DurationSource::Contract),
+                    complete_cycles: 6,
+                    reason: None,
+                };
+                snapshot.windows[0].historical_pace = Some(HistoricalPacePayload {
+                    expected_used_percent: 35.0,
+                    eta_seconds: Some(1_800.0),
+                    will_last_to_reset: false,
+                    run_out_probability: Some(0.42),
+                });
+            },
+        )
+        .unwrap();
+        assert_eq!(enrich_calls.get(), 1);
+
+        let fallback = apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            failure_at,
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Codex usage request failed. Retrying automatically.",
+                Some(binding.clone()),
+                timeout_diagnostic(),
+            )),
+            |_| enrich_calls.set(enrich_calls.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(enrich_calls.get(), 1);
+        assert_eq!(fallback.updated_at, fresh.updated_at);
+        assert_eq!(fallback.source, fresh.source);
+        assert_eq!(
+            fallback.identity.as_ref().unwrap().plan.as_deref(),
+            Some("Fixture")
+        );
+        assert_eq!(fallback.windows.len(), 1);
         assert_eq!(fallback.windows[0].pace_status.complete_cycles, 6);
         assert_eq!(
             fallback.windows[0]
@@ -3475,10 +4867,378 @@ mod tests {
                 .map(|pace| pace.expected_used_percent),
             Some(35.0)
         );
+        assert_eq!(
+            fallback
+                .credits
+                .as_ref()
+                .and_then(|credits| credits.remaining),
+            Some(-2.5)
+        );
+        assert!(matches!(
+            fallback.account_scope,
+            Err(AccountScopeError::NoTrustedEvidence)
+        ));
+        assert!(fallback.error.is_some());
+        assert_eq!(
+            fallback
+                .transport_diagnostic
+                .map(|diagnostic| diagnostic.category),
+            Some(TransportCategory::Timeout)
+        );
 
-        // Leave the gate clean for any other test touching the static.
-        claude_gate_record_success(&snapshot);
+        let cached = lock_last_good(&cache)
+            .entries
+            .get("codex")
+            .unwrap()
+            .snapshot
+            .clone();
+        assert!(cached.error.is_none());
+        assert!(cached.transport_diagnostic.is_none());
+        drop(cached);
+
+        let fallback_again = apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            failure_at + chrono::Duration::minutes(1),
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Codex usage request failed. Retrying automatically.",
+                Some(binding),
+                SafeTransportDiagnostic::server_error(503),
+            )),
+            |_| enrich_calls.set(enrich_calls.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(enrich_calls.get(), 1);
+        assert_eq!(fallback_again.updated_at, fresh.updated_at);
+        assert_eq!(fallback_again.windows[0].pace_status.complete_cycles, 6);
         scope.cleanup();
+    }
+
+    #[test]
+    fn last_good_mismatch_unbound_terminal_and_absent_clear_cache() {
+        let scope = TestRefreshScope::new("codex", "last-good-clear");
+        let scope_a = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let scope_b = scope
+            .resolve_current("fixture", "account-b", b"marker-b")
+            .unwrap();
+        let binding_a = ProviderCacheBinding::primary(scope_a.clone());
+        let binding_b = ProviderCacheBinding::primary(scope_b);
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        for failure in [
+            ProviderFetchFailure::transient("mismatch", Some(binding_b), timeout_diagnostic()),
+            ProviderFetchFailure::transient("unbound", None, timeout_diagnostic()),
+            ProviderFetchFailure::terminal("terminal"),
+        ] {
+            let cache = Mutex::new(ProviderLastGoodCache::default());
+            apply_provider_outcome_with(
+                &cache,
+                "codex",
+                "oauth",
+                now,
+                ProviderFetchOutcome::Success {
+                    snapshot: cache_test_snapshot("codex", Ok(scope_a.clone()), now),
+                    cache_binding: Some(binding_a.clone()),
+                },
+                |_| {},
+            );
+            let result = apply_provider_outcome_with(
+                &cache,
+                "codex",
+                "oauth",
+                now + chrono::Duration::seconds(1),
+                ProviderFetchOutcome::Failure(failure),
+                |_| panic!("failure must not enrich"),
+            )
+            .unwrap();
+            assert!(result.windows.is_empty());
+            assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+        }
+
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("codex", Ok(scope_a), now),
+                cache_binding: Some(binding_a),
+            },
+            |_| {},
+        );
+        assert!(apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Absent,
+            |_| panic!("absent must not enrich"),
+        )
+        .is_none());
+        assert!(!lock_last_good(&cache).entries.contains_key("codex"));
+        scope.cleanup();
+    }
+
+    #[test]
+    fn uncacheable_or_invalid_success_clears_prior_last_good() {
+        let scope = TestRefreshScope::new("antigravity", "last-good-uncacheable");
+        let account_scope = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("antigravity", Ok(account_scope.clone()), now),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        );
+        let anonymous = apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "local",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot(
+                    "antigravity",
+                    Err(AccountScopeError::NoTrustedEvidence),
+                    now,
+                ),
+                cache_binding: None,
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert_eq!(anonymous.windows.len(), 1);
+        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+
+        apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("antigravity", Ok(account_scope.clone()), now),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        );
+        let mut empty = cache_test_snapshot("antigravity", Ok(account_scope.clone()), now);
+        empty.windows.clear();
+        let live_empty = apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: empty,
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+        assert!(live_empty.windows.is_empty());
+        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+
+        apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("antigravity", Ok(account_scope), now),
+                cache_binding: Some(binding),
+            },
+            |_| {},
+        );
+        let enrich_calls = std::cell::Cell::new(0);
+        let invalid = apply_provider_outcome_with(
+            &cache,
+            "antigravity",
+            "oauth",
+            now,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot(
+                    "antigravity",
+                    Err(AccountScopeError::MetadataRead),
+                    now,
+                ),
+                cache_binding: None,
+            },
+            |_| enrich_calls.set(enrich_calls.get() + 1),
+        )
+        .unwrap();
+        assert!(invalid.windows.is_empty());
+        assert_eq!(enrich_calls.get(), 0);
+        assert!(!lock_last_good(&cache).entries.contains_key("antigravity"));
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn status_before_body_enforces_terminal_transient_and_claude_exception() {
+        use std::cell::Cell;
+
+        for status in [401, 403, 418, 429, 500, 503] {
+            let reads = Cell::new(0);
+            let result = read_response_body(status, false, || async {
+                reads.set(reads.get() + 1);
+                Ok("sensitive body".to_string())
+            })
+            .await;
+            assert_eq!(reads.get(), 0, "status {status} must not read body");
+            match status {
+                429 | 500 | 503 => {
+                    assert!(matches!(result, Err(ResponseReadFailure::Transient(_))))
+                }
+                _ => assert_eq!(result, Err(ResponseReadFailure::Terminal(status))),
+            }
+        }
+
+        let reads = Cell::new(0);
+        let body = read_response_body(200, false, || async {
+            reads.set(reads.get() + 1);
+            Ok("success".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(body, "success");
+        assert_eq!(reads.get(), 1);
+
+        let reads = Cell::new(0);
+        let failure = read_response_body(200, false, || async {
+            reads.set(reads.get() + 1);
+            Err(TransportErrorFacts::synthetic(
+                false,
+                false,
+                TransportPhase::ResponseBody,
+                Some(54),
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(reads.get(), 1);
+        assert!(matches!(
+            failure,
+            ResponseReadFailure::Transient(SafeTransportDiagnostic {
+                category: TransportCategory::ConnectionReset,
+                os_code: Some(54),
+                ..
+            })
+        ));
+
+        let reads = Cell::new(0);
+        let body = read_response_body(403, true, || async {
+            reads.set(reads.get() + 1);
+            Ok("missing user:profile".to_string())
+        })
+        .await
+        .unwrap();
+        assert_eq!(body, "missing user:profile");
+        assert_eq!(reads.get(), 1);
+
+        let reads = Cell::new(0);
+        let failure = read_response_body(403, true, || async {
+            reads.set(reads.get() + 1);
+            Err(TransportErrorFacts::synthetic(
+                true,
+                false,
+                TransportPhase::ResponseBody,
+                None,
+            ))
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(reads.get(), 1);
+        assert_eq!(failure, ResponseReadFailure::Terminal(403));
+    }
+
+    #[tokio::test]
+    async fn verified_binding_failure_prevents_every_provider_request() {
+        for provider in ["codex", "claude", "grok", "copilot", "antigravity"] {
+            let sends = std::cell::Cell::new(0);
+            let result: Result<(), &str> =
+                request_after_verified_binding(Err::<(), _>("scope unavailable"), |()| async {
+                    sends.set(sends.get() + 1);
+                    Ok(())
+                })
+                .await;
+            assert_eq!(result, Err("scope unavailable"), "{provider}");
+            assert_eq!(sends.get(), 0, "{provider}");
+        }
+    }
+
+    #[test]
+    fn structured_transport_diagnostic_serializes_only_allowlisted_fields() {
+        let diagnostic = SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+            false,
+            true,
+            TransportPhase::Request,
+            Some(61),
+        ));
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert_eq!(wire, r#"{"category":"connectionRefused","osCode":61}"#);
+        for secret in [
+            "token-secret",
+            "Authorization",
+            "https://example.invalid/path?query=secret#fragment",
+            "user@example.invalid",
+            "account-123",
+            "/private/credential/path",
+        ] {
+            assert!(!wire.contains(secret));
+        }
+        assert_eq!(
+            serde_json::to_value(SafeTransportDiagnostic::rate_limited(429)).unwrap(),
+            serde_json::json!({ "category": "rateLimited", "status": 429 })
+        );
+        assert_eq!(
+            serde_json::to_value(SafeTransportDiagnostic::server_error(503)).unwrap(),
+            serde_json::json!({ "category": "serverError", "status": 503 })
+        );
+    }
+
+    #[test]
+    fn codex_credit_is_usable_only_when_balance_is_finite() {
+        let credits = |balance, unlimited| CodexCredits { balance, unlimited };
+
+        assert_eq!(
+            finite_codex_balance(Some(&credits(Some(12.5), false))),
+            Some(12.5)
+        );
+        assert_eq!(
+            finite_codex_balance(Some(&credits(Some(-2.5), false))),
+            Some(-2.5),
+            "finite negative balances preserve the existing present-credit semantics"
+        );
+        assert_eq!(
+            finite_codex_balance(Some(&credits(Some(0.0), false))),
+            Some(0.0)
+        );
+        assert_eq!(
+            finite_codex_balance(Some(&credits(Some(f64::NAN), false))),
+            None
+        );
+        assert_eq!(
+            finite_codex_balance(Some(&credits(Some(f64::INFINITY), false))),
+            None
+        );
+        assert_eq!(
+            finite_codex_balance(Some(&credits(None, true))),
+            None,
+            "unlimited without a balance is not usable credit"
+        );
+        assert_eq!(finite_codex_balance(None), None);
     }
 
     #[test]
@@ -3623,6 +5383,7 @@ mod tests {
             subscription_type: None,
             source: ClaudeCredentialSource::File,
             raw_root: None,
+            keychain_account: None,
             scope_slot: slot.clone(),
         };
         assert_eq!(
@@ -3645,99 +5406,32 @@ mod tests {
     }
 
     #[test]
-    fn codex_scope_precedence_keeps_refresh_failure_sticky() {
-        let scope_store = TestRefreshScope::new("codex", "codex-scope-precedence");
-        let refresh_scope = scope_store
-            .resolve_current("fixture", "refresh", b"refresh-marker")
+    fn provider_cache_binding_requires_structural_exact_match() {
+        let scope_store = TestRefreshScope::new("codex", "binding-exact-match");
+        let primary_a = scope_store
+            .resolve_current("fixture", "primary-a", b"primary-a")
             .unwrap();
-        let authoritative_scope = scope_store
-            .resolve_current("fixture", "authoritative", b"authoritative-marker")
+        let primary_b = scope_store
+            .resolve_current("fixture", "primary-b", b"primary-b")
             .unwrap();
-        let credential_scope = scope_store
-            .resolve_current("fixture", "credential", b"credential-marker")
+        let corroborating_a = scope_store
+            .resolve_current("fixture", "corroborating-a", b"corroborating-a")
             .unwrap();
-        let authoritative_calls = std::cell::Cell::new(0);
-        let credential_calls = std::cell::Cell::new(0);
+        let corroborating_b = scope_store
+            .resolve_current("fixture", "corroborating-b", b"corroborating-b")
+            .unwrap();
 
-        let resolved = resolve_codex_account_scope(
-            Some(Err(AccountScopeError::MetadataWrite)),
-            Some("acct-id"),
-            |_| {
-                authoritative_calls.set(authoritative_calls.get() + 1);
-                Ok(authoritative_scope.clone())
-            },
-            || {
-                credential_calls.set(credential_calls.get() + 1);
-                Ok(credential_scope.clone())
-            },
+        let full = ProviderCacheBinding::new(primary_a.clone(), Some(corroborating_a.clone()));
+        assert_eq!(full, full.clone());
+        assert_ne!(
+            full,
+            ProviderCacheBinding::new(primary_b, Some(corroborating_a.clone()))
         );
-        assert_eq!(resolved, Err(AccountScopeError::MetadataWrite));
-        assert_eq!(authoritative_calls.get(), 0);
-        assert_eq!(credential_calls.get(), 0);
-
-        let resolved = resolve_codex_account_scope(
-            Some(Err(AccountScopeError::MetadataRead)),
-            None,
-            |_| {
-                authoritative_calls.set(authoritative_calls.get() + 1);
-                Ok(authoritative_scope.clone())
-            },
-            || {
-                credential_calls.set(credential_calls.get() + 1);
-                Ok(credential_scope.clone())
-            },
+        assert_ne!(
+            full,
+            ProviderCacheBinding::new(primary_a.clone(), Some(corroborating_b))
         );
-        assert_eq!(resolved, Err(AccountScopeError::MetadataRead));
-        assert_eq!(authoritative_calls.get(), 0);
-        assert_eq!(credential_calls.get(), 0);
-
-        let resolved = resolve_codex_account_scope(
-            Some(Ok(refresh_scope.clone())),
-            Some("acct-id"),
-            |_| {
-                authoritative_calls.set(authoritative_calls.get() + 1);
-                Ok(authoritative_scope.clone())
-            },
-            || {
-                credential_calls.set(credential_calls.get() + 1);
-                Ok(credential_scope.clone())
-            },
-        );
-        assert_eq!(resolved.unwrap(), authoritative_scope);
-        assert_eq!(authoritative_calls.get(), 1);
-        assert_eq!(credential_calls.get(), 0);
-
-        let resolved = resolve_codex_account_scope(
-            Some(Ok(refresh_scope.clone())),
-            None,
-            |_| {
-                authoritative_calls.set(authoritative_calls.get() + 1);
-                Ok(authoritative_scope.clone())
-            },
-            || {
-                credential_calls.set(credential_calls.get() + 1);
-                Ok(credential_scope.clone())
-            },
-        );
-        assert_eq!(resolved.unwrap(), refresh_scope);
-        assert_eq!(authoritative_calls.get(), 1);
-        assert_eq!(credential_calls.get(), 0);
-
-        let resolved = resolve_codex_account_scope(
-            None,
-            None,
-            |_| {
-                authoritative_calls.set(authoritative_calls.get() + 1);
-                Ok(authoritative_scope.clone())
-            },
-            || {
-                credential_calls.set(credential_calls.get() + 1);
-                Ok(credential_scope.clone())
-            },
-        );
-        assert_eq!(resolved.unwrap(), credential_scope);
-        assert_eq!(authoritative_calls.get(), 1);
-        assert_eq!(credential_calls.get(), 1);
+        assert_ne!(full, ProviderCacheBinding::primary(primary_a));
         scope_store.cleanup();
     }
 
@@ -3910,6 +5604,7 @@ mod tests {
             windows,
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
         let history_calls = std::cell::Cell::new(0);
         enrich_snapshot_with(&mut snapshot, now.timestamp(), |_, _, _| {
@@ -3965,7 +5660,7 @@ mod tests {
         credentials.refresh_token = Some("new-refresh".to_string());
         credentials.expires_at = Utc.timestamp_millis_opt(1_700_009_999_000).single();
 
-        let merged = merge_claude_credentials_json(&credentials).unwrap();
+        let merged = merge_claude_credentials_json(&credentials, raw).unwrap();
         let reparsed =
             parse_claude_credentials_data(&merged, ClaudeCredentialSource::File).unwrap();
         assert_eq!(reparsed.access_token, "new-access");
@@ -3977,6 +5672,47 @@ mod tests {
         // Untouched fields the Claude CLI wrote survive the merge.
         assert_eq!(reparsed.subscription_type.as_deref(), Some("pro"));
         assert_eq!(reparsed.scopes, vec!["user:profile"]);
+    }
+
+    #[test]
+    fn claude_keychain_write_decision_pins_account_and_rejects_target_mismatch() {
+        let raw_a = r#"{
+            "claudeAiOauth": {
+                "accessToken": "old-access",
+                "refreshToken": "old-refresh",
+                "expiresAt": 0
+            },
+            "sibling": "a"
+        }"#;
+        let mut credentials =
+            parse_claude_credentials_data(raw_a, ClaudeCredentialSource::Keychain).unwrap();
+        credentials.keychain_account = Some("account-a".to_string());
+        credentials.access_token = "new-access".to_string();
+        credentials.refresh_token = Some("new-refresh".to_string());
+
+        let (account, merged) =
+            prepare_claude_keychain_write(&credentials, Some("account-a"), raw_a).unwrap();
+        assert_eq!(account, "account-a");
+        assert_eq!(
+            serde_json::from_str::<Value>(&merged).unwrap()["claudeAiOauth"]["accessToken"],
+            "new-access"
+        );
+
+        assert!(prepare_claude_keychain_write(&credentials, Some("account-b"), raw_a).is_err());
+        assert!(prepare_claude_keychain_write(&credentials, None, raw_a).is_err());
+
+        let raw_changed_target = r#"{
+            "claudeAiOauth": {
+                "accessToken": "account-b-access",
+                "refreshToken": "account-b-refresh",
+                "expiresAt": 0
+            },
+            "sibling": "b"
+        }"#;
+        assert!(
+            prepare_claude_keychain_write(&credentials, Some("account-a"), raw_changed_target,)
+                .is_err()
+        );
     }
 
     #[test]
@@ -4311,6 +6047,7 @@ mod tests {
             windows: vec![window],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
         let calls = std::cell::Cell::new(0);
         enrich_snapshot_with(&mut snapshot, 1_700_000_000, |active, observations, _| {
@@ -4421,6 +6158,7 @@ mod tests {
             windows: vec![weekly, new_window],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
 
         enrich_snapshot_with(
@@ -4715,6 +6453,7 @@ mod tests {
 
     struct RecordingRefreshScope<'a> {
         inner: &'a TestRefreshScope,
+        resolves: Mutex<usize>,
         transfers: Mutex<Vec<(Vec<u8>, Vec<u8>)>>,
     }
 
@@ -4722,8 +6461,13 @@ mod tests {
         fn new(inner: &'a TestRefreshScope) -> Self {
             Self {
                 inner,
+                resolves: Mutex::new(0),
                 transfers: Mutex::new(Vec::new()),
             }
+        }
+
+        fn resolve_count(&self) -> usize {
+            *self.resolves.lock().unwrap()
         }
 
         fn transfers(&self) -> Vec<(Vec<u8>, Vec<u8>)> {
@@ -4738,6 +6482,7 @@ mod tests {
             canonical_location: &str,
             marker: &[u8],
         ) -> Result<AccountScope, AccountScopeError> {
+            *self.resolves.lock().unwrap() += 1;
             self.inner
                 .resolve_current(semantic_source, canonical_location, marker)
         }
@@ -4758,19 +6503,50 @@ mod tests {
         }
     }
 
+    struct MetadataFailingRefreshScope<'a> {
+        inner: &'a TestRefreshScope,
+    }
+
+    impl RefreshScopeTransaction for MetadataFailingRefreshScope<'_> {
+        fn resolve_current(
+            &self,
+            semantic_source: &str,
+            canonical_location: &str,
+            marker: &[u8],
+        ) -> Result<AccountScope, AccountScopeError> {
+            self.inner
+                .resolve_current(semantic_source, canonical_location, marker)
+        }
+
+        fn transfer(
+            &self,
+            semantic_source: &str,
+            canonical_location: &str,
+            old_marker: &[u8],
+            new_marker: &[u8],
+        ) -> Result<AccountScope, AccountScopeError> {
+            self.inner.fail_metadata_save();
+            self.inner
+                .transfer(semantic_source, canonical_location, old_marker, new_marker)
+        }
+    }
+
     fn checkpoint_at(
         target: Option<RefreshCheckpoint>,
-    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), String> {
+    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure> {
         move |checkpoint| {
             if Some(checkpoint) == target {
-                Err("injected crash".to_string())
+                Err(ProviderFetchFailure::terminal("injected crash"))
             } else {
                 Ok(())
             }
         }
     }
 
-    async fn codex_test_response(refresh_token: String) -> Result<Value, String> {
+    async fn codex_test_response(
+        refresh_token: String,
+        _attempt_binding: ProviderCacheBinding,
+    ) -> Result<Value, ProviderFetchFailure> {
         assert_eq!(refresh_token, "codex-old-refresh");
         Ok(serde_json::json!({
             "access_token": "codex-new-access",
@@ -4809,11 +6585,11 @@ mod tests {
         (scope, path, old_scope, metadata, location)
     }
 
-    async fn run_codex_refresh(
-        scope: &TestRefreshScope,
+    async fn run_codex_refresh<R: RefreshScopeTransaction + ?Sized>(
+        scope: &R,
         path: &Path,
         crash: Option<RefreshCheckpoint>,
-    ) -> Result<(CodexCredentials, Result<AccountScope, AccountScopeError>), String> {
+    ) -> Result<(CodexCredentials, ProviderCacheBinding), ProviderFetchFailure> {
         refresh_codex_credentials_with(
             path,
             scope,
@@ -4825,7 +6601,154 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn codex_refresh_canonicalizes_tokens_before_transfer_and_reload() {
+    async fn codex_refresh_rejects_concurrent_account_switch_without_touching_b() {
+        const B_BYTES: &[u8] = br#"{
+  "tokens": {
+    "access_token": "account-b-access",
+    "refresh_token": "account-b-refresh",
+    "id_token": "account-b-id",
+    "account_id": "account-b"
+  },
+  "sibling": {"writer": "b", "revision": 2}
+}
+"#;
+        let (scope, path, _, metadata_before, _) = setup_codex_refresh("codex-target-switch");
+        let recording = RecordingRefreshScope::new(&scope);
+        let request_path = path.clone();
+
+        let failure = refresh_codex_credentials_with(
+            &path,
+            &recording,
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "codex-old-refresh");
+                fs::write(&request_path, B_BYTES).unwrap();
+                Ok(serde_json::json!({
+                    "access_token": "codex-new-access",
+                    "refresh_token": "codex-new-refresh"
+                }))
+            },
+            save_codex_credentials,
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        assert!(recording.transfers().is_empty());
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        let stored_bytes = fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, B_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("codex-new"));
+        let stored = load_codex_credentials_from(&path).unwrap();
+        assert_eq!(stored.access_token, "account-b-access");
+        assert_eq!(stored.refresh_token.as_deref(), Some("account-b-refresh"));
+        assert_eq!(stored.account_id.as_deref(), Some("account-b"));
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_patches_unchanged_target_and_preserves_siblings() {
+        let (scope, path, old_scope, _, location) = setup_codex_refresh("codex-target-unchanged");
+        let original = serde_json::json!({
+            "tokens": {
+                "access_token": "codex-old-access",
+                "refresh_token": "codex-old-refresh",
+                "id_token": "codex-old-id",
+                "token_sibling": {"keep": true}
+            },
+            "sibling": {"writer": "before", "revision": 1}
+        });
+        fs::write(&path, serde_json::to_vec_pretty(&original).unwrap()).unwrap();
+        let current = serde_json::json!({
+            "tokens": original["tokens"].clone(),
+            "sibling": {"writer": "codex-cli", "revision": 2},
+            "unrelated": [1, 2, 3]
+        });
+        let current_bytes = serde_json::to_vec_pretty(&current).unwrap();
+        let request_path = path.clone();
+
+        let (refreshed, post_binding) = refresh_codex_credentials_with(
+            &path,
+            &scope,
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "codex-old-refresh");
+                fs::write(&request_path, current_bytes).unwrap();
+                Ok(serde_json::json!({
+                    "access_token": "codex-new-access",
+                    "refresh_token": "codex-new-refresh"
+                }))
+            },
+            save_codex_credentials,
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refreshed.access_token, "codex-new-access");
+        assert_eq!(post_binding.primary, old_scope);
+        let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(stored["tokens"]["access_token"], "codex-new-access");
+        assert_eq!(stored["tokens"]["refresh_token"], "codex-new-refresh");
+        assert_eq!(stored["tokens"]["id_token"], "codex-old-id");
+        assert_eq!(stored["tokens"]["token_sibling"]["keep"], true);
+        assert_eq!(stored["sibling"]["writer"], "codex-cli");
+        assert_eq!(stored["sibling"]["revision"], 2);
+        assert_eq!(stored["unrelated"], serde_json::json!([1, 2, 3]));
+        assert_eq!(
+            scope
+                .resolve_current("codex-auth-json", &location, b"codex-old-refresh")
+                .unwrap(),
+            old_scope
+        );
+        assert_eq!(
+            scope
+                .resolve_current("codex-auth-json", &location, b"codex-new-refresh")
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_rejects_concurrent_logout_without_restoring_a() {
+        const LOGGED_OUT_BYTES: &[u8] = br#"{
+  "sibling": {"writer": "logout", "revision": 2}
+}
+"#;
+        let (scope, path, _, metadata_before, _) = setup_codex_refresh("codex-target-logout");
+        let recording = RecordingRefreshScope::new(&scope);
+        let request_path = path.clone();
+
+        let failure = refresh_codex_credentials_with(
+            &path,
+            &recording,
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "codex-old-refresh");
+                fs::write(&request_path, LOGGED_OUT_BYTES).unwrap();
+                Ok(serde_json::json!({
+                    "access_token": "codex-new-access",
+                    "refresh_token": "codex-new-refresh"
+                }))
+            },
+            save_codex_credentials,
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        assert!(recording.transfers().is_empty());
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        let stored_bytes = fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, LOGGED_OUT_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("codex-new"));
+        let stored: Value = serde_json::from_slice(&stored_bytes).unwrap();
+        assert!(stored.get("tokens").is_none());
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn codex_refresh_canonicalizes_tokens_and_preserves_unrotated_marker() {
         for (tag, refresh_value) in [
             ("missing", None),
             ("null", Some(Value::Null)),
@@ -4852,10 +6775,10 @@ mod tests {
                     .insert("refresh_token".to_string(), refresh_value);
             }
 
-            let (refreshed, scope_outcome) = refresh_codex_credentials_with(
+            let (refreshed, post_binding) = refresh_codex_credentials_with(
                 &path,
                 &recording,
-                move |refresh_token| async move {
+                move |refresh_token, _attempt_binding| async move {
                     assert_eq!(refresh_token, "codex-old-refresh");
                     Ok(response)
                 },
@@ -4872,7 +6795,8 @@ mod tests {
                 "{tag}"
             );
             assert_eq!(refreshed.id_token.as_deref(), Some("codex-new-id"), "{tag}");
-            assert_eq!(scope_outcome.unwrap(), old_scope, "{tag}");
+            assert_eq!(post_binding.primary, old_scope, "{tag}");
+            assert_eq!(post_binding.corroborating, None, "{tag}");
             assert_eq!(
                 recording.transfers(),
                 vec![(b"codex-old-refresh".to_vec(), b"codex-old-refresh".to_vec())],
@@ -4903,84 +6827,117 @@ mod tests {
             );
             scope.cleanup();
         }
+    }
 
-        let (scope, path, old_scope, _, _) = setup_codex_refresh("codex-canonical-aliases");
-        let recording = RecordingRefreshScope::new(&scope);
-        let response = serde_json::json!({
-            "access_token": " \t ",
-            "accessToken": false,
-            "refresh_token": null,
-            "refreshToken": " codex-new-refresh ",
-            "id_token": { "unexpected": true },
-            "idToken": ""
-        });
-        let (refreshed, scope_outcome) = refresh_codex_credentials_with(
-            &path,
-            &recording,
-            move |refresh_token| async move {
-                assert_eq!(refresh_token, "codex-old-refresh");
-                Ok(response)
-            },
-            save_codex_credentials,
-            checkpoint_at(None),
-        )
-        .await
-        .unwrap();
+    #[tokio::test]
+    async fn codex_refresh_rejects_invalid_success_schema_before_state_or_usage() {
+        for (tag, response) in [
+            ("array", serde_json::json!([])),
+            ("empty-object", serde_json::json!({})),
+            ("null", Value::Null),
+            ("bool", Value::Bool(true)),
+            ("string", Value::String("codex-new-access".to_string())),
+            (
+                "blank-access",
+                serde_json::json!({ "access_token": " \t\n " }),
+            ),
+            (
+                "invalid-aliases",
+                serde_json::json!({
+                    "access_token": false,
+                    "accessToken": [],
+                    "refreshToken": " codex-new-refresh "
+                }),
+            ),
+        ] {
+            let (scope, path, old_scope, metadata_before, location) =
+                setup_codex_refresh(&format!("codex-invalid-schema-{tag}"));
+            let credentials_before = fs::read(&path).unwrap();
+            let recording = RecordingRefreshScope::new(&scope);
+            let save_calls = std::cell::Cell::new(0);
+            let usage_calls = std::cell::Cell::new(0);
 
-        assert_eq!(refreshed.access_token, "codex-old-access");
-        assert_eq!(
-            refreshed.refresh_token.as_deref(),
-            Some("codex-new-refresh")
-        );
-        assert_eq!(refreshed.id_token.as_deref(), Some("codex-old-id"));
-        assert_eq!(scope_outcome.unwrap(), old_scope);
-        assert_eq!(
-            recording.transfers(),
-            vec![(b"codex-old-refresh".to_vec(), b"codex-new-refresh".to_vec())]
-        );
-        let stored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(
-            stored["tokens"]["refresh_token"],
-            Value::String("codex-new-refresh".to_string())
-        );
-        let reloaded = load_codex_credentials_from(&path).unwrap();
-        assert_eq!(reloaded.access_token, refreshed.access_token);
-        assert_eq!(reloaded.refresh_token, refreshed.refresh_token);
-        assert_eq!(reloaded.id_token, refreshed.id_token);
-        assert_eq!(reloaded.scope_marker(), refreshed.scope_marker());
-        scope.cleanup();
+            let refresh_result = refresh_codex_credentials_with(
+                &path,
+                &recording,
+                move |refresh_token, _attempt_binding| async move {
+                    assert_eq!(refresh_token, "codex-old-refresh");
+                    Ok(response)
+                },
+                |_| -> Result<CodexCredentialWriteReceipt, String> {
+                    save_calls.set(save_calls.get() + 1);
+                    Err("unexpected save".to_string())
+                },
+                checkpoint_at(None),
+            )
+            .await;
+            let result: Result<(), ProviderFetchFailure> =
+                request_after_verified_binding(refresh_result, |_| async {
+                    usage_calls.set(usage_calls.get() + 1);
+                    Ok(())
+                })
+                .await;
+
+            assert!(
+                matches!(result, Err(ProviderFetchFailure::Terminal { .. })),
+                "{tag}"
+            );
+            assert!(recording.transfers().is_empty(), "{tag}");
+            assert_eq!(save_calls.get(), 0, "{tag}");
+            assert_eq!(usage_calls.get(), 0, "{tag}");
+            assert_eq!(fs::read(&path).unwrap(), credentials_before, "{tag}");
+            assert_eq!(scope.metadata_bytes(), metadata_before, "{tag}");
+            let reloaded = load_codex_credentials_from(&path).unwrap();
+            assert_eq!(reloaded.access_token, "codex-old-access", "{tag}");
+            assert_eq!(
+                reloaded.refresh_token.as_deref(),
+                Some("codex-old-refresh"),
+                "{tag}"
+            );
+            assert!(reloaded.last_refresh.is_none(), "{tag}");
+            assert_eq!(
+                scope
+                    .resolve_current("codex-auth-json", &location, reloaded.scope_marker())
+                    .unwrap(),
+                old_scope,
+                "{tag}"
+            );
+            scope.cleanup();
+        }
     }
 
     #[tokio::test]
     async fn codex_refresh_crash_boundaries_and_scope_gate_use_production_sequence() {
+        // These checkpoints model process stops, not a cross-resource transaction:
+        // after credential persistence, metadata may still be the pre-refresh bytes.
         for boundary in [
             RefreshCheckpoint::Reloaded,
             RefreshCheckpoint::NetworkReturned,
-            RefreshCheckpoint::MetadataHandled,
             RefreshCheckpoint::CredentialsPersisted,
+            RefreshCheckpoint::MetadataHandled,
         ] {
             let (scope, path, old_scope, before, location) = setup_codex_refresh("codex-crash");
-            assert_eq!(
-                run_codex_refresh(&scope, &path, Some(boundary))
-                    .await
-                    .unwrap_err(),
-                "injected crash"
+            let failure = run_codex_refresh(&scope, &path, Some(boundary))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display } if display == "injected crash"
+            ));
+            let credentials_persisted = matches!(
+                boundary,
+                RefreshCheckpoint::CredentialsPersisted | RefreshCheckpoint::MetadataHandled
             );
             let stored = load_codex_credentials_from(&path).unwrap();
             assert_eq!(
                 stored.refresh_token.as_deref(),
-                Some(if boundary == RefreshCheckpoint::CredentialsPersisted {
+                Some(if credentials_persisted {
                     "codex-new-refresh"
                 } else {
                     "codex-old-refresh"
                 })
             );
-            if matches!(
-                boundary,
-                RefreshCheckpoint::Reloaded | RefreshCheckpoint::NetworkReturned
-            ) {
-                assert_eq!(scope.metadata_bytes(), before);
-            } else {
+            if boundary == RefreshCheckpoint::MetadataHandled {
                 assert_ne!(scope.metadata_bytes(), before);
                 assert_eq!(
                     scope
@@ -4994,16 +6951,19 @@ mod tests {
                         .unwrap(),
                     old_scope
                 );
+            } else {
+                assert_eq!(scope.metadata_bytes(), before);
             }
             scope.cleanup();
         }
 
         let (scope, path, old_scope, before, location) = setup_codex_refresh("codex-metadata-fail");
-        scope.fail_metadata_save();
-        let (refreshed, scope_outcome) = run_codex_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(refreshed.access_token, "codex-new-access");
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
+        let auth_before = fs::read(&path).unwrap();
+        let failing = MetadataFailingRefreshScope { inner: &scope };
+        let failure = run_codex_refresh(&failing, &path, None).await.unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert_eq!(scope.metadata_bytes(), before);
+        assert_eq!(fs::read(&path).unwrap(), auth_before);
         let persisted = load_codex_credentials_from(&path).unwrap();
         assert_eq!(persisted.access_token, "codex-old-access");
         assert_eq!(
@@ -5018,38 +6978,71 @@ mod tests {
         );
         scope.cleanup();
 
-        let (scope, path, _old_scope, before, _) =
-            setup_codex_refresh("codex-metadata-fail-unchanged");
-        scope.fail_metadata_save();
-        let (refreshed, scope_outcome) = refresh_codex_credentials_with(
+        const CONCURRENT_LOGIN_BYTES: &[u8] = br#"{
+  "tokens": {
+    "access_token": "concurrent-access",
+    "refresh_token": "concurrent-refresh",
+    "id_token": "concurrent-id",
+    "account_id": "concurrent-account"
+  },
+  "sibling": {"writer": "codex-cli", "revision": 3}
+}
+"#;
+        let (scope, path, _, metadata_before, _) =
+            setup_codex_refresh("codex-metadata-fail-concurrent-login");
+        let failing = MetadataFailingRefreshScope { inner: &scope };
+        let save_path = path.clone();
+        let failure = refresh_codex_credentials_with(
             &path,
-            &scope,
-            |refresh_token| async move {
-                assert_eq!(refresh_token, "codex-old-refresh");
-                Ok(serde_json::json!({ "access_token": "codex-new-access" }))
+            &failing,
+            codex_test_response,
+            move |credentials| {
+                let receipt = save_codex_credentials(credentials)?;
+                fs::write(&save_path, CONCURRENT_LOGIN_BYTES)
+                    .map_err(|error| format!("inject concurrent Codex login: {error}"))?;
+                Ok(receipt)
             },
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        assert_eq!(fs::read(&path).unwrap(), CONCURRENT_LOGIN_BYTES);
+        scope.cleanup();
+
+        let (scope, path, _, metadata_before, _) = setup_codex_refresh("codex-save-fail");
+        let auth_before = fs::read(&path).unwrap();
+        let recording = RecordingRefreshScope::new(&scope);
+        let failure = refresh_codex_credentials_with(
+            &path,
+            &recording,
+            codex_test_response,
+            |_| Err("injected save failure".to_string()),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        assert!(recording.transfers().is_empty());
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        assert_eq!(fs::read(&path).unwrap(), auth_before);
+        scope.cleanup();
+
+        let (scope, path, old_scope, _, location) = setup_codex_refresh("codex-success");
+        let recording = RecordingRefreshScope::new(&scope);
+        let (_, post_binding) = refresh_codex_credentials_with(
+            &path,
+            &recording,
+            codex_test_response,
             save_codex_credentials,
             checkpoint_at(None),
         )
         .await
         .unwrap();
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
-        assert_eq!(scope.metadata_bytes(), before);
-        assert_eq!(
-            refreshed.refresh_token.as_deref(),
-            Some("codex-old-refresh")
-        );
-        let persisted = load_codex_credentials_from(&path).unwrap();
-        assert_eq!(persisted.access_token, "codex-new-access");
-        assert_eq!(
-            persisted.refresh_token.as_deref(),
-            Some("codex-old-refresh")
-        );
-        scope.cleanup();
-
-        let (scope, path, old_scope, _, location) = setup_codex_refresh("codex-success");
-        let (_, scope_outcome) = run_codex_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(scope_outcome.unwrap(), old_scope);
+        assert_eq!(recording.resolve_count(), 1);
+        assert_eq!(post_binding.primary, old_scope);
+        assert_eq!(post_binding.corroborating, None);
         assert_eq!(
             scope
                 .resolve_current("codex-auth-json", &location, b"codex-new-refresh")
@@ -5059,10 +7052,55 @@ mod tests {
         scope.cleanup();
     }
 
-    async fn claude_test_response(refresh_token: String) -> Result<ClaudeRefreshResponse, String> {
+    #[tokio::test]
+    async fn codex_refresh_transient_uses_lock_reloaded_binding_not_outer_binding() {
+        let (scope, path, inner_scope, _, location) = setup_codex_refresh("codex-lock-binding");
+        let outer_scope = scope
+            .resolve_current("codex-auth-json", &location, b"outer-refresh-a")
+            .unwrap();
+        assert_ne!(outer_scope, inner_scope);
+        let expected = ProviderCacheBinding::primary(inner_scope);
+        let request_expected = expected.clone();
+
+        let failure = refresh_codex_credentials_with(
+            &path,
+            &scope,
+            move |refresh_token, attempt_binding| async move {
+                assert_eq!(refresh_token, "codex-old-refresh");
+                assert_eq!(attempt_binding, request_expected);
+                Err(ProviderFetchFailure::transient(
+                    "Codex token refresh failed. Retrying automatically.",
+                    Some(attempt_binding),
+                    SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                        true,
+                        false,
+                        TransportPhase::Request,
+                        None,
+                    )),
+                ))
+            },
+            save_codex_credentials,
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        match failure {
+            ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
+        }
+        scope.cleanup();
+    }
+
+    async fn claude_test_response(
+        refresh_token: String,
+        _attempt_binding: ProviderCacheBinding,
+    ) -> Result<ClaudeRefreshResponse, ProviderFetchFailure> {
         assert_eq!(refresh_token, "claude-old-refresh");
         Ok(ClaudeRefreshResponse {
-            access_token: "claude-new-access".to_string(),
+            access_token: " claude-new-access ".to_string(),
             refresh_token: Some("claude-new-refresh".to_string()),
             expires_in: 3_600,
         })
@@ -5117,7 +7155,14 @@ mod tests {
         path: &Path,
         original: &ClaudeCredentials,
         crash: Option<RefreshCheckpoint>,
-    ) -> Result<(ClaudeCredentials, Result<AccountScope, AccountScopeError>), String> {
+    ) -> Result<
+        (
+            ClaudeCredentials,
+            AccountScope,
+            Option<ProviderCacheBinding>,
+        ),
+        ProviderFetchFailure,
+    > {
         let reload_path = path.to_path_buf();
         let save_path = path.to_path_buf();
         refresh_claude_credentials_with(
@@ -5148,6 +7193,122 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_file_refresh_rejects_concurrent_target_change_without_touching_b() {
+        const B_BYTES: &[u8] = br#"{
+  "claudeAiOauth": {
+    "accessToken": "account-b-access",
+    "refreshToken": "account-b-refresh",
+    "expiresAt": 4102444800000
+  },
+  "sibling": {"writer": "b", "revision": 2}
+}
+"#;
+        let (scope, path, original, old_scope, _, _) =
+            setup_claude_refresh("claude-file-target-race");
+        let reload_path = path.clone();
+        let request_path = path.clone();
+        let save_path = path.clone();
+        let save_failed = std::rc::Rc::new(std::cell::Cell::new(false));
+        let observed_save_failure = std::rc::Rc::clone(&save_failed);
+
+        let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
+            &original,
+            &scope,
+            move |template| {
+                let raw = fs::read_to_string(&reload_path)
+                    .map_err(|error| format!("reload Claude test credentials: {error}"))?;
+                let mut credentials =
+                    parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)?;
+                credentials.scope_slot = template.scope_slot.clone();
+                Ok(credentials)
+            },
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "claude-old-refresh");
+                fs::write(&request_path, B_BYTES).unwrap();
+                Ok(ClaudeRefreshResponse {
+                    access_token: "claude-new-access".to_string(),
+                    refresh_token: Some("claude-new-refresh".to_string()),
+                    expires_in: 3_600,
+                })
+            },
+            move |credentials| {
+                let result = save_claude_credentials_to_file(credentials, &save_path);
+                observed_save_failure.set(result.is_err());
+                result
+            },
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refreshed.access_token, "claude-new-access");
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(cache_binding, None);
+        assert!(save_failed.get());
+        assert_eq!(fs::read(&path).unwrap(), B_BYTES);
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn claude_file_refresh_preserves_concurrent_top_level_sibling() {
+        const CURRENT_WITH_NEW_SIBLING: &str = r#"{
+            "claudeAiOauth": {
+                "accessToken": "claude-old-access",
+                "refreshToken": "claude-old-refresh",
+                "expiresAt": 0
+            },
+            "sibling": {"writer": "claude-cli", "revision": 2}
+        }"#;
+        let (scope, path, original, old_scope, _, _) =
+            setup_claude_refresh("claude-file-sibling-race");
+        let reload_path = path.clone();
+        let request_path = path.clone();
+        let save_path = path.clone();
+
+        let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
+            &original,
+            &scope,
+            move |template| {
+                let raw = fs::read_to_string(&reload_path)
+                    .map_err(|error| format!("reload Claude test credentials: {error}"))?;
+                let mut credentials =
+                    parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)?;
+                credentials.scope_slot = template.scope_slot.clone();
+                Ok(credentials)
+            },
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "claude-old-refresh");
+                fs::write(&request_path, CURRENT_WITH_NEW_SIBLING).unwrap();
+                Ok(ClaudeRefreshResponse {
+                    access_token: "claude-new-access".to_string(),
+                    refresh_token: Some("claude-new-refresh".to_string()),
+                    expires_in: 3_600,
+                })
+            },
+            move |credentials| save_claude_credentials_to_file(credentials, &save_path),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(refreshed.access_token, "claude-new-access");
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(
+            cache_binding,
+            Some(ProviderCacheBinding::primary(old_scope.clone()))
+        );
+        let stored: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(stored["claudeAiOauth"]["accessToken"], "claude-new-access");
+        assert_eq!(
+            stored["claudeAiOauth"]["refreshToken"],
+            "claude-new-refresh"
+        );
+        assert_eq!(stored["sibling"]["writer"], "claude-cli");
+        assert_eq!(stored["sibling"]["revision"], 2);
+        scope.cleanup();
+    }
+
+    #[tokio::test]
     async fn claude_refresh_invalid_new_refresh_preserves_old_marker_and_store() {
         for (tag, refresh_value) in [
             ("claude-invalid-refresh-empty", serde_json::json!("")),
@@ -5165,7 +7326,7 @@ mod tests {
             .unwrap();
             let reload_path = path.clone();
             let save_path = path.clone();
-            let (refreshed, scope_outcome) = refresh_claude_credentials_with(
+            let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
                 &original,
                 &scope,
                 move |template| {
@@ -5176,7 +7337,7 @@ mod tests {
                     credentials.scope_slot = template.scope_slot.clone();
                     Ok(credentials)
                 },
-                move |refresh_token| async move {
+                move |refresh_token, _attempt_binding| async move {
                     assert_eq!(refresh_token, "claude-old-refresh");
                     Ok(response)
                 },
@@ -5191,7 +7352,11 @@ mod tests {
                 refreshed.refresh_token.as_deref(),
                 Some("claude-old-refresh")
             );
-            assert_eq!(scope_outcome.unwrap(), old_scope);
+            assert_eq!(scope_outcome, old_scope);
+            assert_eq!(
+                cache_binding,
+                Some(ProviderCacheBinding::primary(old_scope.clone()))
+            );
             assert_eq!(
                 scope
                     .resolve_current("claude-login-file", &location, b"claude-old-refresh")
@@ -5212,6 +7377,59 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn claude_refresh_blank_access_token_is_terminal_before_metadata_or_save() {
+        let (scope, path, original, old_scope, before, location) =
+            setup_claude_refresh("claude-blank-access");
+        let store_before = fs::read(&path).unwrap();
+        let reload_path = path.clone();
+        let save_calls = std::cell::Cell::new(0);
+
+        let failure = refresh_claude_credentials_with(
+            &original,
+            &scope,
+            move |template| {
+                let raw = fs::read_to_string(&reload_path)
+                    .map_err(|error| format!("reload Claude test credentials: {error}"))?;
+                let mut credentials =
+                    parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)?;
+                credentials.scope_slot = template.scope_slot.clone();
+                Ok(credentials)
+            },
+            |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "claude-old-refresh");
+                Ok(ClaudeRefreshResponse {
+                    access_token: " \t\n ".to_string(),
+                    refresh_token: Some("claude-new-refresh".to_string()),
+                    expires_in: 3_600,
+                })
+            },
+            |_| {
+                save_calls.set(save_calls.get() + 1);
+                Ok(())
+            },
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display }
+                if display == "Claude OAuth refresh response has no access token."
+        ));
+        assert_eq!(save_calls.get(), 0);
+        assert_eq!(scope.metadata_bytes(), before);
+        assert_eq!(fs::read(&path).unwrap(), store_before);
+        assert_eq!(
+            scope
+                .resolve_current("claude-login-file", &location, b"claude-old-refresh")
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
     async fn claude_refresh_crash_boundaries_and_scope_gate_use_production_sequence() {
         for boundary in [
             RefreshCheckpoint::Reloaded,
@@ -5221,12 +7439,13 @@ mod tests {
         ] {
             let (scope, path, original, old_scope, before, location) =
                 setup_claude_refresh("claude-crash");
-            assert_eq!(
-                run_claude_refresh(&scope, &path, &original, Some(boundary))
-                    .await
-                    .unwrap_err(),
-                "injected crash"
-            );
+            let failure = run_claude_refresh(&scope, &path, &original, Some(boundary))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display } if display == "injected crash"
+            ));
             assert_eq!(
                 stored_claude_refresh_token(&path).as_deref(),
                 Some(if boundary == RefreshCheckpoint::CredentialsPersisted {
@@ -5261,11 +7480,10 @@ mod tests {
         let (scope, path, original, old_scope, before, location) =
             setup_claude_refresh("claude-metadata-fail");
         scope.fail_metadata_save();
-        let (refreshed, scope_outcome) = run_claude_refresh(&scope, &path, &original, None)
+        let failure = run_claude_refresh(&scope, &path, &original, None)
             .await
-            .unwrap();
-        assert_eq!(refreshed.access_token, "claude-new-access");
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
+            .unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert_eq!(scope.metadata_bytes(), before);
         assert_eq!(
             stored_claude_refresh_token(&path).as_deref(),
@@ -5279,12 +7497,10 @@ mod tests {
         );
         scope.cleanup();
 
-        let (scope, path, original, _old_scope, before, _) =
-            setup_claude_refresh("claude-metadata-fail-unchanged");
-        scope.fail_metadata_save();
+        let (scope, path, original, old_scope, _, location) =
+            setup_claude_refresh("claude-save-fail");
         let reload_path = path.clone();
-        let save_path = path.clone();
-        let (refreshed, scope_outcome) = refresh_claude_credentials_with(
+        let (refreshed, scope_outcome, cache_binding) = refresh_claude_credentials_with(
             &original,
             &scope,
             move |template| {
@@ -5295,49 +7511,96 @@ mod tests {
                 credentials.scope_slot = template.scope_slot.clone();
                 Ok(credentials)
             },
-            |refresh_token| async move {
-                assert_eq!(refresh_token, "claude-old-refresh");
-                Ok(ClaudeRefreshResponse {
-                    access_token: "claude-new-access".to_string(),
-                    refresh_token: None,
-                    expires_in: 3_600,
-                })
-            },
-            move |credentials| save_claude_credentials_to_file(credentials, &save_path),
+            claude_test_response,
+            |_| Err("injected save failure".to_string()),
             checkpoint_at(None),
         )
         .await
         .unwrap();
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
-        assert_eq!(scope.metadata_bytes(), before);
+        assert_eq!(refreshed.access_token, "claude-new-access");
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(cache_binding, None);
         assert_eq!(
-            refreshed.refresh_token.as_deref(),
+            stored_claude_refresh_token(&path).as_deref(),
             Some("claude-old-refresh")
         );
-        let persisted = parse_claude_credentials_data(
-            &fs::read_to_string(&path).unwrap(),
-            ClaudeCredentialSource::File,
-        )
-        .unwrap();
-        assert_eq!(persisted.access_token, "claude-new-access");
-        assert_eq!(
-            persisted.refresh_token.as_deref(),
-            Some("claude-old-refresh")
-        );
-        scope.cleanup();
-
-        let (scope, path, original, old_scope, _, location) =
-            setup_claude_refresh("claude-success");
-        let (_, scope_outcome) = run_claude_refresh(&scope, &path, &original, None)
-            .await
-            .unwrap();
-        assert_eq!(scope_outcome.unwrap(), old_scope);
         assert_eq!(
             scope
                 .resolve_current("claude-login-file", &location, b"claude-new-refresh")
                 .unwrap(),
             old_scope
         );
+        scope.cleanup();
+
+        let (scope, path, original, old_scope, _, location) =
+            setup_claude_refresh("claude-success");
+        let (_, scope_outcome, cache_binding) = run_claude_refresh(&scope, &path, &original, None)
+            .await
+            .unwrap();
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(
+            cache_binding,
+            Some(ProviderCacheBinding::primary(old_scope.clone()))
+        );
+        assert_eq!(
+            scope
+                .resolve_current("claude-login-file", &location, b"claude-new-refresh")
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn claude_refresh_transient_uses_lock_reloaded_binding_not_outer_binding() {
+        let (scope, path, mut original, inner_scope, _, location) =
+            setup_claude_refresh("claude-lock-binding");
+        original.refresh_token = Some("outer-refresh-a".to_string());
+        let outer_scope = scope
+            .resolve_current("claude-login-file", &location, b"outer-refresh-a")
+            .unwrap();
+        assert_ne!(outer_scope, inner_scope);
+        let expected = ProviderCacheBinding::primary(inner_scope);
+        let request_expected = expected.clone();
+        let reload_path = path.clone();
+
+        let failure = refresh_claude_credentials_with(
+            &original,
+            &scope,
+            move |template| {
+                let raw = fs::read_to_string(&reload_path)
+                    .map_err(|error| format!("reload Claude test credentials: {error}"))?;
+                let mut credentials =
+                    parse_claude_credentials_data(&raw, ClaudeCredentialSource::File)?;
+                credentials.scope_slot = template.scope_slot.clone();
+                Ok(credentials)
+            },
+            move |refresh_token, attempt_binding| async move {
+                assert_eq!(refresh_token, "claude-old-refresh");
+                assert_eq!(attempt_binding, request_expected);
+                Err(ProviderFetchFailure::transient(
+                    "Claude OAuth refresh failed. Retrying automatically.",
+                    Some(attempt_binding),
+                    SafeTransportDiagnostic::from_facts(TransportErrorFacts::synthetic(
+                        true,
+                        false,
+                        TransportPhase::Request,
+                        None,
+                    )),
+                ))
+            },
+            |_| Ok(()),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        match failure {
+            ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
+        }
         scope.cleanup();
     }
 
@@ -5425,6 +7688,7 @@ mod tests {
             ],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
 
         enrich_snapshot_with(&mut snapshot, now, |active, observations, _| {
@@ -5482,6 +7746,7 @@ mod tests {
             ],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
 
         enrich_snapshot_with(&mut snapshot, now, |active, observations, _| {
@@ -5572,6 +7837,7 @@ mod tests {
             ],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
         let calls = std::cell::Cell::new(0);
         enrich_snapshot_with(&mut snapshot, now, |active, observations, _| {
@@ -5643,6 +7909,7 @@ mod tests {
             )],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
 
         enrich_snapshot_with(&mut snapshot, now, |_, _, _| {
@@ -5695,6 +7962,7 @@ mod tests {
             )],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
 
         enrich_snapshot_with(&mut snapshot, now, |_, _, _| {
@@ -5824,6 +8092,7 @@ mod tests {
             ],
             credits: None,
             error: None,
+            transport_diagnostic: None,
         };
         let calls = std::cell::Cell::new(0);
         enrich_snapshot_with(&mut snapshot, now.timestamp(), |_, _, _| {
@@ -5949,6 +8218,7 @@ mod tests {
 
         let payload = AgentUsagePayload {
             generated_at: "2026-07-10T12:00:00.000Z".to_string(),
+            publication_generation: 1,
             agents: vec![AgentUsageSnapshot {
                 client_id: "provider-fixture.invalid".to_string(),
                 source: "fixture.invalid".to_string(),
@@ -6060,6 +8330,7 @@ mod tests {
                 ],
                 credits: None,
                 error: None,
+                transport_diagnostic: None,
             }],
             opencode_subscriptions: Vec::new(),
         };
@@ -6072,6 +8343,12 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("decode {}: {error}", fixture_path.display()));
         assert_eq!(fixture["schemaVersion"], 3);
-        assert_eq!(fixture["payload"], serde_json::to_value(payload).unwrap());
+        let mut serialized = serde_json::to_value(payload).unwrap();
+        assert_eq!(serialized["publicationGeneration"], 1);
+        serialized
+            .as_object_mut()
+            .expect("payload serializes as an object")
+            .remove("publicationGeneration");
+        assert_eq!(fixture["payload"], serialized);
     }
 }

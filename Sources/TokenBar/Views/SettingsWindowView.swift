@@ -20,10 +20,53 @@ struct SettingsWindowView: View {
     /// instead of lagging a poller tick behind.
     @AppStorage(ClientRegistry.tabHiddenKey) private var tabsHiddenRaw = ""
     @AppStorage(ClientRegistry.tabOrderKey) private var tabsOrderRaw = ""
+    @AppStorage(TrayAnimator.quotaSourceKey) private var quotaSourceRaw = QuotaResolver.auto
+    @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
 
     /// The user's hidden client set, parsed from the observed raw string.
     private var hiddenClients: Set<String> {
         ClientRegistry.parseIdSet(tabsHiddenRaw)
+    }
+
+    /// Reconcile again for every generated payload, selection, or exclusion
+    /// change. Legacy/demo payloads have no publication generation, so their
+    /// resolved scalar is the content fingerprint that prevents a timestamp
+    /// collision from preserving stale defaults.
+    private var quotaReconciliationID: String? {
+        let excluded = ClientRegistry.quotaExcludedClients()
+        let exclusionSignature = [
+            excluded.sorted().joined(separator: ","),
+            tabsHiddenRaw,
+            limitsHiddenRaw,
+        ].joined(separator: "|")
+        return Self.quotaReconciliationID(
+            payload: model.agentUsage,
+            persistedSelection: quotaSourceRaw,
+            excluding: excluded,
+            exclusionSignature: exclusionSignature)
+    }
+
+    nonisolated static func quotaReconciliationID(
+        payload: AgentUsagePayload?,
+        persistedSelection: String,
+        excluding: Set<String>,
+        exclusionSignature: String
+    ) -> String? {
+        guard let payload else { return nil }
+        let payloadIdentity: String
+        if let generation = payload.publicationGeneration {
+            payloadIdentity = "generation:\(generation)"
+        } else {
+            let remaining = QuotaSelectionPolicy.resolveRemainingPercent(
+                payload: payload,
+                persistedSelection: persistedSelection,
+                excluding: excluding,
+                cachedRemaining: nil)
+            let fingerprint = remaining.map { String($0.bitPattern) } ?? "nil"
+            payloadIdentity = "legacy:\(payload.generatedAt):\(fingerprint)"
+        }
+        return [payloadIdentity, persistedSelection, exclusionSignature]
+            .joined(separator: "|")
     }
 
     var body: some View {
@@ -50,11 +93,37 @@ struct SettingsWindowView: View {
         .background(PopoverBackdrop().ignoresSafeArea())
         .task { await model.load() }
         .task { await model.pollAgentUsage() }
+        .task(id: quotaReconciliationID) {
+            guard let payload = model.agentUsage else { return }
+            let defaults = UsageDataSources.current.allowsQuotaCachePersistence
+                ? UserDefaults.standard
+                : nil
+            _ = Self.applyQuotaRemaining(
+                payload: payload,
+                persistedSelection: quotaSourceRaw,
+                excluding: ClientRegistry.quotaExcludedClients(),
+                defaults: defaults)
+        }
         .task { await model.pollTrace() }
         .task { await model.pollGraph() }
         // Key the rate poll on the hidden raw so a hide toggle restarts it and
         // re-fetches the filtered rate immediately, instead of lagging ≤10s.
         .task(id: tabsHiddenRaw) { await pollTokensPerMin() }
+    }
+
+    nonisolated static func applyQuotaRemaining(
+        payload: AgentUsagePayload?,
+        persistedSelection: String,
+        excluding: Set<String>,
+        defaults: UserDefaults?
+    ) -> Double? {
+        let cachedRemaining = defaults?.object(forKey: TrayAnimator.lastRemainingKey) as? Double
+        return TrayAnimator.applyQuotaRemaining(
+            payload: payload,
+            persistedSelection: persistedSelection,
+            excluding: excluding,
+            cachedRemaining: cachedRemaining,
+            defaults: defaults)
     }
 
     // MARK: - Preview column
@@ -175,32 +244,19 @@ private struct MenuBarMock: View {
                 .strokeBorder(Color.primary.opacity(0.12), lineWidth: 1))
     }
 
-    /// Mirrors TrayAnimator.quotaRemaining minus the write-back: live resolve
-    /// first, then the persisted last-good reading when this source permits it.
-    /// Excludes the tab- and limits-hidden clients from the auto pick, same as
-    /// the real tray.
+    /// Mirrors TrayAnimator.quotaRemaining through the shared payload-aware
+    /// policy. Excludes the tab- and limits-hidden clients from the auto pick,
+    /// same as the real tray.
     private var quotaRemaining: Double? {
         let source = UsageDataSources.current
-        let excluded = ClientRegistry.quotaExcludedClients()
-        let selection = QuotaSelectionPolicy.effectiveSelection(
+        let cachedRemaining: Double? = source.allowsQuotaCachePersistence
+            ? UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
+            : nil
+        return QuotaSelectionPolicy.resolveRemainingPercent(
             payload: agentUsage,
             persistedSelection: quotaSource,
-            excluding: excluded)
-        if let value = QuotaResolver.resolve(
-            payload: agentUsage, selection: selection, excluding: excluded)?
-            .window.remainingPercent
-        {
-            return value
-        }
-        // Same disambiguation as the real tray: don't fall back to the persisted
-        // last-good reading when the nil is caused purely by the exclusion.
-        if QuotaResolver.excludedAllCandidates(
-            payload: agentUsage, selection: selection, excluding: excluded)
-        {
-            return nil
-        }
-        guard source.allowsQuotaCachePersistence else { return nil }
-        return UserDefaults.standard.object(forKey: TrayAnimator.lastRemainingKey) as? Double
+            excluding: ClientRegistry.quotaExcludedClients(),
+            cachedRemaining: cachedRemaining)
     }
 
     @ViewBuilder

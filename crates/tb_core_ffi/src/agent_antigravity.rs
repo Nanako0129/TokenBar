@@ -19,7 +19,11 @@ use crate::agent_account_scope::{
     self, AccountScope, AccountScopeError, AuthoritativeIdKind, RefreshCheckpoint,
     RefreshScopeTransaction,
 };
-use crate::agent_usage::{clean_plan, parse_datetime, percent_encode, AgentIdentity, UsageWindow};
+use crate::agent_usage::{
+    clean_plan, parse_datetime, percent_encode, read_response_body, request_after_verified_binding,
+    AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
+    TransportErrorFacts, TransportPhase, UsageWindow,
+};
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
@@ -33,27 +37,88 @@ const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const REFRESH_SAFETY_SECS: i64 = 60;
 
+#[derive(Debug)]
 pub(crate) struct Fetched {
     pub source: String,
     pub identity: Option<AgentIdentity>,
     pub account_scope: Result<AccountScope, AccountScopeError>,
+    pub cache_binding: Option<ProviderCacheBinding>,
     pub windows: Vec<UsageWindow>,
 }
 
-/// Auto: prefer the live Local IDE API; fall back to the OAuth remote API.
-pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, String> {
-    match fetch_local_ide(now).await {
-        Ok(local) if !local.windows.is_empty() => Ok(local),
-        local_result => {
-            let local_err = local_result.err();
-            match fetch_oauth_remote(now).await {
-                Ok(remote) => Ok(remote),
-                Err(remote_err) => Err(local_err
-                    .map(|le| format!("{remote_err} (local IDE: {le})"))
-                    .unwrap_or(remote_err)),
+#[derive(Debug)]
+enum LocalAttempt {
+    Success(Fetched),
+    RouteMiss,
+}
+
+#[derive(Debug)]
+enum PrimaryAttempt<Context> {
+    Success(Fetched),
+    Forbidden(Context),
+    SchemaContradiction {
+        context: Context,
+        failure: ProviderFetchFailure,
+    },
+    Transient(Context),
+    FinalFailure(ProviderFetchFailure),
+}
+
+async fn fetch_with<
+    Local,
+    LocalFuture,
+    Primary,
+    PrimaryFuture,
+    Secondary,
+    SecondaryFuture,
+    Context,
+>(
+    local_attempt: Local,
+    primary_remote_attempt: Primary,
+    secondary_remote_attempt: Secondary,
+) -> Result<Fetched, ProviderFetchFailure>
+where
+    Local: FnOnce() -> LocalFuture,
+    LocalFuture: std::future::Future<Output = LocalAttempt>,
+    Primary: FnOnce() -> PrimaryFuture,
+    PrimaryFuture: std::future::Future<Output = PrimaryAttempt<Context>>,
+    Secondary: FnOnce(Context) -> SecondaryFuture,
+    SecondaryFuture: std::future::Future<Output = Result<Fetched, ProviderFetchFailure>>,
+{
+    if let LocalAttempt::Success(fetched) = local_attempt().await {
+        return Ok(fetched);
+    }
+
+    match primary_remote_attempt().await {
+        PrimaryAttempt::Success(fetched) => Ok(fetched),
+        PrimaryAttempt::Forbidden(context) => secondary_remote_attempt(context).await,
+        PrimaryAttempt::SchemaContradiction { context, failure } => {
+            match secondary_remote_attempt(context).await {
+                Ok(fetched) => Ok(fetched),
+                Err(_) => Err(failure),
             }
         }
+        PrimaryAttempt::Transient(context) => match secondary_remote_attempt(context).await {
+            Ok(fetched) => Ok(fetched),
+            Err(failure) => Err(failure),
+        },
+        PrimaryAttempt::FinalFailure(failure) => Err(failure),
     }
+}
+
+/// Auto: prefer the live Local IDE API; fall back to the OAuth remote API.
+pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    fetch_with(
+        || async move {
+            match fetch_local_ide(now).await {
+                Ok(local) if !local.windows.is_empty() => LocalAttempt::Success(local),
+                Ok(_) | Err(_) => LocalAttempt::RouteMiss,
+            }
+        },
+        || fetch_oauth_primary(now),
+        |context| fetch_oauth_secondary(context, now),
+    )
+    .await
 }
 
 // ── Local IDE API ───────────────────────────────────────────────────────────
@@ -122,8 +187,14 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
             continue;
         };
         match parse_user_status(&text, now) {
-            Ok(mut fetched) if !fetched.windows.is_empty() || fetched.identity.is_some() => {
+            Ok(mut fetched) if !fetched.windows.is_empty() => {
                 fetched.account_scope = resolve_local_account_scope(fetched.identity.as_ref());
+                fetched.cache_binding = fetched
+                    .account_scope
+                    .as_ref()
+                    .ok()
+                    .cloned()
+                    .map(ProviderCacheBinding::primary);
                 return Ok(fetched);
             }
             Ok(_) => last_err = "local API returned no model quotas".to_string(),
@@ -411,6 +482,7 @@ fn parse_user_status(body: &str, now: DateTime<Utc>) -> Result<Fetched, String> 
         // Parsing remains pure and hermetic. fetch_local_ide resolves this only
         // after the authenticated loopback response has been accepted.
         account_scope: Err(AccountScopeError::NoTrustedEvidence),
+        cache_binding: None,
         windows,
     })
 }
@@ -439,52 +511,140 @@ fn local_plan_name(info: LocalPlanInfo) -> Option<String> {
 
 // ── OAuth remote (Google Code Assist) ─────────────────────────────────────────
 
-async fn fetch_oauth_remote(now: DateTime<Utc>) -> Result<Fetched, String> {
+struct RemoteContext {
+    client: reqwest::Client,
+    access_token: String,
+    project: Option<String>,
+    plan: Option<String>,
+    account_scope: AccountScope,
+    cache_binding: Option<ProviderCacheBinding>,
+}
+
+impl RemoteContext {
+    fn finish(self, windows: Vec<UsageWindow>) -> Fetched {
+        Fetched {
+            source: "oauth".to_string(),
+            // google_accounts.active is unrelated local state, not authenticated
+            // by the credential that fetched these quotas.
+            identity: Some(remote_identity(self.plan)),
+            account_scope: Ok(self.account_scope),
+            cache_binding: self.cache_binding,
+            windows,
+        }
+    }
+}
+
+enum PrimaryQuotaAttempt {
+    Success(Vec<UsageWindow>),
+    Forbidden,
+    SchemaContradiction(ProviderFetchFailure),
+    Transient,
+    Terminal(ProviderFetchFailure),
+}
+
+async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext> {
+    let context = match prepare_remote_context(now).await {
+        Ok(context) => context,
+        Err(failure) => return PrimaryAttempt::FinalFailure(failure),
+    };
+    match fetch_available_models(&context, now).await {
+        PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
+        PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
+        PrimaryQuotaAttempt::SchemaContradiction(failure) => {
+            PrimaryAttempt::SchemaContradiction { context, failure }
+        }
+        PrimaryQuotaAttempt::Transient => PrimaryAttempt::Transient(context),
+        PrimaryQuotaAttempt::Terminal(failure) => PrimaryAttempt::FinalFailure(failure),
+    }
+}
+
+async fn fetch_oauth_secondary(
+    context: RemoteContext,
+    now: DateTime<Utc>,
+) -> Result<Fetched, ProviderFetchFailure> {
+    let windows = fetch_user_quota(&context, now).await?;
+    Ok(context.finish(windows))
+}
+
+async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, ProviderFetchFailure> {
     let creds_path = gemini_home()
         .map(|home| home.join("oauth_creds.json"))
-        .ok_or_else(|| "Could not resolve ~/.gemini".to_string())?;
-    let mut creds = load_remote_credentials(&creds_path)?;
-    let mut access_token = remote_access_token(&creds)?;
-    let mut refreshed_scope = None;
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal("Antigravity credential location could not be resolved.")
+        })?;
+    let creds = load_remote_credentials(&creds_path).map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity is not logged in. Re-login in Antigravity.")
+    })?;
+    let verified = if remote_credentials_need_refresh(&creds, now) {
+        refresh_access_token(&creds_path, now).await.map(
+            |(_, access_token, account_scope, cache_binding)| {
+                (access_token, account_scope, cache_binding)
+            },
+        )
+    } else {
+        remote_access_token(&creds)
+            .map_err(|_| {
+                ProviderFetchFailure::terminal("Antigravity credentials have no access token.")
+            })
+            .and_then(|access_token| {
+                resolve_remote_account_scope(&creds_path, &creds)
+                    .map(|account_scope| {
+                        let cache_binding = ProviderCacheBinding::primary(account_scope.clone());
+                        (access_token, account_scope, Some(cache_binding))
+                    })
+                    .map_err(|_| {
+                        ProviderFetchFailure::terminal(
+                            "Antigravity account identity could not be verified.",
+                        )
+                    })
+            })
+    };
 
-    if remote_credentials_need_refresh(&creds, now) {
-        let refreshed = refresh_access_token(&creds_path, now).await?;
-        creds = refreshed.0;
-        access_token = refreshed.1;
-        refreshed_scope = Some(refreshed.2);
-    }
+    request_after_verified_binding(
+        verified,
+        |(access_token, account_scope, cache_binding)| async move {
+            let client = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .map_err(|_| {
+                    ProviderFetchFailure::terminal(
+                        "Antigravity usage client could not be created.",
+                    )
+                })?;
+            let code_assist_body = code_assist_post(
+                &client,
+                "loadCodeAssist",
+                &json!({
+                    "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
+                }),
+                &access_token,
+                cache_binding.clone(),
+                false,
+            )
+            .await
+            .map_err(|failure| match failure {
+                CodeAssistPostFailure::Forbidden => ProviderFetchFailure::terminal(
+                    "Antigravity loadCodeAssist permission was denied.",
+                ),
+                CodeAssistPostFailure::Failure(failure) => failure,
+            })?;
+            let code_assist: Value = serde_json::from_str(&code_assist_body).map_err(|_| {
+                ProviderFetchFailure::terminal(
+                    "Antigravity loadCodeAssist response could not be decoded.",
+                )
+            })?;
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(30))
-        .build()
-        .map_err(|e| format!("build Antigravity client: {e}"))?;
-
-    let code_assist_body = code_assist_post(
-        &client,
-        "loadCodeAssist",
-        &json!({
-            "metadata": { "ideType": "ANTIGRAVITY", "platform": "PLATFORM_UNSPECIFIED", "pluginType": "GEMINI" }
-        }),
-        &access_token,
+            Ok(RemoteContext {
+                client,
+                access_token,
+                project: project_id(&code_assist),
+                plan: resolve_remote_plan(&code_assist),
+                account_scope,
+                cache_binding,
+            })
+        },
     )
-    .await?;
-    let code_assist: Value = serde_json::from_str(&code_assist_body)
-        .map_err(|e| format!("decode Antigravity loadCodeAssist: {e}"))?;
-    let project = project_id(&code_assist);
-    let plan = resolve_remote_plan(&code_assist);
-    let windows = fetch_model_quotas(&client, &access_token, project.as_deref(), now).await?;
-    let account_scope =
-        refreshed_scope.unwrap_or_else(|| resolve_remote_account_scope(&creds_path, &creds));
-
-    Ok(Fetched {
-        source: "oauth".to_string(),
-        // google_accounts.active is unrelated local state, not authenticated by
-        // the credential that fetched these quotas. It is neither presentation
-        // identity nor account-scope evidence for the remote route.
-        identity: Some(remote_identity(plan)),
-        account_scope,
-        windows,
-    })
+    .await
 }
 
 fn remote_identity(plan: Option<String>) -> AgentIdentity {
@@ -542,9 +702,10 @@ fn resolve_remote_account_scope(
 async fn refresh_access_token(
     creds_path: &Path,
     now: DateTime<Utc>,
-) -> Result<(Value, String, Result<AccountScope, AccountScopeError>), String> {
-    let refresh = agent_account_scope::begin_refresh("antigravity")
-        .map_err(|_| "Antigravity credential refresh lock is unavailable.".to_string())?;
+) -> Result<(Value, String, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure> {
+    let refresh = agent_account_scope::begin_refresh("antigravity").map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity credential refresh lock is unavailable.")
+    })?;
     refresh_access_token_with(
         creds_path,
         now,
@@ -556,13 +717,21 @@ async fn refresh_access_token(
     .await
 }
 
-async fn request_access_token(refresh_token: String) -> Result<Value, String> {
-    let client = resolve_oauth_client()
-        .ok_or_else(|| "Antigravity OAuth client not found. Install Antigravity.app or set ANTIGRAVITY_OAUTH_CLIENT_ID/SECRET.".to_string())?;
+async fn request_access_token(
+    refresh_token: String,
+    attempt_binding: ProviderCacheBinding,
+) -> Result<Value, ProviderFetchFailure> {
+    let client = resolve_oauth_client().ok_or_else(|| {
+        ProviderFetchFailure::terminal(
+            "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
+        )
+    })?;
     let http = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
-        .map_err(|e| format!("build refresh client: {e}"))?;
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Antigravity refresh client could not be created.")
+        })?;
     let form = format!(
         "client_id={}&client_secret={}&refresh_token={}&grant_type=refresh_token",
         percent_encode(&client.0),
@@ -578,14 +747,33 @@ async fn request_access_token(refresh_token: String) -> Result<Value, String> {
         .body(form)
         .send()
         .await
-        .map_err(|e| format!("Antigravity token refresh failed: {e}"))?;
-    if !response.status().is_success() {
-        return Err("Antigravity token refresh rejected. Re-login in Antigravity.".to_string());
-    }
-    response
-        .json()
-        .await
-        .map_err(|e| format!("decode refresh response: {e}"))
+        .map_err(|error| {
+            ProviderFetchFailure::from_send_error(
+                "Antigravity token refresh failed. Retrying automatically.",
+                Some(attempt_binding.clone()),
+                &error,
+            )
+        })?;
+    let status = response.status().as_u16();
+    let body = read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    .map_err(|failure| match failure {
+        ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+            "Antigravity token refresh failed. Retrying automatically.",
+            Some(attempt_binding),
+            diagnostic,
+        ),
+        ResponseReadFailure::Terminal(_) => ProviderFetchFailure::terminal(
+            "Antigravity token refresh was rejected. Re-login in Antigravity.",
+        ),
+    })?;
+    serde_json::from_str(&body).map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity token refresh response could not be decoded.")
+    })
 }
 
 async fn refresh_access_token_with<R, Request, RequestFuture, Save, Checkpoint>(
@@ -595,81 +783,128 @@ async fn refresh_access_token_with<R, Request, RequestFuture, Save, Checkpoint>(
     request: Request,
     save: Save,
     mut checkpoint: Checkpoint,
-) -> Result<(Value, String, Result<AccountScope, AccountScopeError>), String>
+) -> Result<(Value, String, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure>
 where
     R: RefreshScopeTransaction + ?Sized,
-    Request: FnOnce(String) -> RequestFuture,
-    RequestFuture: std::future::Future<Output = Result<Value, String>>,
+    Request: FnOnce(String, ProviderCacheBinding) -> RequestFuture,
+    RequestFuture: std::future::Future<Output = Result<Value, ProviderFetchFailure>>,
     Save: FnOnce(&Value) -> std::io::Result<()>,
-    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), String>,
+    Checkpoint: FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure>,
 {
-    let mut creds = load_remote_credentials(creds_path)?;
+    let creds = load_remote_credentials(creds_path).map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity credentials could not be reloaded.")
+    })?;
     checkpoint(RefreshCheckpoint::Reloaded)?;
-    let location = remote_scope_location(creds_path)
-        .map_err(|_| "Antigravity auth location cannot be scoped safely.".to_string())?;
-    if !remote_credentials_need_refresh(&creds, Utc::now()) {
-        let access_token = remote_access_token(&creds)?;
-        let scope = match remote_refresh_marker(&creds) {
-            Some(marker) => refresh.resolve_current("google-oauth-creds", &location, marker),
-            None => Err(AccountScopeError::NoTrustedEvidence),
-        };
-        return Ok((creds, access_token, scope));
+    let location = remote_scope_location(creds_path).map_err(|_| {
+        ProviderFetchFailure::terminal("Antigravity auth location could not be verified.")
+    })?;
+    let old_marker = remote_refresh_marker(&creds)
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal("Antigravity credential has no trusted refresh marker.")
+        })?
+        .to_vec();
+    let pre_scope = refresh
+        .resolve_current("google-oauth-creds", &location, &old_marker)
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Antigravity account identity could not be verified.")
+        })?;
+    let pre_binding = ProviderCacheBinding::primary(pre_scope.clone());
+    if !remote_credentials_need_refresh(&creds, now) {
+        let access_token = remote_access_token(&creds).map_err(|_| {
+            ProviderFetchFailure::terminal("Antigravity credentials have no access token.")
+        })?;
+        return Ok((creds, access_token, pre_scope, Some(pre_binding)));
     }
 
-    let old_marker = remote_refresh_marker(&creds)
-        .ok_or_else(|| "Antigravity access token expired and no refresh token".to_string())?
-        .to_vec();
     let refresh_token = std::str::from_utf8(&old_marker)
-        .map_err(|_| "Antigravity refresh credential is not valid text.".to_string())?
+        .map_err(|_| ProviderFetchFailure::terminal("Antigravity refresh credential is invalid."))?
         .to_string();
-    let json = request(refresh_token).await?;
+    let json = request(refresh_token, pre_binding).await?;
     checkpoint(RefreshCheckpoint::NetworkReturned)?;
     let access_token = json
         .get("access_token")
         .and_then(Value::as_str)
-        .ok_or_else(|| "refresh response missing access_token".to_string())?
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal(
+                "Antigravity token refresh response had no access token.",
+            )
+        })?
         .to_string();
 
-    if let Some(obj) = creds.as_object_mut() {
-        obj.insert("access_token".into(), Value::String(access_token.clone()));
-        if let Some(expires_in) = json.get("expires_in").and_then(Value::as_f64) {
-            let expiry = now.timestamp_millis() as f64 + expires_in * 1000.0;
-            obj.insert("expiry_date".into(), json!(expiry));
-        }
-        if let Some(id_token) = json.get("id_token").and_then(Value::as_str) {
-            obj.insert("id_token".into(), Value::String(id_token.to_string()));
-        }
-        if let Some(replacement) = json
-            .get("refresh_token")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        {
-            obj.insert(
-                "refresh_token".into(),
-                Value::String(replacement.to_string()),
-            );
-        }
+    // The provider refresh lock serializes TokenBar writers, but the credential
+    // file has no cross-process compare-and-swap. Re-reading closes the network
+    // wait race; an external writer can still race this check and atomic rename.
+    let mut current_creds = load_remote_credentials(creds_path).map_err(|_| {
+        ProviderFetchFailure::terminal(
+            "Antigravity credentials changed during refresh; refusing stale write-back.",
+        )
+    })?;
+    let current_marker = remote_refresh_marker(&current_creds).ok_or_else(|| {
+        ProviderFetchFailure::terminal(
+            "Antigravity credentials changed during refresh; refusing stale write-back.",
+        )
+    })?;
+    if current_marker != old_marker.as_slice() {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity credentials changed during refresh; refusing stale write-back.",
+        ));
     }
-    let new_marker = remote_refresh_marker(&creds);
-    let marker_rotated = new_marker.is_some_and(|marker| marker != old_marker.as_slice());
-    let scope = match new_marker {
-        Some(new_marker) => {
-            refresh.transfer("google-oauth-creds", &location, &old_marker, new_marker)
-        }
-        None => Err(AccountScopeError::NoTrustedEvidence),
-    };
+
+    let obj = current_creds.as_object_mut().ok_or_else(|| {
+        ProviderFetchFailure::terminal(
+            "Antigravity credentials changed during refresh; refusing stale write-back.",
+        )
+    })?;
+    obj.insert("access_token".into(), Value::String(access_token.clone()));
+    if let Some(expires_in) = json.get("expires_in").and_then(Value::as_f64) {
+        let expiry = now.timestamp_millis() as f64 + expires_in * 1000.0;
+        obj.insert("expiry_date".into(), json!(expiry));
+    }
+    if let Some(id_token) = json.get("id_token").and_then(Value::as_str) {
+        obj.insert("id_token".into(), Value::String(id_token.to_string()));
+    }
+    if let Some(replacement) = json
+        .get("refresh_token")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+    {
+        obj.insert(
+            "refresh_token".into(),
+            Value::String(replacement.to_string()),
+        );
+    }
+    let new_marker = remote_refresh_marker(&current_creds)
+        .ok_or_else(|| {
+            ProviderFetchFailure::terminal(
+                "Antigravity refreshed credential has no trusted marker.",
+            )
+        })?
+        .to_vec();
+    let account_scope = refresh
+        .transfer("google-oauth-creds", &location, &old_marker, &new_marker)
+        .map_err(|_| {
+            ProviderFetchFailure::terminal("Antigravity credential lineage could not be preserved.")
+        })?;
     checkpoint(RefreshCheckpoint::MetadataHandled)?;
-    // A rotated marker may reach disk only after its lineage transfer is durable.
-    // The refreshed access token remains usable in memory for this poll.
-    if marker_rotated && scope.is_err() {
-        return Ok((creds, access_token, scope));
-    }
-    if let Err(error) = save(&creds) {
-        eprintln!("tb_core_ffi: failed to persist refreshed Antigravity credentials: {error}");
-    }
+    let persisted = save(&current_creds).is_ok();
     checkpoint(RefreshCheckpoint::CredentialsPersisted)?;
-    Ok((creds, access_token, scope))
+    let cache_binding = if persisted {
+        Some(ProviderCacheBinding::primary(
+            refresh
+                .resolve_current("google-oauth-creds", &location, &new_marker)
+                .map_err(|_| {
+                    ProviderFetchFailure::terminal(
+                        "Antigravity account identity could not be verified after refresh.",
+                    )
+                })?,
+        ))
+    } else {
+        None
+    };
+    Ok((current_creds, access_token, account_scope, cache_binding))
 }
 
 fn write_creds_atomic(path: &Path, creds: &Value) -> std::io::Result<()> {
@@ -712,13 +947,20 @@ fn write_creds_atomic(path: &Path, creds: &Value) -> std::io::Result<()> {
     std::fs::File::open(directory)?.sync_all()
 }
 
+enum CodeAssistPostFailure {
+    Forbidden,
+    Failure(ProviderFetchFailure),
+}
+
 async fn code_assist_post(
     client: &reqwest::Client,
-    method: &str,
+    method: &'static str,
     body: &Value,
     access_token: &str,
-) -> Result<String, String> {
-    let resp = client
+    attempt_binding: Option<ProviderCacheBinding>,
+    forbidden_is_route_miss: bool,
+) -> Result<String, CodeAssistPostFailure> {
+    let response = client
         .post(format!("{CODE_ASSIST_BASE}:{method}"))
         .bearer_auth(access_token)
         .header(reqwest::header::USER_AGENT, "antigravity")
@@ -726,44 +968,113 @@ async fn code_assist_post(
         .json(body)
         .send()
         .await
-        .map_err(|e| format!("Antigravity {method} request failed: {e}"))?;
-    let status = resp.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED {
-        return Err("Antigravity Google auth expired. Re-login in Antigravity.".to_string());
+        .map_err(|error| {
+            CodeAssistPostFailure::Failure(ProviderFetchFailure::from_send_error(
+                format!("Antigravity {method} request failed. Retrying automatically."),
+                attempt_binding.clone(),
+                &error,
+            ))
+        })?;
+    let status = response.status().as_u16();
+    if status == 403 && forbidden_is_route_miss {
+        return Err(CodeAssistPostFailure::Forbidden);
     }
-    if status == reqwest::StatusCode::FORBIDDEN {
-        return Err(format!("Antigravity {method} permission denied"));
-    }
-    if !status.is_success() {
-        return Err(format!("Antigravity {method} returned {}", status.as_u16()));
-    }
-    resp.text()
-        .await
-        .map_err(|e| format!("read Antigravity {method}: {e}"))
+    read_response_body(status, false, || async {
+        response.text().await.map_err(|error| {
+            TransportErrorFacts::from_reqwest(&error, TransportPhase::ResponseBody)
+        })
+    })
+    .await
+    .map_err(|failure| {
+        CodeAssistPostFailure::Failure(match failure {
+            ResponseReadFailure::Transient(diagnostic) => ProviderFetchFailure::transient(
+                format!("Antigravity {method} request failed. Retrying automatically."),
+                attempt_binding,
+                diagnostic,
+            ),
+            ResponseReadFailure::Terminal(401) => ProviderFetchFailure::terminal(
+                "Antigravity Google auth expired. Re-login in Antigravity.",
+            ),
+            ResponseReadFailure::Terminal(403) => ProviderFetchFailure::terminal(format!(
+                "Antigravity {method} permission was denied."
+            )),
+            ResponseReadFailure::Terminal(status) => ProviderFetchFailure::terminal(format!(
+                "Antigravity {method} rejected the request (status {status})."
+            )),
+        })
+    })
 }
 
-async fn fetch_model_quotas(
-    client: &reqwest::Client,
-    access_token: &str,
-    project: Option<&str>,
+async fn fetch_available_models(
+    context: &RemoteContext,
     now: DateTime<Utc>,
-) -> Result<Vec<UsageWindow>, String> {
-    let body = match project {
-        Some(p) => json!({ "project": p }),
+) -> PrimaryQuotaAttempt {
+    let body = match context.project.as_deref() {
+        Some(project) => json!({ "project": project }),
         None => json!({}),
     };
-    // Primary: fetchAvailableModels (per-model quotaInfo). Fall back to
-    // retrieveUserQuota buckets if the catalog endpoint is denied.
-    match code_assist_post(client, "fetchAvailableModels", &body, access_token)
-        .await
-        .and_then(|body| models_from_available(&body, now))
+    let response = match code_assist_post(
+        &context.client,
+        "fetchAvailableModels",
+        &body,
+        &context.access_token,
+        context.cache_binding.clone(),
+        true,
+    )
+    .await
     {
-        Ok(windows) if !windows.is_empty() => Ok(windows),
-        _ => {
-            let quota = code_assist_post(client, "retrieveUserQuota", &body, access_token).await?;
-            buckets_from_quota(&quota, now)
+        Ok(response) => response,
+        Err(CodeAssistPostFailure::Forbidden) => return PrimaryQuotaAttempt::Forbidden,
+        Err(CodeAssistPostFailure::Failure(failure @ ProviderFetchFailure::Transient { .. })) => {
+            let _ = failure;
+            return PrimaryQuotaAttempt::Transient;
         }
+        Err(CodeAssistPostFailure::Failure(failure)) => {
+            return PrimaryQuotaAttempt::Terminal(failure);
+        }
+    };
+    match models_from_available(&response, now) {
+        Ok(windows) if !windows.is_empty() => PrimaryQuotaAttempt::Success(windows),
+        Ok(_) | Err(_) => PrimaryQuotaAttempt::SchemaContradiction(ProviderFetchFailure::terminal(
+            "Antigravity fetchAvailableModels returned no usable quota windows.",
+        )),
     }
+}
+
+async fn fetch_user_quota(
+    context: &RemoteContext,
+    now: DateTime<Utc>,
+) -> Result<Vec<UsageWindow>, ProviderFetchFailure> {
+    let body = match context.project.as_deref() {
+        Some(project) => json!({ "project": project }),
+        None => json!({}),
+    };
+    let response = code_assist_post(
+        &context.client,
+        "retrieveUserQuota",
+        &body,
+        &context.access_token,
+        context.cache_binding.clone(),
+        false,
+    )
+    .await
+    .map_err(|failure| match failure {
+        CodeAssistPostFailure::Forbidden => {
+            ProviderFetchFailure::terminal("Antigravity retrieveUserQuota permission was denied.")
+        }
+        CodeAssistPostFailure::Failure(failure) => failure,
+    })?;
+    let windows = buckets_from_quota(&response, now).map_err(|_| {
+        ProviderFetchFailure::terminal(
+            "Antigravity retrieveUserQuota response could not be decoded.",
+        )
+    })?;
+    if windows.is_empty() {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity retrieveUserQuota returned no usable quota windows.",
+        ));
+    }
+    Ok(windows)
 }
 
 fn project_id(code_assist: &Value) -> Option<String> {
@@ -1637,19 +1948,189 @@ mod tests {
         );
     }
 
+    fn orchestration_fetched(source: &str) -> Fetched {
+        Fetched {
+            source: source.to_string(),
+            identity: None,
+            account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            cache_binding: None,
+            windows: Vec::new(),
+        }
+    }
+
+    fn orchestration_transient(display: &str) -> ProviderFetchFailure {
+        ProviderFetchFailure::transient(
+            display,
+            None,
+            crate::agent_usage::SafeTransportDiagnostic::from_facts(
+                TransportErrorFacts::synthetic(true, false, TransportPhase::Request, None),
+            ),
+        )
+    }
+
+    #[tokio::test]
+    async fn orchestration_local_success_and_primary_terminal_do_not_call_later_routes() {
+        let primary_calls = std::cell::Cell::new(0);
+        let secondary_calls = std::cell::Cell::new(0);
+        let local = fetch_with(
+            || async { LocalAttempt::Success(orchestration_fetched("cli")) },
+            || async {
+                primary_calls.set(primary_calls.get() + 1);
+                PrimaryAttempt::<()>::FinalFailure(ProviderFetchFailure::terminal("unexpected"))
+            },
+            |_: ()| async {
+                secondary_calls.set(secondary_calls.get() + 1);
+                Ok(orchestration_fetched("secondary"))
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(local.source, "cli");
+        assert_eq!(primary_calls.get(), 0);
+        assert_eq!(secondary_calls.get(), 0);
+
+        let failure = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async {
+                PrimaryAttempt::<()>::FinalFailure(ProviderFetchFailure::terminal("primary 401"))
+            },
+            |_: ()| async {
+                secondary_calls.set(secondary_calls.get() + 1);
+                Ok(orchestration_fetched("secondary"))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            failure,
+            ProviderFetchFailure::Terminal { ref display } if display == "primary 401"
+        ));
+        assert_eq!(secondary_calls.get(), 0);
+    }
+
+    #[tokio::test]
+    async fn orchestration_primary_forbidden_uses_secondary_result() {
+        let success = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Forbidden(()) },
+            |()| async { Ok(orchestration_fetched("secondary")) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(success.source, "secondary");
+
+        let transient = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Forbidden(()) },
+            |()| async { Err(orchestration_transient("secondary transient")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            transient,
+            ProviderFetchFailure::Transient { ref display, .. }
+                if display == "secondary transient"
+        ));
+
+        let terminal = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Forbidden(()) },
+            |()| async { Err(ProviderFetchFailure::terminal("secondary terminal")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            terminal,
+            ProviderFetchFailure::Terminal { ref display }
+                if display == "secondary terminal"
+        ));
+    }
+
+    #[tokio::test]
+    async fn orchestration_schema_and_transient_precedence_is_fail_closed() {
+        let schema_recovered = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async {
+                PrimaryAttempt::SchemaContradiction {
+                    context: (),
+                    failure: ProviderFetchFailure::terminal("primary schema"),
+                }
+            },
+            |()| async { Ok(orchestration_fetched("secondary")) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(schema_recovered.source, "secondary");
+
+        let schema_stays_terminal = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async {
+                PrimaryAttempt::SchemaContradiction {
+                    context: (),
+                    failure: ProviderFetchFailure::terminal("primary schema"),
+                }
+            },
+            |()| async { Err(orchestration_transient("secondary transient")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            schema_stays_terminal,
+            ProviderFetchFailure::Terminal { ref display } if display == "primary schema"
+        ));
+
+        let transient_recovered = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Transient(()) },
+            |()| async { Ok(orchestration_fetched("secondary")) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(transient_recovered.source, "secondary");
+
+        let transient_then_terminal = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Transient(()) },
+            |()| async { Err(ProviderFetchFailure::terminal("secondary terminal")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            transient_then_terminal,
+            ProviderFetchFailure::Terminal { ref display }
+                if display == "secondary terminal"
+        ));
+
+        let both_transient = fetch_with(
+            || async { LocalAttempt::RouteMiss },
+            || async { PrimaryAttempt::Transient(()) },
+            |()| async { Err(orchestration_transient("secondary transient")) },
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            both_transient,
+            ProviderFetchFailure::Transient { ref display, .. }
+                if display == "secondary transient"
+        ));
+    }
+
     fn checkpoint_at(
         target: Option<RefreshCheckpoint>,
-    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), String> {
+    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure> {
         move |checkpoint| {
             if Some(checkpoint) == target {
-                Err("injected crash".to_string())
+                Err(ProviderFetchFailure::terminal("injected crash"))
             } else {
                 Ok(())
             }
         }
     }
 
-    async fn test_refresh_response(refresh_token: String) -> Result<Value, String> {
+    async fn test_refresh_response(
+        refresh_token: String,
+        _attempt_binding: ProviderCacheBinding,
+    ) -> Result<Value, ProviderFetchFailure> {
         assert_eq!(refresh_token, "antigravity-old-refresh");
         Ok(json!({
             "access_token": "antigravity-new-access",
@@ -1684,7 +2165,8 @@ mod tests {
         scope: &TestRefreshScope,
         path: &Path,
         crash: Option<RefreshCheckpoint>,
-    ) -> Result<(Value, String, Result<AccountScope, AccountScopeError>), String> {
+    ) -> Result<(Value, String, AccountScope, Option<ProviderCacheBinding>), ProviderFetchFailure>
+    {
         let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
@@ -1707,6 +2189,192 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn refresh_rejects_concurrent_account_switch_without_touching_b() {
+        const B_BYTES: &[u8] = br#"{
+  "access_token": "account-b-access",
+  "refresh_token": "account-b-refresh",
+  "id_token": "account-b-id",
+  "expiry_date": 4102444800000,
+  "sibling": {"writer": "b", "revision": 2}
+}
+"#;
+        let (scope, path, _, before, _) = setup_refresh("antigravity-target-switch");
+        let request_path = path.clone();
+        let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let failure = refresh_access_token_with(
+            &path,
+            now,
+            &scope,
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "antigravity-old-refresh");
+                std::fs::write(&request_path, B_BYTES).unwrap();
+                Ok(json!({
+                    "access_token": "antigravity-new-access",
+                    "refresh_token": "antigravity-new-refresh"
+                }))
+            },
+            |_| -> std::io::Result<()> {
+                panic!("target mismatch must not reach credential persistence")
+            },
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        let stored_bytes = std::fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, B_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("antigravity-new"));
+        let stored = load_remote_credentials(&path).unwrap();
+        assert_eq!(stored["access_token"], "account-b-access");
+        assert_eq!(stored["refresh_token"], "account-b-refresh");
+        assert_eq!(stored["id_token"], "account-b-id");
+        assert_eq!(stored["sibling"]["writer"], "b");
+        assert_eq!(scope.metadata_bytes(), before);
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn refresh_patches_unchanged_target_and_preserves_current_root_siblings() {
+        let (scope, path, old_scope, _, location) = setup_refresh("antigravity-target-unchanged");
+        std::fs::write(
+            &path,
+            serde_json::to_vec_pretty(&json!({
+                "access_token": "antigravity-old-access",
+                "refresh_token": "antigravity-old-refresh",
+                "id_token": "antigravity-old-id",
+                "expiry_date": 0,
+                "stale_only": "must-not-return"
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let current = json!({
+            "access_token": "concurrent-access",
+            "refresh_token": "antigravity-old-refresh",
+            "id_token": "concurrent-id",
+            "expiry_date": 0,
+            "token_type": "current-writer",
+            "sibling": {"writer": "antigravity-cli", "revision": 2},
+            "unrelated": [1, 2, 3]
+        });
+        let current_bytes = serde_json::to_vec_pretty(&current).unwrap();
+        let request_path = path.clone();
+        let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let (refreshed, access_token, scope_outcome, cache_binding) = refresh_access_token_with(
+            &path,
+            now,
+            &scope,
+            move |refresh_token, _attempt_binding| async move {
+                assert_eq!(refresh_token, "antigravity-old-refresh");
+                std::fs::write(&request_path, current_bytes).unwrap();
+                Ok(json!({
+                    "access_token": "antigravity-new-access",
+                    "refresh_token": "antigravity-new-refresh",
+                    "id_token": "antigravity-new-id",
+                    "expires_in": 3600,
+                    "token_type": "provider-response"
+                }))
+            },
+            |credentials| write_creds_atomic(&path, credentials),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(access_token, "antigravity-new-access");
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(
+            cache_binding,
+            Some(ProviderCacheBinding::primary(old_scope.clone()))
+        );
+        let stored = load_remote_credentials(&path).unwrap();
+        assert_eq!(refreshed, stored);
+        assert_eq!(stored["access_token"], "antigravity-new-access");
+        assert_eq!(stored["refresh_token"], "antigravity-new-refresh");
+        assert_eq!(stored["id_token"], "antigravity-new-id");
+        assert_eq!(
+            stored["expiry_date"].as_f64(),
+            Some(now.timestamp_millis() as f64 + 3_600_000.0)
+        );
+        assert_eq!(stored["token_type"], "current-writer");
+        assert_eq!(stored["sibling"]["writer"], "antigravity-cli");
+        assert_eq!(stored["sibling"]["revision"], 2);
+        assert_eq!(stored["unrelated"], json!([1, 2, 3]));
+        assert!(stored.get("stale_only").is_none());
+        assert_eq!(
+            scope
+                .resolve_current("google-oauth-creds", &location, b"antigravity-new-refresh",)
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn refresh_rejects_concurrent_logout_removal_and_malformed_root_without_restoring_a() {
+        const LOGGED_OUT_BYTES: &[u8] = br#"{
+  "sibling": {"writer": "logout", "revision": 2}
+}
+"#;
+        const MALFORMED_BYTES: &[u8] = b"{not-json";
+        let cases: [(&str, Option<&[u8]>); 3] = [
+            ("logout", Some(LOGGED_OUT_BYTES)),
+            ("removed", None),
+            ("malformed", Some(MALFORMED_BYTES)),
+        ];
+
+        for (case, current_bytes) in cases {
+            let (scope, path, _, before, _) = setup_refresh(&format!("antigravity-target-{case}"));
+            let request_path = path.clone();
+            let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+                .unwrap()
+                .with_timezone(&Utc);
+
+            let failure = refresh_access_token_with(
+                &path,
+                now,
+                &scope,
+                move |refresh_token, _attempt_binding| async move {
+                    assert_eq!(refresh_token, "antigravity-old-refresh");
+                    if let Some(bytes) = current_bytes {
+                        std::fs::write(&request_path, bytes).unwrap();
+                    } else {
+                        std::fs::remove_file(&request_path).unwrap();
+                    }
+                    Ok(json!({
+                        "access_token": "antigravity-new-access",
+                        "refresh_token": "antigravity-new-refresh"
+                    }))
+                },
+                |_| -> std::io::Result<()> {
+                    panic!("missing or malformed target must not reach credential persistence")
+                },
+                checkpoint_at(None),
+            )
+            .await
+            .unwrap_err();
+
+            assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+            assert_eq!(scope.metadata_bytes(), before);
+            if let Some(expected) = current_bytes {
+                let stored = std::fs::read(&path).unwrap();
+                assert_eq!(stored, expected);
+                assert!(!String::from_utf8_lossy(&stored).contains("antigravity-new"));
+            } else {
+                assert!(!path.exists());
+            }
+            scope.cleanup();
+        }
+    }
+
+    #[tokio::test]
     async fn refresh_crash_boundaries_and_scope_gate_use_production_sequence() {
         for boundary in [
             RefreshCheckpoint::Reloaded,
@@ -1715,12 +2383,13 @@ mod tests {
             RefreshCheckpoint::CredentialsPersisted,
         ] {
             let (scope, path, old_scope, before, location) = setup_refresh("antigravity-crash");
-            assert_eq!(
-                run_refresh(&scope, &path, Some(boundary))
-                    .await
-                    .unwrap_err(),
-                "injected crash"
-            );
+            let failure = run_refresh(&scope, &path, Some(boundary))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display } if display == "injected crash"
+            ));
             assert_eq!(
                 stored_refresh_token(&path),
                 if boundary == RefreshCheckpoint::CredentialsPersisted {
@@ -1762,62 +2431,101 @@ mod tests {
 
         let (scope, path, old_scope, before, location) = setup_refresh("antigravity-metadata-fail");
         scope.fail_metadata_save();
-        let (refreshed, access_token, scope_outcome) =
-            run_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(access_token, "antigravity-new-access");
-        assert_eq!(remote_access_token(&refreshed).unwrap(), access_token);
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
+        let failure = run_refresh(&scope, &path, None).await.unwrap_err();
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert_eq!(scope.metadata_bytes(), before);
         assert_eq!(stored_refresh_token(&path), "antigravity-old-refresh");
         assert_eq!(
             scope
-                .resolve_current("google-oauth-creds", &location, b"antigravity-old-refresh",)
+                .resolve_current("google-oauth-creds", &location, b"antigravity-old-refresh")
                 .unwrap(),
             old_scope
         );
         scope.cleanup();
 
-        let (scope, path, _old_scope, before, _) =
-            setup_refresh("antigravity-metadata-fail-unchanged");
-        scope.fail_metadata_save();
+        let (scope, path, old_scope, _, location) = setup_refresh("antigravity-save-fail");
         let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
             .unwrap()
             .with_timezone(&Utc);
-        let save_path = path.clone();
-        let (refreshed, access_token, scope_outcome) = refresh_access_token_with(
+        let (refreshed, access_token, scope_outcome, cache_binding) = refresh_access_token_with(
             &path,
             now,
             &scope,
-            |refresh_token| async move {
-                assert_eq!(refresh_token, "antigravity-old-refresh");
-                Ok(json!({
-                    "access_token": "antigravity-new-access",
-                    "expires_in": 3600
-                }))
-            },
-            move |credentials| write_creds_atomic(&save_path, credentials),
+            test_refresh_response,
+            |_| Err(std::io::Error::other("injected save failure")),
             checkpoint_at(None),
         )
         .await
         .unwrap();
-        assert_eq!(scope_outcome, Err(AccountScopeError::MetadataWrite));
-        assert_eq!(scope.metadata_bytes(), before);
         assert_eq!(access_token, "antigravity-new-access");
         assert_eq!(remote_access_token(&refreshed).unwrap(), access_token);
-        let persisted = load_remote_credentials(&path).unwrap();
-        assert_eq!(remote_access_token(&persisted).unwrap(), access_token);
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(cache_binding, None);
         assert_eq!(stored_refresh_token(&path), "antigravity-old-refresh");
-        scope.cleanup();
-
-        let (scope, path, old_scope, _, location) = setup_refresh("antigravity-success");
-        let (_, _, scope_outcome) = run_refresh(&scope, &path, None).await.unwrap();
-        assert_eq!(scope_outcome.unwrap(), old_scope);
         assert_eq!(
             scope
-                .resolve_current("google-oauth-creds", &location, b"antigravity-new-refresh",)
+                .resolve_current("google-oauth-creds", &location, b"antigravity-new-refresh")
                 .unwrap(),
             old_scope
         );
+        scope.cleanup();
+
+        let (scope, path, old_scope, _, location) = setup_refresh("antigravity-success");
+        let (_, _, scope_outcome, cache_binding) = run_refresh(&scope, &path, None).await.unwrap();
+        assert_eq!(scope_outcome, old_scope);
+        assert_eq!(
+            cache_binding,
+            Some(ProviderCacheBinding::primary(old_scope.clone()))
+        );
+        assert_eq!(
+            scope
+                .resolve_current("google-oauth-creds", &location, b"antigravity-new-refresh")
+                .unwrap(),
+            old_scope
+        );
+        scope.cleanup();
+    }
+
+    #[tokio::test]
+    async fn refresh_transient_uses_lock_reloaded_binding_not_outer_binding() {
+        let (scope, path, inner_scope, _, location) = setup_refresh("antigravity-lock-binding");
+        let outer_scope = scope
+            .resolve_current("google-oauth-creds", &location, b"outer-refresh-a")
+            .unwrap();
+        assert_ne!(outer_scope, inner_scope);
+        let expected = ProviderCacheBinding::primary(inner_scope);
+        let request_expected = expected.clone();
+        let now = DateTime::parse_from_rfc3339("2026-07-17T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let failure = refresh_access_token_with(
+            &path,
+            now,
+            &scope,
+            move |refresh_token, attempt_binding| async move {
+                assert_eq!(refresh_token, "antigravity-old-refresh");
+                assert_eq!(attempt_binding, request_expected);
+                Err(ProviderFetchFailure::transient(
+                    "Antigravity token refresh failed. Retrying automatically.",
+                    Some(attempt_binding),
+                    crate::agent_usage::SafeTransportDiagnostic::from_facts(
+                        TransportErrorFacts::synthetic(true, false, TransportPhase::Request, None),
+                    ),
+                ))
+            },
+            |credentials| write_creds_atomic(&path, credentials),
+            checkpoint_at(None),
+        )
+        .await
+        .unwrap_err();
+
+        match failure {
+            ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
+        }
         scope.cleanup();
     }
 }

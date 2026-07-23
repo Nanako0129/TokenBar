@@ -10,8 +10,31 @@
 //   {"ok":true,"data":<payload>}   on success
 //   {"ok":false,"err":"..."}       on failure
 // Payload fields use the Tauri frontend's camelCase contract. In particular,
-// AgentUsagePayload is `{generatedAt, agents, opencodeSubscriptions}` (the
-// subscription array is omitted when empty) and each v3 quota window uses
+// AgentUsagePayload is `{generatedAt, publicationGeneration?, agents,
+// opencodeSubscriptions}` (the subscription array is omitted when empty).
+// `publicationGeneration` is an additive optional Rust `u64` JSON integer for
+// generated payloads; demo/legacy payloads omit it.
+// Rust assigns it with a checked increment at process-wide publication-gate
+// entry before the complete provider run; exhaustion returns an outer error
+// rather than repeating a generation. The gate orders generations and pointer
+// creation, but is released before `tb_agent_usage` returns and therefore does
+// not promise C return order. Swift's shared MainActor publication coordinator
+// rejects a lower generation for dashboard, Settings, tray, and snapshot
+// consumers. AgentUsage snapshots may additionally carry the additive optional
+// camelCase field
+// `transportDiagnostic?: {category, status?, osCode?}`. `error` remains the
+// user-visible provider status and may coexist with last-good windows;
+// `transportDiagnostic` is the only provider failure detail permitted in the
+// public Unified Log. Its `category` is limited to timeout/dns/tls/
+// connectionRefused/connectionReset/connect/request/responseBody/rateLimited/
+// serverError. `rateLimited` accepts only status 429; `serverError` accepts only
+// 500...599. HTTP categories do not carry `osCode`; non-HTTP categories do not
+// carry `status`. `osCode`, when present, is a 32-bit OS error integer. Neither
+// field carries token, header,
+// body, URL/query, email, account ID, credential path, or free-form cause data.
+// Other report payloads retain their existing camelCase shapes from the Tauri
+// contract. Adding these fields does not change C function signatures, ownership,
+// ABI, or any other wire fields. Each v3 quota window uses
 // `{cardId, label, usedPercent, remainingPercent, resetsAt, resetText,
 // windowMinutes, paceStatus, historicalPace}`. `paceStatus` is required and
 // carries `{state, windowKey, durationSeconds, durationSource, completeCycles,
@@ -51,7 +74,7 @@ char *tb_usage_trace(int64_t window_secs);
 // Live rate: {"tokensPerMin": <number>} (10-minute-window average).
 char *tb_tokens_per_min(void);
 
-// OAuth quota cards (AgentUsagePayload) for codex/claude/antigravity/copilot.
+// OAuth quota cards (AgentUsagePayload) for codex/claude/antigravity/copilot/grok.
 // Network-bound; per-provider failures are reported inside each snapshot.
 char *tb_agent_usage(void);
 

@@ -441,6 +441,116 @@ enum SelfTest {
                 productionPayload?.agents.first?.windows[2].paceStatus.state == .available,
             "complete AgentUsagePayload v3 shape decodes")
 
+        // Rust's publication gate orders generations, while the Swift state
+        // guards apply order shared by popover and Settings models.
+        let publicationAJSON = """
+        {"generatedAt":"A","publicationGeneration":1,"agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"A",
+           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":12,"remainingPercent":88}],
+           "error":null}]}
+        """
+        let publicationBJSON = """
+        {"generatedAt":"B","publicationGeneration":2,"agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"B",
+           "windows":[],"error":"terminal B"}]}
+        """
+        let legacyPublicationJSON = """
+        {"generatedAt":"legacy","agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"legacy",
+           "windows":[],"error":"legacy payload"}]}
+        """
+        let publicationA = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(publicationAJSON.utf8))
+        let publicationB = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(publicationBJSON.utf8))
+        let legacyPublication = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(legacyPublicationJSON.utf8))
+
+        var stalePublicationState = AgentUsagePublicationState()
+        _ = stalePublicationState.resolve(publicationB)
+        let staleResult = stalePublicationState.resolve(publicationA)
+        expect(
+            staleResult.publicationGeneration == 2 &&
+                staleResult.agents.first?.error == "terminal B" &&
+                staleResult.agents.first?.windows.isEmpty == true,
+            "stale generation resolves to newer terminal payload content")
+
+        var orderedPublicationState = AgentUsagePublicationState()
+        let firstResult = orderedPublicationState.resolve(publicationA)
+        let secondResult = orderedPublicationState.resolve(publicationB)
+        expect(
+            firstResult.publicationGeneration == 1 &&
+                firstResult.agents.first?.windows.first?.usedPercent == 12,
+            "generation 1 success applies its own payload")
+        expect(
+            secondResult.publicationGeneration == 2 &&
+                secondResult.agents.first?.error == "terminal B",
+            "generation 2 terminal replaces generation 1")
+
+        let legacyResult = stalePublicationState.resolve(legacyPublication)
+        expect(
+            legacyResult.publicationGeneration == nil &&
+                legacyResult.agents.first?.error == "legacy payload",
+            "legacy payload passes through without touching generation state")
+        let afterLegacy = stalePublicationState.resolve(publicationA)
+        expect(
+            afterLegacy.publicationGeneration == 2 &&
+                afterLegacy.agents.first?.error == "terminal B",
+            "legacy payload does not lower generated publication state")
+
+        func settingsQuotaPayload(generation: UInt64?, remaining: Double) -> AgentUsagePayload {
+            let generationField = generation.map { #","publicationGeneration":\#($0)"# } ?? ""
+            let json = """
+            {"generatedAt":"same"\(generationField),"agents":[
+              {"clientId":"codex","source":"oauth","updatedAt":"same",
+               "windows":[{"cardId":"session.v1","label":"Session","usedPercent":\(100 - remaining),"remainingPercent":\(remaining)}]}]}
+            """
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
+        }
+        let settingsGeneration41 = settingsQuotaPayload(generation: 41, remaining: 80)
+        let settingsGeneration42 = settingsQuotaPayload(generation: 42, remaining: 80)
+        let settingsGeneration41ID = SettingsWindowView.quotaReconciliationID(
+            payload: settingsGeneration41,
+            persistedSelection: "codex|session.v1",
+            excluding: [],
+            exclusionSignature: "")
+        let settingsGeneration42ID = SettingsWindowView.quotaReconciliationID(
+            payload: settingsGeneration42,
+            persistedSelection: "codex|session.v1",
+            excluding: [],
+            exclusionSignature: "")
+        expect(
+            settingsGeneration41ID != settingsGeneration42ID,
+            "Settings reconciliation identity tracks publication generation")
+
+        let settingsLegacy80 = settingsQuotaPayload(generation: nil, remaining: 80)
+        let settingsLegacy20 = settingsQuotaPayload(generation: nil, remaining: 20)
+        let settingsLegacy80ID = SettingsWindowView.quotaReconciliationID(
+            payload: settingsLegacy80,
+            persistedSelection: "codex|session.v1",
+            excluding: [],
+            exclusionSignature: "")
+        let settingsLegacy20ID = SettingsWindowView.quotaReconciliationID(
+            payload: settingsLegacy20,
+            persistedSelection: "codex|session.v1",
+            excluding: [],
+            exclusionSignature: "")
+        expect(
+            settingsLegacy80ID != settingsLegacy20ID,
+            "Settings legacy reconciliation identity fingerprints resolved quota")
+        expect(
+            settingsGeneration41ID != SettingsWindowView.quotaReconciliationID(
+                payload: settingsGeneration41,
+                persistedSelection: "codex|weekly.v1",
+                excluding: [],
+                exclusionSignature: "") &&
+                settingsGeneration41ID != SettingsWindowView.quotaReconciliationID(
+                    payload: settingsGeneration41,
+                    persistedSelection: "codex|session.v1",
+                    excluding: ["codex"],
+                    exclusionSignature: "codex"),
+            "Settings reconciliation identity tracks selection and exclusions")
+
         // Contribution grid: GitHub layout, col 0 row 0 = Sunday on/before
         // Jan 1; out-of-year cells are never active; max tracks active only.
         expect(ISODay("1970-01-01")?.weekday == 4, "epoch day is Thursday")
@@ -531,13 +641,345 @@ enum SelfTest {
           {"clientId":"claude","source":"oauth","updatedAt":"now",
            "windows":[{"cardId":"session.v1","label":"Session","usedPercent":88,"remainingPercent":12},
                       {"cardId":"weekly.v1","label":"Weekly","usedPercent":10,"remainingPercent":90}]},
-          {"clientId":"broken","source":"oauth","updatedAt":"now",
-           "windows":[{"cardId":"session.v1","label":"Session","usedPercent":99,"remainingPercent":1}],
-           "error":"401"}
+          {"clientId":"grok","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"billing.weekly.v1","label":"Weekly","usedPercent":99,"remainingPercent":1}],
+           "error":"Grok request timed out.",
+           "transportDiagnostic":{"category":"timeout"}}
         ]}
         """
         let quotaPayload = try! JSONDecoder().decode(
             AgentUsagePayload.self, from: Data(quotaJSON.utf8))
+
+        func transportPayload(_ body: String) -> AgentUsagePayload? {
+            do {
+                return try JSONDecoder().decode(
+                    AgentUsagePayload.self,
+                    from: Data("{\"generatedAt\":\"now\",\"agents\":[{\(body)}]}".utf8))
+            } catch {
+                return nil
+            }
+        }
+        func transportEntries(_ body: String) -> [AgentUsageTransportLogEntry]? {
+            transportPayload(body).map(agentUsageTransportLogEntries)
+        }
+        let transportBase = #""clientId":"codex","source":"fixture","updatedAt":"now","windows":[]"#
+        expect(
+            transportEntries(transportBase + #","error":"SECRET_ERROR""#)?.isEmpty == true,
+            "transport diagnostics absent from sensitive error yields no candidates")
+        let validTransport = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"serverError","status":504,"osCode":-9806}"#)
+        expect(
+            validTransport?.count == 1 && validTransport?.first?.clientId == "codex"
+                && validTransport?.first?.category == "serverError"
+                && validTransport?.first?.status == 504 && validTransport?.first?.osCode == nil,
+            "server-error diagnostic keeps status but drops osCode")
+        let validRateLimited = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"rateLimited","status":429,"osCode":-1}"#)
+        expect(
+            validRateLimited?.count == 1 && validRateLimited?.first?.status == 429
+                && validRateLimited?.first?.osCode == nil,
+            "rate-limit diagnostic accepts only status 429 without osCode")
+        let contradictoryHTTP = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"rateLimited","status":500,"osCode":-1}"#)
+        let contradictoryServer = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"serverError","status":429,"osCode":-1}"#)
+        expect(
+            contradictoryHTTP?.count == 1 && contradictoryHTTP?.first?.status == nil
+                && contradictoryHTTP?.first?.osCode == nil
+                && contradictoryServer?.count == 1 && contradictoryServer?.first?.status == nil
+                && contradictoryServer?.first?.osCode == nil,
+            "contradictory HTTP diagnostics keep category only")
+        let crossFieldTransport = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"timeout","status":504,"osCode":-9806}"#)
+        expect(
+            crossFieldTransport?.count == 1 && crossFieldTransport?.first?.status == nil
+                && crossFieldTransport?.first?.osCode == -9806,
+            "transport diagnostic rejects status on timeout but keeps osCode")
+        let unknownTransport = transportEntries(
+            transportBase.replacingOccurrences(of: "codex", with: "future-client") + #","transportDiagnostic":{"category":"futureCategory","status":200,"osCode":7}"#)
+        expect(
+            unknownTransport?.first?.clientId == "unknown"
+                && unknownTransport?.first?.category == "unknown"
+                && unknownTransport?.first?.status == nil
+                && unknownTransport?.first?.osCode == nil,
+            "unknown transport tuples drop associated numerics")
+        let malformedTransportBodies = [
+            transportBase + #","transportDiagnostic":"not-an-object""#,
+            transportBase + #","transportDiagnostic":{"status":500}"#,
+            transportBase + #","transportDiagnostic":{"category":42}"#,
+        ]
+        expect(
+            malformedTransportBodies.allSatisfy { body in
+                transportEntries(body)?.isEmpty == true
+            },
+            "malformed transport diagnostics decode with no candidates")
+        let invalidNumeric = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"dns","status":99,"osCode":2147483648}"#)
+        expect(
+            invalidNumeric?.count == 1 && invalidNumeric?.first?.status == nil
+                && invalidNumeric?.first?.osCode == nil,
+            "invalid transport numeric fields are retained as nil")
+        let malformedOptionalInteger = transportEntries(
+            transportBase + #","transportDiagnostic":{"category":"dns","status":"SECRET","osCode":7}"#)
+        expect(
+            malformedOptionalInteger?.count == 1
+                && malformedOptionalInteger?.first?.category == "dns"
+                && malformedOptionalInteger?.first?.status == nil
+                && malformedOptionalInteger?.first?.osCode == 7,
+            "malformed optional status drops only that field")
+        let sensitiveTransport = transportEntries(
+            #""clientId":"codex","source":"SECRET_SOURCE","updatedAt":"now","identity":{"email":"SECRET_IDENTITY","plan":"SECRET_PLAN"},"windows":[{"cardId":"SECRET_WINDOW","label":"SECRET_LABEL","usedPercent":1,"remainingPercent":99}],"error":"SECRET_ERROR","transportDiagnostic":{"category":"tls","status":502,"osCode":-1}"#)
+        let sensitiveDescription = String(describing: sensitiveTransport ?? [])
+        expect(
+            !["SECRET_SOURCE", "SECRET_IDENTITY", "SECRET_PLAN", "SECRET_WINDOW",
+              "SECRET_LABEL", "SECRET_ERROR"].contains { sensitiveDescription.contains($0) },
+            "transport candidates exclude sensitive source identity window and error text")
+
+        func failedBoundaryEvents(_ data: Data?) -> [AgentUsageBoundaryLogEvent]? {
+            var events: [AgentUsageBoundaryLogEvent] = []
+            do {
+                _ = try TBCore.decodeAgentUsageBoundary(data) { events.append($0) }
+                return nil
+            } catch {
+                return events
+            }
+        }
+        let bridgeEvents = failedBoundaryEvents(Data(
+            #"{"ok":false,"err":"SECRET_TOKEN https://example.invalid/?secret /private/credential"}"#.utf8))
+        expect(
+            bridgeEvents == [.bridgeFailed]
+                && !String(describing: bridgeEvents).contains("SECRET_TOKEN"),
+            "agent usage bridge failure logs only a fixed event")
+        let decodeEvents = failedBoundaryEvents(Data(
+            #"{"ok":true,"data":{"generatedAt":"SECRET_DECODE","agents":"not-an-array"}}"#.utf8))
+        expect(
+            decodeEvents == [.decodeFailed]
+                && !String(describing: decodeEvents).contains("SECRET_DECODE"),
+            "agent usage decode failure logs only a fixed event")
+        expect(
+            failedBoundaryEvents(Data(#"{"ok":true,"data":null}"#.utf8)) == [.decodeFailed],
+            "agent usage successful envelope without data is a decode failure")
+        expect(
+            failedBoundaryEvents(Data(#"{not json"#.utf8)) == [.decodeFailed],
+            "agent usage malformed envelope is a decode failure")
+        expect(
+            failedBoundaryEvents(nil) == [.returnedNull],
+            "agent usage null pointer logs only a fixed event")
+
+        var quotaApplyEvents: [String] = []
+        MainActor.assumeIsolated {
+            TrayAnimator.applyQuotaPayload(
+                quotaPayload,
+                store: { _ in quotaApplyEvents.append("store") },
+                reconcile: { _ in quotaApplyEvents.append("reconcile") },
+                persistSelection: { _ in quotaApplyEvents.append("persist") },
+                render: { quotaApplyEvents.append("render") },
+                notify: { quotaApplyEvents.append("notify") })
+        }
+        expect(
+            quotaApplyEvents == ["store", "reconcile", "persist", "render", "notify"],
+            "quota payload applies scalar state before render and notification")
+
+        let suiteName = "TokenBar.SelfTest.PT0.\(UUID().uuidString)"
+        if let defaults = UserDefaults(suiteName: suiteName) {
+            let sentinelKey = "pt0.sentinel"
+            defaults.set("keep", forKey: sentinelKey)
+            let beforeFailure = defaults.persistentDomain(forName: suiteName)
+            let failed = TrayAnimator.applyQuotaRemaining(
+                payload: nil, persistedSelection: "codex|session.v1", excluding: [],
+                cachedRemaining: 77, defaults: defaults)
+            expect(
+                failed == 77 && NSDictionary(dictionary: defaults.persistentDomain(forName: suiteName) ?? [:])
+                    .isEqual(to: beforeFailure ?? [:]),
+                "outer quota failure returns cached scalar without changing defaults")
+
+            let fresh = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: "codex|session.v1", excluding: [],
+                cachedRemaining: 77, defaults: defaults)
+            expect(
+                fresh == 80 && defaults.double(forKey: TrayAnimator.lastRemainingKey) == 80,
+                "successful quota payload replaces cached scalar and defaults")
+
+            let trayRaceRejected = MainActor.assumeIsolated { () -> Bool in
+                let raceSuiteName = "TokenBar.SelfTest.PT0.Race.\(UUID().uuidString)"
+                guard let raceDefaults = UserDefaults(suiteName: raceSuiteName) else { return false }
+                defer { raceDefaults.removePersistentDomain(forName: raceSuiteName) }
+                var remaining: Double? = fresh
+                var generations: [UInt64?] = []
+                for candidate in [publicationB, publicationA] {
+                    TrayAnimator.applyQuotaPayload(
+                        candidate,
+                        store: { generations.append($0.publicationGeneration) },
+                        reconcile: {
+                            remaining = TrayAnimator.applyQuotaRemaining(
+                                payload: $0,
+                                persistedSelection: "codex|session.v1",
+                                excluding: [],
+                                cachedRemaining: remaining,
+                                defaults: raceDefaults)
+                        },
+                        persistSelection: { _ in },
+                        render: {},
+                        notify: {})
+                }
+                return generations == [2, 2] && remaining == nil
+                    && raceDefaults.object(forKey: TrayAnimator.lastRemainingKey) == nil
+            }
+            expect(
+                trayRaceRejected,
+                "late tray generation cannot revive a newer terminal scalar")
+
+            let dashboardGeneration3 = settingsQuotaPayload(generation: 3, remaining: 80)
+            let dashboardPublicationReachesTray = MainActor.assumeIsolated { () -> Bool in
+                let dashboardSuiteName = "TokenBar.SelfTest.PT0.Dashboard.\(UUID().uuidString)"
+                guard let dashboardDefaults = UserDefaults(suiteName: dashboardSuiteName) else {
+                    return false
+                }
+                defer { dashboardDefaults.removePersistentDomain(forName: dashboardSuiteName) }
+                let iconSignatureBefore = TrayAnimator.currentIconSignature(
+                    defaults: dashboardDefaults)
+                let resolved = AgentUsagePublicationCoordinator.resolve(dashboardGeneration3)
+                let remaining = TrayAnimator.applyQuotaRemaining(
+                    payload: resolved,
+                    persistedSelection: "codex|session.v1",
+                    excluding: [],
+                    cachedRemaining: 20,
+                    defaults: dashboardDefaults)
+                let trayPayload = TrayAnimator.publishedQuota(publicationA)
+                let iconSignatureAfter = TrayAnimator.currentIconSignature(
+                    defaults: dashboardDefaults)
+                return trayPayload?.publicationGeneration == 3
+                    && trayPayload?.agents.first?.windows.first?.remainingPercent == 80
+                    && remaining == 80
+                    && dashboardDefaults.double(forKey: TrayAnimator.lastRemainingKey) == 80
+                    && iconSignatureAfter != iconSignatureBefore
+            }
+            expect(
+                dashboardPublicationReachesTray,
+                "dashboard publication updates tray payload scalar and gauge invalidation")
+
+            let unresolved = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: "missing|session.v1", excluding: [],
+                cachedRemaining: fresh, defaults: defaults)
+            let unresolvedRestarted = UserDefaults(suiteName: suiteName)
+            let resumedAfterRestart = TrayAnimator.applyQuotaRemaining(
+                payload: nil, persistedSelection: "missing|session.v1", excluding: [],
+                cachedRemaining: unresolvedRestarted?.object(
+                    forKey: TrayAnimator.lastRemainingKey) as? Double,
+                defaults: unresolvedRestarted)
+            expect(
+                unresolved == nil && resumedAfterRestart == nil
+                    && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil
+                    && unresolvedRestarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "same-generation unresolved selection clears scalar without restart revival")
+
+            let replaced = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: "claude|session.v1", excluding: [],
+                cachedRemaining: unresolved, defaults: defaults)
+            expect(
+                replaced == 12 && defaults.double(forKey: TrayAnimator.lastRemainingKey) == 12,
+                "same-generation healthy selection replaces scalar")
+
+            let hiddenAllAfterReplacement = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: QuotaResolver.auto,
+                excluding: ["codex", "claude"], cachedRemaining: replaced, defaults: defaults)
+            let hiddenAllRestarted = UserDefaults(suiteName: suiteName)
+            expect(
+                hiddenAllAfterReplacement == nil
+                    && hiddenAllRestarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "same-generation hidden-all clears replaced scalar across restart")
+
+            let terminalPayload = try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"oauth","updatedAt":"now","windows":[],"error":"Unauthorized"}]}"#.utf8))
+            let terminalResult = TrayAnimator.applyQuotaRemaining(
+                payload: terminalPayload, persistedSelection: QuotaResolver.auto, excluding: [],
+                cachedRemaining: 80, defaults: defaults)
+            let restarted = UserDefaults(suiteName: suiteName)
+            expect(
+                terminalResult == nil && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil
+                    && restarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "terminal empty provider payload clears scalar across restart")
+
+            defaults.set(80, forKey: TrayAnimator.lastRemainingKey)
+            let settingsTerminal = SettingsWindowView.applyQuotaRemaining(
+                payload: terminalPayload,
+                persistedSelection: QuotaResolver.auto,
+                excluding: [],
+                defaults: defaults)
+            let settingsRestarted = UserDefaults(suiteName: suiteName)
+            expect(
+                settingsTerminal == nil
+                    && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil
+                    && settingsRestarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "Settings terminal payload clears persisted scalar across restart")
+
+            defaults.set(65, forKey: TrayAnimator.lastRemainingKey)
+            let settingsBeforeFailure = defaults.persistentDomain(forName: suiteName)
+            let settingsFailure = SettingsWindowView.applyQuotaRemaining(
+                payload: nil,
+                persistedSelection: QuotaResolver.auto,
+                excluding: [],
+                defaults: defaults)
+            expect(
+                settingsFailure == 65
+                    && NSDictionary(dictionary: defaults.persistentDomain(forName: suiteName) ?? [:])
+                        .isEqual(to: settingsBeforeFailure ?? [:]),
+                "Settings outer quota failure preserves persisted scalar")
+
+            let fallback = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: "grok|billing.weekly.v1", excluding: [],
+                cachedRemaining: 80, defaults: defaults)
+            expect(
+                fallback == 1 && defaults.double(forKey: TrayAnimator.lastRemainingKey) == 1,
+                "explicit selection keeps same-binding fallback window despite error")
+
+            let errorOnlyPayload = try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data((#"{"generatedAt":"now","agents":[{"clientId":"grok","source":"oauth","updatedAt":"now","windows":[{"cardId":"billing.weekly.v1","label":"Weekly","usedPercent":99,"remainingPercent":1}],"error":"Grok request timed out.","transportDiagnostic":{"category":"timeout"}}]}"#).utf8))
+            let autoError = TrayAnimator.applyQuotaRemaining(
+                payload: errorOnlyPayload, persistedSelection: QuotaResolver.auto,
+                excluding: [], cachedRemaining: 1, defaults: defaults)
+            expect(
+                autoError == nil && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "Auto excludes an error-only fallback payload and clears scalar")
+
+            defaults.set(1, forKey: TrayAnimator.lastRemainingKey)
+            let optionalAbsentPayload = try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"oauth","updatedAt":"now","windows":[{"cardId":"session.v1","label":"Session","usedPercent":20,"remainingPercent":80}]}]}"#.utf8))
+            let optionalAbsent = TrayAnimator.applyQuotaRemaining(
+                payload: optionalAbsentPayload,
+                persistedSelection: "grok|billing.weekly.v1",
+                excluding: [], cachedRemaining: 1, defaults: defaults)
+            expect(
+                optionalAbsent == nil
+                    && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "optional provider absence clears an explicit cached scalar")
+
+            let standardBefore = UserDefaults.standard.persistentDomain(
+                forName: Bundle.main.bundleIdentifier ?? "TokenBar")
+            let demoFresh = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: "codex|session.v1", excluding: [],
+                cachedRemaining: nil, defaults: nil)
+            let standardAfter = UserDefaults.standard.persistentDomain(
+                forName: Bundle.main.bundleIdentifier ?? "TokenBar")
+            expect(
+                demoFresh == 80 && NSDictionary(dictionary: standardBefore ?? [:])
+                    .isEqual(to: standardAfter ?? [:]),
+                "nil defaults returns fresh quota without touching live defaults")
+
+            let hiddenAll = TrayAnimator.applyQuotaRemaining(
+                payload: quotaPayload, persistedSelection: QuotaResolver.auto,
+                excluding: ["codex", "claude"], cachedRemaining: 66, defaults: defaults)
+            expect(
+                hiddenAll == nil && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil,
+                "all-hidden successful payload cannot fall back to cached scalar")
+            defaults.removePersistentDomain(forName: suiteName)
+        } else {
+            expect(false, "isolated quota defaults suite is available")
+        }
+
         let tightest = QuotaResolver.resolve(payload: quotaPayload, selection: "auto")
         expect(
             tightest?.clientId == "claude" && tightest?.window.cardId == "session.v1",

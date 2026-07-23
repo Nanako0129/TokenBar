@@ -4,7 +4,7 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-19
+last_verified: 2026-07-23
 sources: ["Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md"]
 ---
 
@@ -58,6 +58,8 @@ Rust owns the raw-session interpretation and all expensive aggregation. Swift ca
 
 > **核心不變量：** Rust 產生的 payload 是跨語言契約。Swift 可以格式化、排序或選擇顯示視角，但不能假設自己能從已預聚合的數字反推出每個 client 的貢獻。
 
+Provider diagnostics and `publicationGeneration` are additive optional wire data. PT0 does not change C ABI signatures or pointer ownership; existing envelope and `tb_free` semantics remain authoritative. Rust assigns the generation with a checked increment at process-wide publication-gate entry before the provider run, then keeps that gate through JSON serialization, envelope construction, and raw pointer creation. Exhaustion fails the outer call instead of publishing a duplicate generation. The gate is released before the extern function returns, so it orders publication generations but cannot guarantee C return order. A process-lifetime `@MainActor` publication coordinator is shared by DashboardModel, Settings, the independent tray poller, and snapshot restore; it resolves a lower generated payload to the latest complete payload before any consumer applies scalar or presentation state. Dashboard polling immediately reconciles an accepted payload into the shared scalar, and TrayAnimator reads the coordinator's latest generated payload even before its own five-minute poll returns, so presentation and persistence cannot remain on an older generation. The scalar is part of TrayAnimator's icon-settings signature, making its UserDefaults notification synchronously invalidate the gauge instead of waiting for the 30-second appearance loop. Payloads without a generation remain legacy/demo pass-through.
+
 ## Windows downstream consumer
 
 C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。它以 byte-identical 方式複製本 repo 的 `crates/`＋`vendor/`＋`Sources/CTB/include/ctb.h`，本 repo 是**唯一同步源**；來源 commit 記錄在該 repo 的 `vendor/tokscale-core/SYNC.md`。
@@ -69,6 +71,7 @@ C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https
 | `ctb.h` 簽名 | 簽名變更＝跨 repo breaking change。P/Invoke 綁定沒有編譯期檢查，參數數量錯誤到執行期才以垃圾指標顯現（先例：`tb_hourly_report`/`tb_agents_report` 新增 `clients` 參數）。變更 `ctb.h` 時把 Windows port 視為必須通知的消費者 |
 | Build-infra 選型 | vendor 的 reqwest TLS 選型（0.13 `rustls`＝rustls-platform-verifier）部分理由來自 Windows 建置限制（vendored OpenSSL 需 Perl+NASM）；精確帳目在 [`vendor/README.md`](../../vendor/README.md) 的 local-patch 表 |
 | 邏輯層對拍 | `Sources/TokenBarCore` 在 Windows 側有 C# 逐檔移植；語意變更後的跨語言驗證見 [`verification.md`](verification.md) |
+| Additive payload fields | `publicationGeneration` is an unknown-field-compatible optional addition; Windows compatibility remains covered by the M19-B1 synthetic unknown-field gate, not by a C ABI signature change |
 
 ## Streaming and cache
 
@@ -126,7 +129,7 @@ Pricing and quota are separate flows. Vendored tokscale pricing resolves model c
 |---|---|---|
 | Token counts, model cost, active days | Rust core and FFI reports | Decode and display; do not reprice raw sessions |
 | Price freshness | Vendored pricing service | Show the timestamp supplied by the model report |
-| OAuth or subscription windows | Rust FFI provider modules | Preserve last good data when refresh fails and display an actionable error only when no good value exists |
+| OAuth or subscription windows | Rust FFI provider modules | Preserve only same-binding last-good data for transient failures and display the current actionable error alongside fallback windows；without a trusted fallback, display the error-only snapshot |
 | Quota account scope | Rust `agent_account_scope` | Treat the opaque scope as history identity only；do not derive it from labels、paths or token hashes |
 | Duration lifecycle and historical pace | Rust `agent_quota_duration` and `agent_quota_history` | Decode typed `paceStatus` and the optional coherent expected／ETA／will-last／risk result；do not recompute historical output |
 | Tray quota selection | Swift `QuotaResolver` | Select from already decoded windows by `clientId|cardId`；do not make a second provider request |
@@ -134,22 +137,28 @@ Pricing and quota are separate flows. Vendored tokscale pricing resolves model c
 
 Authoritative provider-reported costs use the vendored cost-provenance contract. The local cache schema must be bumped whenever serialized message output changes, while report-time-only arithmetic changes do not require a cache bump.
 
+Provider quota transport has one Rust source of truth. Process-memory last-good snapshots are keyed by canonical client plus opaque `ProviderCacheBinding`; fallback is allowed only for a structural same-binding transient on an actual request-bearing credential and route: timeout, connect, body I/O, rate limit, or 5xx. A fallback keeps the clean display-ready snapshot's `updatedAt`, windows, identity, credits, pace, and source, and adds the current user-visible `error` plus optional `transportDiagnostic`; account scope becomes untrusted, and the result is not enriched, written to history, or re-cached. Terminal, absent/logout, 401/403/other 4xx, schema contradiction, invalid required meters, unbound transient, and binding mismatch clear the snapshot. Refresh write-back is optimistic and target-bound: Claude, Codex, Grok, and Antigravity re-read the current credential store, refuse a stale target after logout or account switch, and preserve unrelated sibling changes. Claude, Grok, and Antigravity make an unchanged-target persistence failure fresh but uncacheable. Codex keeps save failure terminal, persists the validated current root before lineage transfer, and attempts a compare-then-rollback if transfer fails. External writers can still race the rollback comparison and atomic rename, and credentials plus metadata do not claim filesystem CAS or cross-resource crash atomicity. Grok monthly data remains additive best-effort; absent Copilot or Grok data is not revived.
+
+The diagnostic wire is additive and bounded to `{category,status?,osCode?}`. Categories are limited to `timeout`, `dns`, `tls`, `connectionRefused`, `connectionReset`, `connect`, `request`, `responseBody`, `rateLimited`, and `serverError`; `status` is accepted only as `429` for `rateLimited` or `500...599` for `serverError`, and those HTTP categories do not carry `osCode`. Non-HTTP categories do not carry `status`; unknown categories produce a category-only `unknown` candidate. Swift drops malformed optional integer fields individually, while a non-object diagnostic or missing/non-string category produces no candidate. Free-form causes, bodies, URLs or queries, headers, tokens, emails, account IDs, and credential paths do not cross the boundary. `tb_agent_usage` is process-wide single-flight across the complete provider run, JSON serialization, envelope construction, and raw C-pointer publication; its Rust gate assigns `publicationGeneration` with a checked increment and returns an outer error on exhaustion rather than reusing a value. The gate releases before the extern function returns, so it does not guarantee C return order. The shared `@MainActor` publication coordinator owns stale-generation rejection for dashboard, Settings, tray, and snapshot consumers; providers may still run concurrently within one invocation.
+
 Provider-wide history uses `quota-pace-history-v3.json` keyed by provider、opaque account scope and semantic window key. Rust owns duration evidence、sampling、retention、expected pace、ETA、will-last and risk；Swift owns mode selection、display stage and copy. The installation HMAC key is an exact 32-byte owner-only file in the hardened Application Support directory；the directory is `0700`、the file is `0600`、creation is atomic and cross-process locked、and every resolution reloads the persisted winner without a process cache. The old development Keychain item is ignored. Codex v2 remains read-only migration input for byte-exact current-account matches；v1 is never imported and both legacy files remain untouched.
 
 Pricing metadata is refreshable rather than frozen for the process lifetime; the current refresh cadence is approximately one hour. When provider-hinted lookup selects an entry without cache rates, local cache-rate backfill preserves the correct cache pricing.
 
 ## Swift presentation layer
 
-SwiftUI owns the seven dashboard lenses, settings, menu-bar title, quota icon, animation, and lifecycle of the popover and settings window. `DashboardModel` coordinates initial load, lazy hourly and Agents reports, year selection, snapshot reuse, stale-data retention, and poll cancellation. The app shell must stop hidden-window polling when the window is closed; otherwise an apparently idle menu-bar utility can keep rendering and consuming CPU.
+SwiftUI owns the seven dashboard lenses, settings, menu-bar title, quota icon, animation, and lifecycle of the popover and settings window. `DashboardModel` coordinates initial load, lazy hourly and Agents reports, year selection, snapshot reuse, stale-data retention, and poll cancellation. A process-lifetime `@MainActor` publication coordinator applies the Rust `publicationGeneration` guard across the popover and Settings models, snapshot restore, and TrayAnimator's independent poller before any payload or scalar is stored. Dashboard polling reconciles the accepted payload into the shared scalar, while TrayAnimator's payload getter prefers the coordinator's latest generated payload over an older result from its own poller. The persistent scalar participates in the tray icon signature, so that write triggers immediate gauge rendering and the app-level defaults observer refreshes the title; missing generations remain direct demo/legacy values and are not persisted. Settings reconciliation is keyed by generation plus selection/exclusions, or by generated timestamp plus resolved-scalar fingerprint for legacy payloads, so distinct payloads cannot collide on `generatedAt` alone. The app shell must stop hidden-window polling when the window is closed; otherwise an apparently idle menu-bar utility can keep rendering and consuming CPU.
 
 `Package.swift` links the Rust static library from `target/release`, so the build must run from the repository root after Rust has produced the library. The Makefile is the local build-order source and contains the stale-executable relink guard for SwiftPM's incomplete static-library dependency tracking.
+
+Swift treats a successful outer payload's finite quota scalar as authoritative: fresh values replace both memory and persistent scalar; terminal, absent, unresolved, or hidden-all results clear them; selection or exclusion changes re-resolve the same successful payload before render; only an outer FFI failure or missing payload retains the old scalar. Explicit selection may use same-binding fallback windows with an error, while Auto excludes providers carrying an error. Diagnostic decoding is lossy: malformed optional integer fields are dropped individually; non-object diagnostics or missing/non-string categories produce no candidate; unknown categories and client strings normalize to `unknown`, and public logs contain only bounded fields. An `ok:false` agent-usage envelope is classified as a fixed bridge failure, while malformed JSON or `ok:true` without data is a fixed decode failure; associated bridge, panic, decode, and provider error text is not public-logged.
 
 ## Change checklist
 
 | Question | Evidence required |
 |---|---|
 | Does the change alter parsed messages, dedup keys, agent attribution, or cost provenance? | Hermetic old-fail/new-pass fixture and an intentional cache-schema decision |
-| Does the change cross Rust, C, and Swift? | `ctb.h`, FFI mapper, Swift decoder, nested payload parity test or smoke evidence, and downstream Windows handoff |
+| Does the change cross Rust, C, and Swift? | `ctb.h`, FFI mapper, additive-generation Swift decoder/apply guard, nested payload parity test or smoke evidence, and downstream Windows handoff |
 | Does a report hide or select clients? | Source-to-consumer matrix, ID vocabulary check, and pre-aggregation filter test |
 | Does a parser read siblings or WAL? | Fingerprint, lane, mtime, and pruning coverage |
 | Does a UI lifecycle change start or stop polling? | Closed-window CPU/render evidence and cancellation regression |

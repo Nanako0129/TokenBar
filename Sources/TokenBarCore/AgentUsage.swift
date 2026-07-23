@@ -467,6 +467,23 @@ public struct CreditsSnapshot: Decodable, Sendable {
     public let unlimited: Bool
 }
 
+public struct AgentUsageTransportDiagnostic: Decodable, Sendable {
+    public let category: String?
+    public let status: Int64?
+    public let osCode: Int64?
+
+    private enum CodingKeys: String, CodingKey {
+        case category, status, osCode
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.category = try? container.decode(String.self, forKey: .category)
+        self.status = try? container.decode(Int64.self, forKey: .status)
+        self.osCode = try? container.decode(Int64.self, forKey: .osCode)
+    }
+}
+
 public struct AgentUsageSnapshot: Decodable, Sendable {
     public let clientId: String
     public let source: String
@@ -475,6 +492,24 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     public let windows: [UsageWindow]
     public let credits: CreditsSnapshot?
     public let error: String?
+    public let transportDiagnostic: AgentUsageTransportDiagnostic?
+
+    private enum CodingKeys: String, CodingKey {
+        case clientId, source, updatedAt, identity, windows, credits, error, transportDiagnostic
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.clientId = try container.decode(String.self, forKey: .clientId)
+        self.source = try container.decode(String.self, forKey: .source)
+        self.updatedAt = try container.decode(String.self, forKey: .updatedAt)
+        self.identity = try container.decodeIfPresent(AgentIdentity.self, forKey: .identity)
+        self.windows = try container.decode([UsageWindow].self, forKey: .windows)
+        self.credits = try container.decodeIfPresent(CreditsSnapshot.self, forKey: .credits)
+        self.error = try container.decodeIfPresent(String.self, forKey: .error)
+        self.transportDiagnostic = try? container.decode(
+            AgentUsageTransportDiagnostic.self, forKey: .transportDiagnostic)
+    }
 
     /// Order-preserving card view shared by quota resolvers and consumers.
     /// A duplicate card ID is fail-closed after the first occurrence; labels
@@ -487,8 +522,59 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
 
 public struct AgentUsagePayload: Decodable, Sendable {
     public let generatedAt: String
+    /// Rust publication order. Older/demo payloads omit this additive field.
+    public let publicationGeneration: UInt64?
     public let agents: [AgentUsageSnapshot]
     /// Subscription-type providers opencode is authed against (e.g. ["Codex"]).
     /// Omitted from the JSON entirely when empty.
     public let opencodeSubscriptions: [String]?
+}
+
+package struct AgentUsageTransportLogEntry: Equatable, Sendable {
+    package let clientId: String
+    package let category: String
+    package let status: Int?
+    package let osCode: Int32?
+}
+
+private let agentUsageTransportLogClientIds: Set<String> = [
+    "codex", "claude", "antigravity", "copilot", "grok",
+]
+
+private let agentUsageTransportLogCategories: Set<String> = [
+    "timeout", "dns", "tls", "connectionRefused", "connectionReset",
+    "connect", "request", "responseBody", "rateLimited", "serverError",
+]
+
+package func agentUsageTransportLogEntries(
+    _ payload: AgentUsagePayload
+) -> [AgentUsageTransportLogEntry] {
+    payload.agents.compactMap { snapshot in
+        guard let diagnostic = snapshot.transportDiagnostic,
+              let rawCategory = diagnostic.category else { return nil }
+        let clientId = agentUsageTransportLogClientIds.contains(snapshot.clientId)
+            ? snapshot.clientId : "unknown"
+        let isKnownCategory = agentUsageTransportLogCategories.contains(rawCategory)
+        let category = isKnownCategory ? rawCategory : "unknown"
+        let status = diagnostic.status.flatMap { value -> Int? in
+            switch rawCategory {
+            case "rateLimited":
+                return value == 429 ? Int(exactly: value) : nil
+            case "serverError":
+                return (500...599).contains(value) ? Int(exactly: value) : nil
+            default:
+                return nil
+            }
+        }
+        let osCode = isKnownCategory && rawCategory != "rateLimited"
+            && rawCategory != "serverError"
+            ? diagnostic.osCode.flatMap { Int32(exactly: $0) }
+            : nil
+        return AgentUsageTransportLogEntry(
+            clientId: clientId,
+            category: category,
+            status: status,
+            osCode: osCode
+        )
+    }
 }

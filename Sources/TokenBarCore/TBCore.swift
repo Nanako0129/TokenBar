@@ -3,15 +3,21 @@ import Foundation
 import os
 
 /// FFI-boundary log. Backend failures and contract drift would otherwise vanish
-/// — every app-side caller wraps these in `try?` to keep the last good numbers,
-/// so the only record of a failure is here. Logs the entry-point type and the
-/// error string only; never a decoded payload body (agent usage carries emails).
+/// — every app-side caller wraps these in `try?` to keep the last good numbers.
+/// Agent usage is the sensitive exception: it logs only bounded transport fields
+/// plus fixed outer-failure classifications, never backend or decoding text.
 let ffiLog = Logger(subsystem: "com.nyanako.tokenbar", category: "ffi")
 
 /// Errors crossing the Rust FFI boundary.
 public enum TBCoreError: Error {
     case nullPointer
     case bridge(String)
+}
+
+package enum AgentUsageBoundaryLogEvent: Equatable, Sendable {
+    case returnedNull
+    case bridgeFailed
+    case decodeFailed
 }
 
 /// Result of the `tb_probe` smoke entry point.
@@ -76,14 +82,20 @@ public enum TBCore {
     }
 
     /// Pure envelope decode: `{"ok":true,"data":..}` → payload, `{"ok":false}` →
-    /// thrown `TBCoreError.bridge`. Split out from the pointer/free path so the
+    /// `TBCoreError.bridge`, and a successful envelope without data → decoding
+    /// contract failure. Split out from the pointer/free path so the
     /// error contract is unit-testable (`envelopeContractChecks`) without a real
     /// FFI allocation — feeding a synthetic pointer to `decode` would be unsound,
     /// since `tb_free` must only ever release a Rust-allocated pointer.
     static func decodeEnvelope<T: Decodable>(_ data: Data) throws -> T {
         let envelope = try JSONDecoder().decode(TBEnvelope<T>.self, from: data)
-        guard envelope.ok, let payload = envelope.data else {
+        guard envelope.ok else {
             throw TBCoreError.bridge(envelope.err ?? "unknown")
+        }
+        guard let payload = envelope.data else {
+            throw DecodingError.dataCorrupted(.init(
+                codingPath: [],
+                debugDescription: "successful FFI envelope is missing data"))
         }
         return payload
     }
@@ -164,7 +176,60 @@ public enum TBCore {
     /// OAuth quota cards for codex/claude/antigravity/copilot/grok. Network-bound;
     /// per-provider failures are reported in each snapshot's `error`.
     public static func agentUsage() throws -> AgentUsagePayload {
-        try unwrap(tb_agent_usage())
+        let payload = try decodeAgentUsageBoundary(takeBytes(tb_agent_usage())) {
+            logAgentUsageBoundaryEvent($0)
+        }
+        logAgentUsageTransportDiagnostics(payload)
+        return payload
+    }
+
+    package static func decodeAgentUsageBoundary(
+        _ data: Data?,
+        onLog: (AgentUsageBoundaryLogEvent) -> Void
+    ) throws -> AgentUsagePayload {
+        guard let data else {
+            onLog(.returnedNull)
+            throw TBCoreError.nullPointer
+        }
+        do {
+            return try decodeEnvelope(data)
+        } catch let error as TBCoreError {
+            onLog(.bridgeFailed)
+            throw error
+        } catch {
+            onLog(.decodeFailed)
+            throw error
+        }
+    }
+
+    private static func logAgentUsageBoundaryEvent(_ event: AgentUsageBoundaryLogEvent) {
+        switch event {
+        case .returnedNull:
+            ffiLog.error("FFI agent usage returned NULL")
+        case .bridgeFailed:
+            ffiLog.error("FFI agent usage bridge failed")
+        case .decodeFailed:
+            ffiLog.error("FFI agent usage decode failed")
+        }
+    }
+
+    private static func logAgentUsageTransportDiagnostics(_ payload: AgentUsagePayload) {
+        for entry in agentUsageTransportLogEntries(payload) {
+            switch (entry.status, entry.osCode) {
+            case let (status?, osCode?):
+                ffiLog.error(
+                    "Agent usage transport failure client=\(entry.clientId, privacy: .public) category=\(entry.category, privacy: .public) status=\(status, privacy: .public) osCode=\(osCode, privacy: .public)")
+            case let (status?, nil):
+                ffiLog.error(
+                    "Agent usage transport failure client=\(entry.clientId, privacy: .public) category=\(entry.category, privacy: .public) status=\(status, privacy: .public)")
+            case let (nil, osCode?):
+                ffiLog.error(
+                    "Agent usage transport failure client=\(entry.clientId, privacy: .public) category=\(entry.category, privacy: .public) osCode=\(osCode, privacy: .public)")
+            case (nil, nil):
+                ffiLog.error(
+                    "Agent usage transport failure client=\(entry.clientId, privacy: .public) category=\(entry.category, privacy: .public)")
+            }
+        }
     }
 
     /// Hermetic checks for the FFI envelope/error contract, surfaced to the
@@ -195,12 +260,14 @@ public enum TBCore {
             check("ok:false throws bridge(boom)", false)
         }
 
-        // ok:true but data absent → bridge (contract violation, not a crash).
+        // ok:true but data absent → decoding contract failure, not bridge failure.
         do {
             let _: TokensPerMin = try decodeEnvelope(Data(#"{"ok":true}"#.utf8))
-            check("ok:true without data throws", false)
+            check("ok:true without data is decode failure", false)
+        } catch is DecodingError {
+            check("ok:true without data is decode failure", true)
         } catch {
-            check("ok:true without data throws", true)
+            check("ok:true without data is decode failure", false)
         }
 
         // Malformed JSON → thrown DecodingError, never a trap.

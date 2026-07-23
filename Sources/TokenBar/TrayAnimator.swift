@@ -22,9 +22,15 @@ final class TrayAnimator {
     private var quotaTask: Task<Void, Never>?
     /// RunCat load signal in [0, 100]: tokens/min ÷ 10K, so 1M tok/min = 100.
     private var load: Double = 0
-    /// Latest OAuth quota snapshot — feeds the gauge icon styles and the
-    /// quota title mode (AppDelegate reads it through `quotaRemaining`).
-    private(set) var quota: AgentUsagePayload?
+    /// Latest snapshot returned by this poller. A newer payload accepted by a
+    /// dashboard or Settings poll wins through the shared publication state.
+    private var polledQuota: AgentUsagePayload?
+    var quota: AgentUsagePayload? { Self.publishedQuota(polledQuota) }
+
+    static func publishedQuota(_ polledQuota: AgentUsagePayload?) -> AgentUsagePayload? {
+        if let polledQuota, polledQuota.publicationGeneration == nil { return polledQuota }
+        return AgentUsagePublicationCoordinator.latestPayload ?? polledQuota
+    }
     /// Fired after every successful quota fetch (title refresh hook).
     var onQuotaUpdated: (() -> Void)?
 
@@ -70,12 +76,12 @@ final class TrayAnimator {
     /// tear down + restart the animation loop on every keystroke.
     private var iconSettingsSignature = ""
 
-    private static func currentIconSignature() -> String {
-        let d = UserDefaults.standard
+    static func currentIconSignature(defaults d: UserDefaults = .standard) -> String {
         return [
             d.string(forKey: styleKey) ?? "",
             d.object(forKey: animateKey).map { "\($0)" } ?? "",
             d.string(forKey: quotaSourceKey) ?? "",
+            d.object(forKey: lastRemainingKey).map { "\($0)" } ?? "",
             d.string(forKey: IconColoring.storageKey) ?? "",
             // The Auto gauge value now depends on the exclusion set, so a hide
             // toggle must re-render (and re-resolve) the gauge — renderGaugeIcon
@@ -106,6 +112,9 @@ final class TrayAnimator {
                 let next = Self.currentIconSignature()
                 guard next != self.iconSettingsSignature else { return }
                 self.iconSettingsSignature = next
+                if let payload = self.quota {
+                    self.reconcileQuotaRemaining(with: payload)
+                }
                 self.renderGaugeIcon()
                 self.animationTask?.cancel()
                 self.startAnimationLoop()
@@ -143,70 +152,92 @@ final class TrayAnimator {
                 coloring: coloring))
     }
 
-    /// Internal so the settings window's preview can fall back to the same
-    /// last-good reading before its own quota fetch lands.
-    static let lastRemainingKey = "tokenbar.quota.lastRemaining"
+    /// Internal so the settings window's preview can use the same last-good
+    /// reading before its own quota fetch lands.
+    nonisolated static let lastRemainingKey = "tokenbar.quota.lastRemaining"
 
-    /// Last successfully resolved remaining percent — a transient fetch
-    /// failure (or a provider erroring) must never zero/blank the display.
-    /// Live mode seeds this from UserDefaults; demo mode starts nil and keeps
+    /// Remaining percent reconciled from the most recent successful outer
+    /// payload. Live mode seeds this from UserDefaults so an outer FFI failure
+    /// before any new payload preserves the last-good reading; demo mode keeps
     /// only the process-local synthetic value.
     private var cachedQuotaRemaining: Double?
 
-    /// The selected quota window's remaining percent, holding the last good
-    /// value across failed refreshes (nil only before any data ever arrived).
-    /// Pure read: it updates the in-memory cache but does NOT write
-    /// UserDefaults — persisting here (a side effect inside a getter that
-    /// renderGaugeIcon / applyTitle call on every observer pass) re-posted
-    /// didChangeNotification and re-entered the observers. `persistQuotaState()`
-    /// is called explicitly when fresh quota data arrives instead.
+    /// The selected quota window's remaining percent. A missing outer payload
+    /// may use the last-good scalar; a successful payload must resolve a fresh,
+    /// finite value from its own windows.
     var quotaRemaining: Double? {
         let persistedSelection = UserDefaults.standard.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
-        let excluded = ClientRegistry.quotaExcludedClients()
-        let selection = QuotaSelectionPolicy.effectiveSelection(
+        return QuotaSelectionPolicy.resolveRemainingPercent(
             payload: quota,
             persistedSelection: persistedSelection,
-            excluding: excluded)
-        if let value = QuotaResolver.resolve(
-            payload: quota, selection: selection, excluding: excluded)?
-            .window.remainingPercent
-        {
-            cachedQuotaRemaining = value
-            return value
-        }
-        // resolve() returned nil. If that is ONLY because every auto candidate
-        // is hidden, suppress the cached reading — it was captured before the
-        // hide and belongs to a now-hidden client, so keep the tray in its
-        // no-quota state instead. A genuine nil (no payload / fetch failure /
-        // no healthy window) still falls back to the cache, unchanged. The
-        // persisted last-good value is left intact so unhide restores instantly.
-        if QuotaResolver.excludedAllCandidates(
-            payload: quota, selection: selection, excluding: excluded)
-        {
-            return nil
-        }
-        return cachedQuotaRemaining
+            excluding: ClientRegistry.quotaExcludedClients(),
+            cachedRemaining: cachedQuotaRemaining)
     }
 
-    /// Persist a proven legacy-label migration and the last good remaining
-    /// percent when fresh live quota data arrives. Demo mode remains entirely
-    /// process-local. Reads `quotaRemaining` (not `cachedQuotaRemaining`) so it
-    /// resolves the fresh value even for cat/parrot styles, where
-    /// `renderGaugeIcon()` returns early without touching the cache.
-    private func persistQuotaState() {
+    /// Reconcile a successful payload with the scalar cache. A missing outer
+    /// payload returns the cache without touching defaults; nil defaults keep
+    /// demo mode process-local.
+    nonisolated static func applyQuotaRemaining(
+        payload: AgentUsagePayload?,
+        persistedSelection: String,
+        excluding: Set<String>,
+        cachedRemaining: Double?,
+        defaults: UserDefaults?
+    ) -> Double? {
+        guard payload != nil else { return cachedRemaining }
+        let remaining = QuotaSelectionPolicy.resolveRemainingPercent(
+            payload: payload,
+            persistedSelection: persistedSelection,
+            excluding: excluding,
+            cachedRemaining: cachedRemaining)
+        if let remaining {
+            defaults?.set(remaining, forKey: Self.lastRemainingKey)
+        } else {
+            defaults?.removeObject(forKey: Self.lastRemainingKey)
+        }
+        return remaining
+    }
+
+    private func reconcileQuotaRemaining(with payload: AgentUsagePayload) {
+        let defaults = UserDefaults.standard
+        cachedQuotaRemaining = Self.applyQuotaRemaining(
+            payload: payload,
+            persistedSelection: defaults.string(forKey: Self.quotaSourceKey)
+                ?? QuotaResolver.auto,
+            excluding: ClientRegistry.quotaExcludedClients(),
+            cachedRemaining: cachedQuotaRemaining,
+            defaults: source.allowsQuotaCachePersistence ? defaults : nil)
+    }
+
+    /// Persist a proven legacy-label migration after the payload's scalar state
+    /// has been reconciled. Demo mode remains entirely process-local.
+    private func persistQuotaSelectionMigration(for payload: AgentUsagePayload) {
         guard source.allowsQuotaCachePersistence else { return }
         let defaults = UserDefaults.standard
         let persistedSelection = defaults.string(forKey: Self.quotaSourceKey)
             ?? QuotaResolver.auto
         if let migrated = QuotaSelectionPolicy.migrationToPersist(
-            payload: quota, persistedSelection: persistedSelection)
+            payload: payload, persistedSelection: persistedSelection)
         {
             defaults.set(migrated, forKey: Self.quotaSourceKey)
         }
-        if let value = quotaRemaining {
-            defaults.set(value, forKey: Self.lastRemainingKey)
-        }
+    }
+
+    static func applyQuotaPayload(
+        _ candidate: AgentUsagePayload,
+        store: (AgentUsagePayload) -> Void,
+        reconcile: (AgentUsagePayload) -> Void,
+        persistSelection: (AgentUsagePayload) -> Void,
+        render: () -> Void,
+        notify: () -> Void
+    ) {
+        let payload = AgentUsagePublicationCoordinator.resolve(candidate)
+        store(payload)
+        reconcile(payload)
+        persistSelection(payload)
+        render()
+        notify()
     }
 
     private func currentFrames() -> [NSImage] {
@@ -275,10 +306,13 @@ final class TrayAnimator {
                 let payload = try? await source.agentUsage()
                 guard let self, !Task.isCancelled else { break }
                 if let payload {
-                    self.quota = payload
-                    self.renderGaugeIcon() // refreshes cachedQuotaRemaining
-                    self.persistQuotaState()
-                    self.onQuotaUpdated?()
+                    Self.applyQuotaPayload(
+                        payload,
+                        store: { self.polledQuota = $0 },
+                        reconcile: { self.reconcileQuotaRemaining(with: $0) },
+                        persistSelection: { self.persistQuotaSelectionMigration(for: $0) },
+                        render: { self.renderGaugeIcon() },
+                        notify: { self.onQuotaUpdated?() })
                 }
                 try? await Task.sleep(for: .seconds(300))
             }
