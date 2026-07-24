@@ -70,8 +70,8 @@ fn auth_path_from(
     user_home: Option<&std::path::Path>,
 ) -> Option<PathBuf> {
     let root = match xdg_data_home {
-        Ok(root) => root,
-        Err(_) => format!("{}/.local/share", user_home?.to_string_lossy()),
+        Ok(root) if !root.is_empty() => root,
+        Ok(_) | Err(_) => format!("{}/.local/share", user_home?.to_string_lossy()),
     };
     Some(PathBuf::from(format!("{root}/opencode/auth.json")))
 }
@@ -218,10 +218,21 @@ mod tests {
     }
 
     #[test]
-    fn auth_path_keeps_empty_xdg_data_root_semantics() {
+    fn auth_path_preserves_whitespace_only_xdg_data_root() {
         assert_eq!(
-            auth_path_from(Ok(String::new()), None),
-            Some(PathBuf::from("/opencode/auth.json"))
+            auth_path_from(Ok("   ".to_string()), None),
+            Some(PathBuf::from("   /opencode/auth.json"))
+        );
+    }
+
+    #[test]
+    fn auth_path_falls_back_for_empty_xdg_data_root() {
+        let home = PathBuf::from("resolved-home");
+        assert_eq!(
+            auth_path_from(Ok(String::new()), Some(&home)),
+            Some(PathBuf::from(
+                "resolved-home/.local/share/opencode/auth.json"
+            ))
         );
     }
 

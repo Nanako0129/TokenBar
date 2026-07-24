@@ -15,8 +15,10 @@ impl PathRoot {
             PathRoot::Home => home_dir.to_string(),
             PathRoot::XdgData => {
                 if use_env_roots {
-                    std::env::var("XDG_DATA_HOME")
-                        .unwrap_or_else(|_| format!("{}/.local/share", home_dir))
+                    match std::env::var("XDG_DATA_HOME") {
+                        Ok(root) if !root.is_empty() => root,
+                        Ok(_) | Err(_) => format!("{}/.local/share", home_dir),
+                    }
                 } else {
                     format!("{}/.local/share", home_dir)
                 }
@@ -666,6 +668,26 @@ mod tests {
 
         let resolved = PathRoot::XdgData.resolve("/tmp/home");
         assert_eq!(resolved, "/tmp/xdg-data-home");
+    }
+
+    #[test]
+    #[serial]
+    fn test_path_root_xdg_data_preserves_whitespace_when_set() {
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.set("XDG_DATA_HOME", "   ");
+
+        let resolved = PathRoot::XdgData.resolve("/tmp/home");
+        assert_eq!(resolved, "   ");
+    }
+
+    #[test]
+    #[serial]
+    fn test_path_root_xdg_data_falls_back_when_empty() {
+        let mut _env = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _env.set("XDG_DATA_HOME", "");
+
+        let resolved = PathRoot::XdgData.resolve("/tmp/home");
+        assert_eq!(resolved, "/tmp/home/.local/share");
     }
 
     #[test]

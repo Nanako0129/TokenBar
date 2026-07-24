@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-use crate::clients::ClientId;
+use crate::clients::{ClientId, PathRoot};
 use crate::sessions::{normalize_workspace_key, workspace_label_from_key};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -1019,11 +1019,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if enabled.contains(&ClientId::OpenCode) {
-        let xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
-        } else {
-            format!("{}/.local/share", home_dir)
-        };
+        let xdg_data = PathRoot::XdgData.resolve_with_env_strategy(home_dir, use_env_roots);
 
         // OpenCode 1.2+: SQLite database(s) at ~/.local/share/opencode/opencode*.db
         //
@@ -1145,11 +1141,7 @@ fn scan_all_clients_with_env_strategy_inner(
     }
 
     if include_synthetic {
-        let xdg_data = if use_env_roots {
-            std::env::var("XDG_DATA_HOME").unwrap_or_else(|_| format!("{}/.local/share", home_dir))
-        } else {
-            format!("{}/.local/share", home_dir)
-        };
+        let xdg_data = PathRoot::XdgData.resolve_with_env_strategy(home_dir, use_env_roots);
         let octofriend_db_path = PathBuf::from(format!("{}/octofriend/sqlite.db", xdg_data));
         if octofriend_db_path.exists() {
             result.synthetic_db = Some(octofriend_db_path);
@@ -2031,6 +2023,29 @@ mod tests {
         assert!(result.get(ClientId::Claude).is_empty());
         assert!(result.get(ClientId::Codex).is_empty());
         assert!(result.get(ClientId::Gemini).is_empty());
+    }
+
+    #[test]
+    #[serial]
+    fn test_scan_all_clients_opencode_empty_xdg_uses_home_fallback() {
+        let mut _xdg = EnvGuard::capture(&["XDG_DATA_HOME"]);
+        _xdg.set("XDG_DATA_HOME", "");
+
+        let dir = TempDir::new().unwrap();
+        let home = dir.path();
+        setup_mock_opencode_dir(home);
+        let data_dir = home.join(".local/share/opencode");
+        let db = data_dir.join("opencode.db");
+        File::create(&db).unwrap();
+
+        let result = scan_without_extra_dirs(home.to_str().unwrap(), &["opencode".to_string()]);
+        let json_dir = home.join(".local/share/opencode/storage/message");
+        assert_eq!(result.opencode_json_dir, Some(json_dir.clone()));
+        assert_eq!(
+            result.get(ClientId::OpenCode),
+            &[json_dir.join("proj1/msg_001.json")]
+        );
+        assert_eq!(result.opencode_dbs, vec![db]);
     }
 
     #[test]
