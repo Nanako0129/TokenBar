@@ -2,7 +2,7 @@
 //!
 //! opencode can sign in to providers via OAuth (a shared subscription, e.g.
 //! "Sign in with ChatGPT" = the Codex/ChatGPT plan) or via API keys (metered).
-//! Its `~/.local/share/opencode/auth.json` records each provider with a `type`.
+//! Its `auth.json` under the XDG data root records each provider with a `type`.
 //! We surface the `type: "oauth"` providers so the user can see which agent
 //! subscriptions opencode also draws on (its usage counts against those plans).
 
@@ -59,7 +59,21 @@ fn subscription_label(provider: &str) -> String {
 }
 
 fn auth_path() -> Option<PathBuf> {
-    crate::user_home_dir().map(|home| home.join(".local/share/opencode/auth.json"))
+    auth_path_from(
+        std::env::var("XDG_DATA_HOME"),
+        crate::user_home_dir().as_deref(),
+    )
+}
+
+fn auth_path_from(
+    xdg_data_home: Result<String, std::env::VarError>,
+    user_home: Option<&std::path::Path>,
+) -> Option<PathBuf> {
+    let root = match xdg_data_home {
+        Ok(root) => root,
+        Err(_) => format!("{}/.local/share", user_home?.to_string_lossy()),
+    };
+    Some(PathBuf::from(format!("{root}/opencode/auth.json")))
 }
 
 pub(crate) struct GitHubCopilotCredential {
@@ -193,6 +207,36 @@ mod tests {
             subscription_label("minimax-coding-plan"),
             "Minimax-coding-plan"
         );
+    }
+
+    #[test]
+    fn auth_path_uses_nonempty_xdg_data_root() {
+        assert_eq!(
+            auth_path_from(Ok("configured-xdg-data".to_string()), None),
+            Some(PathBuf::from("configured-xdg-data/opencode/auth.json"))
+        );
+    }
+
+    #[test]
+    fn auth_path_keeps_empty_xdg_data_root_semantics() {
+        assert_eq!(
+            auth_path_from(Ok(String::new()), None),
+            Some(PathBuf::from("/opencode/auth.json"))
+        );
+    }
+
+    #[test]
+    fn auth_path_falls_back_on_environment_errors() {
+        let home = PathBuf::from("resolved-home");
+        let fallback = Some(PathBuf::from(
+            "resolved-home/.local/share/opencode/auth.json",
+        ));
+        for error in [
+            std::env::VarError::NotPresent,
+            std::env::VarError::NotUnicode(std::ffi::OsString::new()),
+        ] {
+            assert_eq!(auth_path_from(Err(error), Some(&home)), fallback);
+        }
     }
 
     #[test]

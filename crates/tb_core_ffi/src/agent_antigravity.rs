@@ -8,10 +8,10 @@
 //!    `language_server` process (carrying a `--csrf_token`), discover its
 //!    listening port via `lsof`, and call the local Connect-RPC `GetUserStatus`
 //!    over loopback TLS. Live, no token refresh, no disk writes.
-//! 2. **OAuth remote (`oauth`)** — otherwise read the shared Google creds at
-//!    `~/.gemini/oauth_creds.json`, refresh against Google (client id/secret
-//!    scanned from the installed Antigravity.app binary), and hit the
-//!    `cloudcode-pa.googleapis.com` Code Assist quota endpoints.
+//! 2. **OAuth remote (`oauth`)** — otherwise read the shared Google creds under
+//!    `GEMINI_CLI_HOME` (falling back to `~/.gemini`), refresh against Google
+//!    (client id/secret scanned from the installed Antigravity.app binary), and
+//!    hit the `cloudcode-pa.googleapis.com` Code Assist quota endpoints.
 //!
 //! Both yield per-model "remaining fraction + reset" which map to `UsageWindow`s.
 
@@ -1459,13 +1459,57 @@ fn preferred_client(ids: &[String], secrets: &[String]) -> Option<(String, Strin
 // ── shared ────────────────────────────────────────────────────────────────────
 
 fn gemini_home() -> Option<PathBuf> {
-    crate::user_home_dir().map(|home| home.join(".gemini"))
+    gemini_home_from(
+        std::env::var("GEMINI_CLI_HOME"),
+        crate::user_home_dir().as_deref(),
+    )
+}
+
+fn gemini_home_from(
+    gemini_cli_home: Result<String, std::env::VarError>,
+    user_home: Option<&Path>,
+) -> Option<PathBuf> {
+    let root = match gemini_cli_home {
+        Ok(root) if !root.trim().is_empty() => root,
+        Ok(_) | Err(_) => format!("{}/.gemini", user_home?.to_string_lossy()),
+    };
+    Some(PathBuf::from(root))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    #[test]
+    fn gemini_home_uses_nonempty_configured_root_unchanged() {
+        let configured = " /tmp/gemini-cli-home ";
+        assert_eq!(
+            gemini_home_from(Ok(configured.to_string()), None),
+            Some(PathBuf::from(configured))
+        );
+    }
+
+    #[test]
+    fn gemini_home_falls_back_on_environment_errors() {
+        let home = PathBuf::from("resolved-home");
+        let fallback = Some(PathBuf::from("resolved-home/.gemini"));
+        for error in [
+            std::env::VarError::NotPresent,
+            std::env::VarError::NotUnicode(std::ffi::OsString::new()),
+        ] {
+            assert_eq!(gemini_home_from(Err(error), Some(&home)), fallback);
+        }
+    }
+
+    #[test]
+    fn gemini_home_falls_back_for_trim_empty_root() {
+        let home = PathBuf::from("resolved-home");
+        assert_eq!(
+            gemini_home_from(Ok(" \t\n ".to_string()), Some(&home)),
+            Some(PathBuf::from("resolved-home/.gemini"))
+        );
+    }
 
     #[test]
     fn extracts_flags_both_forms() {
