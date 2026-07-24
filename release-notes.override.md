@@ -10,4 +10,5 @@
 ## Fixes
 
 - **Local data discovery remains reliable when GUI launches lack a full shell environment.** Explicit source overrides keep their existing precedence. [#92](https://github.com/Nanako0129/TokenBar/pull/92)
+- **Configured roots now cover the affected default local sources and credentials.** OpenCode's default usage data and OAuth credentials use `XDG_DATA_HOME`, with an empty value falling back to `$HOME/.local/share`; Gemini CLI and Antigravity CLI data, plus Antigravity OAuth credentials, use `GEMINI_CLI_HOME`, falling back to `$HOME/.gemini`. [#97](https://github.com/Nanako0129/TokenBar/pull/97)
 - **Claude version detection now runs at most once per TokenBar launch,** avoiding repeated CLI starts during quota refreshes. [#93](https://github.com/Nanako0129/TokenBar/pull/93)
