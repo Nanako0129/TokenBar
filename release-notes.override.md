@@ -1,9 +1,13 @@
 ## Highlights
 
-- **Copilot Desktop usage is now included.** TokenBar reads token-bearing local sessions from Copilot Desktop, preserves model, workspace, and agent attribution, and lets Copilot OTEL remain authoritative when both sources contain the same session. Totals may increase because previously invisible Desktop usage is now counted, not because the update created new spend. [#83](https://github.com/Nanako0129/TokenBar/pull/83)
-- **Model usage is easier to inspect.** Hovered Token Usage and Models bars now gain adaptive outlines and glow in both light and dark appearances. Model markers glow with their rows, and Daily/Monthly drill-downs show detailed Input, Output, Cache read, Cache write, and Reasoning tooltips above neighboring rows. [#88](https://github.com/Nanako0129/TokenBar/pull/88)
+- **Animated status icons now use far less TokenBar CPU.** In controlled 40 FPS benchmarks, TokenBar process CPU fell from 14.938% to 0.458% for Cat and from 10.287% to 0.462% for Parrot while preserving the configured cadence. Visible animation still carries WindowServer composition cost. [#95](https://github.com/Nanako0129/TokenBar/pull/95)
+- **Quota cards now survive transient provider outages without hiding the error.** TokenBar keeps the last known windows for the same account and shows the current Error. Sign-outs, account changes, authentication failures, and invalid responses still clear stale data instead of reusing it. [#94](https://github.com/Nanako0129/TokenBar/pull/94)
 
 ## Changes
 
-- **Usage caching is now sharded by source identity.** TokenBar replaces the single message cache with bounded per-source shards that isolate parser versions, preserve concurrent updates, and let report paths seed their own cache entries. The first scan after updating starts cold because the legacy cache is intentionally left untouched; later refreshes use the new cache without changing report semantics. [#90](https://github.com/Nanako0129/TokenBar/pull/90)
-- **Hermes discovery supports native Windows layouts** for the downstream Windows build while leaving the macOS app unchanged. [#82](https://github.com/Nanako0129/TokenBar/pull/82)
+- **Usage cache validation now follows related files more precisely.** TokenBar invalidates cached source data when dependencies move, appear, or disappear. The first scan after updating starts cold, then later refreshes use the rebuilt cache. [#91](https://github.com/Nanako0129/TokenBar/pull/91)
+
+## Fixes
+
+- **Local data discovery remains reliable when GUI launches lack a full shell environment.** Explicit source overrides keep their existing precedence. [#92](https://github.com/Nanako0129/TokenBar/pull/92)
+- **Claude version detection now runs at most once per TokenBar launch,** avoiding repeated CLI starts during quota refreshes. [#93](https://github.com/Nanako0129/TokenBar/pull/93)

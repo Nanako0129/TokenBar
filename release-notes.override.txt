@@ -1,9 +1,8 @@
-New:
-- Copilot Desktop token-bearing local sessions are now counted with model, workspace, and agent details. Copilot OTEL remains authoritative when both sources contain the same session, so overlapping usage is not counted twice. Totals may increase because previously invisible Desktop usage is now included, not because the update created new spend.
-
 Improved:
-- Hovered Token Usage and Models bars now gain adaptive outlines and glow in light and dark appearances. Model markers glow with their rows, and Daily/Monthly drill-downs show detailed Input, Output, Cache read, Cache write, and Reasoning tooltips above neighboring rows.
+- Animated Cat and Parrot icons now use a dedicated AppKit rendering surface. In controlled 40 FPS benchmarks, TokenBar process CPU fell from 14.938% to 0.458% for Cat and from 10.287% to 0.462% for Parrot while preserving the configured cadence; visible animation still carries WindowServer composition cost.
+- Usage cache validation now notices related files moving, appearing, or disappearing. The first scan after updating starts cold, then later refreshes use the rebuilt cache.
 
-Under the hood:
-- Usage caching now uses bounded identity-aware shards instead of one message-cache file. The first scan after updating starts cold because the legacy cache is intentionally left untouched; later refreshes use the new cache without changing report semantics.
-- Hermes discovery supports native Windows layouts for the downstream Windows build without changing the macOS app.
+Fixes:
+- Quota cards keep the last known windows during transient same-account provider failures and show the current Error. Sign-outs, account changes, authentication failures, and invalid responses still clear stale data.
+- Local data discovery remains reliable when GUI launches lack a full shell environment.
+- Claude version detection now runs at most once per TokenBar launch, avoiding repeated CLI starts during quota refreshes.
