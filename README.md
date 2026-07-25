@@ -95,6 +95,22 @@ The [project knowledge base](docs/knowledge/README.md) is the canonical guide to
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
 
+## Support TokenBar
+
+TokenBar is local-first and needs no TokenBar account, but maintaining
+trustworthy numbers across 25+ AI coding agents is a wide compatibility job.
+Parser changes cross Rust, FFI, Swift, and the Windows sibling; live quota cards
+require real OAuth or subscription accounts and provider APIs; releases cover
+native macOS behavior, Sparkle signing and appcasts, Homebrew, and legacy
+migration metadata.
+
+Sponsorship helps cover test accounts, CI and release infrastructure, and the
+maintainer time required to keep readings accurate as upstream formats change.
+If TokenBar helps you understand where your AI budget goes, you can support its
+continued development on Ko-fi.
+
+[![Support TokenBar on Ko-fi](https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/nanako0129)
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, change-specific guardrails, verification, and pull-request requirements.
