@@ -30,7 +30,7 @@ The Copilot duplicate-span contribution reached upstream in issue [#938](https:/
 
 M24 PR [#86](https://github.com/Nanako0129/TokenBar/pull/86) is closed unmerged as fidelity evidence; its [close rationale](https://github.com/Nanako0129/TokenBar/pull/86#issuecomment-5047332480) records the public stop decision. Current-head Codex found four independent security/state-machine defects, and the first local fix round was rejected by fresh security verification because process-local Warp source/revocation state could race with the shared cross-process singleton app cache: one process handling a 401 or Disconnect for scope B could delete another process's valid scope-A cache. Holding the refresh lock through remote I/O violates the approved network boundary; releasing it exposes the cache-ownership conflict. The second consecutive review round therefore triggered the M24 stop condition. No review fix was pushed, `63a44d7c` moved from `TAKE` to `DEFER`, and the resulting checkpoint was `78/2/0/17/13/1`.
 
-The approved replacement delivery graph removes M24 from the cache dependency chain without reviving Warp: `M26-A → M26-B → M19-B0 → M19-B1 → D2`. M26-A merged in PR [#90](https://github.com/Nanako0129/TokenBar/pull/90) at [`95c819c7`](https://github.com/Nanako0129/TokenBar/commit/95c819c7cf6532be7276b64386490b1b03a0c1ae), selectively porting `ae36db5c`'s identity-aware format-1 shard engine while preserving TokenBar's streaming and source-specific cache seams. The actual M26-B base is [`43fa8ad6`](https://github.com/Nanako0129/TokenBar/commit/43fa8ad67865ae2054211ddf2757024ddce2101c); after the generic format-2 port, `cd07bf78` moves to `DEFER` because its Devin residual remains excluded. Warp remains `parse_local: false`.
+The approved replacement delivery graph removes M24 from the cache dependency chain without reviving Warp: `M26-A → M26-B → M19-BP → M19-BQ → PT0 → M19-B0 → M19-B1 → D2`. M26-A merged in PR [#90](https://github.com/Nanako0129/TokenBar/pull/90) at [`95c819c7`](https://github.com/Nanako0129/TokenBar/commit/95c819c7cf6532be7276b64386490b1b03a0c1ae); M26-B merged in PR [#91](https://github.com/Nanako0129/TokenBar/pull/91) at [`cc52c3b9`](https://github.com/Nanako0129/TokenBar/commit/cc52c3b9e01836cbf1c7ab7c77b4dd8b5e2df7b2), moving `cd07bf78` to `DEFER` because its Devin residual remains excluded. M19-BP, M19-BQ, and PT0 then merged in PRs [#92](https://github.com/Nanako0129/TokenBar/pull/92), [#93](https://github.com/Nanako0129/TokenBar/pull/93), and [#94](https://github.com/Nanako0129/TokenBar/pull/94) without changing the ledger. M19-B0 is the current Native security/storage canonicalization candidate; Warp remains `parse_local: false`.
 
 The immutable audited set is the 111 hashes produced in a clean upstream clone:
 
@@ -186,7 +186,10 @@ flowchart TD
     D --> SA[M26-A format-1 shards]
     F --> SA
     SA --> SB[M26-B format-2 metadata]
-    SB --> W0[M19-B0 Native canonicalization]
+    SB --> BP[M19-BP shared roots]
+    BP --> BQ[M19-BQ Claude probe]
+    BQ --> PT0[PT0 provider transport]
+    PT0 --> W0[M19-B0 Native secure storage]
     W0 --> W1[M19-B1 Windows final sync]
     W1 --> D2[D2 final docs checkpoint]
 ```
@@ -207,14 +210,15 @@ flowchart TD
 | M24 | PR #86 closed unmerged; `63a44d7c: TAKE → DEFER` after the security fidelity stop |
 | M19-A | `a87f0ab6: TAKE → ALREADY_VENDORED`; the TUI signal hunk remains irrelevant to TokenBar |
 | M26-A | PR #90 merged at `95c819c7`; `ae36db5c: TAKE → ALREADY_VENDORED`; format-1 identity-aware shards become active while M24 remains excluded |
-| M26-B | Based on `43fa8ad6`; generic format-2 metadata and Claude cached-parent recovery land, while `cd07bf78: TAKE → DEFER` leaves the Devin residual and Pi excluded |
-| M19-B0 / M19-B1 | Follow M26-B; counts unchanged |
+| M26-B | PR #91 merged at `cc52c3b9`; generic format-2 metadata and Claude cached-parent recovery landed, while `cd07bf78: TAKE → DEFER` leaves the Devin residual and Pi excluded |
+| M19-BP / M19-BQ / PT0 | PRs #92／#93／#94 merged shared roots, the Claude version probe, and provider transport without changing counts |
+| M19-B0 / M19-B1 | M19-B0 canonicalizes cfg-gated shared Rust security/storage ownership before the exact M19-B1 Native → Windows sync; counts unchanged |
 
-The current checkpoint is `ALREADY_VENDORED 79`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 18`, `SKIP 13`, and `SUPERSEDED 1`, total 111. M24 remains deferred and outside the cache dependency graph; the approved sequence is now M26-A, M26-B, M19-B0, M19-B1, then D2. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
+The current checkpoint is `ALREADY_VENDORED 79`, `TAKE 0`, `ADAPT_FOR_STREAMING 0`, `DEFER 18`, `SKIP 13`, and `SUPERSEDED 1`, total 111. M24 remains deferred and outside the cache dependency graph; M26-A, M26-B, M19-BP, M19-BQ, and PT0 are merged, so the approved remaining sequence is M19-B0, M19-B1, then D2. Every later transition must start from this actual ledger, regenerate all six sets, and rerun duplicate and symmetric-difference checks.
 
 M26-A made shard format 1 active at `source-message-cache-v2/<namespace>/shard-XX.bin`; M26-B makes format 2 the active cache contract by persisting related-file paths and existence state and reusing cached Claude parent candidates only after the primary fingerprint matches. Existing format-1 shards are locally stale and cold-rebuild under format 2. The former schema-32 `source-message-cache.bin` remains inert provenance: the shard reader does not load, migrate, rewrite, or delete it. Per-client parser versions remain independent of this global storage-format bump.
 
-Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; M26-A merged in PR #90 at `95c819c7`; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. M26-B is implemented from base `43fa8ad6`; no M26-B PR or merge SHA is claimed here. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
+Public issue #45 is the designated remote inventory. M25 merged in PR #75; M22 PR #72 is closed unmerged; M23-H merged in PR #82 at `1a8ee0c6`; M23-D merged in PR #83 at `f99d9274`; M26-A merged in PR #90 at `95c819c7`; M26-B merged in PR #91 at `cc52c3b9`; M19-BP, M19-BQ, and PT0 merged in PRs #92／#93／#94; PR #74 is closed unmerged at `e274f2ad`; and M24 PR #86 is closed unmerged as the latest fidelity evidence. The private Project tracks executable milestones only; it does not duplicate the 111 commit rows.
 
 ## Cherry-picked upstream commits (ahead of baseline)
 

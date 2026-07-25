@@ -4,8 +4,8 @@ id: kb-verification
 kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
-last_verified: 2026-07-23
-sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
+last_verified: 2026-07-25
+sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 
 # Verification contract
@@ -51,7 +51,7 @@ PT0 的 hermetic authorities are Rust last-good and binding decisions, refresh s
 | Sibling-only write | 預設 fingerprint 不失效；完整 fingerprint、mtime probe、prune 都失效 |
 | Provider cost | 缺失成本可估算；明確 provider-reported 成本不可被 stale pricing 覆蓋 |
 | Hidden client | non-empty partial selection 在 Rust fold 前排除未選 client；`nil`／empty clients 依 C ABI contract 代表 all clients；all-hidden 由 Swift lens strict membership 阻擋 |
-| Quota account scope | 以temporary Application Support驗證exact 32-byte key、directory `0700`／file `0600`、每次reload、cross-process winner、symlink／non-regular／inode swap fail-closed、key-loss orphan recovery、atomic failure與raw-value scan；不得呼叫真實Keychain或provider credential |
+| Quota account scope | 以temporary application-data root驗證exact 32-byte key、每次reload、cross-process winner、key-loss orphan recovery、atomic failure與raw-value scan；macOS／Unix驗證directory `0700`／file `0600`、symlink／non-regular／inode swap fail-closed。Windows另驗證system-preferred CNG、current-user owner、protected current-user／LocalSystem exact allow DACL、foreign／deny／inherited ACE拒絕、final symlink／junction／device／wrong type拒絕、volume plus 128-bit file identity replacement、no-delete-share lock、concurrent first-key winner、replace pre／post-commit failure、collision-safe quarantine與identity-bound rollback、sticky secure-root fallback、insecure legacy v2留原位不匯入，以及錯誤不洩漏path／SID／raw value；不得呼叫真實Keychain或provider credential |
 | Quota history | Reset jitter、floating zero、duration lifecycle、partial／future-reset cycles、active-series capacity、account isolation、corrupt recovery與current-actual shift都以temporary v3 store驗證；Codex v2只驗byte-exact current-account migration，live provider refresh只作smoke |
 | Overflow input | old arithmetic fails or wraps in the targeted site；new saturating path remains bounded |
 | Cache schema | 舊版本 cache 不被當成新 layout 靜默接受；新 layout 可重建並 reload |
@@ -93,6 +93,7 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 | Selftest | UI-free TokenBarCore assertions pass |
 | Smoke | Every C ABI entry point decodes or reports an intentional error envelope；account-scope path不得存取Keychain或顯示credential authorization UI |
 | Account-scope storage | Hermetic security tests先證明permission、path、locking、atomicity與recovery；live smoke只驗證shipping data flow不彈授權UI，不取代fixture correctness |
+| Windows secure storage | M19-B0必須證明Native candidate與核准Windows security/storage semantic source等價，並在Windows x64 runtime執行CNG、owner／exact protected DACL、final-component reparse、file identity、exclusive no-delete-share lock、replace、quarantine、legacy upgrade與error-privacy tests；macOS tests與Windows cross-build不能代替這些runtime assertions。M19-B1另保留real ARM64 runtime merge gate |
 | Relink safety | If Rust changed without Swift source changes, the stale executable is removed before linking |
 | Rust format | For Rust changes, run `cargo fmt --all -- --check` on the touched scope; vendor formatting policy may be intentionally separate |
 | Local Rust tests | `cargo test` passes across workspace crates and test targets |
@@ -156,6 +157,7 @@ A source reader that consumes secondary files must be verified as one unit. The 
 | Envelope shape | `ok` and `data`/`err` fields match `ctb.h` and Swift decoders; agent usage classifies `ok:false` as fixed bridge failure and malformed or `ok:true` missing data as fixed decode failure without public associated text |
 | Publication order | Rust `publicationGeneration` is additive, gate-owned, and checked against exhaustion; one shared Swift `@MainActor` coordinator rejects lower generated payloads across DashboardModel, Settings, tray polling, and snapshot restore before payload or scalar apply, while missing generations pass through without changing state |
 | Windows compatibility | M19-B1's synthetic unknown-field gate covers additive `publicationGeneration`; no C signature or ownership change is required |
+| Windows storage ownership | Native `agent_storage_windows` is the cfg-gated source of truth. Production account scope and v3 history must use only its CNG／DACL／secure-open／identity／lock／replace／quarantine primitives, preserve the trusted per-user anchor and same-SID threat boundary, and never be patched independently in the Windows consumer |
 | Client filter | Non-empty selected IDs reach Rust before mixed buckets are folded; `nil`／empty client lists mean all clients per `ctb.h`; the Swift lens strict-membership check blocks all-hidden views |
 | Arithmetic | Rust report totals, FFI mappers, Swift models, and live-rate consumers use bounded arithmetic where required |
 | Stale-data policy | A failed refresh retains the last good value instead of blanking a working card；fallback must preserve display-ready fields only for a structural same-binding request transient, mark account scope untrusted, and skip enrichment/history/re-cache. Claude、Codex、Grok與Antigravity refresh persistence must re-read and match the loaded target before write-back and preserve unrelated siblings；account switch/logout is rejected before stale usage continues, while only unchanged-target persistence failure may follow the provider's existing uncacheable／terminal policy. Codex save failure must leave auth and metadata bytes unchanged；credentials persist before lineage transfer, transfer failure attempts rollback only after the exact just-written root still matches, and the post-binding reuses the already-verified corroborating scope plus the scope returned by transfer instead of adding a second fallible metadata write. Hermetic fixtures cover A→B、logout/removal、save/metadata failure、single pre-request resolution and sibling preservation；the compare-to-atomic-rename external-writer window and cross-resource crash interval are not claimed as filesystem CAS／atomic transaction |
