@@ -5506,6 +5506,20 @@ mod tests {
         );
         let home = source_home.path().to_str().unwrap();
         let clients = ["copilot".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_db_path = scanner_spelling(
+            std::slice::from_ref(
+                scan_result
+                    .copilot_desktop_db
+                    .as_ref()
+                    .expect("Copilot Desktop database must be discovered"),
+            ),
+            &db_path,
+        );
 
         let initial_fingerprint =
             message_cache::SourceFingerprint::from_copilot_desktop_path(&db_path).unwrap();
@@ -5573,7 +5587,7 @@ mod tests {
         assert!(cache
             .get(
                 message_cache::CacheIdentity::for_client(ClientId::Copilot),
-                &db_path,
+                &cache_db_path,
             )
             .is_some_and(|entry| entry.messages.iter().all(|message| message.cost == 0.0)));
     }
@@ -5892,6 +5906,21 @@ mod tests {
         );
         let home = source_home.path().to_str().unwrap();
         let clients = ["copilot".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_db_path = scanner_spelling(
+            std::slice::from_ref(
+                scan_result
+                    .copilot_desktop_db
+                    .as_ref()
+                    .expect("Copilot Desktop database must be discovered"),
+            ),
+            &db_path,
+        );
+        let cache_otel_path = scanner_spelling(scan_result.get(ClientId::Copilot), &otel_path);
 
         let mut materialized = parse_all_messages_with_pricing(home, &clients, None);
         let cold_materialized = materialized.clone();
@@ -5922,13 +5951,13 @@ mod tests {
         assert!(cache
             .get(
                 message_cache::CacheIdentity::for_client(ClientId::Copilot),
-                &db_path,
+                &cache_db_path,
             )
             .is_some_and(|entry| entry.messages.len() == 2));
         assert!(cache
             .get(
                 message_cache::CacheIdentity::for_client(ClientId::Copilot),
-                &otel_path,
+                &cache_otel_path,
             )
             .is_some_and(|entry| entry.messages.len() == 1));
 
@@ -8739,6 +8768,12 @@ mod tests {
         );
 
         let clients = vec!["opencode".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_db_path = scanner_spelling(&scan_result.opencode_dbs, &db_path);
         let parse_materialized = || {
             parse_all_messages_with_pricing_with_env_strategy(
                 source_home.path().to_str().unwrap(),
@@ -8778,7 +8813,7 @@ mod tests {
             rebuilt_cache
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::OpenCode),
-                    &db_path
+                    &cache_db_path
                 )
                 .unwrap()
                 .messages
@@ -8988,6 +9023,12 @@ mod tests {
         );
 
         let clients = vec!["jcode".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_source_path = scanner_spelling(scan_result.get(ClientId::Jcode), &source_path);
         let parse_materialized = || {
             parse_all_messages_with_pricing_with_env_strategy(
                 source_home.path().to_str().unwrap(),
@@ -9030,7 +9071,7 @@ mod tests {
             rebuilt_cache
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Jcode),
-                    &source_path
+                    &cache_source_path
                 )
                 .unwrap()
                 .messages
@@ -9506,6 +9547,31 @@ mod tests {
         .unwrap();
     }
 
+    fn scan_test_sources(
+        source_home: &Path,
+        clients: &[String],
+        scanner_settings: &scanner::ScannerSettings,
+    ) -> scanner::ScanResult {
+        scanner::scan_all_clients_with_scanner_settings(
+            source_home.to_str().unwrap(),
+            clients,
+            false,
+            scanner_settings,
+        )
+    }
+
+    // Cache keys preserve the scanner-returned path spelling. On Windows an
+    // explicit-home resolver can use `/` while TempDir::join produces `\`, so
+    // cache fixtures must seed and query with the production scanner spelling.
+    fn scanner_spelling(paths: &[PathBuf], expected: &Path) -> PathBuf {
+        let expected = std::fs::canonicalize(expected).unwrap();
+        paths
+            .iter()
+            .find(|path| std::fs::canonicalize(path).is_ok_and(|path| path == expected))
+            .cloned()
+            .expect("scanner must return the expected physical source")
+    }
+
     fn with_isolated_tokscale_cache<T>(
         cache_home: &std::path::Path,
         action: impl FnOnce() -> T,
@@ -9567,12 +9633,19 @@ mod tests {
         });
         assert_eq!(cold.total_messages, 1);
         assert!(shard_cache_has_entries(cache_home.path(), "claude"));
+        let clients = ["claude".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_source = scanner_spelling(scan_result.get(ClientId::Claude), &source);
         with_isolated_tokscale_cache(cache_home.path(), || {
             let cache = message_cache::SourceMessageCache::load();
             assert!(cache
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Claude),
-                    &source,
+                    &cache_source,
                 )
                 .is_some_and(|entry| entry.messages.len() == 1));
         });
@@ -9603,6 +9676,13 @@ mod tests {
             ),
         )
         .unwrap();
+        let clients = ["claude".to_string()];
+        let scan_result = scan_test_sources(
+            source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_source = scanner_spelling(scan_result.get(ClientId::Claude), &source);
 
         let mut fingerprint = message_cache::SourceFingerprint::from_claude_code_path_with_home(
             &source,
@@ -9636,7 +9716,7 @@ mod tests {
             let mut cache = message_cache::SourceMessageCache::default();
             cache.insert(message_cache::CachedSourceEntry::new(
                 message_cache::CacheIdentity::for_client(ClientId::Claude),
-                &source,
+                &cache_source,
                 fingerprint,
                 vec![sentinel],
                 Vec::new(),
@@ -9645,7 +9725,6 @@ mod tests {
             cache.save_if_dirty();
         });
 
-        let clients = ["claude".to_string()];
         let mut streamed = Vec::new();
         with_isolated_tokscale_cache(cache_home.path(), || {
             scan_messages_streaming(
@@ -9757,6 +9836,13 @@ mod tests {
             .unwrap()
             .to_string();
         let clients = vec!["codex".to_string()];
+        let streaming_scan = scan_test_sources(
+            streaming_source_home.path(),
+            &clients,
+            &scanner::ScannerSettings::default(),
+        );
+        let cache_streaming_source =
+            scanner_spelling(streaming_scan.get(ClientId::Codex), &streaming_source);
         let parse_materialized = || {
             parse_all_messages_with_pricing_with_env_strategy(
                 &home,
@@ -9823,7 +9909,7 @@ mod tests {
             let incremental = cache
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Codex),
-                    &streaming_source,
+                    &cache_streaming_source,
                 )
                 .and_then(|entry| entry.codex_incremental.as_ref())
                 .expect("cold shipping report must persist Codex incremental state");
@@ -9854,7 +9940,7 @@ mod tests {
             let incremental = cache
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Codex),
-                    &streaming_source,
+                    &cache_streaming_source,
                 )
                 .and_then(|entry| entry.codex_incremental.as_ref())
                 .expect("incremental shipping report must refresh Codex state");
@@ -15411,6 +15497,8 @@ mod tests {
 
         let clients = ["kiro".to_string()];
         let scanner_settings = scanner::ScannerSettings::default();
+        let scan_result = scan_test_sources(source_home.path(), &clients, &scanner_settings);
+        let cache_session = scanner_spelling(scan_result.get(ClientId::Kiro), &session);
         let parse_materialized = || {
             let mut parsed = parse_all_messages_with_pricing_with_env_strategy(
                 source_home.path().to_str().unwrap(),
@@ -15505,7 +15593,7 @@ mod tests {
             message_cache::SourceMessageCache::load()
                 .get(
                     message_cache::CacheIdentity::for_client(ClientId::Kiro),
-                    &session,
+                    &cache_session,
                 )
                 .unwrap()
                 .messages

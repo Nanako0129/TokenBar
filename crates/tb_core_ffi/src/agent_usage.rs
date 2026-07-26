@@ -3030,7 +3030,7 @@ fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     let seq = TMP_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let tmp = parent.join(format!(".{}.tmp.{}.{}", file_name, std::process::id(), seq));
 
-    // Stage into the temp, fsync it, then rename over the target. Create with
+    // Stage into the temp, fsync it, then atomically replace the target. Create with
     // O_EXCL + 0600 up front: the mode-at-creation closes the umask-default
     // window a write-then-chmod leaves the secret readable in, and O_EXCL
     // refuses to follow a symlink pre-seeded at the temp path.
@@ -3060,7 +3060,7 @@ fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
         let _ = fs::remove_file(&tmp);
         return Err(error);
     }
-    if let Err(error) = fs::rename(&tmp, path) {
+    if let Err(error) = tokscale_core::fs_atomic::replace_file(&tmp, path) {
         let _ = fs::remove_file(&tmp);
         return Err(format!("replace {}: {}", path.display(), error));
     }
@@ -5732,6 +5732,116 @@ mod tests {
             .collect();
         assert!(leftovers.is_empty(), "temp file not cleaned up");
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    fn open_without_delete_sharing(path: &Path) -> fs::File {
+        use std::os::windows::fs::OpenOptionsExt as _;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_READ, FILE_SHARE_WRITE};
+
+        let mut options = fs::OpenOptions::new();
+        options
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE);
+        options.open(path).unwrap()
+    }
+
+    #[cfg(target_os = "windows")]
+    fn atomic_temp_path(dir: &Path) -> Option<PathBuf> {
+        fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .find(|entry| entry.file_name().to_string_lossy().contains(".tmp."))
+            .map(|entry| entry.path())
+    }
+
+    #[cfg(target_os = "windows")]
+    fn lock_staged_atomic_temp(dir: &Path) -> Option<fs::File> {
+        use std::os::windows::fs::OpenOptionsExt as _;
+
+        let mut options = fs::OpenOptions::new();
+        options.read(true).share_mode(0);
+        options.open(atomic_temp_path(dir)?).ok()
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn atomic_write_retries_transient_windows_destination_lock() {
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!(
+            "tb_atomic_windows_transient_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(&path, "old").unwrap();
+        let destination_lock = open_without_delete_sharing(&path);
+
+        let writer_path = path.clone();
+        let writer = std::thread::spawn(move || atomic_write(&writer_path, "new"));
+        let deadline = Instant::now() + Duration::from_secs(1);
+        let staged_temp_lock = loop {
+            if let Some(file) = lock_staged_atomic_temp(&dir) {
+                break Some(file);
+            }
+            if writer.is_finished() || Instant::now() >= deadline {
+                break None;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        };
+        let staged_temp_locked = staged_temp_lock.is_some();
+        if staged_temp_locked {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let waited_for_retry = !writer.is_finished();
+        drop(staged_temp_lock);
+        drop(destination_lock);
+        let result = writer.join().expect("atomic writer thread panicked");
+
+        assert!(
+            staged_temp_locked,
+            "atomic write never completed temp-file staging"
+        );
+        assert!(
+            waited_for_retry,
+            "atomic write did not retry the sharing denial"
+        );
+        result.unwrap();
+        assert_eq!(fs::read_to_string(&path).unwrap(), "new");
+        assert!(atomic_temp_path(&dir).is_none(), "temp file not cleaned up");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn atomic_write_exhausts_windows_retry_budget_without_losing_original() {
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!(
+            "tb_atomic_windows_persistent_{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("auth.json");
+        fs::write(&path, "old").unwrap();
+        let destination_lock = open_without_delete_sharing(&path);
+
+        let started = Instant::now();
+        let result = atomic_write(&path, "new");
+        let elapsed = started.elapsed();
+        drop(destination_lock);
+
+        assert!(result.is_err(), "persistent sharing denial must fail");
+        assert!(
+            elapsed >= Duration::from_millis(80),
+            "atomic write returned before exhausting the retry budget: {elapsed:?}"
+        );
+        assert_eq!(fs::read_to_string(&path).unwrap(), "old");
+        assert!(atomic_temp_path(&dir).is_none(), "temp file not cleaned up");
         let _ = fs::remove_dir_all(&dir);
     }
 

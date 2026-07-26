@@ -815,7 +815,7 @@ fn parser_version(client: ClientId) -> u32 {
         // so future changes have an obvious local version to increment.
         ClientId::Codex => 4,
         ClientId::Jcode => 4,
-        ClientId::Copilot => 3,
+        ClientId::Copilot => 4,
         _ => 1,
     }
 }
@@ -2746,6 +2746,95 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
+    fn test_copilot_parser_v3_same_fingerprint_rebuilds_merged_duration() {
+        let temp_home = TempDir::new().unwrap();
+        let prev_env = sandbox_cache_env(temp_home.path());
+        let source = write_temp_file(
+            br#"{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934270,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":20}}
+{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934255,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":30,"gen_ai.usage.output_tokens":50}}
+"#,
+        );
+        let current = CacheIdentity::for_client(ClientId::Copilot);
+        let stale = CacheIdentity {
+            namespace: current.namespace,
+            parser_version: 3,
+        };
+        let fingerprint = SourceFingerprint::from_path(source.path()).unwrap();
+        let mut stale_message = UnifiedMessage::new(
+            "copilot",
+            "gpt-5.4-mini",
+            "openai",
+            "trace-duplicate",
+            1_775_934_255_000,
+            TokenBreakdown {
+                input: 30,
+                output: 50,
+                ..Default::default()
+            },
+            0.0,
+        );
+        stale_message.duration_ms = Some(10_000);
+        let stale_entry = CachedSourceEntry::new(
+            stale,
+            source.path(),
+            fingerprint.clone(),
+            vec![stale_message],
+            Vec::new(),
+            None,
+        );
+        let payload = bincode::options().serialize(&vec![stale_entry]).unwrap();
+        let stale_key = CacheKey::new(current, source.path()).shard();
+        let stale_path = shard_path(&cache_shard_dir().unwrap(), &stale_key);
+        ensure_cache_dir(stale_path.parent().unwrap()).unwrap();
+        let stale_envelope = CachedShardEnvelope {
+            format_version: CACHE_FORMAT_VERSION,
+            parser_namespace: stale.namespace.to_string(),
+            parser_version: stale.parser_version,
+            payload,
+        };
+        let mut writer = BufWriter::new(File::create(&stale_path).unwrap());
+        bincode::options()
+            .serialize_into(&mut writer, &stale_envelope)
+            .unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+
+        assert_eq!(
+            SourceFingerprint::from_path(source.path()).unwrap(),
+            fingerprint,
+            "the parser-only invalidation must rebuild an unchanged source"
+        );
+        assert!(matches!(
+            read_shard(&stale_path, current),
+            ShardReadStatus::Stale
+        ));
+        let mut cache = SourceMessageCache::load();
+        assert!(cache.get(current, source.path()).is_none());
+
+        let rebuilt_messages = crate::sessions::copilot::parse_copilot_file(source.path());
+        assert_eq!(rebuilt_messages.len(), 1);
+        assert_eq!(rebuilt_messages[0].timestamp, 1_775_934_255_000);
+        assert_eq!(rebuilt_messages[0].duration_ms, Some(15_000));
+        cache.insert(CachedSourceEntry::new(
+            current,
+            source.path(),
+            fingerprint,
+            rebuilt_messages,
+            Vec::new(),
+            None,
+        ));
+        cache.save_if_dirty();
+
+        let loaded = SourceMessageCache::load();
+        assert_eq!(
+            loaded.get(current, source.path()).unwrap().messages[0].duration_ms,
+            Some(15_000)
+        );
+        restore_cache_env(prev_env);
+    }
+
+    #[test]
+    #[serial_test::serial]
     fn test_format_one_shard_is_stale_without_hiding_format_two_namespace() {
         let temp_home = TempDir::new().unwrap();
         let prev_env = sandbox_cache_env(temp_home.path());
@@ -2988,7 +3077,7 @@ mod tests {
     fn test_parser_versions_are_identity_scoped() {
         assert_eq!(parser_version(ClientId::Codex), 4);
         assert_eq!(parser_version(ClientId::Jcode), 4);
-        assert_eq!(parser_version(ClientId::Copilot), 3);
+        assert_eq!(parser_version(ClientId::Copilot), 4);
         assert_eq!(CacheIdentity::synthetic().parser_version, 1);
         for client in ClientId::iter() {
             if !matches!(

@@ -157,15 +157,25 @@ fn merge_copilot_duplicate(existing: &mut UnifiedMessage, duplicate: UnifiedMess
     existing.tokens.reasoning = existing.tokens.reasoning.max(duplicate.tokens.reasoning);
 
     // Sessionization needs the activity start, not the response completion. A
-    // repeated span can carry a different start and duration, so retain the
-    // earliest anchor and the longest observed duration without additive drift.
-    if duplicate.timestamp < existing.timestamp {
-        existing.set_timestamp(duplicate.timestamp);
+    // repeated span can carry a different start and duration, so merge the
+    // observed time envelope without adding replayed duration.
+    let existing_start = existing.timestamp;
+    let duplicate_start = duplicate.timestamp;
+    let merged_start = existing_start.min(duplicate_start);
+    let merged_end = existing
+        .duration_ms
+        .map(|duration| existing_start.saturating_add(duration))
+        .into_iter()
+        .chain(
+            duplicate
+                .duration_ms
+                .map(|duration| duplicate_start.saturating_add(duration)),
+        )
+        .max();
+    if merged_start != existing_start {
+        existing.set_timestamp(merged_start);
     }
-    existing.duration_ms = match (existing.duration_ms, duplicate.duration_ms) {
-        (Some(existing), Some(duplicate)) => Some(existing.max(duplicate)),
-        (None, duration) | (duration, None) => duration,
-    };
+    existing.duration_ms = merged_end.map(|end| end.saturating_sub(merged_start));
 }
 
 fn collect_trace_contexts(records: &[Value]) -> HashMap<String, TraceContext> {
@@ -935,8 +945,8 @@ mod tests {
 
     #[test]
     fn test_parse_copilot_merges_duplicate_spans_without_additive_duration() {
-        let content = r#"{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934265,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":20}}
-{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934259,0],"endTime":[1775934266,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":30,"gen_ai.usage.output_tokens":50}}"#;
+        let content = r#"{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934260,0],"endTime":[1775934270,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":10,"gen_ai.usage.output_tokens":20}}
+{"type":"span","traceId":"trace-duplicate","spanId":"span-duplicate","name":"chat gpt-5.4-mini","startTime":[1775934255,0],"endTime":[1775934261,0],"attributes":{"gen_ai.operation.name":"chat","gen_ai.response.model":"gpt-5.4-mini","gen_ai.usage.input_tokens":30,"gen_ai.usage.output_tokens":50}}"#;
         let file = create_test_file(content);
 
         let messages = parse_copilot_file(file.path());
@@ -946,8 +956,12 @@ mod tests {
             1,
             "duplicate spans must collapse before folds"
         );
-        assert_eq!(messages[0].timestamp, 1_775_934_259_000);
-        assert_eq!(messages[0].duration_ms, Some(7_000));
+        assert_eq!(messages[0].timestamp, 1_775_934_255_000);
+        assert_eq!(
+            messages[0].duration_ms,
+            Some(15_000),
+            "the merged span must preserve the latest observed endpoint"
+        );
         assert_eq!(messages[0].tokens.input, 30);
         assert_eq!(messages[0].tokens.output, 50);
     }
