@@ -1625,7 +1625,9 @@ mod tests {
     /// Pin every env var the cache resolvers consult so the test stays
     /// inside `temp_home`. CI runners can leak `XDG_CONFIG_HOME` /
     /// `XDG_CACHE_HOME` from the host, which would resolve cache shards outside
-    /// the sandbox. Returns the previous values so the caller can restore.
+    /// the sandbox. `dirs::config_dir()` uses Windows Known Folders instead of
+    /// HOME/XDG, so `TOKSCALE_CONFIG_DIR` must also be pinned explicitly there.
+    /// Returns the previous values so the caller can restore.
     fn sandbox_cache_env(
         temp_home: &std::path::Path,
     ) -> (
@@ -1642,7 +1644,7 @@ mod tests {
             std::env::set_var("HOME", temp_home);
             std::env::set_var("XDG_CONFIG_HOME", temp_home.join(".config"));
             std::env::set_var("XDG_CACHE_HOME", temp_home.join(".cache"));
-            std::env::remove_var("TOKSCALE_CONFIG_DIR");
+            std::env::set_var("TOKSCALE_CONFIG_DIR", temp_home);
         }
         (prev_home, prev_xdg_config, prev_xdg_cache, prev_override)
     }
@@ -2014,7 +2016,9 @@ mod tests {
             .unwrap()
             .modified()
             .unwrap();
-        File::open(&second_related)
+        File::options()
+            .write(true)
+            .open(&second_related)
             .unwrap()
             .set_modified(first_modified)
             .unwrap();
@@ -2717,6 +2721,7 @@ mod tests {
             .serialize_into(&mut writer, &stale_envelope)
             .unwrap();
         writer.flush().unwrap();
+        drop(writer);
 
         assert!(matches!(
             read_shard(&stale_path, codex),
@@ -2770,6 +2775,7 @@ mod tests {
             .serialize_into(&mut writer, &format_one_envelope)
             .unwrap();
         writer.flush().unwrap();
+        drop(writer);
 
         assert!(matches!(
             read_shard(&stale_path, codex),

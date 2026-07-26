@@ -5539,7 +5539,9 @@ mod tests {
         );
 
         let event_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_800_000_000);
-        std::fs::File::open(&events)
+        std::fs::File::options()
+            .write(true)
+            .open(&events)
             .unwrap()
             .set_modified(event_time)
             .unwrap();
@@ -5591,15 +5593,21 @@ mod tests {
         );
         let stale_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
         let fresh_time = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_086_400);
-        std::fs::File::open(&db_path)
+        std::fs::File::options()
+            .write(true)
+            .open(&db_path)
             .unwrap()
             .set_modified(stale_time)
             .unwrap();
-        std::fs::File::open(&otel_path)
+        std::fs::File::options()
+            .write(true)
+            .open(&otel_path)
             .unwrap()
             .set_modified(stale_time)
             .unwrap();
-        std::fs::File::open(&events)
+        std::fs::File::options()
+            .write(true)
+            .open(&events)
             .unwrap()
             .set_modified(fresh_time)
             .unwrap();
@@ -5615,7 +5623,9 @@ mod tests {
         assert_eq!(event_fresh.copilot_desktop_db.as_ref(), Some(&db_path));
         assert_eq!(event_fresh.get(ClientId::Copilot), &vec![otel_path.clone()]);
 
-        std::fs::File::open(&events)
+        std::fs::File::options()
+            .write(true)
+            .open(&events)
             .unwrap()
             .set_modified(stale_time)
             .unwrap();
