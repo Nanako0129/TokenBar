@@ -124,7 +124,13 @@ pub(crate) fn session_state_event_paths(db_path: &Path) -> std::io::Result<Vec<P
 
     let mut paths = Vec::new();
     for entry in entries {
-        let path = entry?.path().join("events.jsonl");
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            return Err(std::io::Error::other(
+                "Copilot Desktop session-state entry is not a directory",
+            ));
+        }
+        let path = entry.path().join("events.jsonl");
         match std::fs::metadata(&path) {
             Ok(metadata) if metadata.is_file() => {
                 std::fs::File::open(&path)?;

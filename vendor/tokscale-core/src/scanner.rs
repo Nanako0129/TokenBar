@@ -4095,16 +4095,22 @@ mod tests {
         let files = scan_directory(root.to_str().unwrap(), "kiro-globalstorage");
         let relative: Vec<_> = files
             .iter()
-            .map(|path| path.strip_prefix(&root).unwrap().to_string_lossy())
+            .map(|path| path.strip_prefix(&root).unwrap().to_path_buf())
             .collect();
 
         assert_eq!(
             relative,
             vec![
-                "workspace-a/execution-store/execution-record",
-                "workspace-a/execution-store/execution.json",
-                "workspace-a/snapshot.chat",
-                "workspace-sessions/workspace-a/session.json",
+                PathBuf::from("workspace-a")
+                    .join("execution-store")
+                    .join("execution-record"),
+                PathBuf::from("workspace-a")
+                    .join("execution-store")
+                    .join("execution.json"),
+                PathBuf::from("workspace-a").join("snapshot.chat"),
+                PathBuf::from("workspace-sessions")
+                    .join("workspace-a")
+                    .join("session.json"),
             ]
         );
     }

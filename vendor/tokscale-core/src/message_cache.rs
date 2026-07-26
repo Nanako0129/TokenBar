@@ -1339,8 +1339,10 @@ fn write_shard_with_limit(
             .map_err(std::io::Error::other)?;
         writer.flush()?;
         writer.get_ref().sync_all()?;
+        drop(writer);
         crate::fs_atomic::replace_file(&tmp_path, final_path)?;
-        File::open(final_path)?.sync_all()?;
+        let final_file = OpenOptions::new().read(true).write(true).open(final_path)?;
+        final_file.sync_all()?;
         Ok(())
     })();
 
@@ -2458,10 +2460,12 @@ mod tests {
         let variant_path = variant_dir.join("variant.json");
         std::fs::write(
             &variant_path,
-            format!(
-                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
+            serde_json::json!({
+                "name": "kimi-code",
+                "provider": "kimi",
+                "configDir": config_dir,
+            })
+            .to_string(),
         )
         .unwrap();
         let with_kimi =
@@ -2469,10 +2473,12 @@ mod tests {
 
         std::fs::write(
             &variant_path,
-            format!(
-                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
+            serde_json::json!({
+                "name": "kimi-code",
+                "provider": "minimax",
+                "configDir": config_dir,
+            })
+            .to_string(),
         )
         .unwrap();
         let with_minimax =
@@ -2498,10 +2504,12 @@ mod tests {
         let variant_path = variant_dir.join("variant.json");
         std::fs::write(
             &variant_path,
-            format!(
-                r#"{{"name":"kimi-code","provider":"kimi","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
+            serde_json::json!({
+                "name": "kimi-code",
+                "provider": "kimi",
+                "configDir": config_dir,
+            })
+            .to_string(),
         )
         .unwrap();
         let with_kimi =
@@ -2510,10 +2518,12 @@ mod tests {
 
         std::fs::write(
             &variant_path,
-            format!(
-                r#"{{"name":"kimi-code","provider":"minimax","configDir":"{}"}}"#,
-                config_dir.display()
-            ),
+            serde_json::json!({
+                "name": "kimi-code",
+                "provider": "minimax",
+                "configDir": config_dir,
+            })
+            .to_string(),
         )
         .unwrap();
         let with_minimax =
