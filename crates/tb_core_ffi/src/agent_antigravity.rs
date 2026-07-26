@@ -313,12 +313,12 @@ const WINDOWS_DISCOVERY_PREFIX: &str = "ANTIGRAVITY_V1";
 #[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 const WINDOWS_DISCOVERY_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 try {
     [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
-    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'language_server.exe'")
+    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name LIKE 'language_server%.exe'")
     if ($processes.Count -eq 0) {
         [Console]::Out.WriteLine("ANTIGRAVITY_V1`tN")
         exit 0
@@ -1753,6 +1753,13 @@ mod tests {
     }
 
     #[test]
+    fn windows_discovery_queries_language_server_executable_family() {
+        assert!(WINDOWS_DISCOVERY_SCRIPT.contains(
+            r#"Get-CimInstance -ClassName Win32_Process -Filter "Name LIKE 'language_server%.exe'""#
+        ));
+    }
+
+    #[test]
     fn windows_discovery_preserves_per_process_candidate_binding() {
         let first_csrf = "first-primary-secret";
         let first_extension_csrf = "first-extension-secret";
@@ -1760,7 +1767,7 @@ mod tests {
         let first = windows_process_fixture(
             1001,
             &format!(
-                r#""C:\Program Files\Antigravity\language_server.exe" --app_data_dir="C:\Users\me\AppData\Roaming\Antigravity" --csrf_token={first_csrf} --extension_server_port=41999 --extension_server_csrf_token={first_extension_csrf}"#
+                r#""C:\Program Files\Antigravity\language_server_windows_x64.exe" --app_data_dir="C:\Users\me\AppData\Roaming\Antigravity" --csrf_token={first_csrf} --extension_server_port=41999 --extension_server_csrf_token={first_extension_csrf}"#
             ),
             "41002,41001,41002",
         );
