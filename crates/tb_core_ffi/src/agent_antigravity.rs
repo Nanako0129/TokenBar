@@ -6,8 +6,9 @@
 //!
 //! 1. **Local IDE API (`cli`)** — when Antigravity is running, find its
 //!    `language_server` process (carrying a `--csrf_token`), discover its
-//!    listening port via `lsof`, and call the local Connect-RPC `GetUserStatus`
-//!    over loopback TLS. Live, no token refresh, no disk writes.
+//!    listening ports with platform-native process tools, and call the local
+//!    Connect-RPC `GetUserStatus` over loopback TLS. Live, no token refresh,
+//!    no disk writes.
 //! 2. **OAuth remote (`oauth`)** — otherwise read the shared Google creds under
 //!    `GEMINI_CLI_HOME` (falling back to `~/.gemini`), refresh against Google
 //!    (client id/secret scanned from the installed Antigravity.app binary), and
@@ -24,10 +25,14 @@ use crate::agent_usage::{
     AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
     TransportErrorFacts, TransportPhase, UsageWindow,
 };
+#[cfg(any(windows, test))]
+use base64::Engine;
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::{json, value::RawValue, Value};
 use std::collections::{BTreeMap, BTreeSet};
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
@@ -131,8 +136,7 @@ struct ProcInfo {
 }
 
 async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
-    let proc = detect_process()?;
-    let ports = listening_ports(proc.pid)?;
+    let processes = discover_local_ide()?;
 
     let client = reqwest::Client::builder()
         .danger_accept_invalid_certs(true) // loopback language_server uses a self-signed cert
@@ -148,21 +152,8 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
         }
     });
 
-    // language-server ports use the language-server CSRF; the extension server
-    // (if advertised) carries its own token.
-    let mut candidates: Vec<(u16, String)> = ports
-        .iter()
-        .map(|p| (*p, proc.csrf_token.clone()))
-        .collect();
-    if let Some(port) = proc.extension_port {
-        if let Some(csrf) = proc.extension_csrf.as_ref() {
-            candidates.push((port, csrf.clone()));
-        }
-        candidates.push((port, proc.csrf_token.clone()));
-    }
-
     let mut last_err = "Antigravity local IDE API not reachable".to_string();
-    for (port, csrf) in candidates {
+    for (port, csrf) in local_api_candidates(processes) {
         let url = format!("https://127.0.0.1:{port}{LANG_SERVICE}");
         let resp = client
             .post(&url)
@@ -204,6 +195,34 @@ async fn fetch_local_ide(now: DateTime<Utc>) -> Result<Fetched, String> {
     Err(last_err)
 }
 
+fn local_api_candidates(processes: Vec<(ProcInfo, Vec<u16>)>) -> Vec<(u16, String)> {
+    let mut candidates = Vec::new();
+    for (proc, ports) in processes {
+        // language-server ports use the language-server CSRF; the extension
+        // server (if advertised) carries its own token.
+        candidates.extend(
+            ports
+                .into_iter()
+                .map(|port| (port, proc.csrf_token.clone())),
+        );
+        if let Some(port) = proc.extension_port {
+            if let Some(csrf) = proc.extension_csrf.as_ref() {
+                candidates.push((port, csrf.clone()));
+            }
+            candidates.push((port, proc.csrf_token.clone()));
+        }
+    }
+    candidates
+}
+
+#[cfg(not(windows))]
+fn discover_local_ide() -> Result<Vec<(ProcInfo, Vec<u16>)>, String> {
+    let proc = detect_process()?;
+    let ports = listening_ports(proc.pid)?;
+    Ok(vec![(proc, ports)])
+}
+
+#[cfg(not(windows))]
 fn detect_process() -> Result<ProcInfo, String> {
     let output = Command::new("/bin/ps")
         .args(["-ax", "-o", "pid=,command="])
@@ -261,6 +280,7 @@ fn extract_flag(cmd: &str, flag: &str) -> Option<String> {
     (!value.is_empty()).then_some(value)
 }
 
+#[cfg(not(windows))]
 fn listening_ports(pid: i32) -> Result<Vec<u16>, String> {
     let lsof = ["/usr/sbin/lsof", "/usr/bin/lsof"]
         .into_iter()
@@ -285,6 +305,192 @@ fn parse_listen_port(line: &str) -> Option<u16> {
     let before = line[..idx].trim_end();
     let colon = before.rfind(':')?;
     before[colon + 1..].trim().parse().ok()
+}
+
+#[cfg(any(windows, test))]
+const WINDOWS_DISCOVERY_PREFIX: &str = "ANTIGRAVITY_V1";
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+const WINDOWS_DISCOVERY_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+try {
+    [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false)
+    $processes = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'language_server.exe'")
+    if ($processes.Count -eq 0) {
+        [Console]::Out.WriteLine("ANTIGRAVITY_V1`tN")
+        exit 0
+    }
+
+    $listeners = @(Get-NetTCPConnection -State Listen -ErrorAction Stop)
+    foreach ($process in $processes) {
+        $commandLine = [string]$process.CommandLine
+        $encoded = [Convert]::ToBase64String([System.Text.Encoding]::UTF8.GetBytes($commandLine))
+        $ports = @(
+            $listeners |
+                Where-Object { $_.OwningProcess -eq [uint32]$process.ProcessId } |
+                ForEach-Object { [uint16]$_.LocalPort } |
+                Sort-Object -Unique
+        )
+        [Console]::Out.WriteLine(
+            "ANTIGRAVITY_V1`tP`t$($process.ProcessId)`t$encoded`t$($ports -join ',')"
+        )
+    }
+} catch {
+    exit 1
+}
+exit 0
+"#;
+
+#[cfg(any(windows, test))]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum WindowsDiscoveryError {
+    ProcessNotFound,
+    TokenMissing,
+    PortsMissing,
+    PowerShellFailed,
+    MalformedOutput,
+}
+
+#[cfg(any(windows, test))]
+impl WindowsDiscoveryError {
+    fn message(self) -> &'static str {
+        match self {
+            Self::ProcessNotFound => "Antigravity is not running",
+            Self::TokenMissing => "Antigravity is running but no CSRF token was found",
+            Self::PortsMissing => "no listening ports for Antigravity",
+            Self::PowerShellFailed => "Antigravity PowerShell discovery failed",
+            Self::MalformedOutput => "malformed Antigravity PowerShell discovery output",
+        }
+    }
+}
+
+#[cfg(windows)]
+fn discover_local_ide() -> Result<Vec<(ProcInfo, Vec<u16>)>, String> {
+    let system_root = std::env::var_os("SystemRoot").ok_or_else(|| {
+        WindowsDiscoveryError::PowerShellFailed
+            .message()
+            .to_string()
+    })?;
+    let powershell = PathBuf::from(system_root)
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+    let output = Command::new(powershell)
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            WINDOWS_DISCOVERY_SCRIPT,
+        ])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|_| {
+            WindowsDiscoveryError::PowerShellFailed
+                .message()
+                .to_string()
+        })?;
+    if !output.status.success() {
+        return Err(WindowsDiscoveryError::PowerShellFailed
+            .message()
+            .to_string());
+    }
+    let stdout = std::str::from_utf8(&output.stdout)
+        .map_err(|_| WindowsDiscoveryError::MalformedOutput.message().to_string())?;
+    parse_windows_discovery(stdout).map_err(|error| error.message().to_string())
+}
+
+#[cfg(any(windows, test))]
+fn parse_windows_discovery(
+    stdout: &str,
+) -> Result<Vec<(ProcInfo, Vec<u16>)>, WindowsDiscoveryError> {
+    let mut processes = Vec::new();
+    let mut saw_valid_record = false;
+    let mut saw_antigravity = false;
+    let mut saw_csrf = false;
+
+    for line in stdout.lines() {
+        let fields: Vec<&str> = line.trim_end_matches('\r').split('\t').collect();
+        match fields.as_slice() {
+            [prefix, "N"] if *prefix == WINDOWS_DISCOVERY_PREFIX => {
+                saw_valid_record = true;
+            }
+            [prefix, "P", pid, encoded_cmd, port_field] if *prefix == WINDOWS_DISCOVERY_PREFIX => {
+                let Ok(pid) = pid.parse::<i32>() else {
+                    continue;
+                };
+                let Some(ports) = parse_windows_ports(port_field) else {
+                    continue;
+                };
+                let Ok(command_bytes) =
+                    base64::engine::general_purpose::STANDARD.decode(encoded_cmd)
+                else {
+                    continue;
+                };
+                let Ok(cmd) = String::from_utf8(command_bytes) else {
+                    continue;
+                };
+                if cmd.is_empty() {
+                    continue;
+                }
+                saw_valid_record = true;
+                let lower = cmd.to_lowercase();
+                if !is_language_server(&lower) || !is_antigravity(&lower) {
+                    continue;
+                }
+                saw_antigravity = true;
+                let Some(csrf) = extract_flag(&cmd, "--csrf_token") else {
+                    continue;
+                };
+                saw_csrf = true;
+                if ports.is_empty() {
+                    continue;
+                }
+                processes.push((
+                    ProcInfo {
+                        pid,
+                        csrf_token: csrf,
+                        extension_port: extract_flag(&cmd, "--extension_server_port")
+                            .and_then(|value| value.parse().ok()),
+                        extension_csrf: extract_flag(&cmd, "--extension_server_csrf_token"),
+                    },
+                    ports,
+                ));
+            }
+            _ => {}
+        }
+    }
+
+    if !processes.is_empty() {
+        Ok(processes)
+    } else if saw_csrf {
+        Err(WindowsDiscoveryError::PortsMissing)
+    } else if saw_antigravity {
+        Err(WindowsDiscoveryError::TokenMissing)
+    } else if saw_valid_record {
+        Err(WindowsDiscoveryError::ProcessNotFound)
+    } else {
+        Err(WindowsDiscoveryError::MalformedOutput)
+    }
+}
+
+#[cfg(any(windows, test))]
+fn parse_windows_ports(field: &str) -> Option<Vec<u16>> {
+    if field.is_empty() {
+        return Some(Vec::new());
+    }
+    let mut ports = BTreeSet::new();
+    for value in field.split(',') {
+        let port = value.parse::<u16>().ok()?;
+        if port == 0 {
+            return None;
+        }
+        ports.insert(port);
+    }
+    Some(ports.into_iter().collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -1532,6 +1738,121 @@ mod tests {
         let line = "language_ 123 nanako 30u IPv4 0x0 0t0 TCP 127.0.0.1:54321 (LISTEN)";
         assert_eq!(parse_listen_port(line), Some(54321));
         assert_eq!(parse_listen_port("... (ESTABLISHED)"), None);
+    }
+
+    fn windows_process_fixture(pid: i32, command: &str, ports: &str) -> String {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(command);
+        format!("{WINDOWS_DISCOVERY_PREFIX}\tP\t{pid}\t{encoded}\t{ports}")
+    }
+
+    fn windows_discovery_error(stdout: &str) -> WindowsDiscoveryError {
+        match parse_windows_discovery(stdout) {
+            Ok(_) => panic!("Windows discovery fixture unexpectedly succeeded"),
+            Err(error) => error,
+        }
+    }
+
+    #[test]
+    fn windows_discovery_preserves_per_process_candidate_binding() {
+        let first_csrf = "first-primary-secret";
+        let first_extension_csrf = "first-extension-secret";
+        let second_csrf = "second-primary-secret";
+        let first = windows_process_fixture(
+            1001,
+            &format!(
+                r#""C:\Program Files\Antigravity\language_server.exe" --app_data_dir="C:\Users\me\AppData\Roaming\Antigravity" --csrf_token={first_csrf} --extension_server_port=41999 --extension_server_csrf_token={first_extension_csrf}"#
+            ),
+            "41002,41001,41002",
+        );
+        let ignored = windows_process_fixture(
+            1009,
+            r#"C:\Other\language_server.exe --csrf_token=decoy-secret"#,
+            "49999",
+        );
+        let second = windows_process_fixture(
+            1002,
+            &format!(
+                r#"C:\Antigravity\language_server.exe --app_data_dir antigravity --csrf_token={second_csrf}"#
+            ),
+            "42000",
+        );
+        let fixture = format!(
+            "garbage\n{first}\n{ignored}\n{WINDOWS_DISCOVERY_PREFIX}\tP\tnot-a-pid\tnot-base64\t80\n{second}\r\n"
+        );
+
+        let processes = match parse_windows_discovery(&fixture) {
+            Ok(processes) => processes,
+            Err(_) => panic!("valid Windows discovery fixture was rejected"),
+        };
+        assert_eq!(processes.len(), 2);
+        assert_eq!(processes[0].0.pid, 1001);
+        assert_eq!(processes[0].1.as_slice(), &[41001, 41002]);
+        assert_eq!(processes[1].0.pid, 1002);
+        assert_eq!(processes[1].1.as_slice(), &[42000]);
+
+        assert_eq!(
+            local_api_candidates(processes),
+            vec![
+                (41001, first_csrf.to_string()),
+                (41002, first_csrf.to_string()),
+                (41999, first_extension_csrf.to_string()),
+                (41999, first_csrf.to_string()),
+                (42000, second_csrf.to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_discovery_rejects_malformed_rows_without_exposing_secrets() {
+        let sentinel = "sentinel-secret-that-must-not-leak";
+        let command = format!(
+            r#"C:\Antigravity\language_server.exe --app_data_dir antigravity --csrf_token={sentinel}"#
+        );
+        let encoded = base64::engine::general_purpose::STANDARD.encode(&command);
+        for malformed in [
+            "garbage".to_string(),
+            format!("{WINDOWS_DISCOVERY_PREFIX}\tP\tnot-a-pid\t{encoded}\t54321"),
+            format!("{WINDOWS_DISCOVERY_PREFIX}\tP\t4242\tnot-base64\t54321"),
+            windows_process_fixture(4242, &command, "not-a-port"),
+            windows_process_fixture(4242, &command, "0"),
+            windows_process_fixture(4242, &command, "65536"),
+        ] {
+            assert_eq!(
+                windows_discovery_error(&malformed),
+                WindowsDiscoveryError::MalformedOutput
+            );
+        }
+
+        assert_eq!(
+            windows_discovery_error(&format!("{WINDOWS_DISCOVERY_PREFIX}\tN\n")),
+            WindowsDiscoveryError::ProcessNotFound
+        );
+        assert_eq!(
+            windows_discovery_error(&windows_process_fixture(
+                4242,
+                r#"C:\Other\language_server.exe --csrf_token=decoy-secret"#,
+                "54321",
+            )),
+            WindowsDiscoveryError::ProcessNotFound
+        );
+        assert_eq!(
+            windows_discovery_error(&windows_process_fixture(
+                4242,
+                r#"C:\Antigravity\language_server.exe --app_data_dir antigravity"#,
+                "54321",
+            )),
+            WindowsDiscoveryError::TokenMissing
+        );
+
+        let error = windows_discovery_error(&windows_process_fixture(4242, &command, ""));
+        assert_eq!(error, WindowsDiscoveryError::PortsMissing);
+        let display = error.message();
+        let debug = format!("{error:?}");
+        assert!(!display.contains(sentinel));
+        assert!(!debug.contains(sentinel));
+        assert!(!WindowsDiscoveryError::PowerShellFailed
+            .message()
+            .contains(sentinel));
     }
 
     #[test]
