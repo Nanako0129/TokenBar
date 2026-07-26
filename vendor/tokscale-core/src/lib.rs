@@ -9685,7 +9685,7 @@ mod tests {
         let cache_source = scanner_spelling(scan_result.get(ClientId::Claude), &source);
 
         let mut fingerprint = message_cache::SourceFingerprint::from_claude_code_path_with_home(
-            &source,
+            &cache_source,
             Some(source_home.path()),
         )
         .unwrap();
