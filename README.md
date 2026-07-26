@@ -107,9 +107,9 @@ migration metadata.
 Sponsorship helps cover test accounts, CI and release infrastructure, and the
 maintainer time required to keep readings accurate as upstream formats change.
 If TokenBar helps you understand where your AI budget goes, you can support its
-continued development on Ko-fi.
+continued development on Patreon.
 
-[![Support TokenBar on Ko-fi](https://img.shields.io/badge/Support_on_Ko--fi-FF5E5B?style=for-the-badge&logo=ko-fi&logoColor=white)](https://ko-fi.com/nanako0129)
+[![Support TokenBar on Patreon](https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/Nanako0129/membership)
 
 ## Contributing
 
