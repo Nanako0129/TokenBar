@@ -86,14 +86,15 @@ enum AppRelauncher {
             at: Bundle.main.bundleURL,
             configuration: configuration
         ) { application, error in
-            guard error == nil,
-                  let application,
-                  application.processIdentifier != ProcessInfo.processInfo.processIdentifier
-            else {
-                NSSound.beep()
-                return
-            }
+            let openedReplacement =
+                error == nil
+                && application?.processIdentifier != nil
+                && application?.processIdentifier != ProcessInfo.processInfo.processIdentifier
             Task { @MainActor in
+                guard openedReplacement else {
+                    NSSound.beep()
+                    return
+                }
                 NSApp.terminate(nil)
             }
         }
