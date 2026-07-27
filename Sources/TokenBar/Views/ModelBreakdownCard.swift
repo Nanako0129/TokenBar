@@ -110,7 +110,10 @@ struct ModelBreakdownCard: View {
                 }
                 let hidden = rows.count - min(rows.count, Self.maxRows)
                 if hidden > 0 {
-                    Button(expanded ? "Show less" : "Show \(hidden) more") {
+                    let title = expanded
+                        ? "Show less".localized
+                        : "Show %lld more".localized(hidden)
+                    Button(title) {
                         expanded.toggle()
                     }
                     .buttonStyle(.plain)

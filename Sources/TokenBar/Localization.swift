@@ -53,9 +53,10 @@ enum AppLanguage: String, CaseIterable {
         for locale in ["en", "zh-Hant"] {
             let source = packageResourceURL.appendingPathComponent("\(locale).lproj")
             let destination = resourceURL.appendingPathComponent("\(locale).lproj")
-            guard fileManager.fileExists(atPath: source.path),
-                  !fileManager.fileExists(atPath: destination.path)
-            else { continue }
+            guard fileManager.fileExists(atPath: source.path) else { continue }
+            if fileManager.fileExists(atPath: destination.path) {
+                try? fileManager.removeItem(at: destination)
+            }
             try? fileManager.copyItem(at: source, to: destination)
         }
     }

@@ -27,6 +27,7 @@ guard ProcessInfo.processInfo.environment["TZ"] == "Asia/Taipei" else {
 let args: [String] = {
     let raw = CommandLine.arguments
     var kept: [String] = Array(raw.prefix(1))
+    var appleLanguages: String?
     var i = 1
     while i < raw.count {
         let token = raw[i]
@@ -40,7 +41,13 @@ let args: [String] = {
                 "error: unsupported option \(token) — only `-AppleLanguages <value>` is recognized, and it requires a value\n".utf8))
             exit(2)
         }
+        appleLanguages = raw[i + 1]
         i += 2
+    }
+    guard appleLanguages == "(en)" else {
+        FileHandle.standardError.write(Data(
+            "error: language must be pinned with -AppleLanguages \"(en)\"\n".utf8))
+        exit(1)
     }
     return kept
 }()
@@ -48,8 +55,9 @@ let args: [String] = {
 // --- fail closed on the language pin (Format's dates/relative times localize) ---
 // An unpinned run on a non-English host silently emits values the byte-exact C#
 // comparison can never match, which reads as a port defect rather than a harness
-// misinvocation. A harness with no .lproj beside it resolves to "en" anyway, so
-// this does not fire in a bare checkout.
+// misinvocation. The argument check above is authoritative even when a sibling
+// `TokenBar_TokenBar.bundle` is present: TokenBarCore's shared lookup searches
+// that bundle, while Bundle.main belongs to this harness executable.
 let language = Bundle.main.preferredLocalizations.first ?? "en"
 guard language == "en" else {
     FileHandle.standardError.write(Data(

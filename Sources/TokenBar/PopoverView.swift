@@ -265,7 +265,7 @@ struct PopoverView: View {
                 .pickerStyle(.inline)
                 .labelsHidden()
             } label: {
-                Text(model.year ?? "All")
+                Text((model.year ?? "All").localized)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
             }
