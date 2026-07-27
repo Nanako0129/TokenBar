@@ -22,8 +22,9 @@ use crate::agent_account_scope::{
 };
 use crate::agent_quota_duration::DurationEvidence;
 use crate::agent_usage::{
-    read_response_body, request_after_verified_binding, AgentIdentity, ProviderCacheBinding,
-    ProviderFetchFailure, ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
+    provider_http_client_builder, read_response_body, request_after_verified_binding,
+    AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
+    TransportErrorFacts, TransportPhase, UsageWindow,
 };
 use chrono::{DateTime, SecondsFormat, Utc};
 use serde::Deserialize;
@@ -209,7 +210,7 @@ async fn fetch_with_credentials(
         request_after_verified_binding(
             verified,
             |(credentials, account_scope, cache_binding)| async move {
-                let client = reqwest::Client::builder()
+                let client = provider_http_client_builder()
                     .timeout(std::time::Duration::from_secs(30))
                     .build()
                     .map_err(|_| {
@@ -605,7 +606,7 @@ async fn request_refresh(
     client_id: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<TokenResponse, ProviderFetchFailure> {
-    let client = reqwest::Client::builder()
+    let client = provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| ProviderFetchFailure::terminal("Grok refresh client could not be created."))?;

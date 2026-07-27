@@ -21,9 +21,9 @@ use crate::agent_account_scope::{
     RefreshScopeTransaction,
 };
 use crate::agent_usage::{
-    clean_plan, parse_datetime, percent_encode, read_response_body, request_after_verified_binding,
-    AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
-    TransportErrorFacts, TransportPhase, UsageWindow,
+    clean_plan, parse_datetime, percent_encode, provider_http_client_builder, read_response_body,
+    request_after_verified_binding, AgentIdentity, ProviderCacheBinding, ProviderFetchFailure,
+    ResponseReadFailure, TransportErrorFacts, TransportPhase, UsageWindow,
 };
 #[cfg(any(windows, test))]
 use base64::Engine;
@@ -809,7 +809,7 @@ async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, Pro
     request_after_verified_binding(
         verified,
         |(access_token, account_scope, cache_binding)| async move {
-            let client = reqwest::Client::builder()
+            let client = provider_http_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|_| {
@@ -932,7 +932,7 @@ async fn request_access_token(
             "Antigravity OAuth client was not found. Install Antigravity.app or configure its OAuth client.",
         )
     })?;
-    let http = reqwest::Client::builder()
+    let http = provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| {

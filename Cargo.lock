@@ -1626,15 +1626,18 @@ dependencies = [
  "dirs",
  "fs2",
  "hmac",
+ "hyper-util",
  "parking_lot",
  "rayon",
  "reqwest",
+ "rustls",
  "security-framework",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
  "tokscale-core",
+ "tower-service",
  "windows-sys 0.61.2",
 ]
 

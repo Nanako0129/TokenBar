@@ -11,6 +11,9 @@ use crate::agent_quota_history::{
     SeriesKey,
 };
 use chrono::{DateTime, SecondsFormat, TimeZone, Utc};
+use hyper_util::client::legacy::connect::dns::{
+    GaiResolver as HyperGaiResolver, Name as HyperDnsName,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -18,6 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
+use tower_service::Service;
 
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
@@ -102,6 +106,8 @@ impl SafeTransportDiagnostic {
             match facts.raw_os_code {
                 Some(61 | 111 | 10061) => TransportCategory::ConnectionRefused,
                 Some(54 | 104 | 10054) => TransportCategory::ConnectionReset,
+                _ if facts.is_dns => TransportCategory::Dns,
+                _ if facts.is_tls => TransportCategory::Tls,
                 _ if facts.is_connect => TransportCategory::Connect,
                 _ if facts.phase == TransportPhase::ResponseBody => TransportCategory::ResponseBody,
                 _ => TransportCategory::Request,
@@ -137,30 +143,106 @@ pub(crate) enum TransportPhase {
     ResponseBody,
 }
 
+#[derive(Debug)]
+struct DnsResolutionError {
+    source: Box<dyn std::error::Error + Send + Sync>,
+}
+
+impl DnsResolutionError {
+    fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+        Self {
+            source: Box::new(source),
+        }
+    }
+}
+
+impl std::fmt::Display for DnsResolutionError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DNS resolution failed")
+    }
+}
+
+impl std::error::Error for DnsResolutionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.source.as_ref())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TypedGaiResolver;
+
+impl reqwest::dns::Resolve for TypedGaiResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let parsed_name = name.as_str().parse::<HyperDnsName>();
+        Box::pin(async move {
+            let parsed_name = parsed_name.map_err(|source| {
+                Box::new(DnsResolutionError::new(source))
+                    as Box<dyn std::error::Error + Send + Sync>
+            })?;
+            let addresses = HyperGaiResolver::new()
+                .call(parsed_name)
+                .await
+                .map_err(|source| {
+                    Box::new(DnsResolutionError::new(source))
+                        as Box<dyn std::error::Error + Send + Sync>
+                })?;
+            Ok(Box::new(addresses) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+pub(crate) fn provider_http_client_builder() -> reqwest::ClientBuilder {
+    reqwest::Client::builder().dns_resolver(TypedGaiResolver)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TransportErrorFacts {
     is_timeout: bool,
     is_connect: bool,
+    is_dns: bool,
+    is_tls: bool,
     phase: TransportPhase,
     raw_os_code: Option<i32>,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+struct TransportSourceFacts {
+    is_dns: bool,
+    is_tls: bool,
+    raw_os_code: Option<i32>,
+}
+
+fn transport_source_facts(error: &(dyn std::error::Error + 'static)) -> TransportSourceFacts {
+    let mut sources = vec![error];
+    let mut facts = TransportSourceFacts::default();
+    while let Some(current) = sources.pop() {
+        if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
+            if facts.raw_os_code.is_none() {
+                facts.raw_os_code = io_error.raw_os_error();
+            }
+            if let Some(inner) = io_error.get_ref() {
+                sources.push(inner);
+            }
+        }
+        facts.is_dns |= current.downcast_ref::<DnsResolutionError>().is_some();
+        facts.is_tls |= current.downcast_ref::<rustls::Error>().is_some();
+        if let Some(source) = current.source() {
+            sources.push(source);
+        }
+    }
+    facts
+}
+
 impl TransportErrorFacts {
     pub(crate) fn from_reqwest(error: &reqwest::Error, phase: TransportPhase) -> Self {
-        let mut source: Option<&(dyn std::error::Error + 'static)> = Some(error);
-        let mut raw_os_code = None;
-        while let Some(current) = source {
-            if let Some(io_error) = current.downcast_ref::<std::io::Error>() {
-                raw_os_code = io_error.raw_os_error();
-                break;
-            }
-            source = current.source();
-        }
+        let source_facts = transport_source_facts(error);
         Self {
             is_timeout: error.is_timeout(),
             is_connect: error.is_connect(),
+            is_dns: source_facts.is_dns,
+            is_tls: source_facts.is_tls,
             phase,
-            raw_os_code,
+            raw_os_code: source_facts.raw_os_code,
         }
     }
 
@@ -174,6 +256,8 @@ impl TransportErrorFacts {
         Self {
             is_timeout,
             is_connect,
+            is_dns: false,
+            is_tls: false,
             phase,
             raw_os_code,
         }
@@ -1408,7 +1492,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
     };
     let (credentials, cache_binding, response) =
         match request_after_verified_binding(verified, |(credentials, cache_binding)| async move {
-            let client = reqwest::Client::builder()
+            let client = provider_http_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|_| {
@@ -1781,7 +1865,7 @@ async fn fetch_claude_oauth_usage_request(
     cache_binding: Option<ProviderCacheBinding>,
     gate_binding: ProviderCacheBinding,
 ) -> (&'static str, ProviderFetchOutcome) {
-    let client = match reqwest::Client::builder()
+    let client = match provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
     {
@@ -1986,7 +2070,7 @@ async fn fetch_claude_via_headers(
         }
     }
 
-    let client = reqwest::Client::builder()
+    let client = provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| {
@@ -2612,7 +2696,7 @@ async fn request_codex_refresh(
     refresh_token: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<Value, ProviderFetchFailure> {
-    let client = reqwest::Client::builder()
+    let client = provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| {
@@ -2792,7 +2876,7 @@ async fn request_claude_refresh(
     refresh_token: String,
     attempt_binding: ProviderCacheBinding,
 ) -> Result<ClaudeRefreshResponse, ProviderFetchFailure> {
-    let client = reqwest::Client::builder()
+    let client = provider_http_client_builder()
         .timeout(std::time::Duration::from_secs(30))
         .build()
         .map_err(|_| {
@@ -4797,6 +4881,76 @@ mod tests {
     }
 
     #[test]
+    fn copilot_malformed_optional_reset_remains_success_and_keeps_last_good() {
+        let scope = TestRefreshScope::new("copilot", "lossy-optional-reset");
+        let account_scope = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let binding = ProviderCacheBinding::primary(account_scope.clone());
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let fresh_at = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+
+        apply_provider_outcome_with(
+            &cache,
+            "copilot",
+            "oauth",
+            fresh_at,
+            ProviderFetchOutcome::Success {
+                snapshot: cache_test_snapshot("copilot", Ok(account_scope.clone()), fresh_at),
+                cache_binding: Some(binding.clone()),
+            },
+            |_| {},
+        )
+        .unwrap();
+
+        let response_at = fresh_at + chrono::Duration::minutes(1);
+        let decoded = agent_copilot::decode_usage_response(
+            r#"{
+                "quota_reset_date": {"credential":"token-secret"},
+                "quota_snapshots": {
+                    "premium_interactions": {
+                        "entitlement": 100,
+                        "remaining": 60,
+                        "percent_remaining": 60
+                    }
+                }
+            }"#,
+            response_at,
+        );
+        let outcome = match decoded {
+            Ok((plan, windows)) => ProviderFetchOutcome::Success {
+                snapshot: AgentUsageSnapshot {
+                    client_id: "copilot".to_string(),
+                    source: "oauth".to_string(),
+                    updated_at: response_at.to_rfc3339_opts(SecondsFormat::Millis, true),
+                    identity: Some(AgentIdentity { email: None, plan }),
+                    account_scope: Ok(account_scope),
+                    windows,
+                    credits: None,
+                    error: None,
+                    transport_diagnostic: None,
+                },
+                cache_binding: Some(binding),
+            },
+            Err(failure) => ProviderFetchOutcome::Failure(failure),
+        };
+        let snapshot =
+            apply_provider_outcome_with(&cache, "copilot", "oauth", response_at, outcome, |_| {})
+                .unwrap();
+
+        assert!(snapshot.error.is_none());
+        assert_eq!(snapshot.windows.len(), 1);
+        assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
+        assert!(snapshot.windows[0].resets_at.is_none());
+        let cached = lock_last_good(&cache).entries["copilot"].snapshot.clone();
+        assert_eq!(cached.updated_at, snapshot.updated_at);
+        assert_eq!(cached.windows.len(), 1);
+        assert!(cached.error.is_none());
+        assert!(cached.transport_diagnostic.is_none());
+        scope.cleanup();
+    }
+
+    #[test]
     fn last_good_same_binding_fallback_preserves_clean_snapshot_without_enrichment() {
         let scope = TestRefreshScope::new("codex", "last-good-same-binding");
         let account_scope = scope
@@ -4903,7 +5057,7 @@ mod tests {
             failure_at + chrono::Duration::minutes(1),
             ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
                 "Codex usage request failed. Retrying automatically.",
-                Some(binding),
+                Some(binding.clone()),
                 SafeTransportDiagnostic::server_error(503),
             )),
             |_| enrich_calls.set(enrich_calls.get() + 1),
@@ -4912,6 +5066,36 @@ mod tests {
         assert_eq!(enrich_calls.get(), 1);
         assert_eq!(fallback_again.updated_at, fresh.updated_at);
         assert_eq!(fallback_again.windows[0].pace_status.complete_cycles, 6);
+
+        let dns_fallback = apply_provider_outcome_with(
+            &cache,
+            "codex",
+            "oauth",
+            failure_at + chrono::Duration::minutes(2),
+            ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+                "Codex usage request failed. Retrying automatically.",
+                Some(binding),
+                SafeTransportDiagnostic::from_facts(TransportErrorFacts {
+                    is_timeout: false,
+                    is_connect: true,
+                    is_dns: true,
+                    is_tls: false,
+                    phase: TransportPhase::Request,
+                    raw_os_code: None,
+                }),
+            )),
+            |_| enrich_calls.set(enrich_calls.get() + 1),
+        )
+        .unwrap();
+        assert_eq!(enrich_calls.get(), 1);
+        assert_eq!(dns_fallback.updated_at, fresh.updated_at);
+        assert_eq!(dns_fallback.windows[0].pace_status.complete_cycles, 6);
+        assert_eq!(
+            dns_fallback
+                .transport_diagnostic
+                .map(|diagnostic| diagnostic.category),
+            Some(TransportCategory::Dns)
+        );
         scope.cleanup();
     }
 
@@ -5176,6 +5360,262 @@ mod tests {
             assert_eq!(result, Err("scope unavailable"), "{provider}");
             assert_eq!(sends.get(), 0, "{provider}");
         }
+    }
+
+    #[derive(Debug)]
+    struct SensitiveTestError(&'static str);
+
+    impl std::fmt::Display for SensitiveTestError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str(self.0)
+        }
+    }
+
+    impl std::error::Error for SensitiveTestError {}
+
+    #[derive(Debug)]
+    struct NestedTestError {
+        source: Box<dyn std::error::Error + Send + Sync>,
+    }
+
+    impl NestedTestError {
+        fn new(source: impl std::error::Error + Send + Sync + 'static) -> Self {
+            Self {
+                source: Box::new(source),
+            }
+        }
+    }
+
+    impl std::fmt::Display for NestedTestError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("nested transport failure")
+        }
+    }
+
+    impl std::error::Error for NestedTestError {
+        fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+            Some(self.source.as_ref())
+        }
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    struct InjectedDnsFailureResolver;
+
+    impl reqwest::dns::Resolve for InjectedDnsFailureResolver {
+        fn resolve(&self, _name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+            Box::pin(async {
+                Err(Box::new(DnsResolutionError::new(SensitiveTestError(
+                    "token-secret user@example.invalid /private/credential/path",
+                )))
+                    as Box<dyn std::error::Error + Send + Sync>)
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn typed_gai_adapter_preserves_loopback_addresses_without_network_io() {
+        let name: reqwest::dns::Name = "127.0.0.1".parse().unwrap();
+        let addresses = reqwest::dns::Resolve::resolve(&TypedGaiResolver, name)
+            .await
+            .unwrap()
+            .collect::<Vec<_>>();
+        assert!(!addresses.is_empty());
+        assert!(addresses.iter().all(|address| address.ip().is_loopback()));
+        assert!(provider_http_client_builder().build().is_ok());
+    }
+
+    #[tokio::test]
+    async fn injected_typed_dns_failure_is_classified_without_source_disclosure() {
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .dns_resolver(InjectedDnsFailureResolver)
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let error = client
+            .get("http://account-123.example.invalid/private/path?token=token-secret")
+            .send()
+            .await
+            .unwrap_err();
+        let diagnostic = SafeTransportDiagnostic::from_facts(TransportErrorFacts::from_reqwest(
+            &error,
+            TransportPhase::Request,
+        ));
+        assert_eq!(diagnostic.category, TransportCategory::Dns);
+        let wire = serde_json::to_string(&diagnostic).unwrap();
+        assert_eq!(wire, r#"{"category":"dns"}"#);
+        for secret in [
+            "token-secret",
+            "user@example.invalid",
+            "account-123",
+            "example.invalid",
+            "/private/path",
+            "/private/credential/path",
+        ] {
+            assert!(!wire.contains(secret));
+        }
+    }
+
+    #[test]
+    fn nested_typed_sources_are_found_without_text_classification() {
+        let dns_error = NestedTestError::new(std::io::Error::other(DnsResolutionError::new(
+            SensitiveTestError("token-secret"),
+        )));
+        let dns_facts = transport_source_facts(&dns_error);
+        assert!(dns_facts.is_dns);
+        assert!(!dns_facts.is_tls);
+        assert_eq!(dns_facts.raw_os_code, None);
+
+        let tls_error = NestedTestError::new(std::io::Error::other(rustls::Error::General(
+            "token-secret".to_string(),
+        )));
+        let tls_facts = transport_source_facts(&tls_error);
+        assert!(!tls_facts.is_dns);
+        assert!(tls_facts.is_tls);
+        assert_eq!(tls_facts.raw_os_code, None);
+
+        let os_error =
+            NestedTestError::new(std::io::Error::other(std::io::Error::from_raw_os_error(61)));
+        assert_eq!(transport_source_facts(&os_error).raw_os_code, Some(61));
+    }
+
+    #[tokio::test]
+    async fn loopback_plaintext_on_tls_endpoint_is_classified_as_tls() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut client_hello = [0_u8; 1024];
+            let _ = stream.read(&mut client_hello).await;
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n")
+                .await;
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        });
+        let client = provider_http_client_builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(3))
+            .build()
+            .unwrap();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            client.get(format!("https://{address}/")).send(),
+        )
+        .await
+        .expect("loopback TLS request timed out")
+        .unwrap_err();
+        let facts = TransportErrorFacts::from_reqwest(&error, TransportPhase::Request);
+        assert!(facts.is_tls);
+        assert_eq!(
+            SafeTransportDiagnostic::from_facts(facts).category,
+            TransportCategory::Tls
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn transport_diagnostic_precedence_and_generic_categories_are_stable() {
+        let facts =
+            |is_timeout, is_connect, is_dns, is_tls, phase, raw_os_code| TransportErrorFacts {
+                is_timeout,
+                is_connect,
+                is_dns,
+                is_tls,
+                phase,
+                raw_os_code,
+            };
+        let category = |facts| SafeTransportDiagnostic::from_facts(facts).category;
+
+        assert_eq!(
+            category(facts(
+                true,
+                true,
+                true,
+                true,
+                TransportPhase::Request,
+                Some(61),
+            )),
+            TransportCategory::Timeout
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                true,
+                true,
+                true,
+                TransportPhase::Request,
+                Some(61),
+            )),
+            TransportCategory::ConnectionRefused
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                true,
+                true,
+                true,
+                TransportPhase::Request,
+                Some(54),
+            )),
+            TransportCategory::ConnectionReset
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                true,
+                true,
+                true,
+                TransportPhase::Request,
+                None,
+            )),
+            TransportCategory::Dns
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                true,
+                false,
+                true,
+                TransportPhase::Request,
+                None,
+            )),
+            TransportCategory::Tls
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                true,
+                false,
+                false,
+                TransportPhase::Request,
+                None,
+            )),
+            TransportCategory::Connect
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                false,
+                false,
+                false,
+                TransportPhase::Request,
+                None,
+            )),
+            TransportCategory::Request
+        );
+        assert_eq!(
+            category(facts(
+                false,
+                false,
+                false,
+                false,
+                TransportPhase::ResponseBody,
+                None,
+            )),
+            TransportCategory::ResponseBody
+        );
     }
 
     #[test]

@@ -9,14 +9,14 @@
 use crate::agent_account_scope::{self, AccountScope, AccountScopeError};
 use crate::agent_quota_duration::{copilot_calendar_duration, DurationEvidence};
 use crate::agent_usage::{
-    clean_plan, read_response_body, request_after_verified_binding, AgentIdentity,
-    ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure, TransportErrorFacts,
-    TransportPhase, UsageWindow,
+    clean_plan, provider_http_client_builder, read_response_body, request_after_verified_binding,
+    AgentIdentity, ProviderCacheBinding, ProviderFetchFailure, ResponseReadFailure,
+    TransportErrorFacts, TransportPhase, UsageWindow,
 };
 use crate::opencode_integrations::GitHubCopilotCredential;
 use chrono::{DateTime, NaiveDate, TimeZone, Utc};
-use serde::Deserialize;
-use serde_json::value::RawValue;
+use serde::{Deserialize, Deserializer};
+use serde_json::{value::RawValue, Value};
 
 const COPILOT_USAGE_URL: &str = "https://api.github.com/copilot_internal/user";
 
@@ -31,10 +31,22 @@ pub(crate) struct CopilotData {
 struct CopilotUser {
     #[serde(default)]
     copilot_plan: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_optional_string")]
     quota_reset_date: Option<String>,
     #[serde(default)]
     quota_snapshots: Option<QuotaSnapshots>,
+}
+
+fn deserialize_optional_string<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Ok(
+        Option::<Value>::deserialize(deserializer)?.and_then(|value| match value {
+            Value::String(value) => Some(value),
+            _ => None,
+        }),
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -74,7 +86,7 @@ pub(crate) async fn fetch(
     });
     let (account_scope, cache_binding, response) =
         request_after_verified_binding(verified, |(account_scope, cache_binding)| async move {
-            let client = reqwest::Client::builder()
+            let client = provider_http_client_builder()
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .map_err(|_| {
@@ -123,16 +135,7 @@ pub(crate) async fn fetch(
             "Copilot usage API rejected the request (status {status})."
         )),
     })?;
-    let usage: CopilotUser = serde_json::from_str(&body).map_err(|_| {
-        ProviderFetchFailure::terminal("Copilot usage response could not be decoded.")
-    })?;
-
-    let (plan, windows, mapping) = map_user(usage, now);
-    if windows.is_empty() && mapping != CopilotMapping::PlaceholderOnly {
-        return Err(ProviderFetchFailure::terminal(
-            "Copilot usage API returned no usable quota windows.",
-        ));
-    }
+    let (plan, windows) = decode_usage_response(&body, now)?;
     Ok(CopilotData {
         identity: Some(AgentIdentity { email: None, plan }),
         account_scope: Ok(account_scope),
@@ -154,6 +157,22 @@ enum CopilotRow {
     Placeholder,
     Invalid,
     Absent,
+}
+
+pub(crate) fn decode_usage_response(
+    body: &str,
+    now: DateTime<Utc>,
+) -> Result<(Option<String>, Vec<UsageWindow>), ProviderFetchFailure> {
+    let usage: CopilotUser = serde_json::from_str(body).map_err(|_| {
+        ProviderFetchFailure::terminal("Copilot usage response could not be decoded.")
+    })?;
+    let (plan, windows, mapping) = map_user(usage, now);
+    if windows.is_empty() && mapping != CopilotMapping::PlaceholderOnly {
+        return Err(ProviderFetchFailure::terminal(
+            "Copilot usage API returned no usable quota windows.",
+        ));
+    }
+    Ok((plan, windows))
 }
 
 fn map_user(
@@ -312,6 +331,83 @@ mod tests {
         assert!((premium.remaining_for_test() - 30.0).abs() < 0.01);
         // chat is a zero-entitlement placeholder → skipped
         assert!(snapshot_window("Chat", snaps.chat.as_deref(), None, now).is_none());
+    }
+
+    #[test]
+    fn quota_reset_date_is_lossy_without_poisoning_valid_snapshots() {
+        let valid: CopilotUser = serde_json::from_str(
+            r#"{
+                "quota_reset_date": "2026-08-01",
+                "quota_snapshots": {
+                    "premium_interactions": {
+                        "entitlement": 100,
+                        "remaining": 60,
+                        "percent_remaining": 60
+                    }
+                }
+            }"#,
+        )
+        .unwrap();
+        assert_eq!(valid.quota_reset_date.as_deref(), Some("2026-08-01"));
+
+        let now = Utc.timestamp_opt(1_751_328_000, 0).single().unwrap();
+        for malformed_reset in [
+            "null",
+            "42",
+            r#"{"credential":"token-secret"}"#,
+            r#"["token-secret"]"#,
+            "true",
+        ] {
+            let body = format!(
+                r#"{{
+                    "quota_reset_date": {malformed_reset},
+                    "quota_snapshots": {{
+                        "premium_interactions": {{
+                            "entitlement": 100,
+                            "remaining": 60,
+                            "percent_remaining": 60
+                        }}
+                    }}
+                }}"#
+            );
+            let usage: CopilotUser = serde_json::from_str(&body).unwrap();
+            assert_eq!(usage.quota_reset_date, None, "{malformed_reset}");
+            let (_, windows, mapping) = map_user(usage, now);
+            assert_eq!(mapping, CopilotMapping::Usable, "{malformed_reset}");
+            assert_eq!(windows.len(), 1, "{malformed_reset}");
+
+            let wire = serde_json::to_value(&windows[0]).unwrap();
+            assert_eq!(wire["usedPercent"], 40.0, "{malformed_reset}");
+            assert_eq!(wire["remainingPercent"], 60.0, "{malformed_reset}");
+            assert_eq!(wire["cardId"], "premium_interactions.v1");
+            assert!(wire.get("resetsAt").is_none(), "{malformed_reset}");
+            assert!(wire.get("resetText").is_none(), "{malformed_reset}");
+            assert!(wire.get("windowMinutes").is_none(), "{malformed_reset}");
+            assert_eq!(wire["paceStatus"]["state"], "unavailable");
+            assert_eq!(wire["paceStatus"]["reason"], "missingReset");
+            assert!(wire["paceStatus"].get("durationSeconds").is_none());
+            assert!(wire["paceStatus"].get("durationSource").is_none());
+            assert!(wire.get("historicalPace").is_none(), "{malformed_reset}");
+            assert!(!wire.to_string().contains("token-secret"));
+        }
+    }
+
+    #[test]
+    fn lossy_reset_date_does_not_weaken_quota_row_validation() {
+        let body = r#"{
+            "quota_reset_date": {"ignored":"token-secret"},
+            "quota_snapshots": {
+                "premium_interactions": {
+                    "entitlement": 100,
+                    "remaining": 101,
+                    "percent_remaining": 100
+                }
+            }
+        }"#;
+        assert!(matches!(
+            decode_usage_response(body, Utc::now()),
+            Err(ProviderFetchFailure::Terminal { .. })
+        ));
     }
 
     #[test]
