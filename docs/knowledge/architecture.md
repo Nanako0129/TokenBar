@@ -4,8 +4,8 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-25
-sources: ["Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md"]
+last_verified: 2026-07-27
+sources: ["Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public TokenBar-Windows PR #7"]
 ---
 
 # Runtime architecture and data flow
@@ -71,10 +71,10 @@ C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https
 | `ctb.h` 簽名 | 簽名變更＝跨 repo breaking change。P/Invoke 綁定沒有編譯期檢查，參數數量錯誤到執行期才以垃圾指標顯現（先例：`tb_hourly_report`/`tb_agents_report` 新增 `clients` 參數）。變更 `ctb.h` 時把 Windows port 視為必須通知的消費者 |
 | Build-infra 選型 | vendor 的 reqwest TLS 選型（0.13 `rustls`＝rustls-platform-verifier）部分理由來自 Windows 建置限制（vendored OpenSSL 需 Perl+NASM）；精確帳目在 [`vendor/README.md`](../../vendor/README.md) 的 local-patch 表 |
 | 邏輯層對拍 | `Sources/TokenBarCore` 在 Windows 側有 C# 逐檔移植；語意變更後的跨語言驗證見 [`verification.md`](verification.md) |
-| Additive payload fields | `publicationGeneration` is an unknown-field-compatible optional addition; Windows compatibility remains covered by the M19-B1 synthetic unknown-field gate, not by a C ABI signature change |
+| Additive payload fields | `publicationGeneration` is an unknown-field-compatible optional addition; the M19-B1 Windows production-decoder fixture passed without adding the field to the Windows DTO or changing a C ABI signature |
 | Secure local quota storage | `agent_storage_windows` is cfg-gated shared Rust source, not a Windows-repo-only patch. Production account scope and v3 history use CNG randomness, an exact protected DACL for the current user plus LocalSystem, final-component no-reparse opens, disk/type checks, volume plus full 128-bit file identity, no-delete-share exclusive locks, verified atomic replacement, and collision-safe hard-link quarantine. Ancestor reparse points remain allowed only below the trusted per-user platform data-directory anchor; same-SID malicious processes are outside the claim |
 
-M19-B0 canonicalizes this storage ownership in Native without changing `ctb.h`, Swift, provider transport, or serialized cache behavior. M19-B1 must sync the resulting exact shared tree back to Windows and run its runtime gates rather than retaining an independent implementation.
+M19-B0 canonicalized this storage ownership in Native without changing `ctb.h`, Swift, provider transport, or serialized cache behavior. M19-B1 then merged the final Native corrections in [PR #102](https://github.com/Nanako0129/TokenBar/pull/102) at `4dfed5ff` and pinned that exact source in [Windows PR #7](https://github.com/Nanako0129/TokenBar-Windows/pull/7), merged at `f29d3b35`. The 17 shared crate files、63 runtime vendor files、header與兩份 provider-v3 fixture copies are byte-identical; Windows adds only its provenance file and retains no shared-tree local patch. Hosted x64 runtime／cross-check gates and a separate real ARM64 run of 351 Rust tests、12 provider-v3 CrossCheck cases、PE checks與 synthetic WinUI startup passed. The GitHub ARM64 cross-package job remains build evidence rather than a substitute for that real ARM64 runtime gate.
 
 ## Streaming and cache
 

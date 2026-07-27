@@ -4,8 +4,8 @@ id: kb-verification
 kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
-last_verified: 2026-07-25
-sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
+last_verified: 2026-07-27
+sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "public TokenBar-Windows PR #7", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 
 # Verification contract
@@ -93,7 +93,7 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 | Selftest | UI-free TokenBarCore assertions pass |
 | Smoke | Every C ABI entry point decodes or reports an intentional error envelope；account-scope path不得存取Keychain或顯示credential authorization UI |
 | Account-scope storage | Hermetic security tests先證明permission、path、locking、atomicity與recovery；live smoke只驗證shipping data flow不彈授權UI，不取代fixture correctness |
-| Windows secure storage | M19-B0必須證明Native candidate與核准Windows security/storage semantic source等價，並在Windows x64 runtime執行CNG、owner／exact protected DACL、final-component reparse、file identity、exclusive no-delete-share lock、replace、quarantine、legacy upgrade與error-privacy tests；macOS tests與Windows cross-build不能代替這些runtime assertions。M19-B1另保留real ARM64 runtime merge gate |
+| Windows secure storage | M19-B0證明Native candidate與核准Windows security/storage semantic source等價；M19-B1又在hosted Windows x64 runtime執行CNG、owner／exact protected DACL、final-component reparse、file identity、exclusive no-delete-share lock、replace、quarantine、legacy upgrade與error-privacy tests。合併後的exact Windows source另在real ARM64 Windows通過351項Rust tests、12-case provider-v3 CrossCheck、ARM64 PE checks與synthetic WinUI startup；macOS tests與GitHub ARM64 cross-package都不取代這些runtime assertions |
 | Relink safety | If Rust changed without Swift source changes, the stale executable is removed before linking |
 | Rust format | For Rust changes, run `cargo fmt --all -- --check` on the touched scope; vendor formatting policy may be intentionally separate |
 | Local Rust tests | `cargo test` passes across workspace crates and test targets |
@@ -156,7 +156,7 @@ A source reader that consumes secondary files must be verified as one unit. The 
 | Heap JSON ownership | Every successful FFI pointer is decoded and released through `tb_free`; errors do not leak a second ownership path |
 | Envelope shape | `ok` and `data`/`err` fields match `ctb.h` and Swift decoders; agent usage classifies `ok:false` as fixed bridge failure and malformed or `ok:true` missing data as fixed decode failure without public associated text |
 | Publication order | Rust `publicationGeneration` is additive, gate-owned, and checked against exhaustion; one shared Swift `@MainActor` coordinator rejects lower generated payloads across DashboardModel, Settings, tray polling, and snapshot restore before payload or scalar apply, while missing generations pass through without changing state |
-| Windows compatibility | M19-B1's synthetic unknown-field gate covers additive `publicationGeneration`; no C signature or ownership change is required |
+| Windows compatibility | M19-B1's production C# decoder ignored additive `publicationGeneration` while preserving existing fields; no DTO, C signature, or ownership change was required |
 | Windows storage ownership | Native `agent_storage_windows` is the cfg-gated source of truth. Production account scope and v3 history must use only its CNG／DACL／secure-open／identity／lock／replace／quarantine primitives, preserve the trusted per-user anchor and same-SID threat boundary, and never be patched independently in the Windows consumer |
 | Client filter | Non-empty selected IDs reach Rust before mixed buckets are folded; `nil`／empty client lists mean all clients per `ctb.h`; the Swift lens strict-membership check blocks all-hidden views |
 | Arithmetic | Rust report totals, FFI mappers, Swift models, and live-rate consumers use bounded arithmetic where required |
@@ -181,7 +181,7 @@ Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/Token
 
 > Historical pace v2 checkpoint（2026-07-16）：116-case legacy baseline 已重跑，非 historical cases 全數一致。27 個 field differences 只分布在 9 個使用舊 top-level historical scalars 的 cases：`historical-expected-clamped`、`historical-runout-exact-half`、`historical-runout-high-keeps-eta`、`historical-runout-low-forces-lasts`、`historical-with-expected`、`runout-risk-certain`、`runout-risk-clamped-above-one`、`runout-risk-half-percent-rounds-up`、`runout-risk-thirty`。這些是 nested contract 取代 scalar contract 的 intended mismatch；Windows 新增 nested fixture／DTO 並完成 semantic port 前，不得宣稱 historical parity。
 >
-> Provider-wide v3 checkpoint（2026-07-17）：no-selector Mac harness 以 production decoder 完整產生 42 pace＋74 format cases，不再因單一 malformed legacy row 中止。Format 74 cases 與現有 C# reference 零差異；pace 有 43 個 field differences，分布在 28／42 cases。差異來自三個 intended contract 變更：整個 `paceStatus` 缺失不再以 `windowMinutes` 恢復 Linear、舊 top-level historical／risk scalars 不再驅動結果，以及 2 個越界百分比 rows 現在明示 `rejected: true`。Mac-owned v3 fixture 另有 7 張 lifecycle windows 與 12 個 projection／selection／legacy／malformed cases，payload 已由 Rust serializer test 鎖定；Windows DTO／state machine／selection／presentation port 完成前，狀態維持 **port/parity pending**。
+> Provider-wide v3 checkpoint（2026-07-27）：no-selector Mac harness 以 production decoder 完整產生 42 pace＋74 format cases，不再因單一 malformed legacy row 中止。原本 28／42 pace cases 的 intended mismatch 來自 strict v3 decoder、typed lifecycle 與 no-silent-fallback contract。M19-B1 的 Windows port在 [Windows PR #7](https://github.com/Nanako0129/TokenBar-Windows/pull/7) 完成 production DTO／state machine／selection／presentation；完整 Swift／C# cross-check 119 cases零material difference。Mac-owned fixture 的7張 lifecycle windows與12個 projection／selection／legacy／malformed cases仍由Rust production serializer鎖定，real ARM64 CrossCheck也產生exact 12 cases。Provider-v3 Windows status因此為 **port/parity complete**。
 
 ## Documentation checks
 

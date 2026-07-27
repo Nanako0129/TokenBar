@@ -4,8 +4,8 @@ id: kb-plan-provider-quota-pace
 kind: plan
 scope: repository
 read_when: implementing or reviewing pace duration and historical pace for provider quota cards
-last_verified: 2026-07-17
-sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
+last_verified: 2026-07-27
+sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
 ---
 
 # Provider-wide quota pace plan
@@ -18,7 +18,7 @@ sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/age
 
 > **核心結果：** pace duration 屬於 quota window，不屬於 provider 特例。任何已顯示、具有 recurring percentage quota 語意的 card，都必須走同一個 duration lifecycle；無法證明 duration 時，UI 必須明示原因，而不是顯示看似真實的 pace。
 >
-> **Implementation checkpoint（2026-07-17）：** Mac Stages 0–6 已在任務分支落地：secure account scope、duration lifecycle、generic v3 history、五個 provider adapters、typed Swift lifecycle／selection／presentation，以及 Rust serializer 鎖定的跨語言 fixture 均已通過各自的 hermetic gate。Stage 7 首次 live smoke 揭露 legacy file-Keychain ACL 在 ad-hoc rebuild 下仍會顯示授權 UI；使用者因此核准把尚未出貨的 installation key改為 hardened owner-only file。0600 storage security regressions、完整 Rust workspace tests／Clippy、Rust→Swift build、Swift selftest、docs gates與storage修正的fresh verifier均已通過；full workspace `cargo fmt --all -- --check`仍只命中既有out-of-scope `hourly_report.rs`、`model_report.rs`與vendor formatting。重新授權的monitored live smoke已exit 0，過程未出現`SecurityAgent`／`authorizationhost`，live storage metadata確認directory `0700`、file `0600`且exact 32 bytes；print-only hourly／agents drift probes顯示小幅mismatch；smoke contract不因此fail，且該diagnostic不涉及account-scope storage，但根因未在本scope內判定。人工 popover UX 已使用明示 `FIXTURE` 的 deterministic `--demo` payload 完成：Historical mode 同時呈現 `Learning reset duration`、灰色 `Learning history · Linear estimate`、只有 backend `available` historical deficit 帶橘色 marker／文案與 risk，以及 typed `unavailable(missingReset)`；Linear mode 移除 historical risk 與橘色 deficit 語意，Off mode 移除全部 pace marker／footer。Quota 長條本身的綠／黃／紅健康門檻維持獨立，不能誤當 historical deficit 色。各 capture process 皆在截圖後刻意終止，並且沒有 `SecurityAgent`／`authorizationhost`。最終 post-GUI fresh verifier 已回傳 `CONFIRMED`；Windows port／parity維持 pending，本 checkpoint 沒有寫入 Windows repository。
+> **Implementation checkpoint（2026-07-27）：** Mac Stages 0–7已完成secure account scope、duration lifecycle、generic v3 history、五個provider adapters、typed Swift lifecycle／selection／presentation、serializer-locked cross-language fixture、monitored live smoke與deterministic popover UX；最終post-GUI fresh verifier回傳 `CONFIRMED`。M19-B1又在Native PR #102與Windows PR #7完成exact shared-core handoff、Windows production DTO／state machine／selection／presentation、119-case Swift／C# cross-check、hosted x64 runtime以及separate real ARM64 runtime gate。Windows port／parity因此完成；C ABI、ledger、cache format與provider network surface均未擴張。
 
 ## 目錄
 
@@ -440,7 +440,7 @@ Stage 0 no longer discovers mappings。It turns every row and every reject rule 
 | 6. Cross-port handoff | Main session；CrossCheckHarness、canonical docs、fixture artifact | 跑完整 baseline、列出 intended wire delta、準備 Windows DTO／state-machine handoff | 非 pace cases 零回歸；Windows 尚未 port 時明確標為 pending，不改 Windows repo |
 | 7. Integrated verification | Main session，加 fresh `verifier` | 執行 full gates、人工 local UX與 adversarial edge cases | Verifier 回傳 `CONFIRMED`；任何 `REFUTED` 回到 owning stage |
 
-### Stage 6 checkpoint and Windows handoff
+### Stage 6 checkpoint and completed Windows handoff
 
 Mac-owned [`provider-quota-pace-v3.json`](../../../Fixtures/CrossCheck/provider-quota-pace-v3.json) 由 Rust production serializer test 鎖定，再由 Swift production `AgentUsagePayload`／`UsageWindow` decoder、`UsagePace` 與 `QuotaResolver` 執行。Fixture 包含 7 張 lifecycle windows 與 12 個 projection／selection／legacy／malformed cases；所有資料皆為 `.invalid` synthetic identifiers，不含 credential、account ID、email 或本機 path。
 
@@ -451,9 +451,9 @@ Mac-owned [`provider-quota-pace-v3.json`](../../../Fixtures/CrossCheck/provider-
 | Mode policy | Historical 只在 `available` 使用 backend result；`learningHistory` 才可明示 Linear estimate；`learningDuration`／`unavailable`／legacy 無 pace；Off 一律無 marker |
 | Selection | Persisted identity 改為 `clientId|cardId`；舊 label 只有唯一 match 才遷移；well-formed unmatched／ambiguous explicit selection 保留並 resolve `nil`，讓 transient partial payload 使用該來源 last-good，而非靜默切到 Auto；只有 malformed／empty selection 回 Auto；duplicate card ID 保留第一張並 fail closed |
 | Presentation | Deficit／yellow gate 必須同時是 Historical basis、`available` 與 deficit stage；Linear 或 learning estimate 不得偽裝成 learned Historical |
-| Cross-check | Windows harness 未來讀同一份 v3 fixture 並與 Mac actual output 對拍；在 DTO、state machine、selection 與 presentation 全部移植前不得宣稱 parity |
+| Cross-check | Windows harness讀同一份v3 fixture並與Mac actual output對拍；M19-B1完成DTO、state machine、selection與presentation後，119-case full cross-check為零material difference，real ARM64 provider-v3 run也產生exact 12 cases |
 
-`crosscheck-harness` 的 no-selector legacy run 目前可完整產生 42 pace＋74 format cases；74 個非 pace cases 與既有 C# reference 零差異。28 個 legacy pace cases 存在 intended mismatch，來源是 v3 strict decoder、typed lifecycle 與 no-silent-fallback contract；Windows status 明確為 **port/parity pending**。
+`crosscheck-harness` 的 no-selector legacy run 可完整產生42 pace＋74 format cases；原本28個legacy pace cases的intended mismatch來自v3 strict decoder、typed lifecycle與no-silent-fallback contract。M19-B1 Windows port以production decoder與同一份serializer-locked fixture收斂這些差異，status為 **port/parity complete**。GitHub ARM64 cross-package只證明交叉建置；另外執行的real ARM64 gate才是runtime evidence。
 
 ### Change budget
 
