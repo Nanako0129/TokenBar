@@ -18,6 +18,13 @@ struct HourlyView: View {
 
     private enum Mode: String {
         case timeline, profile
+
+        var label: String {
+            switch self {
+            case .timeline: return "Timeline".localized
+            case .profile: return "Profile".localized
+            }
+        }
     }
 
     private static let timelineInitial = 200
@@ -139,17 +146,17 @@ struct HourlyView: View {
         case .profile:
             let peak = buckets.max { $0.tokens < $1.tokens } ?? buckets[0]
             let cost = buckets.reduce(0) { $0 + $1.cost }
-            return String(format: "peak %02d:00 · %@", peak.hour, Format.usd(cost))
+            return "peak %02lld:00 · %@".localized(peak.hour, Format.usd(cost))
         case .timeline:
             let cost = timeline.reduce(0) { $0 + $1.cost }
-            return "\(timeline.count) hrs · \(Format.usd(cost))"
+            return "%lld hrs · %@".localized(timeline.count, Format.usd(cost))
         }
     }
 
     private var modeToggle: some View {
         HStack(spacing: 2) {
             ForEach([Mode.timeline, Mode.profile], id: \.rawValue) { m in
-                Button(m.rawValue.prefix(1).uppercased() + m.rawValue.dropFirst()) {
+                Button(m.label) {
                     modeRaw = m.rawValue
                 }
                 .buttonStyle(.plain)

@@ -165,7 +165,7 @@ struct SettingsWindowView: View {
 
     private func section(_ label: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label.uppercased())
+            Text(label.localized.uppercased())
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.tertiary)
             content()

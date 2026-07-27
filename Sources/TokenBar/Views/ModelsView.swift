@@ -30,10 +30,15 @@ struct ModelsView: View {
             "Models by cost",
             trailing: {
                 VStack(alignment: .trailing, spacing: 1) {
-                    Text("\(rows.count) model\(rows.count == 1 ? "" : "s") · \(Format.compactTokens(totalTokens)) · \(Format.usd(totalCost))")
+                    // Whole sentence per key, so a translation can add a
+                    // measure word and reorder; only the plural form branches.
+                    Text((rows.count == 1 ? "%lld model · %@ · %@" : "%lld models · %@ · %@")
+                        .localized(
+                            rows.count, Format.compactTokens(totalTokens),
+                            Format.usd(totalCost)))
                         .foregroundStyle(.secondary)
                     if let updatedAt = report?.pricingUpdatedAt {
-                        Text("Prices updated \(Format.relativeTime(updatedAt))")
+                        Text("Prices updated %@".localized(Format.relativeTime(updatedAt)))
                             .foregroundStyle(.tertiary)
                             .help("LiteLLM pricing data; refreshes automatically about once an hour")
                     }
@@ -74,7 +79,7 @@ struct ModelsView: View {
                 }
                 HStack(spacing: 8) {
                     ForEach(Self.kinds, id: \.label) { kind in
-                        (Text(kind.label + " ").foregroundStyle(.tertiary)
+                        (Text(kind.label.localized + " ").foregroundStyle(.tertiary)
                             + Text(Format.compactTokens(kind.pick(entry))))
                             .font(.caption2.monospacedDigit())
                             .foregroundStyle(.secondary)

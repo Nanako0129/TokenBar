@@ -29,7 +29,10 @@ jobs:
         run: swift build
 
       - name: Core logic selftest
-        run: swift run TokenBar --selftest
+        # Pace copy and Format's date output are localized, and several
+        # assertions compare against the English text. Pin the language so the
+        # result never depends on the runner's locale.
+        run: swift run TokenBar --selftest -AppleLanguages "(en)"
 
       - name: FFI smoke test
         run: swift run TokenBar --smoke

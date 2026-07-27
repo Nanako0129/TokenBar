@@ -1,0 +1,269 @@
+/* TokenBar — 繁體中文（台灣）
+
+   Key 就是原始碼裡的英文原文，沒有對應項目時會原樣顯示英文，不會壞掉。
+
+   保留不譯：TokenBar 與各家產品名（Claude、Codex、Copilot、Gemini…）、模型
+   名稱、token、Agent、2D／3D、In／Out／CR／CW 這類圖表縮寫，以及步調（pace）
+   狀態文案 —— 後者是 SelfTest 逐字斷言的邏輯層字串，這一版維持英文。
+
+   注意 `%` ：經過 String(format:) 的項目（key 帶 %lld／%@ 者）字面百分號要寫
+   成 %%；純查表的長句不經 format，`%` 原樣即可。
+*/
+
+/* ===== 分頁 ===== */
+"Overview" = "總覽";
+"Models" = "模型";
+"Monthly" = "每月";
+"Daily" = "每日";
+"Hourly" = "每小時";
+"Stats" = "統計";
+"Agents" = "Agent";
+
+/* ===== 彈出視窗外框 ===== */
+"Year" = "年份";
+"All years" = "全部年份";
+"All" = "全部";
+"Filter usage by year" = "依年份篩選用量";
+"Refresh usage data (⌘R)" = "重新整理用量資料（⌘R）";
+"Loading usage…" = "正在載入用量…";
+"Loading…" = "載入中…";
+"Settings" = "設定";
+"Quit" = "結束";
+"Dismiss" = "關閉";
+"Drag to resize the popover height" = "拖曳可調整視窗高度";
+"Update %@" = "更新 %@";
+"A new version is ready — click to install" = "新版本已就緒，點一下即可安裝";
+"You're on the beta build" = "你目前使用的是 beta 版本";
+"Switch to the TokenBar 1.0 release — keeps your data" = "切換到 TokenBar 1.0 正式版，資料會保留";
+"Switch" = "切換";
+
+/* ===== 空狀態 ===== */
+"No usage in this range" = "這個區間沒有用量";
+"No model usage in this range" = "這個區間沒有模型用量";
+"No agent activity in this range" = "這個區間沒有 Agent 活動";
+"No activity in this window" = "這個時間窗內沒有活動";
+"No data" = "沒有資料";
+"No clients with usage data yet." = "目前沒有任何用戶端有用量資料。";
+"No supported agents yet" = "目前沒有支援的 Agent";
+
+/* ===== 卡片標題 ===== */
+"Token Usage" = "Token 用量";
+"Streaks" = "連續紀錄";
+"Agent limits" = "Agent 額度";
+"Live session" = "即時工作階段";
+"Models by cost" = "模型費用排行";
+"Agents by cost" = "Agent 費用排行";
+"Hourly rhythm" = "每小時節奏";
+"Hourly usage" = "每小時用量";
+"Full year" = "整年";
+"Stacked by model" = "依模型堆疊";
+"Stacked by agent" = "依 Agent 堆疊";
+"%@ limits" = "%@ 額度";
+"%@ models" = "%@ 模型";
+"Session / weekly / model limits" = "工作階段／每週／模型額度";
+"↔ Routes through opencode" = "↔ 透過 opencode 轉送";
+"opencode also taps: %@" = "opencode 另外接上：%@";
+"Subscriptions: %@" = "訂閱：%@";
+
+/* ===== 統計數字 ===== */
+"Total" = "總計";
+"Tokens" = "Token";
+"Best day" = "最高單日";
+"Total tokens" = "Token 總數";
+"Total spend" = "總花費";
+"Active days" = "活躍天數";
+"Avg / day" = "每日平均";
+"Current streak" = "目前連續";
+"Longest streak" = "最長連續";
+"Favorite model" = "最常用模型";
+"Longest" = "最長";
+"Current" = "目前";
+"Your total spending is " = "你的總花費是 ";
+"%lld active days" = "%lld 天有用量";
+"%@ tokens" = "%@ tokens";
+"%@ msgs" = "%@ 則訊息";
+" days" = " 天";
+
+/* ===== 數量摘要（英文分單複數，中文兩者相同）===== */
+"%lld model · %@ · %@" = "%1$lld 個模型 · %2$@ · %3$@";
+"%lld models · %@ · %@" = "%1$lld 個模型 · %2$@ · %3$@";
+"%lld model · %@" = "%1$lld 個模型 · %2$@";
+"%lld models · %@" = "%1$lld 個模型 · %2$@";
+"%lld agent · %@" = "%1$lld 個 Agent · %2$@";
+"%lld agents · %@" = "%1$lld 個 Agent · %2$@";
+"%lld active day" = "%lld 天有用量";
+"%lld active month" = "%lld 個月有用量";
+"%lld active months" = "%lld 個月有用量";
+
+/* ===== 圖表與明細 ===== */
+"Input" = "輸入";
+"Output" = "輸出";
+"Cache read" = "快取讀取";
+"Cache write" = "快取寫入";
+"Reasoning" = "推理";
+"Model" = "模型";
+"Agent" = "Agent";
+"Price" = "費用";
+"Show less" = "收合";
+"Show %lld more" = "再顯示 %lld 筆";
+"Show more" = "顯示更多";
+"Prices updated %@" = "價格更新於 %@";
+"LiteLLM pricing data; refreshes automatically about once an hour" = "LiteLLM 價格資料，大約每小時自動更新一次";
+"Timeline" = "時間軸";
+"Profile" = "分布";
+"peak %02lld:00 · %@" = "尖峰 %1$02lld:00 · %2$@";
+"%lld hrs · %@" = "%1$lld 小時 · %2$@";
+"last %lldm · %@/m total" = "最近 %1$lld 分鐘 · 合計 %2$@/分";
+
+/* ===== 額度視窗 ===== */
+"Session" = "工作階段";
+"Weekly" = "每週";
+"Pro" = "Pro";
+"Flash" = "Flash";
+"Extra usage" = "額外用量";
+"%lld%% left" = "剩餘 %lld%%";
+"%lld%% used" = "已用 %lld%%";
+"Expected %lld%% used by now" = "依進度目前應已使用 %lld%%";
+"Set up" = "待設定";
+"Error" = "錯誤";
+"Live" = "使用中";
+"No quota" = "無額度";
+"Loading quotas…" = "正在載入額度…";
+"Menu bar tracks" = "選單列追蹤對象";
+"Auto (tightest window)" = "自動（最吃緊的時間窗）";
+"Copy command" = "複製指令";
+"Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？TokenBar 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
+
+/* ===== 時間格式 ===== */
+"Jan" = "1月";
+"Feb" = "2月";
+"Mar" = "3月";
+"Apr" = "4月";
+"May" = "5月";
+"Jun" = "6月";
+"Jul" = "7月";
+"Aug" = "8月";
+"Sep" = "9月";
+"Oct" = "10月";
+"Nov" = "11月";
+"Dec" = "12月";
+"format.monthDay" = "%1$@%2$lld日";
+"format.monthYear" = "%2$lld年%1$@";
+"just now" = "剛剛";
+"%lldm ago" = "%lld 分鐘前";
+"%lldh ago" = "%lld 小時前";
+"%lldd ago" = "%lld 天前";
+
+/* ===== 設定：區段標題 ===== */
+"Menubar title" = "選單列標題";
+"Startup" = "啟動";
+"Menubar icon" = "選單列圖示";
+"Quota source" = "額度來源";
+"View tabs" = "分頁";
+"Client tabs (top bar)" = "用戶端分頁（頂端列）";
+"Live trace" = "即時追蹤";
+"Popover size" = "視窗尺寸";
+"Data refresh" = "資料更新";
+"Language" = "語言";
+"About" = "關於";
+"Menu bar" = "選單列";
+"Agent limits card" = "Agent 額度卡片";
+"Live session card" = "即時工作階段卡片";
+
+/* ===== 設定：選項 ===== */
+"Launch at login" = "登入時開啟";
+"Animate based on token usage" = "依 token 用量調整動畫速度";
+"Show Agent limits card" = "顯示 Agent 額度卡片";
+"Show as used" = "改以已用量顯示";
+"Split by agent / model" = "依 Agent／模型分列";
+"Height" = "高度";
+"Auto" = "自動";
+"Fit the height to the screen automatically" = "自動調整為適合螢幕的高度";
+"Version" = "版本";
+"Check for updates" = "檢查更新";
+"Check Now" = "立即檢查";
+"Receive beta updates" = "接收 beta 版更新";
+"Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
+"Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
+"System" = "跟隨系統";
+"(quota card only)" = "（僅額度卡片）";
+"Drag to reorder" = "拖曳可調整順序";
+
+"Today's tokens (50M)" = "今日 tokens（50M）";
+"Today's cost ($5.20)" = "今日花費（$5.20）";
+"Total tokens (1.5B)" = "累計 tokens（1.5B）";
+"Total cost ($889)" = "累計花費（$889）";
+"Tokens / min (12.4K/m)" = "每分鐘 tokens（12.4K/m）";
+"Quota left (57%)" = "剩餘額度（57%）";
+"Icon only" = "只顯示圖示";
+
+"Spinning cat" = "旋轉貓";
+"Party parrot" = "派對鸚鵡";
+"Signal bars" = "訊號格";
+"Ring gauge" = "環形儀表";
+"Melting popsicle" = "融化冰棒";
+"Color on warning only" = "僅警示時上色";
+"Always colored" = "一律上色";
+"Never colored" = "一律不上色";
+
+"Layout: Full" = "版面：完整";
+"Layout: Classic" = "版面：經典";
+"Pace: Historical" = "步調：歷史";
+"Pace: Linear" = "步調：線性";
+"Pace: Off" = "步調：關閉";
+
+"Every hour" = "每小時";
+"Every %lld min" = "每 %lld 分鐘";
+
+/* ===== 設定：說明文字 ===== */
+"Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
+"Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "儀表圖示會隨著所選額度時間窗耗盡而下降。「僅警示時上色」在剩餘 25%（琥珀色）與 10%（紅色）之前維持單色，行為與電池圖示一致。";
+"Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out." = "決定儀表圖示與「剩餘額度」標題的資料來源。自動會追蹤最接近用盡的時間窗。";
+"Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
+"On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
+"Full is the wide card with the pace line; Classic is the original compact layout without pace." = "完整版是含步調線的寬版卡片，經典版則是不含步調的原始精簡版面。";
+"The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker." = "超前／保留量的標記。歷史模式會學習每個額度時間窗的使用模式，學習期間會標示為線性估算；線性模式使用確切的重置週期；關閉則隱藏標記。";
+"Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too." = "只隱藏該用戶端在此處與自身分頁的額度卡片 —— 分頁本身與費用／token 資料仍會顯示。適合沒有 OAuth 額度的帳號（例如 Claude Console）。當下方把該分頁整個隱藏時，這裡會變成灰色，因為隱藏分頁一定連帶隱藏它的額度卡片。";
+"Off removes a tab from the popover's tab row. Cost/token data is unaffected." = "關閉會將該分頁從彈出視窗的分頁列移除。費用與 token 資料不受影響。";
+"Drag to set the order used by both the top tabs and the quota cards. The switch shows/hides a client's top tab (hiding also drops its quota card)." = "拖曳可設定頂端分頁與額度卡片共用的排序。開關用來顯示或隱藏該用戶端的頂端分頁（隱藏時也會一併移除它的額度卡片）。";
+"Present clients have a switch to show/hide their top tab — hiding also removes that client's quota card. Quota-only clients (OAuth quota, no local sessions, e.g. Antigravity) have no tab, so they appear here only to order their quota card. Drag order applies to both top tabs and quota cards." = "有本機資料的用戶端會有開關可顯示或隱藏頂端分頁 —— 隱藏時也會移除該用戶端的額度卡片。純額度用戶端（只有 OAuth 額度、沒有本機工作階段，例如 Antigravity）沒有分頁，出現在這裡只是為了排序它的額度卡片。拖曳排序會同時套用到頂端分頁與額度卡片。";
+"Affects the live-session card only: on, each agent & model gets its own row; off, rows collapse to one per app." = "只影響即時工作階段卡片：開啟時每個 Agent 與模型各佔一列，關閉時每個應用程式合併為一列。";
+"Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height." = "也可以拖曳彈出視窗底部邊緣的把手。寬度固定；「自動」約為螢幕高度的 60%。";
+"How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless." = "選單列重新讀取記錄檔的頻率。儀表板會在開啟彈出視窗時更新；即時的每分鐘 tokens 則不受此設定影響，每隔幾秒就會更新。";
+"TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed." = "TokenBar 最初是 handlecusion 的 tokcat 分支。解析與計價來自 Junho Yeo 的 tokscale；選單列的做法參考 Peter Steinberger 的 CodexBar；跑動的貓則源自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
+
+/* ===== 步調（pace）=====
+   片段各自查表後以 " · " 串接，分隔符與語言無關，因此逐片段翻譯是安全的。
+   英文原文同時是 SelfTest 與 cross-check 的斷言對象，靠鎖定 en 取得 fallback。
+*/
+"On pace" = "依進度";
+"%lld%% in deficit" = "超前 %lld%%";
+"%lld%% in reserve" = "保留 %lld%%";
+"Lasts until reset" = "可撐到重置";
+"Projected empty now" = "預計即將用盡";
+"Projected empty in %@" = "預計 %@ 後用盡";
+"≈ %lld%% run-out risk" = "≈ %lld%% 用盡風險";
+
+"Learning history · Linear estimate" = "學習歷史中 · 線性估算";
+"Learning reset duration" = "學習重置週期中";
+"Linear" = "線性";
+"Pace unavailable · legacy data" = "無步調資料 · 舊版資料";
+"Pace unavailable · unavailable reason" = "無步調資料 · 原因不明";
+"Pace unavailable · unknown quota window" = "無步調資料 · 未知的額度時間窗";
+"Pace unavailable · missing reset" = "無步調資料 · 缺少重置時間";
+"Pace unavailable · invalid quota data" = "無步調資料 · 額度資料無效";
+"Pace unavailable · account identity unavailable" = "無步調資料 · 無法取得帳號識別";
+"Pace unavailable · history storage full" = "無步調資料 · 歷史儲存空間已滿";
+"Pace unavailable · history unavailable" = "無步調資料 · 沒有歷史資料";
+"Pace unavailable · non-recurring quota" = "無步調資料 · 非週期性額度";
+
+/* 緊湊時間長度，組合成「預計 3天2小時 後用盡」 */
+"duration.now" = "現在";
+"%lldm" = "%lld分";
+"%lldh" = "%lld小時";
+"%lldh %lldm" = "%1$lld小時%2$lld分";
+"%lldd" = "%lld天";
+"%lldd %lldh" = "%1$lld天%2$lld小時";
+
+/* ===== 視窗 ===== */
+"TokenBar Settings" = "TokenBar 設定";

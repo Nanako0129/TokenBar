@@ -116,7 +116,8 @@ struct MonthlyView: View {
         DashCard(
             "Monthly",
             trailing: {
-                Text("\(rows.count) active month\(rows.count == 1 ? "" : "s")")
+                Text((rows.count == 1 ? "%lld active month" : "%lld active months")
+                    .localized(rows.count))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -152,7 +153,7 @@ struct MonthlyView: View {
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                     Text(Format.monthYear(row.month))
                         .font(.caption)
-                    Text("\(row.messages.formatted()) msgs")
+                    Text("%@ msgs".localized(row.messages.formatted()))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     Spacer()

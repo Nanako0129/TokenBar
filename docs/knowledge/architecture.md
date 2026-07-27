@@ -156,10 +156,25 @@ SwiftUI owns the seven dashboard lenses, settings, menu-bar title, quota icon, a
 
 Swift treats a successful outer payload's finite quota scalar as authoritative: fresh values replace both memory and persistent scalar; terminal, absent, unresolved, or hidden-all results clear them; selection or exclusion changes re-resolve the same successful payload before render; only an outer FFI failure or missing payload retains the old scalar. Explicit selection may use same-binding fallback windows with an error, while Auto excludes providers carrying an error. Diagnostic decoding is lossy: malformed optional integer fields are dropped individually; non-object diagnostics or missing/non-string categories produce no candidate; unknown categories and client strings normalize to `unknown`, and public logs contain only bounded fields. An `ok:false` agent-usage envelope is classified as a fixed bridge failure, while malformed JSON or `ok:true` without data is a fixed decode failure; associated bridge, panic, decode, and provider error text is not public-logged.
 
+## Localization
+
+翻譯以 legacy `.strings` 提供，來源是 `Resources/Localizations/<lang>.lproj/Localizable.strings`（例如 [`zh-Hant`](../../Resources/Localizations/zh-Hant.lproj/Localizable.strings)），由 [`scripts/bundle.sh`](../../scripts/bundle.sh) 安裝進 `TokenBar.app/Contents/Resources/`、由 [`Makefile`](../../Makefile) 複製到 `.build/<config>/`。兩者都必須落在 **`Bundle.main`**：SwiftUI 的字串字面值與 `NSLocalizedString` 都只查 main bundle，放進 SwiftPM 的 `TokenBar_TokenBar.bundle` 永遠讀不到。
+
+| 契約 | 規則 |
+|---|---|
+| Key | 英文原文即 key。缺項時原樣顯示英文，因此不存在「翻一半壞掉」的狀態；`Format` 的兩個日期樣板在英文下同形（都是 `%1$@ %2$lld`），只有這類無法以原文當 key 的情況才用語意 key 搭 `NSLocalizedString(value:)` 的英文 fallback |
+| 自動 vs 手動 | SwiftUI 的字串**字面值**選到 `LocalizedStringKey` overload，自動查表；`Text(someString)` 選到的是 verbatim overload，永遠不會在地化。收 `String` 的共用 helper（`SettingsPanel` 的 `section`／`row`／`hint`／`radioGroup`、`Cards.swift` 的 `DashCard`）在 helper 內部收斂一次 `.localized`，勝過每個呼叫端各加一次 |
+| 識別碼不譯 | `window.label` 參與 `QuotaResolver` 的 legacy selection 遷移，client／model 名是資料。一律只在**顯示端**查表，payload 與持久化值保持英文原文 |
+| 語序 | 整句一個 key，不可拆成單詞各自翻譯——中文需要量詞與不同語序。英文單複數以兩個完整 key 分支表達 |
+| 工具位置 | `String.localized` 系列住在 [`Sources/TokenBarCore/Localization.swift`](../../Sources/TokenBarCore/Localization.swift)（`public`），因為 pace 文案在 `UsagePace` 組成，且 `CrossCheckHarness` 連結該模組即可取得，不需額外 symlink。`AppLanguage`（語言選單）留在 TokenBar target |
+| 多片段組合 | pace 文案由 `status`／`label`／`etaText`／`riskText` 各自查表後以 `" · "` 串接。分隔符與語言無關，因此逐**片段**翻譯是安全的——每個片段是完整語意單元，與被禁止的逐**單詞**拆解不同 |
+| 語系鎖定 | `Format` 與 `UsagePace.durationText` 具語系相依，而後者是 cross-check 案例。selftest 與 cross-check 一律以 `-AppleLanguages "(en)"` 執行；harness 對此 fail closed（只認該選項並驗證 `preferredLocalizations`），寧可拒跑也不產生對不上的在地化輸出 |
+
 ## Change checklist
 
 | Question | Evidence required |
 |---|---|
+| Does the change add user-facing copy? | 英文原文可當 key（或有 `value:` fallback）、整句未被拆詞、識別碼未被翻譯 |
 | Does the change alter parsed messages, dedup keys, agent attribution, or cost provenance? | Hermetic old-fail/new-pass fixture and an intentional cache-schema decision |
 | Does the change cross Rust, C, and Swift? | `ctb.h`, FFI mapper, additive-generation Swift decoder/apply guard, nested payload parity test or smoke evidence, and downstream Windows handoff |
 | Does a report hide or select clients? | Source-to-consumer matrix, ID vocabulary check, and pre-aggregation filter test |

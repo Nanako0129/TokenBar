@@ -103,7 +103,8 @@ struct DailyView: View {
         DashCard(
             "Daily",
             trailing: {
-                Text("\(rows.count) active day\(rows.count == 1 ? "" : "s")")
+                Text((rows.count == 1 ? "%lld active day" : "%lld active days")
+                    .localized(rows.count))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -139,7 +140,7 @@ struct DailyView: View {
                         .rotationEffect(.degrees(isOpen ? 90 : 0))
                     Text(Format.monthDay(row.date))
                         .font(.caption)
-                    Text("\(row.messages.formatted()) msgs")
+                    Text("%@ msgs".localized(row.messages.formatted()))
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                     Spacer()

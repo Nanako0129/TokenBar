@@ -8,7 +8,9 @@ import TokenBarCore
 enum AppView: String, CaseIterable {
     case overview, models, monthly, daily, hourly, stats, agents
 
-    var label: String { rawValue.prefix(1).uppercased() + rawValue.dropFirst() }
+    /// Title-cased id, then looked up: the English label doubles as the
+    /// translation key, while `rawValue` stays the persisted id.
+    var label: String { (rawValue.prefix(1).uppercased() + rawValue.dropFirst()).localized }
 
     /// Lenses the user can individually hide via Settings. Overview and
     /// Models are fixed anchors — Overview is the fallback target for every

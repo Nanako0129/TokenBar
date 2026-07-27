@@ -1,0 +1,18 @@
+/* TokenBar — English (source language).
+
+   The English UI text is itself the lookup key, so a missing entry renders as
+   written in the Swift source. That is why this file is nearly empty: it only
+   carries the semantic keys whose English form cannot serve as a key, and it
+   exists mainly so the bundle advertises `en` as a localization — without it,
+   an English user would be resolved into the only other available language.
+*/
+
+/* "2026-06-10" → "Jun 10". Reordered in Chinese, hence a semantic key. */
+"format.monthDay" = "%1$@ %2$lld";
+
+/* "2026-07" → "Jul 2026". Same English template as monthDay, different order
+   in Chinese — the two cannot share a key. */
+"format.monthYear" = "%1$@ %2$lld";
+
+/* Compact duration zero case. Bare "now" is too generic to use as a key. */
+"duration.now" = "now";

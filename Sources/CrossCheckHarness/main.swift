@@ -16,7 +16,47 @@ guard ProcessInfo.processInfo.environment["TZ"] == "Asia/Taipei" else {
     exit(1)
 }
 
-let args = CommandLine.arguments
+// `Format` is locale-dependent since i18n, so the cross-check contract pins the
+// language through the NSUserDefaults argument domain (`-AppleLanguages "(en)"`).
+// UserDefaults reads that pair straight from argv and leaves it in
+// CommandLine.arguments, where it would shift the positional arguments below.
+//
+// Strip only that one known option, and reject anything else dash-prefixed.
+// Consuming an unrecognized flag's "value" blindly would silently eat a fixture
+// path and run the comparison against the wrong directory.
+let args: [String] = {
+    let raw = CommandLine.arguments
+    var kept: [String] = Array(raw.prefix(1))
+    var i = 1
+    while i < raw.count {
+        let token = raw[i]
+        guard token.hasPrefix("-"), token.count > 1 else {
+            kept.append(token)
+            i += 1
+            continue
+        }
+        guard token == "-AppleLanguages", i + 1 < raw.count else {
+            FileHandle.standardError.write(Data(
+                "error: unsupported option \(token) — only `-AppleLanguages <value>` is recognized, and it requires a value\n".utf8))
+            exit(2)
+        }
+        i += 2
+    }
+    return kept
+}()
+
+// --- fail closed on the language pin (Format's dates/relative times localize) ---
+// An unpinned run on a non-English host silently emits values the byte-exact C#
+// comparison can never match, which reads as a port defect rather than a harness
+// misinvocation. A harness with no .lproj beside it resolves to "en" anyway, so
+// this does not fire in a bare checkout.
+let language = Bundle.main.preferredLocalizations.first ?? "en"
+guard language == "en" else {
+    FileHandle.standardError.write(Data(
+        "error: language must be pinned to en (got \(language)) — pass -AppleLanguages \"(en)\"\n".utf8))
+    exit(1)
+}
+
 guard (3...4).contains(args.count) else {
     FileHandle.standardError.write(Data("usage: crosscheck-harness <fixtures-dir> <out-dir> [format|usage-pace|provider-quota-pace-v3]\n".utf8))
     exit(2)

@@ -19,7 +19,8 @@ struct AgentsView: View {
         DashCard(
             "Agents by cost",
             trailing: {
-                Text("\(rows.count) agent\(rows.count == 1 ? "" : "s") · \(Format.usd(totalCost))")
+                Text((rows.count == 1 ? "%lld agent · %@" : "%lld agents · %@")
+                    .localized(rows.count, Format.usd(totalCost)))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
@@ -74,7 +75,7 @@ struct AgentsView: View {
                     .lineLimit(1)
                     .help(sources)
                 Spacer()
-                Text("\(entry.messages.formatted()) msgs · \(Format.compactTokens(entry.total)) · \(Format.usd(entry.cost))")
+                Text("%@ msgs".localized(entry.messages.formatted()) + " · \(Format.compactTokens(entry.total)) · \(Format.usd(entry.cost))")
                     .foregroundStyle(.secondary)
                     .layoutPriority(1)
             }

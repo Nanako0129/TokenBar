@@ -52,29 +52,40 @@ public struct UsagePace: Sendable {
 
     /// Short left-hand label: "On pace" / "12% in deficit" / "8% in reserve".
     public var label: String {
-        if stage == .onTrack { return "On pace" }
+        if stage == .onTrack { return "On pace".localized }
         let d = Int(abs(deltaPercent).rounded())
-        return stage.isDeficit ? "\(d)% in deficit" : "\(d)% in reserve"
+        return stage.isDeficit
+            ? "%lld%% in deficit".localized(d)
+            : "%lld%% in reserve".localized(d)
     }
 
     /// Right-hand projection: "Lasts until reset" / "Projected empty in 2h 10m".
     public var etaText: String? {
-        if willLastToReset { return "Lasts until reset" }
+        if willLastToReset { return "Lasts until reset".localized }
         guard let etaSeconds else { return nil }
         let t = Self.durationText(etaSeconds)
-        return t == "now" ? "Projected empty now" : "Projected empty in \(t)"
+        // `durationText` is already localized, so compare against the same
+        // localized token rather than the literal "now".
+        return t == Self.nowText
+            ? "Projected empty now".localized
+            : "Projected empty in %@".localized(t)
     }
+
+    /// Semantic key: bare "now" is too generic to safely use as a lookup key.
+    static var nowText: String { "duration.now".localized(default: "now") }
 
     public static func durationText(_ seconds: Double) -> String {
         let m = Int((seconds / 60).rounded())
-        if m < 1 { return "now" }
-        if m < 60 { return "\(m)m" }
+        if m < 1 { return nowText }
+        if m < 60 { return "%lldm".localized(m) }
         let h = m / 60
         let rem = m % 60
-        if h < 24 { return rem > 0 ? "\(h)h \(rem)m" : "\(h)h" }
+        if h < 24 {
+            return rem > 0 ? "%lldh %lldm".localized(h, rem) : "%lldh".localized(h)
+        }
         let days = h / 24
         let hr = h % 24
-        return hr > 0 ? "\(days)d \(hr)h" : "\(days)d"
+        return hr > 0 ? "%lldd %lldh".localized(days, hr) : "%lldd".localized(days)
     }
 }
 
@@ -241,5 +252,5 @@ public func runOutRiskLabel(window: UsageWindow, pace: UsagePace? = nil) -> Stri
     else { return nil }
     let pct = Int((clamp(probability, 0, 1) * 100).rounded())
     if pct <= 0 { return nil }
-    return "≈ \(pct)% run-out risk"
+    return "≈ %lld%% run-out risk".localized(pct)
 }

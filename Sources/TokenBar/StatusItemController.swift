@@ -228,7 +228,8 @@ final class StatusItemController: NSObject {
         let current = QuotaResolver.canonicalSelection(
             payload: payload, selection: persistedSelection)
 
-        let header = NSMenuItem(title: "Menu bar tracks", action: nil, keyEquivalent: "")
+        let header = NSMenuItem(
+            title: "Menu bar tracks".localized, action: nil, keyEquivalent: "")
         header.isEnabled = false
         menu.addItem(header)
 
@@ -240,7 +241,7 @@ final class StatusItemController: NSObject {
             item.state = selection == current ? .on : .off
             menu.addItem(item)
         }
-        add("Auto (tightest window)", selection: QuotaResolver.auto)
+        add("Auto (tightest window)".localized, selection: QuotaResolver.auto)
 
         if let payload {
             for agent in payload.agents where agent.error == nil {
@@ -253,15 +254,19 @@ final class StatusItemController: NSObject {
                 name.isEnabled = false
                 menu.addItem(name)
                 for window in windows {
-                    let left = "\(Int(min(100, max(0, window.remainingPercent)).rounded()))% left"
+                    let left = "%lld%% left".localized(
+                        Int(min(100, max(0, window.remainingPercent)).rounded()))
+                    // `label` is display-only here; the persisted selection
+                    // below is keyed by `cardId`.
                     add(
-                        "\(window.label) — \(left)",
+                        "\(window.label.localized) — \(left)",
                         selection: QuotaResolver.selection(
                             clientId: agent.clientId, cardId: window.cardId))
                 }
             }
         } else {
-            let loading = NSMenuItem(title: "Loading quotas…", action: nil, keyEquivalent: "")
+            let loading = NSMenuItem(
+                title: "Loading quotas…".localized, action: nil, keyEquivalent: "")
             loading.isEnabled = false
             menu.addItem(loading)
         }

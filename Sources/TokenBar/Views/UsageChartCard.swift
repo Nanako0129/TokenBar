@@ -130,7 +130,7 @@ struct UsageChartCard: View {
     private func picker(selection: Binding<String>, options: [(String, String)]) -> some View {
         HStack(spacing: 2) {
             ForEach(options, id: \.0) { value, label in
-                Button(label) { selection.wrappedValue = value }
+                Button(label.localized) { selection.wrappedValue = value }
                     .buttonStyle(.plain)
                     .lineLimit(1)
                     .fixedSize()
@@ -295,7 +295,7 @@ struct UsageChartCard: View {
             Text(Format.monthDay(bar.date))
                 .font(.caption.weight(.semibold))
             HStack {
-                Text("\(Format.exactTokens(bar.totalTokens)) tokens")
+                Text("%@ tokens".localized(Format.exactTokens(bar.totalTokens)))
                 Spacer()
                 Text(Format.usd(bar.totalCost))
             }

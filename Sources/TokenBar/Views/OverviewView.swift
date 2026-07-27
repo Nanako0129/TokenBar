@@ -38,13 +38,14 @@ struct OverviewView: View {
                 if limitsEnabled && !hiddenLimits.contains(singleClient) {
                     AgentLimitsCard(
                         clients: [singleClient], trace: trace, agentUsage: agentUsage,
-                        title: "\(name) limits", note: "Session / weekly / model limits",
+                        title: "%@ limits".localized(name),
+                        note: "Session / weekly / model limits",
                         restrict: true)
                 }
                 chart
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors,
-                    title: "\(name) models")
+                    title: "%@ models".localized(name))
             } else {
                 chart
                 if limitsEnabled {

@@ -32,7 +32,10 @@ struct UsageTraceCard: View {
         let windowMin = max(1, Int((Double(windowSecs) / 60).rounded()))
 
         DashCard(title, trailing: {
-            Text("last \(windowMin)m · \(Format.compactTokens(Int64(totalRate.rounded())))/m total")
+            // One key for the whole sentence: translating "last" and "total"
+            // separately would pin the English word order.
+            Text("last %lldm · %@/m total".localized(
+                windowMin, Format.compactTokens(Int64(totalRate.rounded()))))
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }) {

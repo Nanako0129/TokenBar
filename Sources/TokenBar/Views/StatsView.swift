@@ -53,7 +53,7 @@ struct StatsView: View {
                         Text(m.value)
                             .font(.system(size: 14, weight: .semibold).monospacedDigit())
                             .foregroundStyle(m.accent ? AnyShapeStyle(Color(hex: "#22c55e")) : AnyShapeStyle(.primary))
-                        Text(m.label)
+                        Text(m.label.localized)
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }

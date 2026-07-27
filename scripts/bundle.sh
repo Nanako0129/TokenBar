@@ -32,6 +32,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp .build/release/TokenBar "$APP/Contents/MacOS/TokenBar"
 # SwiftPM resource bundle (animation frames, agent icons).
 cp -R .build/release/TokenBar_TokenBar.bundle "$APP/Contents/Resources/"
+# Localizations must land in the *main* bundle, not the SwiftPM resource
+# bundle: SwiftUI string literals and NSLocalizedString both resolve against
+# Bundle.main, so a .lproj inside TokenBar_TokenBar.bundle would never be read.
+cp -R Resources/Localizations/*.lproj "$APP/Contents/Resources/"
 # Brand icon, shared with the Tauri app.
 if [ -f assets/icon.icns ]; then
   cp assets/icon.icns "$APP/Contents/Resources/icon.icns"
@@ -63,6 +67,13 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>$BUILD_NUMBER</string>
     <key>CFBundleIconFile</key>
     <string>icon</string>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>en</string>
+    <key>CFBundleLocalizations</key>
+    <array>
+        <string>en</string>
+        <string>zh-Hant</string>
+    </array>
     <key>LSMinimumSystemVersion</key>
     <string>14.0</string>
     <key>LSUIElement</key>

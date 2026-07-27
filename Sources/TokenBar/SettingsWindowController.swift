@@ -1,4 +1,5 @@
 import AppKit
+import TokenBarCore
 import SwiftUI
 
 /// Owns the standalone settings window (gear button, Cmd-comma, `--settings`).
@@ -59,7 +60,7 @@ final class SettingsWindowController {
         // 1x0 at show time, which broke the centering math) — force the
         // SwiftUI fitting size up front.
         window.setContentSize(host.view.fittingSize)
-        window.title = "TokenBar Settings"
+        window.title = "TokenBar Settings".localized
         window.styleMask = [.titled, .closable, .miniaturizable, .fullSizeContentView]
         // The glass backdrop runs under the title bar (the popover look);
         // scroll views inset their content via the safe area.

@@ -16,7 +16,7 @@ struct DashboardTabs: View {
         ScrollViewReader { proxy in
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 4) {
-                    tab(id: "overview", label: "Overview", color: nil, index: 1)
+                    tab(id: "overview", label: "Overview".localized, color: nil, index: 1)
                     ForEach(Array(clients.enumerated()), id: \.element) { i, id in
                         let style = ClientRegistry.style(id)
                         tab(

@@ -189,10 +189,10 @@ struct DashCard<Content: View>: View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(title)
+                    Text(title.localized)
                         .font(.system(size: 13, weight: .semibold))
                     if let subtitle {
-                        Text(subtitle)
+                        Text(subtitle.localized)
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
@@ -219,7 +219,7 @@ struct TokenUsageRow: View {
                 "\(Format.mmdd(stats.dateRange.start)) → \(Format.mmdd(stats.dateRange.end))")
             cell(
                 Format.compactTokens(stats.totalTokens), "Tokens",
-                "\(stats.activeDays) active days")
+                "%lld active days".localized(stats.activeDays))
             cell(
                 stats.bestDay.map { Format.usd($0.cost) } ?? "$0.00", "Best day",
                 stats.bestDay.map { Format.monthDay($0.date) } ?? "—")
@@ -230,7 +230,7 @@ struct TokenUsageRow: View {
         VStack(alignment: .leading, spacing: 2) {
             Text(num)
                 .font(.system(size: 15, weight: .semibold).monospacedDigit())
-            Text(label)
+            Text(label.localized)
                 .font(.caption)
                 .foregroundStyle(.secondary)
             Text(sub)
@@ -259,7 +259,7 @@ struct StreaksCard: View {
         VStack(alignment: .leading, spacing: 2) {
             (Text("\(days)").font(.system(size: 17, weight: .semibold).monospacedDigit())
                 + Text(" days").font(.caption).foregroundStyle(.secondary))
-            Text(label)
+            Text(label.localized)
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

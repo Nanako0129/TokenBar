@@ -27,6 +27,7 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.limits.layout") private var layoutRaw = LimitsLayout.full.rawValue
     @AppStorage("tokenbar.trace.detailed") private var detailedTrace = false
     @AppStorage("tokenbar.refresh.intervalMin") private var refreshIntervalMin = 30
+    @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.system.rawValue
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -378,9 +379,21 @@ struct SettingsPanel: View {
                         get: { String(refreshIntervalMin) },
                         set: { refreshIntervalMin = Int($0) ?? 30 }),
                     options: Self.refreshIntervalOptions.map {
-                        (String($0), $0 == 60 ? "Every hour" : "Every \($0) min")
+                        (String($0), $0 == 60 ? "Every hour" : "Every %lld min".localized($0))
                     })
                 hint("How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless.")
+            }
+
+            section("Language") {
+                radioGroup(
+                    selection: Binding(
+                        get: { languageRaw },
+                        set: { next in
+                            languageRaw = next
+                            AppLanguage(rawValue: next)?.apply()
+                        }),
+                    options: AppLanguage.allCases.map { ($0.rawValue, $0.label) })
+                hint("Takes effect the next time TokenBar starts.")
             }
 
             section("About") {
@@ -434,9 +447,12 @@ struct SettingsPanel: View {
         for agent in agentUsage?.agents ?? [] where agent.error == nil {
             let name = ClientRegistry.style(agent.clientId).displayName
             for window in agent.uniqueCardWindows {
+                // Display only — the persisted selection is built from
+                // `cardId`, and `QuotaResolver`'s legacy-label migration
+                // matches against the payload's untranslated `label`.
                 options.append(
                     (QuotaResolver.selection(clientId: agent.clientId, cardId: window.cardId),
-                     "\(name) · \(window.label)"))
+                     "\(name) · \(window.label.localized)"))
             }
         }
         return options
@@ -446,7 +462,7 @@ struct SettingsPanel: View {
 
     private func section(_ label: String, @ViewBuilder content: () -> some View) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label.uppercased())
+            Text(label.localized.uppercased())
                 .font(.caption2.weight(.semibold))
                 .foregroundStyle(.tertiary)
             content()
@@ -455,7 +471,7 @@ struct SettingsPanel: View {
 
     private func row(_ label: String, @ViewBuilder trailing: () -> some View) -> some View {
         HStack {
-            Text(label)
+            Text(label.localized)
                 .font(.caption)
             Spacer()
             trailing()
@@ -483,7 +499,7 @@ struct SettingsPanel: View {
                     selection.wrappedValue = option.value
                 } label: {
                     HStack {
-                        Text(option.label)
+                        Text(option.label.localized)
                             .font(.caption)
                         Spacer()
                         if selection.wrappedValue == option.value {
@@ -503,7 +519,7 @@ struct SettingsPanel: View {
     }
 
     private func hint(_ text: String) -> some View {
-        Text(text)
+        Text(text.localized)
             .font(.caption2)
             .foregroundStyle(.tertiary)
             .fixedSize(horizontal: false, vertical: true)

@@ -65,7 +65,7 @@ The current CI runtime source is [`.github/workflows/ci.yml`](../../.github/work
 ```bash
 cargo build --release
 swift build
-swift run TokenBar --selftest
+make selftest          # = swift run TokenBar --selftest -AppleLanguages "(en)"
 swift run TokenBar --smoke
 ```
 
@@ -78,7 +78,7 @@ cargo fmt --all -- --check
 cargo test
 cargo clippy --workspace --all-targets
 make build
-swift run TokenBar --selftest
+make selftest          # = swift run TokenBar --selftest -AppleLanguages "(en)"
 swift run TokenBar --smoke
 ```
 
@@ -90,7 +90,7 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 |---|---|
 | Rust | Release static library builds from the current source |
 | Swift | SwiftPM links against the freshly built library from repository root |
-| Selftest | UI-free TokenBarCore assertions pass |
+| Selftest | UI-free TokenBarCore assertions pass。部分斷言逐字比對英文 UI 文案，因此語系必須鎖定 `en`（用 `make selftest`，或自行帶 `-AppleLanguages "(en)"`）；在中文系統上直接跑 `swift run TokenBar --selftest` 會因 `Format` 輸出中文而假性失敗，入口會先印出提示 |
 | Smoke | Every C ABI entry point decodes or reports an intentional error envelope；account-scope path不得存取Keychain或顯示credential authorization UI |
 | Account-scope storage | Hermetic security tests先證明permission、path、locking、atomicity與recovery；live smoke只驗證shipping data flow不彈授權UI，不取代fixture correctness |
 | Windows secure storage | M19-B0必須證明Native candidate與核准Windows security/storage semantic source等價，並在Windows x64 runtime執行CNG、owner／exact protected DACL、final-component reparse、file identity、exclusive no-delete-share lock、replace、quarantine、legacy upgrade與error-privacy tests；macOS tests與Windows cross-build不能代替這些runtime assertions。M19-B1另保留real ARM64 runtime merge gate |
@@ -172,7 +172,8 @@ Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/Token
 
 | 項目 | 內容 |
 |---|---|
-| Swift harness | [`Sources/CrossCheckHarness/main.swift`](../../Sources/CrossCheckHarness/main.swift)，`TZ=Asia/Taipei swift run crosscheck-harness <fixtures> <out> [usage-pace|format|provider-quota-pace-v3]`；selector 省略時維持 legacy complete run，所有路徑使用 shipping 程式碼 |
+| Swift harness | [`Sources/CrossCheckHarness/main.swift`](../../Sources/CrossCheckHarness/main.swift)，`TZ=Asia/Taipei swift run crosscheck-harness <fixtures> <out> [usage-pace|format|provider-quota-pace-v3] -AppleLanguages "(en)"`；selector 省略時維持 legacy complete run，所有路徑使用 shipping 程式碼 |
+| 語系鎖定 | `Format` 的日期／相對時間與 `UsagePace.durationText` 自 i18n 後具語系相依（查表工具在 `Sources/TokenBarCore/Localization.swift`，harness 透過連結 TokenBarCore 取得）。`make build` 會把 `.lproj` 複製到 `.build/debug/`，harness 的 `Bundle.main` 讀得到，因此**必須**帶 `-AppleLanguages "(en)"`。harness 對此 **fail closed**：解析時只認 `-AppleLanguages <value>`（其餘 dash 開頭的 token 一律拒絕，避免吃掉 fixture 路徑後對錯誤目錄執行），並在 TZ guard 之後檢查 `preferredLocalizations` 必須為 `en`，否則 exit——寧可拒跑，也不要靜默產生對拍永遠對不上的在地化輸出。沒有 `.lproj` 的乾淨 checkout 解析為 `en`，不受影響 |
 | 契約與 fixture | Windows repo 的 legacy `crosscheck/` 保留既有 116-case reference；provider v3 handoff 由 Mac-owned [`provider-quota-pace-v3.json`](../../Fixtures/CrossCheck/provider-quota-pace-v3.json) 提供，Rust production serializer 鎖定 payload，Swift／未來 Windows 都必須用 production decoder，無自製 wire mapping |
 | 比對 | Windows repo 的 `crosscheck/diff.py`：字串逐 byte、數字 epsilon 1e-9、缺鍵視同 null |
 | 執行時機 | `Sources/TokenBarCore` 邏輯或 `Format` 語意變更後；Windows repo 每次 re-sync 或 delta 移植後 |

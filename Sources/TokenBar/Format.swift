@@ -42,18 +42,20 @@ enum Format {
         "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
     ]
 
-    /// "2026-06-10" → "Jun 10".
+    /// "2026-06-10" → "Jun 10" ("6月10日" under zh-Hant).
     static func monthDay(_ iso: String) -> String {
         let parts = iso.split(separator: "-").compactMap { Int($0) }
         guard parts.count == 3, (1...12).contains(parts[1]) else { return iso }
-        return "\(monthsShort[parts[1] - 1]) \(parts[2])"
+        return "format.monthDay".localized(
+            default: "%1$@ %2$lld", monthsShort[parts[1] - 1].localized, parts[2])
     }
 
-    /// "2026-07" → "Jul 2026".
+    /// "2026-07" → "Jul 2026" ("2026年7月" under zh-Hant).
     static func monthYear(_ ym: String) -> String {
         let parts = ym.split(separator: "-").compactMap { Int($0) }
         guard parts.count == 2, (1...12).contains(parts[1]) else { return ym }
-        return "\(monthsShort[parts[1] - 1]) \(parts[0])"
+        return "format.monthYear".localized(
+            default: "%1$@ %2$lld", monthsShort[parts[1] - 1].localized, parts[0])
     }
 
     /// "2026-06-10" → "06/10".
@@ -72,9 +74,9 @@ enum Format {
     /// "3h ago", "2d ago". Used for the pricing-data freshness hint.
     static func relativeTime(_ epochSecs: UInt64, now: Date = Date()) -> String {
         let diff = max(0, Int(now.timeIntervalSince1970) - Int(epochSecs))
-        if diff < 60 { return "just now" }
-        if diff < 3600 { return "\(diff / 60)m ago" }
-        if diff < 86400 { return "\(diff / 3600)h ago" }
-        return "\(diff / 86400)d ago"
+        if diff < 60 { return "just now".localized }
+        if diff < 3600 { return "%lldm ago".localized(diff / 60) }
+        if diff < 86400 { return "%lldh ago".localized(diff / 3600) }
+        return "%lldd ago".localized(diff / 86400)
     }
 }
