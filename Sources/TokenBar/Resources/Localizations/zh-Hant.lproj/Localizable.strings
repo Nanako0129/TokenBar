@@ -96,6 +96,8 @@
 "%lld active months" = "%lld 個月有用量";
 
 /* ===== 圖表與明細 ===== */
+"Fit" = "適配";
+"Reset" = "重設";
 "Input" = "輸入";
 "Output" = "輸出";
 "Cache read" = "快取讀取";
@@ -185,6 +187,8 @@
 "Receive beta updates" = "接收 beta 版更新";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
 "Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
+"Dark" = "深色";
+"Light" = "淺色";
 "System" = "跟隨系統";
 "(quota card only)" = "（僅額度卡片）";
 "Drag to reorder" = "拖曳可調整順序";

@@ -390,8 +390,8 @@ struct ContributionGraph3D: View {
             grid: grid, dark: colorScheme == .dark, holder: holder)
             .overlay(alignment: .topTrailing) {
                 HStack(spacing: 4) {
-                    button("Fit") { holder.view?.fitToContent() }
-                    button("Reset") {
+                    button("Fit".localized) { holder.view?.fitToContent() }
+                    button("Reset".localized) {
                         OrbitRig.clearSavedCamera()
                         holder.view?.fitToContent()
                     }

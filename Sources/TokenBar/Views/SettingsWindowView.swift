@@ -207,7 +207,7 @@ private struct MenuBarMock: View {
         let ink: Color = dark ? .white : .black
 
         HStack(spacing: 10) {
-            Text(dark ? "Dark" : "Light")
+            Text((dark ? "Dark" : "Light").localized)
                 .font(.caption2)
                 .foregroundStyle(ink.opacity(0.4))
             Spacer()
