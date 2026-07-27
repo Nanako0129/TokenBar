@@ -259,6 +259,8 @@
 
 /* 緊湊時間長度，組合成「預計 3天2小時 後用盡」 */
 "duration.now" = "現在";
+"Resets now" = "現在重置";
+"Resets in %@" = "%@ 後重置";
 "%lldm" = "%lld分";
 "%lldh" = "%lld小時";
 "%lldh %lldm" = "%1$lld小時%2$lld分";

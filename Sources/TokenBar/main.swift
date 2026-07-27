@@ -4,6 +4,8 @@ import AppKit
 // `--selftest` runs the TokenBarCore logic checks; anything else boots the
 // menu-bar app (no storyboard, no .app bundle yet).
 
+AppLanguage.prepareDirectRunResources()
+
 if CommandLine.arguments.contains("--smoke") {
     exit(Smoke.run())
 }

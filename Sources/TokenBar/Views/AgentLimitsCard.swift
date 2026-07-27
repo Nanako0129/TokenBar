@@ -439,6 +439,12 @@ struct AgentLimitsCard: View {
         let leftLabel = asUsed
             ? "%lld%% used".localized(Int(used.rounded()))
             : "%lld%% left".localized(Int(remaining.rounded()))
+        // `resetText` is a compatibility field produced in English by Rust.
+        // Derive the visible countdown from the structured timestamp so the
+        // quota card follows the selected UI language; non-countdown metadata
+        // (for example a monthly cap) keeps its provider text.
+        let resetText = window.resetsAt.flatMap { UsagePace.resetText(for: $0) }
+            ?? window.resetText
         let gauge = gaugeColor(remaining: remaining, brand: brand)
 
         if classic {
@@ -449,12 +455,12 @@ struct AgentLimitsCard: View {
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
                     Spacer()
-                    Text(window.resetText ?? leftLabel)
+                    Text(resetText ?? leftLabel)
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
                 }
                 bar(fillPercent: fill, color: gauge, paceLeft: nil, paceIsDeficit: false)
-                if window.resetText != nil {
+                if resetText != nil {
                     Text(leftLabel)
                         .font(.caption2)
                         .foregroundStyle(.secondary)
@@ -468,7 +474,7 @@ struct AgentLimitsCard: View {
                     Text(window.label.localized)
                         .font(.caption2.weight(.medium))
                     Spacer()
-                    if let reset = window.resetText {
+                    if let reset = resetText {
                         Text(reset)
                             .font(.caption2)
                             .foregroundStyle(.tertiary)

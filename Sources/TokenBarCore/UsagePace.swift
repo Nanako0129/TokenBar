@@ -87,6 +87,17 @@ public struct UsagePace: Sendable {
         let hr = h % 24
         return hr > 0 ? "%lldd %lldh".localized(days, hr) : "%lldd".localized(days)
     }
+
+    /// Localized countdown matching the Rust `resetText` rounding contract.
+    /// The wire text is intentionally retained for compatibility, while the
+    /// structured reset timestamp is the source for user-facing copy.
+    public static func resetText(for resetsAt: String, now: Date = Date()) -> String? {
+        guard let reset = parseRFC3339(resetsAt) else { return nil }
+        let seconds = floor(reset.timeIntervalSince(now))
+        guard seconds > 0 else { return "Resets now".localized }
+        let minutes = Int((seconds + 59) / 60)
+        return "Resets in %@".localized(durationText(Double(minutes * 60)))
+    }
 }
 
 /// UI-free projection text assembled from one pace result and its optional

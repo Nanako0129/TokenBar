@@ -50,5 +50,5 @@ endef
 # them next to the binary is what makes a dev run show the same strings the
 # .app does. `scripts/bundle.sh` installs the same .lproj into the real app.
 define sync_localizations
-	cp -R Resources/Localizations/*.lproj .build/$(1)/
+	cp -R Sources/TokenBar/Resources/Localizations/*.lproj .build/$(1)/
 endef

@@ -158,7 +158,7 @@ Swift treats a successful outer payload's finite quota scalar as authoritative: 
 
 ## Localization
 
-翻譯以 legacy `.strings` 提供，來源是 `Resources/Localizations/<lang>.lproj/Localizable.strings`（例如 [`zh-Hant`](../../Resources/Localizations/zh-Hant.lproj/Localizable.strings)），由 [`scripts/bundle.sh`](../../scripts/bundle.sh) 安裝進 `TokenBar.app/Contents/Resources/`、由 [`Makefile`](../../Makefile) 複製到 `.build/<config>/`。兩者都必須落在 **`Bundle.main`**：SwiftUI 的字串字面值與 `NSLocalizedString` 都只查 main bundle，放進 SwiftPM 的 `TokenBar_TokenBar.bundle` 永遠讀不到。
+翻譯以 legacy `.strings` 提供，來源是 `Sources/TokenBar/Resources/Localizations/<lang>.lproj/Localizable.strings`（例如 [`zh-Hant`](../../Sources/TokenBar/Resources/Localizations/zh-Hant.lproj/Localizable.strings)）。[`scripts/bundle.sh`](../../scripts/bundle.sh) 將它們安裝進 `TokenBar.app/Contents/Resources/`；[`Makefile`](../../Makefile) 複製到 `.build/<config>/`，而裸 `swift run` 會在啟動前從 SwiftPM 的 `TokenBar_TokenBar.bundle` 將 `.lproj` 暫存到執行檔旁，讓 SwiftUI 的 `LocalizedStringKey` 與 `Bundle.main` 都能查到。`String.localized` 另外會查找該 SwiftPM resource bundle，供 direct run 與 cross-module pace 文案共用同一份查表來源。
 
 | 契約 | 規則 |
 |---|---|

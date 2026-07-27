@@ -32,10 +32,10 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources" "$APP/Contents/Framewor
 cp .build/release/TokenBar "$APP/Contents/MacOS/TokenBar"
 # SwiftPM resource bundle (animation frames, agent icons).
 cp -R .build/release/TokenBar_TokenBar.bundle "$APP/Contents/Resources/"
-# Localizations must land in the *main* bundle, not the SwiftPM resource
-# bundle: SwiftUI string literals and NSLocalizedString both resolve against
-# Bundle.main, so a .lproj inside TokenBar_TokenBar.bundle would never be read.
-cp -R Resources/Localizations/*.lproj "$APP/Contents/Resources/"
+# Localizations land in the *main* bundle for packaged runs. Bare `swift run`
+# stages the same .lproj directories from the SwiftPM resource bundle before
+# SwiftUI creates any views.
+cp -R Sources/TokenBar/Resources/Localizations/*.lproj "$APP/Contents/Resources/"
 # Brand icon, shared with the Tauri app.
 if [ -f assets/icon.icns ]; then
   cp assets/icon.icns "$APP/Contents/Resources/icon.icns"

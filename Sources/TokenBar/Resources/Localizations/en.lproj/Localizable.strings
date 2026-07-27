@@ -16,3 +16,5 @@
 
 /* Compact duration zero case. Bare "now" is too generic to use as a key. */
 "duration.now" = "now";
+"Resets now" = "Resets now";
+"Resets in %@" = "Resets in %@";

@@ -35,4 +35,28 @@ enum AppLanguage: String, CaseIterable {
             defaults.set([rawValue], forKey: Self.appleLanguagesKey)
         }
     }
+
+    /// Bare SwiftPM executables use Bundle.main for SwiftUI's implicit
+    /// `LocalizedStringKey` lookup, while SwiftPM stores target resources in a
+    /// sibling bundle. Stage those .lproj directories beside the executable
+    /// before any views are created. Packaged .app runs already have them in
+    /// the main bundle and are left untouched.
+    static func prepareDirectRunResources() {
+        guard Bundle.main.bundleURL.pathExtension != "app",
+              let resourceURL = Bundle.main.resourceURL,
+              let packageBundle = Bundle(
+                url: resourceURL.appendingPathComponent("TokenBar_TokenBar.bundle")),
+              let packageResourceURL = packageBundle.resourceURL
+        else { return }
+
+        let fileManager = FileManager.default
+        for locale in ["en", "zh-Hant"] {
+            let source = packageResourceURL.appendingPathComponent("\(locale).lproj")
+            let destination = resourceURL.appendingPathComponent("\(locale).lproj")
+            guard fileManager.fileExists(atPath: source.path),
+                  !fileManager.fileExists(atPath: destination.path)
+            else { continue }
+            try? fileManager.copyItem(at: source, to: destination)
+        }
+    }
 }

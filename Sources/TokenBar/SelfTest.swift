@@ -360,6 +360,15 @@ enum SelfTest {
             "historical exhausted result is coherent")
         expect(UsagePace.durationText(130 * 60) == "2h 10m", "duration text h m")
         expect(UsagePace.durationText(26 * 3600) == "1d 2h", "duration text d h")
+        let resetFormatter = ISO8601DateFormatter()
+        let resetAt = resetFormatter.string(from: now.addingTimeInterval(1_801))
+        expect(
+            UsagePace.resetText(for: resetAt, now: now) == "Resets in 31m",
+            "reset countdown uses structured timestamp and ceil-minute rounding")
+        let resetNow = resetFormatter.string(from: now.addingTimeInterval(-1))
+        expect(
+            UsagePace.resetText(for: resetNow, now: now) == "Resets now",
+            "expired reset countdown is localized")
 
         // Stage 5A production decoder: v3 pace states are typed and strict;
         // only an entirely missing paceStatus key takes the internal legacy path.

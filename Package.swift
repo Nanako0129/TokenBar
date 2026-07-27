@@ -33,6 +33,11 @@ let package = Package(
                 .copy("Resources/anim-parrot"),
                 .copy("Resources/anim-parrot-light"),
                 .copy("Resources/third-party"),
+                // Keep the .lproj directories at the package resource-bundle
+                // root so direct `swift run` can stage them beside the
+                // executable for Bundle.main/SwiftUI lookup.
+                .copy("Resources/Localizations/en.lproj"),
+                .copy("Resources/Localizations/zh-Hant.lproj"),
             ],
             linkerSettings: rustLinkerSettings
         ),
