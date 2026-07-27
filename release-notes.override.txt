@@ -1,9 +1,7 @@
-Improved:
-- Animated Cat and Parrot icons now use a dedicated AppKit rendering surface. In controlled 40 FPS benchmarks, TokenBar process CPU fell from 14.938% to 0.458% for Cat and from 10.287% to 0.462% for Parrot while preserving the configured cadence; visible animation still carries WindowServer composition cost.
-- Usage cache validation now notices related files moving, appearing, or disappearing. The first scan after updating starts cold, then later refreshes use the rebuilt cache.
+New:
+- TokenBar now includes Traditional Chinese. Choose System, English, or Traditional Chinese in Settings; when the selection changes, TokenBar offers to restart immediately so the new preference can take effect. Dashboards, settings, menus, charts, quota reset countdowns, usage pace and risk text, and graph controls are localized, with English fallback for missing entries.
 
 Fixes:
-- Quota cards keep the last known windows during transient same-account provider failures and show the current Error. Sign-outs, account changes, authentication failures, and invalid responses still clear stale data.
-- Local data discovery remains reliable when GUI launches lack a full shell environment.
-- Configured roots now cover the affected default local sources and credentials. OpenCode's default usage data and OAuth credentials use XDG_DATA_HOME, with an empty value falling back to $HOME/.local/share; Gemini CLI and Antigravity CLI data, plus Antigravity OAuth credentials, use GEMINI_CLI_HOME, falling back to $HOME/.gemini.
-- Claude version detection now runs at most once per TokenBar launch, avoiding repeated CLI starts during quota refreshes.
+- Copilot quota windows survive optional reset dates with unexpected types, and duplicate OTEL spans keep the full observed activity duration without adding replayed token usage.
+- Empty KIMI_CODE_HOME values fall back to the default Kimi Code directory; non-empty overrides keep their existing behavior.
+- Provider connection errors retain typed DNS and TLS diagnostics without exposing raw transport text.

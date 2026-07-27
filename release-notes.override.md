@@ -1,14 +1,9 @@
 ## Highlights
 
-- **Animated status icons now use far less TokenBar CPU.** In controlled 40 FPS benchmarks, TokenBar process CPU fell from 14.938% to 0.458% for Cat and from 10.287% to 0.462% for Parrot while preserving the configured cadence. Visible animation still carries WindowServer composition cost. [#95](https://github.com/Nanako0129/TokenBar/pull/95)
-- **Quota cards now survive transient provider outages without hiding the error.** TokenBar keeps the last known windows for the same account and shows the current Error. Sign-outs, account changes, authentication failures, and invalid responses still clear stale data instead of reusing it. [#94](https://github.com/Nanako0129/TokenBar/pull/94)
-
-## Changes
-
-- **Usage cache validation now follows related files more precisely.** TokenBar invalidates cached source data when dependencies move, appear, or disappear. The first scan after updating starts cold, then later refreshes use the rebuilt cache. [#91](https://github.com/Nanako0129/TokenBar/pull/91)
+- **TokenBar now includes Traditional Chinese.** Choose System, English, or Traditional Chinese in Settings; when the selection changes, TokenBar offers to restart immediately so the new preference can take effect. Dashboards, settings, menus, charts, quota reset countdowns, usage pace and risk text, and graph controls are localized, with English fallback for missing entries. [#106](https://github.com/Nanako0129/TokenBar/pull/106) [#108](https://github.com/Nanako0129/TokenBar/pull/108)
 
 ## Fixes
 
-- **Local data discovery remains reliable when GUI launches lack a full shell environment.** Explicit source overrides keep their existing precedence. [#92](https://github.com/Nanako0129/TokenBar/pull/92)
-- **Configured roots now cover the affected default local sources and credentials.** OpenCode's default usage data and OAuth credentials use `XDG_DATA_HOME`, with an empty value falling back to `$HOME/.local/share`; Gemini CLI and Antigravity CLI data, plus Antigravity OAuth credentials, use `GEMINI_CLI_HOME`, falling back to `$HOME/.gemini`. [#97](https://github.com/Nanako0129/TokenBar/pull/97)
-- **Claude version detection now runs at most once per TokenBar launch,** avoiding repeated CLI starts during quota refreshes. [#93](https://github.com/Nanako0129/TokenBar/pull/93)
+- **Copilot quota and activity data now withstand more imperfect inputs.** An optional reset date with an unexpected type no longer discards otherwise valid quota windows, and duplicate OTEL spans keep the earliest start through the latest endpoint without adding replayed token usage. [#102](https://github.com/Nanako0129/TokenBar/pull/102)
+- **Kimi Code discovery now treats an empty `KIMI_CODE_HOME` as unset,** returning to the default Kimi Code directory instead of scanning an invalid root. Non-empty overrides keep their existing behavior. [#101](https://github.com/Nanako0129/TokenBar/pull/101)
+- **Provider connection errors now retain typed DNS and TLS diagnostics without exposing raw transport text.** Existing timeout and connection-failure precedence remains unchanged. [#102](https://github.com/Nanako0129/TokenBar/pull/102)
