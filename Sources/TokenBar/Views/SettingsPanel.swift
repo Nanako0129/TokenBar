@@ -28,6 +28,7 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.trace.detailed") private var detailedTrace = false
     @AppStorage("tokenbar.refresh.intervalMin") private var refreshIntervalMin = 30
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.system.rawValue
+    @State private var showLanguageRestartPrompt = false
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -389,8 +390,12 @@ struct SettingsPanel: View {
                     selection: Binding(
                         get: { languageRaw },
                         set: { next in
+                            guard AppLanguage.requiresRelaunch(
+                                from: languageRaw, to: next)
+                            else { return }
                             languageRaw = next
                             AppLanguage(rawValue: next)?.apply()
+                            showLanguageRestartPrompt = true
                         }),
                     options: AppLanguage.allCases.map { ($0.rawValue, $0.label) })
                 hint("Takes effect the next time TokenBar starts.")
@@ -416,6 +421,12 @@ struct SettingsPanel: View {
                 }
                 hint("TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed.")
             }
+        }
+        .alert("Restart TokenBar?", isPresented: $showLanguageRestartPrompt) {
+            Button("Later", role: .cancel) {}
+            Button("Restart Now") { AppRelauncher.relaunch() }
+        } message: {
+            Text("Restart TokenBar to apply the new language.")
         }
     }
 

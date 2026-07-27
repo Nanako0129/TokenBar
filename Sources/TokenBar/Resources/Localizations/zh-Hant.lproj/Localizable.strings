@@ -187,6 +187,10 @@
 "Receive beta updates" = "接收 beta 版更新";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
 "Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
+"Restart TokenBar?" = "重新啟動 TokenBar？";
+"Restart TokenBar to apply the new language." = "重新啟動 TokenBar 以套用新的語言。";
+"Restart Now" = "立即重新啟動";
+"Later" = "稍後";
 "Dark" = "深色";
 "Light" = "淺色";
 "System" = "跟隨系統";

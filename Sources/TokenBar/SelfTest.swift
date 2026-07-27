@@ -39,6 +39,16 @@ enum SelfTest {
             return try? box.result?.get()
         }
 
+        expect(
+            !AppLanguage.requiresRelaunch(from: "en", to: "en"),
+            "language reselect does not prompt for relaunch")
+        expect(
+            AppLanguage.requiresRelaunch(from: "en", to: "zh-Hant"),
+            "language change prompts for relaunch")
+        expect(
+            !AppLanguage.requiresRelaunch(from: "en", to: "unsupported"),
+            "invalid language does not prompt for relaunch")
+
         // Tray animation timing: preserve the shipping integer-millisecond
         // cadence while mapping the runner rate from 2 to 40 fps.
         let idleLoad = TrayAnimator.animationLoad(tokensPerMinute: 0)

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import TokenBarCore
 
@@ -24,6 +25,12 @@ enum AppLanguage: String, CaseIterable {
         case .english: return "English"
         case .traditionalChinese: return "繁體中文"
         }
+    }
+
+    /// A language change needs a relaunch, but selecting the current value
+    /// again (or receiving a malformed raw value) must not prompt.
+    static func requiresRelaunch(from currentRawValue: String, to nextRawValue: String) -> Bool {
+        currentRawValue != nextRawValue && Self(rawValue: nextRawValue) != nil
     }
 
     /// Writes (or clears) the `AppleLanguages` override.
@@ -58,6 +65,37 @@ enum AppLanguage: String, CaseIterable {
                 try? fileManager.removeItem(at: destination)
             }
             try? fileManager.copyItem(at: source, to: destination)
+        }
+    }
+}
+
+@MainActor
+enum AppRelauncher {
+    /// Starts a new app instance before terminating this one. Waiting for
+    /// NSWorkspace's completion keeps a failed launch from quitting the
+    /// currently working app.
+    static func relaunch() {
+        guard Bundle.main.bundleURL.pathExtension == "app" else {
+            NSSound.beep()
+            return
+        }
+
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.createsNewApplicationInstance = true
+        NSWorkspace.shared.openApplication(
+            at: Bundle.main.bundleURL,
+            configuration: configuration
+        ) { application, error in
+            guard error == nil,
+                  let application,
+                  application.processIdentifier != ProcessInfo.processInfo.processIdentifier
+            else {
+                NSSound.beep()
+                return
+            }
+            Task { @MainActor in
+                NSApp.terminate(nil)
+            }
         }
     }
 }
