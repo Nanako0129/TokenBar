@@ -4,8 +4,8 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-07-28
-sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar-Windows PR #7"]
+last_verified: 2026-07-29
+sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar PR #114", "public TokenBar-Windows PR #12"]
 ---
 
 # Runtime architecture and data flow
@@ -64,11 +64,11 @@ The issue-107 `tb_filter_parity_probe` is a separate additive diagnostic. Rust o
 
 ## Windows downstream consumer
 
-C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native now consumes the public shared engine through a pinned submodule; Windows still carries the last pre-extraction byte-identical Rust snapshot until its separate consumer migration. Native remains the coordination source for app-owned `crates/tb_core_ffi` and `Sources/CTB/include/ctb.h`, while shared parser/cache/aggregation changes belong in `tokscale-core`. The Windows repo's `vendor/tokscale-core/SYNC.md` records its last Native sync provenance.
+C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native [PR #114](https://github.com/Nanako0129/TokenBar/pull/114) 與 Windows [PR #12](https://github.com/Nanako0129/TokenBar-Windows/pull/12) 已把兩個 default branch 遷移到同一個 public shared-engine gitlink `b31e39425859393504a2d56cb5af7c93e6461c7d`。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
 
 | 不變量 | 規則 |
 |---|---|
-| Sync 方向 | Shared-engine fixes land in `tokscale-core`; app-owned FFI/header fixes land in Native before Windows re-sync. Windows-side shared-tree local patches remain empty by design |
+| Sync 方向 | Shared-engine fixes land in `tokscale-core`; each consumer advances only a reviewed gitlink. App-owned FFI／header changes land in Native, then are ported and independently verified in Windows |
 | `crate-type` | `tb_core_ffi` 的 `["cdylib", "staticlib"]` 兩者都必須保留：cdylib 供 C# P/Invoke（與 Windows repo 在 macOS 上的測試迴圈）載入，staticlib 供 SwiftPM 連結。單獨移除任何一個都會斷一邊 |
 | `ctb.h` 簽名 | 簽名變更＝跨 repo breaking change。P/Invoke 綁定沒有編譯期檢查，參數數量錯誤到執行期才以垃圾指標顯現（先例：`tb_hourly_report`/`tb_agents_report` 新增 `clients` 參數）。變更 `ctb.h` 時把 Windows port 視為必須通知的消費者 |
 | Build-infra 選型 | The engine's reqwest TLS selection（0.13 `rustls`＝rustls-platform-verifier）partly reflects Windows build constraints（vendored OpenSSL requires Perl+NASM）；the exact rationale remains in the engine's immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/b31e39425859393504a2d56cb5af7c93e6461c7d/UPSTREAM.md) |
@@ -76,7 +76,9 @@ C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https
 | Additive payload fields | `publicationGeneration` is an unknown-field-compatible optional addition; the M19-B1 Windows production-decoder fixture passed without adding the field to the Windows DTO or changing a C ABI signature |
 | Secure local quota storage | `agent_storage_windows` is cfg-gated shared Rust source, not a Windows-repo-only patch. Production account scope and v3 history use CNG randomness, an exact protected DACL for the current user plus LocalSystem, final-component no-reparse opens, disk/type checks, volume plus full 128-bit file identity, no-delete-share exclusive locks, verified atomic replacement, and collision-safe hard-link quarantine. Ancestor reparse points remain allowed only below the trusted per-user platform data-directory anchor; same-SID malicious processes are outside the claim |
 
-M19-B0 canonicalized this storage ownership in Native without changing `ctb.h`, Swift, provider transport, or serialized cache behavior. M19-B1 then merged the final Native corrections in [PR #102](https://github.com/Nanako0129/TokenBar/pull/102) at `4dfed5ff` and pinned that exact source in [Windows PR #7](https://github.com/Nanako0129/TokenBar-Windows/pull/7), merged at `f29d3b35`. At that checkpoint the 17 shared crate files、63 runtime engine files、header與兩份 provider-v3 fixture copies were byte-identical; Windows added only its provenance file and retained no shared-tree local patch. Hosted x64 runtime／cross-check gates and a separate real ARM64 run of 351 Rust tests、12 provider-v3 CrossCheck cases、PE checks與 synthetic WinUI startup passed. That evidence describes the last pre-extraction sync, not parity with a later engine gitlink; the GitHub ARM64 cross-package job remains build evidence rather than a substitute for a real ARM64 runtime gate.
+M19-B0 canonicalized this storage ownership in Native without changing `ctb.h`, Swift, provider transport, or serialized cache behavior. M19-B1 then merged the final Native corrections in [PR #102](https://github.com/Nanako0129/TokenBar/pull/102) at `4dfed5ff` and pinned that exact source in [Windows PR #7](https://github.com/Nanako0129/TokenBar-Windows/pull/7), merged at `f29d3b35`. At that checkpoint the 17 shared crate files、63 runtime engine files、header 與兩份 provider-v3 fixture copies were byte-identical; Windows added only its provenance file and retained no shared-tree local patch. Hosted x64 runtime／cross-check gates and a separate real ARM64 run of 351 Rust tests、12 provider-v3 CrossCheck cases、PE checks與 synthetic WinUI startup passed.
+
+The later shared-engine extraction preserved that exact source in `tokscale-core`. Native main `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` and Windows main `26492a5b615fed9378034e7bb56bc5aeccf5d368` now pin the same engine commit. Windows PR #12 also passed the GitHub ARM64 cross-package gate and a separate native ARM64 run of the packaged FFI surfaces. Same-pin equality proves shared-source parity, but app-owned FFI／Swift／C# changes still require the cross-port checks in [`verification.md`](verification.md).
 
 ## Streaming and cache
 

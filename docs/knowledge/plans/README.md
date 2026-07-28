@@ -4,8 +4,8 @@ id: kb-plan-index
 kind: index
 scope: repository
 read_when: selecting or resuming a planned work item
-last_verified: 2026-07-28
-sources: ["docs/knowledge/current-state.md", "docs/knowledge/vendor-tokscale.md", "docs/knowledge/plans/provider-quota-pace.md", "public issue #45", "public TokenBar-Windows PR #7"]
+last_verified: 2026-07-29
+sources: ["docs/knowledge/current-state.md", "docs/knowledge/vendor-tokscale.md", "docs/knowledge/plans/provider-quota-pace.md", "public issue #45", "public TokenBar PR #114", "public TokenBar-Windows PR #12"]
 ---
 
 # Plan registry
@@ -20,5 +20,6 @@ sources: ["docs/knowledge/current-state.md", "docs/knowledge/vendor-tokscale.md"
 | [`codex-historical-pace-v2.md`](codex-historical-pace-v2.md) | superseded | Implemented Codex Weekly v2 foundation retained as migration and evaluator evidence |
 | [`tokscale-alignment.md`](tokscale-alignment.md) | historical | Completed M15–D2 selective-alignment cycle; current engine work follows `vendor-tokscale.md` |
 | [`grok-turn-completed-usage.md`](grok-turn-completed-usage.md) | historical | Completed PR #77 implementation record; current engine work follows `vendor-tokscale.md` |
+| [`shared-rust-engine-extraction.md`](shared-rust-engine-extraction.md) | historical | Completed CORE-R0–CORE-X1D extraction、dual-consumer migration and rollback record |
 
 Historical or superseded private plans remain classified in [`../migration-ledger.md`](../migration-ledger.md); they are not copied wholesale into the public tree.

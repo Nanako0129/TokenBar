@@ -4,8 +4,8 @@ id: kb-plan-tokscale-alignment
 kind: plan
 scope: repository
 read_when: reviewing the completed selective-alignment cycle or issue #45 history
-last_verified: 2026-07-28
-sources: ["vendor/README.md", "public tokscale-core commit b31e394", "public issue #45", "public tokscale history", "public TokenBar-Windows PR #7", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
+last_verified: 2026-07-29
+sources: ["vendor/README.md", "public tokscale-core commit b31e394", "public issue #45", "public tokscale history", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
 ---
 
 # Rolling tokscale alignment plan
@@ -194,7 +194,7 @@ A milestone is complete only after its authorized implementation and mandatory d
 | Surface | Responsibility |
 |---|---|
 | [`vendor/README.md`](../../../vendor/README.md) | Exact 111-row classification, selected/mixed commit accounting, transition matrix, cache provenance, and local patch ledger |
-| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; M19-B1 Native PR #102 is merged at `4dfed5ff` and exact Windows PR #7 is merged at `f29d3b35`, with ledger、cache and real ARM64 evidence recorded by D2. PRs #74 and #86 remain closed unmerged as fidelity evidence. After D2 there is no implicitly authorized runtime successor; shared-core extraction requires its own plan |
+| [Issue #45](https://github.com/Nanako0129/TokenBar/issues/45) | Designated public ledger; M19-B1 Native PR #102 is merged at `4dfed5ff` and exact Windows PR #7 is merged at `f29d3b35`, with ledger、cache and real ARM64 evidence recorded by D2. PRs #74 and #86 remain closed unmerged as fidelity evidence. D2 did not implicitly authorize a runtime successor；the later shared-core extraction completed under its separate [`shared-rust-engine-extraction.md`](shared-rust-engine-extraction.md) plan |
 | Private Project #1 | Executable milestone cards only; no duplicate commit-by-commit ledger and no parser-preparation branches |
 | This plan | Product decisions, dependency graph, ownership, cache schedule, and milestone completion contract |
 | [`current-state.md`](../current-state.md) | Concise current queue and maintenance handoff |

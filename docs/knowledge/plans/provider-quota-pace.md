@@ -4,8 +4,8 @@ id: kb-plan-provider-quota-pace
 kind: plan
 scope: repository
 read_when: implementing or reviewing pace duration and historical pace for provider quota cards
-last_verified: 2026-07-27
-sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
+last_verified: 2026-07-29
+sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
 ---
 
 # Provider-wide quota pace plan
@@ -437,7 +437,7 @@ Stage 0 no longer discovers mappings。It turns every row and every reject rule 
 | 3. Generic history and migration | `executor`；v3 store／evaluator modules與 legacy `agent_history.rs` reader | 加 cycle-aware sampling／retention／confidence、current-account-only v2 import與 coherent evaluator | Exact migration collision matrix與5h／7d／monthly evaluator fixtures綠燈；v1／v2 unchanged proofs成立 |
 | 4. Provider adapters | `executor`；`agent_usage.rs`、Antigravity／Copilot／Grok modules | 為每個 card 注入 account scope、stable key、duration與 v3 enrichment | Provider matrix逐列有 serialized fixture；Codex 不再是特殊 enrichment entry point |
 | 5. Wire and Mac UX | `executor`；`ctb.h`、Swift models、`UsagePace`、settings／quota card views | 加 `paceStatus`、移除 silent fallback、更新 learning／available文案與顏色 | Rust JSON 可由 Swift decode；yellow ahead 僅由真實 evaluator fixture 驅動 |
-| 6. Cross-port handoff | Main session；CrossCheckHarness、canonical docs、fixture artifact | 跑完整 baseline、列出 intended wire delta、準備 Windows DTO／state-machine handoff | 非 pace cases 零回歸；Windows 尚未 port 時明確標為 pending，不改 Windows repo |
+| 6. Cross-port handoff | Main session；CrossCheckHarness、canonical docs、fixture artifact | 跑完整 baseline、列出 wire delta、完成 Windows DTO／state-machine handoff | 119-case Swift／C# cross-check 零 material difference；real ARM64 provider-v3 run 產生 exact 12 cases |
 | 7. Integrated verification | Main session，加 fresh `verifier` | 執行 full gates、人工 local UX與 adversarial edge cases | Verifier 回傳 `CONFIRMED`；任何 `REFUTED` 回到 owning stage |
 
 ### Stage 6 checkpoint and completed Windows handoff
@@ -557,7 +557,7 @@ Local UX 驗收必須實際切換 Linear／Historical，覆蓋至少一張 `lear
 | Cross-language state drift | Swift再次 silent fallback | Required `paceStatus` invariants與 Rust／Swift shared fixtures |
 | V2 import破壞既有學習 | Codex使用者重新等待或 evidence遺失 | V2 read-only、idempotent merge、atomic v3與 byte／mtime assertions |
 | 新 identity endpoint | 新 privacy／latency／failure surface | 預設不新增；若必要，Stage 0停止並先更新 Plan與 security review |
-| Windows尚未同步 | Downstream DTO與呈現不一致 | Mac可完成但 parity標為 pending；另行授權跨 repo port後才能宣稱全平台完成 |
+| Consumer pin／ABI drift | Shared source或app-owned DTO／呈現再次分歧 | 兩邊維持同一 reviewed engine pin；app-owned delta 重新跑完整 Swift／C# cross-check，兩個 consumer gates 完成前不得宣稱全平台 parity |
 
 任何一張 eligible card 沒有 stable key、safe account scope 或可信 duration path 時，implementation 必須停在該 provider 的 Stage 0／1／2 gate，回來更新這份 Plan；不得以 label、token hash、30-day constant或 silent Linear 來「完成」matrix。
 

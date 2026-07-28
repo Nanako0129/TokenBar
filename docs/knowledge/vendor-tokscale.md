@@ -4,8 +4,8 @@ id: kb-vendor-tokscale
 kind: canonical
 scope: repository
 read_when: assessing upstream commits, changing shared-engine code or its consumer pin, or changing parser output
-last_verified: 2026-07-28
-sources: [".gitmodules", "vendor/README.md", "public tokscale-core UPSTREAM at b31e394", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public issue #45"]
+last_verified: 2026-07-29
+sources: [".gitmodules", "vendor/README.md", "public tokscale-core UPSTREAM at b31e394", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public issue #45", "public TokenBar PR #114", "public TokenBar-Windows PR #12"]
 ---
 
 # Shared tokscale engine alignment
@@ -32,7 +32,7 @@ The engine's true baseline is recorded in `tokscale-core/UPSTREAM.md`; the Cargo
 
 > **不要在 consumer branch 直接改 submodule source。** Shared Rust changes first land and pass review in `tokscale-core`; TokenBar then advances only the reviewed gitlink and runs its consumer gates. A clean build alone cannot prove that streaming or cache semantics were preserved.
 
-Windows remains a separate downstream consumer during its migration to the same engine pin; do not infer current cross-repository parity from Native's submodule conversion. Shared Rust changes belong in the engine, while Native remains the coordination source for the app-owned FFI and C header until the Windows consumer is re-synced and independently verified. See [`architecture.md`](architecture.md#windows-downstream-consumer).
+Native and Windows now pin the same reviewed engine commit through separate consumer migrations. That proves shared-source equality, not complete cross-repository behavior parity：Native and Windows still own separate FFI、C header、Swift／C# bridge and build surfaces. Shared Rust changes land in the engine first；each consumer then advances its gitlink and runs its own app gates, while app-owned ABI changes are ported and independently cross-checked. See [`architecture.md`](architecture.md#windows-downstream-consumer) and the completed [`shared-rust-engine-extraction.md`](plans/shared-rust-engine-extraction.md).
 
 ## Selective-port method
 
