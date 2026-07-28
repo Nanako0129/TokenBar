@@ -1961,6 +1961,9 @@ enum SelfTest {
         for (label, passed) in TBCore.envelopeContractChecks() {
             expect(passed, "envelope: \(label)")
         }
+        for (label, passed) in TBCore.filterParityContractChecks() {
+            expect(passed, "filter parity: \(label)")
+        }
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

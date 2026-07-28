@@ -162,6 +162,13 @@ public enum TBCore {
         try unwrap(withYearAndClients(year, clients) { tb_agents_report($0, $1) })
     }
 
+    /// Source-generation-aware parity diagnostic for the hourly and Agents
+    /// filter. Rust derives the client list from a fresh graph and brackets all
+    /// report calls with one opaque local-source token sequence.
+    public static func filterParityProbe() throws -> FilterParityProbe {
+        try unwrap(tb_filter_parity_probe())
+    }
+
     /// Live trace buckets over the trailing `windowSecs`.
     public static func usageTrace(windowSecs: Int64) throws -> [TraceBucket] {
         try unwrap(tb_usage_trace(windowSecs))
@@ -276,6 +283,43 @@ public enum TBCore {
             check("malformed body throws", false)
         } catch {
             check("malformed body throws", true)
+        }
+
+        return out
+    }
+
+    /// Hermetic decoder and formatting checks for the source-aware filter
+    /// parity payload. This keeps the Swift side independent of private local
+    /// session data while pinning the lower-camel wire statuses and bounded
+    /// smoke labels.
+    public static func filterParityContractChecks() -> [(String, Bool)] {
+        var out: [(String, Bool)] = []
+        func check(_ label: String, _ passed: Bool) { out.append((label, passed)) }
+
+        let body = Data(
+            #"{"ok":true,"data":{"hourly":{"status":"match","unfiltered":{"entryCount":1,"input":10,"output":20,"cacheRead":3,"cacheWrite":4,"reasoning":5,"totalTokens":42,"messageCount":2,"totalCost":0.25},"full":{"entryCount":1,"input":10,"output":20,"cacheRead":3,"cacheWrite":4,"reasoning":5,"totalTokens":42,"messageCount":2,"totalCost":0.25},"delta":{"entryCount":0,"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":0,"messageCount":0,"totalCost":0}},"agents":{"status":"sourceChanged","unfiltered":null,"full":null,"delta":null},"presentClientCount":2}}"#.utf8
+        )
+        do {
+            let payload: FilterParityProbe = try decodeEnvelope(body)
+            check(
+                "filter parity lower-camel statuses decode",
+                payload.hourly.status == .match && payload.agents.status == .sourceChanged
+                    && payload.presentClientCount == 2
+            )
+            check(
+                "filter parity bounded smoke labels",
+                payload.smokeSummary
+                    == "hourly=MATCH entriesΔ=0 tokensΔ=0 messagesΔ=0 costΔ=0.00; agents=SOURCE_CHANGED / SKIP"
+            )
+            check(
+                "filter parity nullable aggregates decode",
+                payload.agents.unfiltered == nil && payload.agents.full == nil
+                    && payload.agents.delta == nil
+            )
+        } catch {
+            check("filter parity lower-camel statuses decode", false)
+            check("filter parity bounded smoke labels", false)
+            check("filter parity nullable aggregates decode", false)
         }
 
         return out

@@ -43,6 +43,8 @@ TokenBar native 已完成從 Tauri 到 SwiftUI 的出貨重寫，現在是維護
 
 Setup-token quota fallback is shipped: when profile usage is unavailable, provider rate-limit responses can still present quota to the user.
 
+[Issue #107](https://github.com/Nanako0129/TokenBar/issues/107) source-aware filter parity is implemented in Native. The additive `tb_filter_parity_probe` owns one local-source context and a fresh graph/client list, brackets hourly and Agents nil/full reports with `local_source_change_token`, and emits bounded `match`, `mismatch`, `sourceChanged`, or `tokenUnavailable` classifications. Swift smoke makes one probe call; stable mismatches remain diagnostic evidence only, while source changes are never reported as filter mismatches. Focused Rust and Swift contract tests cover deterministic stage mutation and aggregate decoding. Windows consumes this additive ABI only after an exact Native sync.
+
 ## Priority order
 
 | Priority | Trigger | First reading |

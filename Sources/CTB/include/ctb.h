@@ -68,6 +68,17 @@ char *tb_hourly_report(const char *year, const char *clients);
 // Per-(sub-)agent report (AgentsReport). `clients` as in tb_hourly_report.
 char *tb_agents_report(const char *year, const char *clients);
 
+// Source-generation-aware hourly/Agents filter parity diagnostic. The graph
+// client list is derived from a fresh graph and all reports are bracketed by
+// one opaque local-source token sequence. The success payload contains only
+// lower-camel status values (match/mismatch/sourceChanged/tokenUnavailable),
+// bounded report aggregates, and presentClientCount; it never exposes source
+// paths, raw messages, cache data, credentials, providers, models, agents, or
+// workspaces. A token probe failure is a successful tokenUnavailable result;
+// graph/report/mapping/serialization failures use the normal outer error
+// envelope. All calls are blocking and must be made off the main thread.
+char *tb_filter_parity_probe(void);
+
 // Live trace buckets over the trailing window (array of TraceBucket;
 // snake_case fields, e.g. tokens_per_min). Lazily re-parses at most every 10s.
 char *tb_usage_trace(int64_t window_secs);

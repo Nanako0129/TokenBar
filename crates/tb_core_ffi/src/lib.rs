@@ -25,6 +25,7 @@ mod agent_quota_history;
 mod agent_storage_windows;
 mod agent_usage;
 mod agents_report;
+mod filter_parity_probe;
 mod hourly_report;
 mod model_report;
 mod opencode_integrations;
@@ -464,6 +465,29 @@ pub unsafe extern "C" fn tb_agents_report(
             agents_report::run(&context, &year, clients)
         }))
     })
+}
+
+/// Source-generation-aware filter parity diagnostic. The graph is always
+/// freshly computed to derive the present-client list; the hourly and Agents
+/// reports are then bracketed by one opaque local-source token sequence. The
+/// payload intentionally exposes only bounded aggregates and classifications,
+/// never source paths or raw local data.
+#[no_mangle]
+pub extern "C" fn tb_filter_parity_probe() -> *mut c_char {
+    // Keep this boundary panic-safe without forwarding panic text that could
+    // contain a private source path, model, or provider value.
+    LazyLock::force(&RAYON_INIT);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let context = LocalSourceContext::current();
+        filter_parity_probe::run(&context)
+    }));
+    match result {
+        Ok(Ok(payload)) => envelope(
+            serde_json::to_value(payload)
+                .map_err(|_| "filter parity probe serialization failed".to_string()),
+        ),
+        Ok(Err(_)) | Err(_) => envelope(Err("filter parity probe failed".to_string())),
+    }
 }
 
 /// Live per-(client, agent, model) trace buckets over the trailing
