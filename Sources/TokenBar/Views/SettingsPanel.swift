@@ -260,7 +260,7 @@ struct SettingsPanel: View {
                         .foregroundStyle(.secondary)
                 } else {
                     VStack(alignment: .leading, spacing: 6) {
-                        Text("Drag to set the order used by both the top tabs and the quota cards. The switch shows/hides a client's top tab (hiding also drops its quota card).")
+                        Text("Drag to set the order used by both the top tabs and the quota cards — or drag a tab directly in the top bar. The switch shows/hides a client's top tab (hiding also drops its quota card).")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
 

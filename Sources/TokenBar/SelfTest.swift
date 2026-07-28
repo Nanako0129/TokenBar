@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import SwiftUI
 import TokenBarCore
 
 // Logic checks for the pure TokenBarCore ports, run via `TokenBar --selftest`.
@@ -1305,6 +1306,32 @@ enum SelfTest {
                 full: [], visible: ["a", "b"], from: "a", to: "b")
                 == ["b", "a"],
             "mergeReorder with empty full writes the visible sequence")
+
+        // Top tab-bar drag reorder: the drop line sits on the edge the
+        // direction-aware insert will use (right → after the target, left →
+        // before it). Overview is not in `clients`, so it can never be a drop
+        // target and no client can be dragged ahead of it.
+        let tabIds = ["codex", "claude", "opencode"]
+        expect(
+            DashboardTabs.dropEdge(
+                dragId: "codex", overId: "opencode", tabId: "opencode", in: tabIds) == .trailing,
+            "dragging right marks the target's trailing edge")
+        expect(
+            DashboardTabs.dropEdge(
+                dragId: "opencode", overId: "codex", tabId: "codex", in: tabIds) == .leading,
+            "dragging left marks the target's leading edge")
+        expect(
+            DashboardTabs.dropEdge(
+                dragId: "codex", overId: "claude", tabId: "opencode", in: tabIds) == nil,
+            "only the hovered tab draws a drop line")
+        expect(
+            DashboardTabs.dropEdge(
+                dragId: nil, overId: "claude", tabId: "claude", in: tabIds) == nil,
+            "no drop line without an active drag")
+        expect(
+            DashboardTabs.dropEdge(
+                dragId: "codex", overId: "overview", tabId: "overview", in: tabIds) == nil,
+            "Overview is never a drop target")
 
         // knownLimitsClients (the hoisted universe): present clients with a
         // known limit, unioned with quota-snapshot holders (dedup, ordered).
