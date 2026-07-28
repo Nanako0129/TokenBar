@@ -49,6 +49,34 @@ enum SelfTest {
             !AppLanguage.requiresRelaunch(from: "en", to: "unsupported"),
             "invalid language does not prompt for relaunch")
 
+        let popoverResizeResult = MainActor.assumeIsolated { () -> (Bool, Bool) in
+            let defaults = UserDefaults.standard
+            let savedHeight = defaults.object(forKey: PopoverChrome.heightKey)
+            defer {
+                if let savedHeight {
+                    defaults.set(savedHeight, forKey: PopoverChrome.heightKey)
+                } else {
+                    defaults.removeObject(forKey: PopoverChrome.heightKey)
+                }
+            }
+            defaults.set(620.0, forKey: PopoverChrome.heightKey)
+            let chrome = PopoverChrome()
+            chrome.resolve(visibleHeight: 1_000)
+            var liveResize: (CGFloat, Bool)?
+            chrome.onResize = { liveResize = ($0, $1) }
+            chrome.setHeight(700, persist: false, live: true)
+            let liveBypassedPublication =
+                chrome.rawHeight == 620 && liveResize?.0 == 700 && liveResize?.1 == true
+            chrome.setHeight(700, persist: false, live: false)
+            return (liveBypassedPublication, chrome.rawHeight == 700)
+        }
+        expect(
+            popoverResizeResult.0,
+            "live popover resize bypasses environment publication")
+        expect(
+            popoverResizeResult.1,
+            "final popover resize commits published height")
+
         // Tray animation timing: preserve the shipping integer-millisecond
         // cadence while mapping the runner rate from 2 to 40 fps.
         let idleLoad = TrayAnimator.animationLoad(tokensPerMinute: 0)

@@ -66,9 +66,14 @@ final class PopoverChrome: ObservableObject {
     /// Live drag / slider updates. `persist` writes the value back so it
     /// survives relaunch and syncs the settings slider.
     func setHeight(_ value: CGFloat, persist persistValue: Bool, live: Bool) {
-        rawHeight = min(max(minHeight, value), maxHeight)
+        let next = min(max(minHeight, value), maxHeight)
+        if live {
+            onResize?(next, true)
+            return
+        }
+        rawHeight = next
         if persistValue { UserDefaults.standard.set(Double(rawHeight), forKey: Self.heightKey) }
-        onResize?(height, live)
+        onResize?(height, false)
     }
 
     /// Re-read the value the settings slider wrote (from the other window) and

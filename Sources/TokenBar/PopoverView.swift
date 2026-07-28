@@ -129,7 +129,11 @@ struct PopoverView: View {
             Divider()
             footer
         }
-        .frame(width: chrome.width, height: chrome.height)
+        // AppKit owns the live drag size. Filling the hosting view avoids
+        // publishing a new environment-object height — and rebuilding this
+        // entire view tree — for every pointer event.
+        .frame(width: chrome.width)
+        .frame(maxHeight: .infinity)
         .animation(.easeOut(duration: 0.16), value: activeViewRaw)
         .animation(.easeOut(duration: 0.16), value: activeTab)
         .background(PopoverBackdrop().ignoresSafeArea())
