@@ -4,7 +4,7 @@ id: kb-decision-0001
 kind: canonical
 scope: repository
 read_when: adding project documentation, an adapter, or a private overlay
-last_verified: 2026-07-14
+last_verified: 2026-07-28
 sources: ["docs/knowledge/README.md", "AGENTS.md", "docs/knowledge/migration-ledger.md", "project knowledge separation decision"]
 ---
 
@@ -29,4 +29,9 @@ The project accumulated durable architecture, verification, release, and upstrea
 
 ## Boundaries
 
-`vendor/README.md` remains the exact vendor ledger, `.github/workflows/*.yml` remain runtime gate sources, `Makefile` remains build-order source, and `Package.swift` remains linker/target source. Canonical documents explain how to use those sources; they do not duplicate their exact tables or commands.
+The public engine's `UPSTREAM.md` remains the exact shared-engine ledger,
+`vendor/README.md` owns TokenBar's repository and reviewed pin,
+`.github/workflows/*.yml` remain runtime gate sources, `Makefile` remains
+build-order source, and `Package.swift` remains linker/target source. Canonical
+documents explain how to use those sources; they do not duplicate their exact
+tables or commands.

@@ -17,6 +17,7 @@ ID = re.compile(r'^[A-Za-z0-9][A-Za-z0-9._/-]*$')
 LEDGER_IDS = {f'SRC-{n:03d}' for n in range(1, 59)}
 LINK = re.compile(r'!?\[[^]]*\]\(([^)]+)\)')
 SKIP = {'.agent-local','.omo','.git','.build','target','.swiftpm','node_modules','dist'}
+EXTERNAL_DOC_ROOT = ('vendor', 'tokscale-core')
 MACHINE = [
     re.compile(r'/Users/[^\s`"\']+'),
     re.compile(r'/home/[^\s`"\']+'),
@@ -87,7 +88,19 @@ def source_path_issue(root,value):
     resolved=(root/candidate).resolve()
     try: resolved.relative_to(root)
     except ValueError: return 'source path escapes repository root'
-    if not resolved.exists(): return f'source path does not exist: {value}'
+    if not resolved.exists():
+        submodule=(root/Path(*EXTERNAL_DOC_ROOT)).resolve()
+        gitmodules=root/'.gitmodules'
+        try: resolved.relative_to(submodule)
+        except ValueError: pass
+        else:
+            declared=gitmodules.is_file() and re.search(
+                r'(?m)^\s*path\s*=\s*vendor/tokscale-core\s*$',
+                gitmodules.read_text(encoding='utf-8'),
+            )
+            uninitialized=not submodule.exists() or (submodule.is_dir() and not any(submodule.iterdir()))
+            if declared and uninitialized: return None
+        return f'source path does not exist: {value}'
     return None
 def relative_links(root,p,text):
     for m in LINK.finditer(text):
@@ -102,7 +115,7 @@ def relative_links(root,p,text):
 
 def validate(root):
     root=Path(root).resolve(); errors=[]
-    files=sorted(p for p in root.rglob('*.md') if not (set(p.relative_to(root).parts)&SKIP))
+    files=sorted(p for p in root.rglob('*.md') if not (set(p.relative_to(root).parts)&SKIP) and p.relative_to(root).parts[:2] != EXTERNAL_DOC_ROOT)
     required_adapters = [root/'AGENTS.md', root/'CLAUDE.md', root/'vendor'/'AGENTS.md', root/'landing'/'AGENTS.md']
     for p in required_adapters:
         label=p.relative_to(root)
@@ -174,13 +187,14 @@ def validate(root):
         vals=d.get('canonical_for',[]); vals=vals if isinstance(vals,list) else [vals]
         for value in vals:
             owners[value].append(p)
-            if 'vendor' in str(value).lower() and 'ledger' in str(value).lower(): errors.append(Issue(p.relative_to(root),1,'knowledge docs cannot claim exact vendor ledger ownership'))
+            label=str(value).lower()
+            if 'ledger' in label and any(term in label for term in ('vendor','engine','upstream')): errors.append(Issue(p.relative_to(root),1,'knowledge docs cannot claim exact shared-engine ledger ownership'))
     for value,paths in owners.items():
         if len(paths)>1: errors.append(Issue(paths[1].relative_to(root),1,f'canonical_for {value!r} is owned by multiple documents'))
     vendor=root/'vendor'/'README.md'; vendor_doc=knowledge/'vendor-tokscale.md'
-    if not vendor.exists(): errors.append(Issue('vendor/README.md',1,'vendor ledger owner is missing'))
+    if not vendor.exists(): errors.append(Issue('vendor/README.md',1,'consumer pin owner is missing'))
     if not vendor_doc.exists(): errors.append(Issue('docs/knowledge/vendor-tokscale.md',1,'vendor-tokscale.md is missing'))
-    elif not any(t==vendor for t,_,_ in relative_links(root,vendor_doc,vendor_doc.read_text(encoding='utf-8')) if isinstance(t,Path)): errors.append(Issue(vendor_doc.relative_to(root),1,'vendor-tokscale.md must link to vendor/README.md'))
+    elif not any(t==vendor for t,_,_ in relative_links(root,vendor_doc,vendor_doc.read_text(encoding='utf-8')) if isinstance(t,Path)): errors.append(Issue(vendor_doc.relative_to(root),1,'vendor-tokscale.md must link to the consumer pin document'))
     ledger=next((p for p,d in meta.items() if d.get('kind')=='ledger'),None)
     if ledger: check_ledger(root,ledger,meta,errors)
     else: errors.append(Issue('docs/knowledge',1,'migration ledger document is missing'))
@@ -286,6 +300,10 @@ def self_test():
                     payload='secret = sk-live-1\n/Users/alice/private-notes.md\n[missing](nope.md)'
                     (overlay/'AGENTS.md').write_text(payload); (overlay/'CLAUDE.md').write_text(payload); (nested/'notes.md').write_text(payload)
                     self.assertEqual(validate(r),[])
+        def test_external_engine_docs_are_ignored(self):
+            r=self.root(); engine=r/'vendor/tokscale-core'; engine.mkdir()
+            (engine/'AGENTS.md').write_text('secret = sk-live-1\n[missing](nope.md)')
+            self.assertEqual(validate(r),[])
         def test_skip_named_parent_does_not_hide_repo(self):
             result='\n'.join(map(str,validate(self.root(True,'target')))); self.assertIn('invalid scope',result); self.assertNotIn('knowledge tree is missing',result)
         def test_root_adapter_contract(self):
@@ -310,6 +328,22 @@ def self_test():
             r=self.root(); p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('last_verified: 2026-07-14','last_verified: 2026-7-14')); result='\n'.join(map(str,validate(r))); self.assertIn('last_verified must be a valid YYYY-MM-DD date',result)
         def test_missing_path_source(self):
             r=self.root(); p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('sources: [internal]','sources: [docs/knowledge/missing.md]')); result='\n'.join(map(str,validate(r))); self.assertIn('source path does not exist',result)
+        def test_uninitialized_declared_submodule_source(self):
+            for empty_root in (False, True):
+                with self.subTest(empty_root=empty_root):
+                    r=self.root(); (r/'.gitmodules').write_text('[submodule "vendor/tokscale-core"]\n\tpath = vendor/tokscale-core\n')
+                    if empty_root: (r/'vendor/tokscale-core').mkdir()
+                    p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('sources: [internal]','sources: [vendor/tokscale-core/src/missing.rs]'))
+                    self.assertEqual(validate(r),[])
+        def test_populated_submodule_missing_source(self):
+            r=self.root(); (r/'.gitmodules').write_text('[submodule "vendor/tokscale-core"]\n\tpath = vendor/tokscale-core\n')
+            engine=r/'vendor/tokscale-core'; engine.mkdir(); (engine/'.git').write_text('gitdir: elsewhere')
+            p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('sources: [internal]','sources: [vendor/tokscale-core/src/missing.rs]'))
+            self.assertIn('source path does not exist','\n'.join(map(str,validate(r))))
+        def test_undeclared_submodule_missing_source(self):
+            r=self.root(); (r/'vendor/tokscale-core').mkdir()
+            p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('sources: [internal]','sources: [vendor/tokscale-core/src/missing.rs]'))
+            self.assertIn('source path does not exist','\n'.join(map(str,validate(r))))
         def test_absolute_source_path(self):
             r=self.root(); inside=r/'inside.md'; inside.write_text('fixture'); p=r/'docs/knowledge/ledger.md'; p.write_text(p.read_text().replace('sources: [internal]',f'sources: [{inside}]')); result='\n'.join(map(str,validate(r))); self.assertIn('source path must be relative',result)
         def test_source_path_escape(self):

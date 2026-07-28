@@ -4,7 +4,7 @@ id: kb-index
 kind: index
 scope: repository
 read_when: before any TokenBar task or handoff
-last_verified: 2026-07-17
+last_verified: 2026-07-28
 sources: ["README.md", "CONTRIBUTING.md", "AGENTS.md", "Makefile", "Package.swift", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/release.yml", ".github/workflows/update-install-count.yml"]
 ---
 
@@ -12,7 +12,7 @@ sources: ["README.md", "CONTRIBUTING.md", "AGENTS.md", "Makefile", "Package.swif
 
 ## 文件目的
 
-這份索引是 TokenBar 的 canonical project knowledge entry point。它把架構、工作流程、驗證、vendored tokscale、發版、溝通、目前狀態與歷史決策分開保存，讓人類維護者與不同 coding client 都能從同一份 project-owned source 接手。
+這份索引是 TokenBar 的 canonical project knowledge entry point。它把架構、工作流程、驗證、shared tokscale engine、發版、溝通、目前狀態與歷史決策分開保存，讓人類維護者與不同 coding client 都能從同一份 project-owned source 接手。
 
 公開 contributor 從 [`CONTRIBUTING.md`](../../CONTRIBUTING.md) 進入；該文件負責 onboarding、穩定 guardrail 與任務路由，技術與流程事實仍由本 knowledge tree 擁有。
 
@@ -37,7 +37,7 @@ sources: ["README.md", "CONTRIBUTING.md", "AGENTS.md", "Makefile", "Package.swif
 | 分支、PR、merge、授權 | [`workflow.md`](workflow.md) | [`communication.md`](communication.md) |
 | 測試、fixture、cache、跨語言契約 | [`verification.md`](verification.md) | [`architecture.md`](architecture.md) |
 | Provider quota pace／historical calculation | [`plans/provider-quota-pace.md`](plans/provider-quota-pace.md) | [`plans/codex-historical-pace-v2.md`](plans/codex-historical-pace-v2.md)、[`architecture.md`](architecture.md)、[`verification.md`](verification.md) |
-| tokscale sync 或 vendor patch | [`vendor-tokscale.md`](vendor-tokscale.md) | [`vendor/README.md`](../../vendor/README.md) |
+| tokscale engine change 或 consumer pin | [`vendor-tokscale.md`](vendor-tokscale.md) | [`vendor/README.md`](../../vendor/README.md) |
 | Sparkle、appcast、Homebrew、Pages | [`release.md`](release.md) | [`workflow.md`](workflow.md) |
 | 維護期優先順序 | [`current-state.md`](current-state.md) | [`history/README.md`](history/README.md) |
 | 歷史根因或已 parked 調查 | [`history/README.md`](history/README.md) | 對應的 history 文件 |
@@ -82,7 +82,8 @@ docs/knowledge/
 
 | Source | Authority |
 |---|---|
-| `vendor/README.md` | Exact vendored baseline, cherry-pick history, reported upstream fixes, and local patch ledger |
+| Public [`tokscale-core/UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/b31e39425859393504a2d56cb5af7c93e6461c7d/UPSTREAM.md) | Exact shared-engine upstream baseline, selected changes, reports, and local-patch ledger |
+| `vendor/README.md` | TokenBar's shared-engine repository and reviewed consumer pin |
 | `.github/workflows/*.yml` | Runtime CI, Pages, release, and install-count gates |
 | `Makefile` | Local build order and stale Rust static-library relink guard |
 | `Package.swift` | SwiftPM targets and linker contract |
@@ -91,7 +92,7 @@ docs/knowledge/
 | `docs/knowledge/` | Human-readable synthesis of durable project facts and decisions |
 | `.agent-local/` | Optional machine-local overlay; never a public source of project facts |
 
-When a synthesized document and an execution source disagree, verify against the execution source and update the synthesis. Do not copy an exact vendor table or CI command into a second ledger.
+When a synthesized document and an execution source disagree, verify against the execution source and update the synthesis. Do not copy the exact engine ledger or a CI command into a second ledger.
 
 ## Authoring contract
 

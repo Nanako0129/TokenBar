@@ -4,7 +4,7 @@ id: kb-migration-ledger
 kind: ledger
 scope: repository
 read_when: auditing knowledge coverage, adding a memory/plan source, or deciding what stays private
-last_verified: 2026-07-14
+last_verified: 2026-07-28
 sources: ["memory index", "project memory set", "plan set", "sanitized local guidance source", "sanitized local visual-experiment source"]
 source_total: 58
 memory_count: 37
@@ -73,7 +73,7 @@ boundary_counts: {memory: 37, plan: 19, local: 2}
 | `SRC-016` | memory | Explicit merge, push, and release authorization | active | repo-public | summarize | `workflow.md`, `AGENTS.md` / canonical workflow | Authorization boundary appears once in canonical workflow and adapter guardrails |
 | `SRC-017` | memory | External issue and PR review workflow | active | repo-public | summarize | `workflow.md`, `verification.md`, `communication.md` / public contribution process | No private account or credential mechanics copied |
 | `SRC-018` | memory | Public PR and issue writing style | active | repo-public | summarize | `communication.md` / public GitHub surfaces | Hard-wrap, Unicode, and technical-reply rules represented without private tool paths |
-| `SRC-019` | memory | tokscale sync history and selective alignment lessons | active | repo-public | summarize | `vendor-tokscale.md`, `plans/tokscale-alignment.md`, `decisions/0003-selective-upstream-alignment.md` / vendor README and issue #45 | Current schema, selective boundary, and upstream bookkeeping checked against vendor source |
+| `SRC-019` | memory | tokscale sync history and selective alignment lessons | active | repo-public | summarize | `vendor-tokscale.md`, `plans/tokscale-alignment.md`, `decisions/0003-selective-upstream-alignment.md` / engine `UPSTREAM.md`, consumer pin, and issue #45 | Current schema, selective boundary, and upstream bookkeeping checked against the reviewed shared-engine commit |
 | `SRC-020` | memory | Branch naming and PR authorization workflow | active | repo-public | summarize | `workflow.md`, `AGENTS.md` / canonical workflow | Rule matches adapter authorization and current public contribution history |
 | `SRC-021` | memory | Traditional Chinese punctuation and bilingual layout | active | repo-public | summarize | `communication.md`, `docs/knowledge/README.md` / canonical style contract | Chinese punctuation and bilingual separator rules reviewed in new docs |
 | `SRC-022` | memory | Sparkle multi-item appcast correction | historical | repo-public | summarize | `release.md`, `history/release-and-ui-incidents.md` / release script and appcast | Multi-item, channel, and preservation semantics checked against release source |
@@ -106,7 +106,7 @@ boundary_counts: {memory: 37, plan: 19, local: 2}
 | `SRC-049` | plan | Private planning notes | active | user-private | retain-private | `migration-ledger.md#private-retention` / private retention | Private planning material excluded |
 | `SRC-050` | plan | Other-project planning | active | other-project | retain-private | `migration-ledger.md#other-project-sources` / separate project boundary | Other-project lifecycle is classified only; source content excluded |
 | `SRC-051` | plan | Implementation plan with retained private details | historical | project-private | split | `current-state.md`, `history/release-and-ui-incidents.md` / private retention | Public conclusion and private implementation mechanics are split; private material remains outside tracked docs |
-| `SRC-052` | plan | Rolling tokscale catch-up | active | repo-public | summarize | `plans/tokscale-alignment.md`, `vendor-tokscale.md` / vendor README and issue #45 | Current upstream status and ordering reconciled with current vendor tree |
+| `SRC-052` | plan | Rolling tokscale catch-up | active | repo-public | summarize | `plans/tokscale-alignment.md`, `vendor-tokscale.md` / engine `UPSTREAM.md`, consumer pin, and issue #45 | Current upstream status and ordering reconciled with the reviewed shared-engine commit |
 | `SRC-053` | plan | Upstream issue and PR reports | historical | repo-public | summarize | `vendor-tokscale.md`, `workflow.md`, `current-state.md` / vendor README and public issue/PR | Counted once; no duplicate rows for its four report subjects |
 | `SRC-054` | plan | v4.0.7 to v4.0.10 assessment | superseded | repo-public | supersede | `plans/tokscale-alignment.md`, `decisions/0003-selective-upstream-alignment.md` / current rolling plan | Supersession checked against current public alignment status |
 | `SRC-055` | plan | Canonical knowledge-base implementation plan | active | repo-public | summarize | `decisions/0001-canonical-knowledge-base.md`, `docs/knowledge/README.md` / current tracked tree | Required file set and task boundary reconciled with this worktree |
@@ -134,5 +134,5 @@ Rows marked `other-project` are retained only to prove that sources outside Toke
 | Duplicate handling | One row for the upstream-report plan and one row for the project-private follow-up; subjects are split in treatment, not duplicated as sources |
 | Destination coverage | Every row has a non-empty canonical destination or an explicit private/other-project retention section |
 | Privacy scan | No source filename, absolute local path, credential value/location, private environment, machine-specific tooling, or unpublished material is copied |
-| Source hierarchy | Exact vendor facts remain in `vendor/README.md`; runtime gates remain in workflow YAML; this ledger records migration treatment only |
+| Source hierarchy | Exact shared-engine alignment facts remain in the engine `UPSTREAM.md`; TokenBar's reviewed pin remains in `vendor/README.md`; runtime gates remain in workflow YAML; this ledger records migration treatment only |
 | Validator boundary | The tracked validator checks the exact ledger structure; 58-source reconciliation remains a local external audit |

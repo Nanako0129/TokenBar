@@ -3,33 +3,44 @@ status: active
 id: kb-decision-0003
 kind: canonical
 scope: repository
-read_when: evaluating a tokscale commit, resolving vendor drift, or deciding whether to add a client
-last_verified: 2026-07-14
-sources: ["vendor/README.md", "docs/knowledge/vendor-tokscale.md", "docs/knowledge/plans/tokscale-alignment.md", "public issue #45"]
+read_when: evaluating a tokscale commit, resolving shared-engine drift, or deciding whether to add a client
+last_verified: 2026-07-28
+sources: [".gitmodules", "vendor/README.md", "docs/knowledge/vendor-tokscale.md", "docs/knowledge/plans/tokscale-alignment.md", "public tokscale-core UPSTREAM at b31e394", "public issue #45"]
 ---
 
 # ADR 0003: Selective upstream alignment
 
 ## Decision
 
-Track the moving upstream `main` and selectively port reviewed commits or hunks into the current TokenBar vendor. Do not pin the product to a tag, do not wholesale replace patched files, and do not interpret a commit title as a complete description of its runtime effect.
+Track the moving tokscale upstream and selectively land reviewed commits or
+hunks in the public `tokscale-core` engine. TokenBar consumes only a reviewed
+engine commit through its pinned submodule; do not edit shared source on the
+consumer branch or interpret a commit title as a complete description of its
+runtime effect.
 
 ## Selection matrix
 
 | Classification | Action |
 |---|---|
-| Already vendored | Record exact evidence and do not reapply |
-| Correctness take | Port the smallest complete upstream change and add a regression fixture |
-| Streaming adaptation | Port parser logic, then preserve TokenBar lane, cache, mtime, FFI, and report seams |
+| Already in engine | Record exact evidence and do not reapply |
+| Correctness take | Land the smallest complete upstream change and a regression fixture in `tokscale-core` |
+| Shared adaptation | Preserve engine streaming, cache, mtime, pricing, and report semantics while porting parser logic |
 | Defer | Keep the public rationale and wait for a product or architecture decision |
-| Skip | Record why the code is outside TokenBar's vendored surface |
+| Skip | Record why the code is outside the shared engine's surface |
 | Superseded | Point to the newer source of truth and remove stale bookkeeping |
 
 ## Rationale
 
-TokenBar carries local streaming aggregation, cache identity, client filtering, pricing behavior, report mappers, and platform-specific discovery. A whole-file replacement can compile while deleting those behaviors. Selective porting keeps the diff auditable and makes every local deviation explicit in the vendor README.
+The shared engine carries streaming aggregation, cache identity, client
+filtering, pricing behavior, and platform-specific discovery that can be lost
+by a whole-file replacement even when the result compiles. Selective alignment
+keeps those changes auditable in the engine's `UPSTREAM.md`. TokenBar continues
+to own app-specific FFI, C ABI, Swift, and build wiring outside the submodule.
 
-> **Schema rule：** If a selected change alters serialized parser output, dedup keys, or attribution, bump TokenBar's own cache schema and prove stale-cache rebuild. Upstream's counter is not TokenBar's counter.
+> **Schema rule：** If a selected change alters serialized parser output,
+> dedup keys, or attribution, bump the shared engine's cache schema and prove
+> stale-cache rebuild. tokscale upstream's counter is not the shared engine's
+> counter.
 
 ## Public tracking
 

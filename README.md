@@ -79,10 +79,11 @@ a vibrancy fallback). Still on macOS 11–13? The final Tauri build stays as
 
 ## How it works
 
-Rust owns the data — session parsing, aggregation, pricing, quota fetching — via
-the vendored [tokscale-core](https://github.com/junhoyeo/tokscale), exposed to
-Swift as a C-ABI staticlib (`crates/tb_core_ffi`). Swift owns the rest: SwiftUI
-views, the `NSStatusItem` shell, Sparkle updates.
+Rust owns the data: the public
+[tokscale-core](https://github.com/Nanako0129/tokscale-core) shared engine,
+pinned as a Git submodule, handles session parsing, aggregation, and pricing;
+the app-owned `crates/tb_core_ffi` adds quota fetching and exposes the C ABI.
+Swift owns the rest: SwiftUI views, the `NSStatusItem` shell, Sparkle updates.
 
 ```sh
 make                        # cargo build --release, then swift build
@@ -90,7 +91,7 @@ make run                    # build + launch TokenBar
 swift run TokenBar --smoke  # run the FFI smoke test
 ```
 
-The [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, vendor boundary, release chain, and maintenance state.
+The [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, shared-engine boundary, release chain, and maintenance state.
 
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
@@ -118,10 +119,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, change-specific guardrails, ve
 ## Credits
 
 TokenBar is built on **[tokscale](https://github.com/junhoyeo/tokscale)** by
-Junho Yeo. Its vendored `tokscale-core` crate does the session parsing, dedup,
-and pricing across 25+ agents — and its interactive TUI is the blueprint for the
-whole dashboard: the seven lenses (Overview, Models, Monthly, Daily, Hourly, Stats, Agents)
-and their `In · Out · CR · CW` column breakdown are modeled on it.
+Junho Yeo. TokenBar's shared
+[`tokscale-core`](https://github.com/Nanako0129/tokscale-core) engine derives
+from that core and handles session parsing, dedup, and pricing across 25+
+agents. The tokscale interactive TUI is also the blueprint for the whole
+dashboard: the seven lenses (Overview, Models, Monthly, Daily, Hourly, Stats,
+Agents) and their `In · Out · CR · CW` column breakdown are modeled on it.
 
 The product line began as a fork of
 [tokcat](https://github.com/handlecusion/tokcat) by handlecusion — the original

@@ -26,7 +26,7 @@ TokenBar is in a maintenance phase. User-visible correctness, missing or stale d
 |---|---|
 | Wrong or missing usage, cost, quota, or hidden-client data | Describe a minimal reproduction, the expected value, and the affected client or report |
 | Parser, cache, deduplication, aggregation, or FFI correction | Identify the producing layer and the smallest deterministic old-fail/new-pass fixture |
-| Narrow upstream tokscale fix | Compare the current upstream diff with the current vendor tree and local patch ledger |
+| Narrow upstream tokscale fix | Compare the current upstream diff with the shared engine and its `UPSTREAM.md` ledger |
 | New client, broad UI redesign, or major product expansion | Open a discussion or focused issue before implementation |
 | Release, Sparkle, Homebrew, or migration change | Describe the affected delivery surface; publishing remains maintainer-controlled |
 
@@ -43,15 +43,15 @@ If you use an automated coding client, it must also follow [`AGENTS.md`](AGENTS.
 | Rust, C ABI, Swift data flow, reports, or filters | [`architecture.md`](docs/knowledge/architecture.md) and [`verification.md`](docs/knowledge/verification.md) |
 | Branches, commits, review, or integration | [`workflow.md`](docs/knowledge/workflow.md) and [`communication.md`](docs/knowledge/communication.md) |
 | Tests, fixtures, cache invalidation, or UX acceptance | [`verification.md`](docs/knowledge/verification.md) |
-| Vendored tokscale | [`vendor/AGENTS.md`](vendor/AGENTS.md), [`vendor/README.md`](vendor/README.md), and [`vendor-tokscale.md`](docs/knowledge/vendor-tokscale.md) |
+| Shared tokscale engine or consumer pin | [`vendor/AGENTS.md`](vendor/AGENTS.md), [`vendor/README.md`](vendor/README.md), and [`vendor-tokscale.md`](docs/knowledge/vendor-tokscale.md) |
 | Sparkle, appcast, Homebrew, Pages, or release notes | [`release.md`](docs/knowledge/release.md) and [`workflow.md`](docs/knowledge/workflow.md) |
 | Landing site structure, deployment, or product claims | [`landing/AGENTS.md`](landing/AGENTS.md) and [`release.md`](docs/knowledge/release.md) |
 
-Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. Exact vendor baselines and local patch records belong only in `vendor/README.md`.
+Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/b31e39425859393504a2d56cb5af7c93e6461c7d/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`.
 
 ## Development environment
 
-The supported application target is Apple Silicon on macOS 14 or later. The package uses Swift tools 6.0, and CI uses stable Rust. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
+The supported application target is Apple Silicon on macOS 14 or later. The package uses Swift tools 6.0, and CI uses stable Rust. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` before building. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
 
 Build the Rust static library first, link the Swift package, and run the UI-free contract checks:
 
@@ -88,7 +88,7 @@ Create a topic branch from the current upstream `main` branch, and keep each bra
 
 > **Pre-aggregation:** Do not try to subtract a client after contributions have been combined into a mixed aggregate. Pass non-empty filters to the producer while client identity is still available, and preserve the documented `nil` or empty-list semantics across Swift, C, and Rust.
 
-> **Vendor boundary:** Port reviewed upstream hunks into the patched vendor tree. Never replace a whole vendored file when that could erase TokenBar's streaming, cache, report, pricing, or FFI adaptations; update `vendor/README.md` whenever vendor code changes.
+> **Shared-engine boundary:** Land shared Rust changes and their ledger updates in `tokscale-core`, then advance TokenBar's submodule only to a reviewed engine commit. TokenBar keeps `tb_core_ffi`, the C header, Swift, root lockfile, and app wiring in this repository.
 
 | Change class | Required evidence or treatment |
 |---|---|

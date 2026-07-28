@@ -1,15 +1,23 @@
-# Vendor task routing
+# Shared-engine task routing
 
-Read [`vendor/README.md`](README.md) before changing `vendor/tokscale-core/`. It is the exact baseline, cherry-pick, upstream-report, and local-patch ledger. Then read [`docs/knowledge/vendor-tokscale.md`](../docs/knowledge/vendor-tokscale.md) for the selective-port method and [`docs/knowledge/verification.md`](../docs/knowledge/verification.md) for required evidence.
+Read [`vendor/README.md`](README.md) before changing the
+`vendor/tokscale-core` pin. Then read
+[`docs/knowledge/vendor-tokscale.md`](../docs/knowledge/vendor-tokscale.md) for
+the shared-engine boundary and
+[`docs/knowledge/verification.md`](../docs/knowledge/verification.md) for
+required consumer evidence. Engine implementation work follows the public
+engine's immutable
+[`AGENTS.md`](https://github.com/Nanako0129/tokscale-core/blob/b31e39425859393504a2d56cb5af7c93e6461c7d/AGENTS.md).
 
 ## Invariants
 
 | Boundary | Rule |
 |---|---|
-| Baseline | Treat the documented upstream baseline and the current vendor tree as separate evidence; never infer either from the Cargo package version. |
-| Selective sync | Port reviewed upstream hunks into the patched vendor tree. Do not replace a whole file when that would remove local streaming, cache, or TokenBar report adaptations. |
-| Streaming parity | A parser change must be checked against materialized and streaming consumers, including fingerprints, mtime probes, pruning, and FFI report mappings where applicable. |
-| Schema | Any serialized cached-output change requires the vendor's own cache-schema decision and a rebuild regression. |
-| Ledger | Update `vendor/README.md` when vendor code changes; do not duplicate its exact commit table in another document. |
+| Pin | `vendor/tokscale-core` must be a clean gitlink at the reviewed engine commit recorded in `vendor/README.md`. |
+| Engine ownership | Do not edit shared Rust source inside the TokenBar submodule. Land and verify the engine change in `tokscale-core`, then update this consumer pin. |
+| Consumer ownership | TokenBar continues to own `crates/tb_core_ffi`, `Sources/CTB/include/ctb.h`, Swift code, build wiring, and the root `Cargo.lock`. |
+| Parity | A pin update must verify materialized and streaming behavior, cache/schema consequences, FFI mappings, and the Rust-to-Swift app gates that the change can affect. |
+| Ledger | The engine's `UPSTREAM.md` owns the exact upstream and local-patch ledger. `vendor/README.md` records only TokenBar's source and pin. |
 
-No vendor task may push or merge by implication from a plan. Return the diff and verification evidence to the user for authorization.
+No shared-engine task may push or merge by implication from a plan. Return the
+diff and verification evidence to the user for authorization.

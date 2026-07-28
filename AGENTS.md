@@ -12,7 +12,7 @@ Read [`docs/knowledge/README.md`](docs/knowledge/README.md) for every task befor
 | Rust, C ABI, or Swift data flow | [`docs/knowledge/architecture.md`](docs/knowledge/architecture.md) |
 | Branches, reviews, merge, or release authorization | [`docs/knowledge/workflow.md`](docs/knowledge/workflow.md) |
 | Tests, fixtures, cache invalidation, or cross-language checks | [`docs/knowledge/verification.md`](docs/knowledge/verification.md) |
-| Vendored tokscale work | [`vendor/AGENTS.md`](vendor/AGENTS.md), [`vendor/README.md`](vendor/README.md), [`docs/knowledge/vendor-tokscale.md`](docs/knowledge/vendor-tokscale.md) |
+| Shared tokscale engine or consumer pin | [`vendor/AGENTS.md`](vendor/AGENTS.md), [`vendor/README.md`](vendor/README.md), [`docs/knowledge/vendor-tokscale.md`](docs/knowledge/vendor-tokscale.md) |
 | Release, Sparkle, appcast, or Homebrew | [`docs/knowledge/release.md`](docs/knowledge/release.md) |
 | GitHub prose or contributor credit | [`docs/knowledge/communication.md`](docs/knowledge/communication.md) |
 | Current maintenance priorities | [`docs/knowledge/current-state.md`](docs/knowledge/current-state.md) |
@@ -24,7 +24,7 @@ Read [`docs/knowledge/README.md`](docs/knowledge/README.md) for every task befor
 | Source of truth | Add canonical project facts to `docs/knowledge/`; keep adapters as routing and guardrails. |
 | Cross-language seam | Preserve the Rust -> C ABI -> Swift contract; verify both sides when a boundary changes. |
 | Pre-aggregation | Do not attempt to remove a contribution after a mixed aggregate has been computed; pass the filter to the producer. |
-| Vendor boundary | Do not wholesale replace vendored files that contain local streaming, cache, or FFI adaptations. |
+| Shared-engine boundary | Land shared Rust changes in `tokscale-core`; advance only a reviewed gitlink, and keep app-owned FFI, C ABI, Swift, and build wiring in TokenBar. |
 | Public repository | Never add private paths, credentials, machine-specific tooling details, or unpublished security work to tracked docs. |
 
 ## Authorization boundary
