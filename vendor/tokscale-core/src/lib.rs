@@ -5163,12 +5163,14 @@ pub fn parsed_to_unified(msg: &ParsedMessage, cost: f64) -> UnifiedMessage {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::copilot_desktop_source_mtime_ms;
     use super::{
         agent_bucket_key, aggregate_model_usage_entries, apply_pricing_if_available,
-        canonical_model_id, clear_model_aliases, copilot_desktop_source_mtime_ms,
-        dedupe_latest_trae_messages, fold_messages_streaming, get_agents_report, get_hourly_report,
-        get_model_report, get_monthly_report, latest_source_mtime_ms, local_source_change_token,
-        message_cache, model_alias_generation, normalize_model_for_grouping, normalize_syntactic,
+        canonical_model_id, clear_model_aliases, dedupe_latest_trae_messages,
+        fold_messages_streaming, get_agents_report, get_hourly_report, get_model_report,
+        get_monthly_report, latest_source_mtime_ms, local_source_change_token, message_cache,
+        model_alias_generation, normalize_model_for_grouping, normalize_syntactic,
         opencode_authoritative_sources, opencode_identity_group,
         parse_all_messages_with_pricing_with_env_strategy, parse_local_clients,
         parse_local_unified_messages, parsed_to_unified, pricing, prune_scan_result_by_mtime,
@@ -15404,10 +15406,12 @@ mod tests {
         assert_eq!(total_cache_read, i64::MAX);
     }
 
+    #[cfg(target_os = "macos")]
     fn m15a_global_root(home: &Path) -> PathBuf {
         home.join("Library/Application Support/Kiro/User/globalStorage/kiro.kiroagent")
     }
 
+    #[cfg(target_os = "macos")]
     fn write_m15a_snapshot(home: &Path, body: &str) -> PathBuf {
         let path = m15a_global_root(home).join("workspace-a/conversation.chat");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -15415,6 +15419,7 @@ mod tests {
         m15a_global_root(home).join("workspace-a/conversation.chat")
     }
 
+    #[cfg(target_os = "macos")]
     fn write_m15a_execution(home: &Path, status: &str, start_time: &str) -> PathBuf {
         let path = m15a_global_root(home).join("workspace-a/execution-store/execution");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -15437,6 +15442,7 @@ mod tests {
         path
     }
 
+    #[cfg(target_os = "macos")]
     fn m15a_snapshot_body(execution_id: &str, prompt: &str, response: &str) -> String {
         format!(
             r#"{{
