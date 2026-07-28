@@ -1,18 +1,24 @@
 ---
-status: active
+status: historical
 id: kb-plan-tokscale-alignment
 kind: plan
 scope: repository
-read_when: planning the next vendor sync or reviewing issue #45 inventory
-last_verified: 2026-07-27
-sources: ["vendor/README.md", "public issue #45", "public tokscale history", "public TokenBar-Windows PR #7", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
+read_when: reviewing the completed selective-alignment cycle or issue #45 history
+last_verified: 2026-07-28
+sources: ["vendor/README.md", "public tokscale-core commit b31e394", "public issue #45", "public tokscale history", "public TokenBar-Windows PR #7", "docs/knowledge/decisions/0003-selective-upstream-alignment.md"]
 ---
 
 # Rolling tokscale alignment plan
 
+> **Historical completion record：** This M15–D2 cycle finished before the
+> shared-engine extraction. Do not execute its vendor paths, ownership table,
+> ledger transitions, or milestone protocol against the current checkout.
+> Current shared Rust work lands in public `tokscale-core`, updates the engine
+> `UPSTREAM.md`, and reaches TokenBar only through a reviewed submodule pin.
+
 ## 文件目的
 
-TokenBar follows upstream `tokscale` as a rolling source and selects bounded milestones without replacing the locally adapted vendor tree wholesale. This document records the approved product scope, dependency graph, cache schedule, and delivery protocol; the exact 111-row commit classification stays exclusively in [`vendor/README.md`](../../../vendor/README.md).
+TokenBar followed upstream `tokscale` as a rolling source and selected bounded milestones without replacing the locally adapted vendor tree wholesale. This document records that completed product scope, dependency graph, cache schedule, and delivery protocol; its 111-row classification is historical evidence rather than current shared-engine instructions.
 
 ## 目錄
 

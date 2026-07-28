@@ -1,12 +1,12 @@
 ---
-status: active
+status: historical
 id: plan-grok-turn-completed-usage
 kind: plan
 scope: repository
-read_when: fixing Grok Build token undercount, reviewing grok parser, or resuming this branch
-last_verified: 2026-07-21
+read_when: reviewing the completed Grok Build token-undercount implementation
+last_verified: 2026-07-28
 sources:
-  - "vendor/tokscale-core/src/sessions/grok.rs"
+  - "public tokscale-core commit b31e394"
   - "vendor/README.md"
   - "docs/knowledge/vendor-tokscale.md"
   - "docs/knowledge/verification.md"
@@ -14,6 +14,12 @@ sources:
 ---
 
 # Grok Build: prefer `turn_completed.usage` over context counters
+
+> **Historical completion record：** This implementation landed in TokenBar PR
+> #77 before the shared-engine extraction. Do not execute the owned-files,
+> sequence, or handoff instructions against the current consumer checkout.
+> Future shared Rust changes land in public `tokscale-core`, update its
+> `UPSTREAM.md`, and reach TokenBar through a reviewed submodule pin.
 
 ## Outcome
 

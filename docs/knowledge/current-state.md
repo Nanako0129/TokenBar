@@ -51,7 +51,7 @@ Setup-token quota fallback is shipped: when profile usage is unavailable, provid
 |---|---|---|
 | 1 | User-reported wrong or missing usage, cost, quota, or hidden-client data | [`architecture.md`](architecture.md), [`verification.md`](verification.md) |
 | 2 | Regression at Rust -> C ABI -> Swift or cache invalidation seam | [`architecture.md`](architecture.md), [`vendor-tokscale.md`](vendor-tokscale.md) |
-| 3 | Upstream correctness item with a narrow shared-engine adaptation | [`plans/tokscale-alignment.md`](plans/tokscale-alignment.md), [`vendor-tokscale.md`](vendor-tokscale.md) |
+| 3 | Upstream correctness item with a narrow shared-engine adaptation | [`vendor-tokscale.md`](vendor-tokscale.md), [`decisions/0003-selective-upstream-alignment.md`](decisions/0003-selective-upstream-alignment.md) |
 | 4 | Release, appcast, cask, or migration failure | [`release.md`](release.md), [`history/release-and-ui-incidents.md`](history/release-and-ui-incidents.md) |
 | 5 | Cosmetic or broad product expansion | Requires an explicit product decision; do not infer from issue #45 inventory |
 
