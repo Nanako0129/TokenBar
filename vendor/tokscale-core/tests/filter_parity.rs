@@ -21,14 +21,19 @@ struct EnvGuard {
 }
 
 impl EnvGuard {
-    fn set(values: &[(&'static str, &OsStr)]) -> Self {
+    fn isolate(values: &[(&'static str, &OsStr)], removed: &[&'static str]) -> Self {
         let previous = values
             .iter()
-            .map(|(key, _)| (*key, std::env::var_os(key)))
+            .map(|(key, _)| *key)
+            .chain(removed.iter().copied())
+            .map(|key| (key, std::env::var_os(key)))
             .collect();
         unsafe {
             for (key, value) in values {
                 std::env::set_var(key, value);
+            }
+            for key in removed {
+                std::env::remove_var(key);
             }
         }
         Self { previous }
@@ -257,22 +262,41 @@ fn graph_clients(home: &Path) -> Vec<String> {
 fn source_aware_filter_parity_fixture_is_stable_cold_and_warm() {
     let cache_home = tempfile::TempDir::new().unwrap();
     let source_home = tempfile::TempDir::new().unwrap();
-    let _env = EnvGuard::set(&[
-        ("HOME", cache_home.path().as_os_str()),
-        ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
-        ("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1")),
-        (
-            "TOKSCALE_EXTRA_DIRS",
-            source_home
-                .path()
-                .join(".config/manicode/projects")
-                .as_os_str(),
-        ),
-        (
-            "XDG_DATA_HOME",
-            source_home.path().join(".local/share").as_os_str(),
-        ),
-    ]);
+    let extra_dir = format!(
+        "codebuff:{}",
+        source_home
+            .path()
+            .join(".config/manicode/projects")
+            .display()
+    );
+    let _env = EnvGuard::isolate(
+        &[
+            ("HOME", cache_home.path().as_os_str()),
+            ("TOKSCALE_CONFIG_DIR", cache_home.path().as_os_str()),
+            ("TOKSCALE_PRICING_CACHE_ONLY", OsStr::new("1")),
+            ("TOKSCALE_EXTRA_DIRS", OsStr::new(&extra_dir)),
+            (
+                "XDG_DATA_HOME",
+                source_home.path().join(".local/share").as_os_str(),
+            ),
+        ],
+        &[
+            "APPDATA",
+            "CODEBUFF_DATA_DIR",
+            "CODEX_HOME",
+            "COPILOT_OTEL_FILE_EXPORTER_PATH",
+            "GEMINI_CLI_HOME",
+            "GJC_CODING_AGENT_DIR",
+            "GOOSE_PATH_ROOT",
+            "GROK_HOME",
+            "HERMES_HOME",
+            "JCODE_HOME",
+            "KIMI_CODE_HOME",
+            "LOCALAPPDATA",
+            "TOKSCALE_HEADLESS_DIR",
+            "XDG_CONFIG_HOME",
+        ],
+    );
     write_fixture(source_home.path());
 
     let clients = graph_clients(source_home.path());

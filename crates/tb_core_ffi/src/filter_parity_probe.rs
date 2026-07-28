@@ -54,6 +54,9 @@ impl ReportAggregate {
     }
 
     fn matches(&self, other: &Self) -> bool {
+        // Pricing refreshes independently from the local-source generation
+        // token. Keep cost in the diagnostic delta, but do not turn a price-only
+        // refresh between scans into a filter mismatch.
         self.entry_count == other.entry_count
             && self.input == other.input
             && self.output == other.output
@@ -62,7 +65,6 @@ impl ReportAggregate {
             && self.reasoning == other.reasoning
             && self.total_tokens == other.total_tokens
             && self.message_count == other.message_count
-            && (self.total_cost - other.total_cost).abs() < 0.01
     }
 }
 
@@ -430,6 +432,19 @@ mod tests {
         assert_eq!(result.hourly.status, ProbeStatus::Mismatch);
         assert_eq!(result.agents.status, ProbeStatus::Match);
         assert_eq!(result.hourly.delta.unwrap().input, 1);
+    }
+
+    #[test]
+    fn stable_source_ignores_independent_pricing_refresh() {
+        let result = run_fixture(
+            vec![Ok(1); 6],
+            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(10, 2, 0.75))],
+            vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 1.25))],
+        );
+        assert_eq!(result.hourly.status, ProbeStatus::Match);
+        assert_eq!(result.agents.status, ProbeStatus::Match);
+        assert_eq!(result.hourly.delta.unwrap().total_cost, 0.5);
+        assert_eq!(result.agents.delta.unwrap().total_cost, 1.0);
     }
 
     #[test]
