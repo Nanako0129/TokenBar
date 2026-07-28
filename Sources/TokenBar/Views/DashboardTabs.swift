@@ -64,7 +64,10 @@ struct DashboardTabs: View {
                                 }
                             }
                             .help("Drag to reorder")
-                            .gesture(dragGesture(for: id))
+                            // Once the pointer has moved far enough to recognize
+                            // a drag, it takes precedence over the Button press.
+                            // A normal click still uses the native control path.
+                            .highPriorityGesture(dragGesture(for: id))
                     }
                 }
                 .coordinateSpace(name: Self.dragSpace)
@@ -81,39 +84,36 @@ struct DashboardTabs: View {
     }
 
     private func tab(id: String, label: String, color: String?, index: Int) -> some View {
-        HStack(spacing: 5) {
-            if color != nil {
-                AgentIconView(clientId: id, size: 14)
+        Button {
+            active = id
+        } label: {
+            HStack(spacing: 5) {
+                if color != nil {
+                    AgentIconView(clientId: id, size: 14)
+                }
+                Text(label)
+                    .font(.caption.weight(active == id ? .semibold : .regular))
+                    .lineLimit(1)
+                    .fixedSize()
+                if kbdHints && index <= 9 {
+                    Text("⌘\(index)")
+                        .font(.system(size: 8, weight: .semibold).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 3)
+                        .padding(.vertical, 1)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
+                }
             }
-            Text(label)
-                .font(.caption.weight(active == id ? .semibold : .regular))
-                .lineLimit(1)
-                .fixedSize()
-            if kbdHints && index <= 9 {
-                Text("⌘\(index)")
-                    .font(.system(size: 8, weight: .semibold).monospacedDigit())
-                    .foregroundStyle(.secondary)
-                    .padding(.horizontal, 3)
-                    .padding(.vertical, 1)
-                    .background(.quaternary, in: RoundedRectangle(cornerRadius: 3))
-            }
+            .foregroundStyle(active == id ? .primary : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(
+                active == id ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
+                in: Capsule())
+            .contentShape(Capsule())
         }
-        .foregroundStyle(active == id ? .primary : .secondary)
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(
-            active == id ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
-            in: Capsule())
-        .contentShape(Capsule())
-        // A plain tap selects. Not a Button: the reorder DragGesture and a
-        // Button's own press gesture would both claim the drag, and the button
-        // action can still fire after a drop that ends inside its bounds.
-        .onTapGesture { active = id }
-        .accessibilityElement(children: .combine)
-        .accessibilityAddTraits(active == id ? [.isButton, .isSelected] : .isButton)
-        // A tap gesture is not an activation point for VoiceOver the way a
-        // Button is, so restore one explicitly.
-        .accessibilityAction { active = id }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(active == id ? .isSelected : [])
         .id(id)
     }
 
@@ -142,7 +142,7 @@ struct DashboardTabs: View {
     }
 
     /// `minimumDistance` keeps a click a click: below the threshold the drag
-    /// never starts and the tap gesture selects the tab instead.
+    /// never starts and the Button's native press selects the tab instead.
     private func dragGesture(for id: String) -> some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .named(Self.dragSpace))
             .onChanged { value in
