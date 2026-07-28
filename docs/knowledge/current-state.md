@@ -36,7 +36,7 @@ TokenBar native 已完成從 Tauri 到 SwiftUI 的出貨重寫，現在是維護
 | Area | Current evidence |
 |---|---|
 | Product | Native SwiftUI menu-bar app is the shipping line; the predecessor Tauri repository is archived and remains a legacy migration source |
-| Shared engine | Public `tokscale-core` main is `b31e39425859393504a2d56cb5af7c93e6461c7d`; Native main `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` and Windows main `26492a5b615fed9378034e7bb56bc5aeccf5d368` pin that exact commit. The engine owns the 111-row `79/0/0/18/13/1` ledger、format-2 cache source and former schema-32 monolith provenance |
+| Shared engine | Public `tokscale-core` commit `b31e39425859393504a2d56cb5af7c93e6461c7d` is the shared pin; Native PR #114 merge checkpoint `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` and Windows PR #12 merge checkpoint `26492a5b615fed9378034e7bb56bc5aeccf5d368` pin that exact commit. The engine owns the 111-row `79/0/0/18/13/1` ledger、format-2 cache source and former schema-32 monolith provenance |
 | Correctness | Cost provenance, Jcode correction turns, Pi metadata, Claude workflow transcripts, Copilot hierarchy, hidden-client filtering, and bounded folds have landed in staged releases or main history |
 | Release | Stable Sparkle feed, Homebrew cask, legacy update metadata, and landing Pages workflows are maintained as separate delivery surfaces |
 | Current repository baseline | Before each task, fetch and resolve the current `origin/main`; this document is not a commit pin |

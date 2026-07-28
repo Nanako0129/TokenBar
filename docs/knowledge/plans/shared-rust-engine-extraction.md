@@ -41,15 +41,15 @@ submodule pin 同一個 immutable commit。執行期間的本機路徑、credent
 
 ## Final state
 
-| Repository | Default-branch result | Shared-engine state |
+| Repository | Closeout checkpoint | Shared-engine state |
 |---|---|---|
 | [`Nanako0129/tokscale-core`](https://github.com/Nanako0129/tokscale-core) | `b31e39425859393504a2d56cb5af7c93e6461c7d` | Shared source、tests、standalone lock／CI 與 authoritative `UPSTREAM.md` ledger |
 | [`Nanako0129/TokenBar`](https://github.com/Nanako0129/TokenBar) | `704426e8df9acfb8e82fe4bf3b7ed3e5adbc2fea` | Gitlink `vendor/tokscale-core` pins `b31e39425859393504a2d56cb5af7c93e6461c7d` |
 | [`Nanako0129/TokenBar-Windows`](https://github.com/Nanako0129/TokenBar-Windows) | `26492a5b615fed9378034e7bb56bc5aeccf5d368` | Gitlink `vendor/tokscale-core` pins `b31e39425859393504a2d56cb5af7c93e6461c7d` |
 
-The two consumer default branches use the same public submodule URL and exact
-gitlink. Their application-owned FFI、C header、Swift／C# bridge、root lock
-and packaging surfaces remain outside the engine repository.
+At closeout, the two consumer default branches used the same public submodule
+URL and exact gitlink. Their application-owned FFI、C header、Swift／C# bridge、
+root lock and packaging surfaces remain outside the engine repository.
 
 ## Objective and scope
 
@@ -132,7 +132,7 @@ consumer advances its gitlink.
 | AC-2 | Frozen reachable history passed secret、private-path、large-blob、license and attribution scans before and after public publication |
 | AC-3 | Engine passed standalone locked build、tests and strict Clippy on macOS and Windows |
 | AC-4 | Native and Windows default-branch gitlinks both equal reviewed engine commit `b31e39425859393504a2d56cb5af7c93e6461c7d` |
-| AC-5 | Rust-consuming CI and release paths use recursive checkout with expected-gitlink／actual-HEAD assertions |
+| AC-5 | Rust-consuming CI and release paths use recursive checkout |
 | AC-6 | Native app gates、Windows x64／ARM64 packaging and separately authorized native ARM64 runtime smoke passed |
 | AC-7 | Anonymous public clone reproduced the scanned engine refs and reachable-object closure |
 | AC-8 | Native and Windows root `Cargo.lock` files remained byte-identical to their CORE-R0 snapshots |
