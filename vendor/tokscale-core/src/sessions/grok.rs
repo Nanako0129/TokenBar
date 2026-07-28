@@ -150,7 +150,7 @@ impl ParsedUsage {
 
     /// Grok's `inputTokens` includes cache reads. TokenBar totals sum every
     /// bucket, so net uncached input into `input` and put cache in `cache_read`.
-    fn into_token_breakdown(&self) -> TokenBreakdown {
+    fn token_breakdown(&self) -> TokenBreakdown {
         let cache_read = self.cached_read_tokens.max(0);
         let input = self.input_tokens.max(0).saturating_sub(cache_read);
         TokenBreakdown {
@@ -524,7 +524,7 @@ fn emit_usage_messages(
             .filter(|m| !m.trim().is_empty())
             .unwrap_or_else(|| fallback_model.to_string());
 
-        let tokens = row.into_token_breakdown();
+        let tokens = row.token_breakdown();
         if tokens.input == 0
             && tokens.output == 0
             && tokens.cache_read == 0
