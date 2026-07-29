@@ -1307,6 +1307,17 @@ enum SelfTest {
                 == ["b", "a"],
             "mergeReorder with empty full writes the visible sequence")
 
+        // A fresh order key still needs the hidden present-client slots before
+        // the visible subset is merged. Otherwise re-enabling the hidden tab
+        // would append it after every reordered visible tab.
+        expect(
+            ClientRegistry.mergeReorder(
+                full: DashboardTabs.completeOrder(
+                    [], present: ["claude", "codex", "gemini"]),
+                visible: ["claude", "gemini"], from: "gemini", to: "claude")
+                == ["gemini", "codex", "claude"],
+            "top-tab reorder preserves an unsaved hidden client slot")
+
         // Top tab-bar drag reorder: the drop line sits on the edge the
         // direction-aware insert will use (right → after the target, left →
         // before it). Overview is not in `clients`, so it can never be a drop

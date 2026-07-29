@@ -12,7 +12,10 @@ import TokenBarCore
 /// pinned first — it is neither draggable nor a drop target, so no drag can
 /// move a client ahead of it.
 struct DashboardTabs: View {
+    /// Clients currently visible in the row.
     let clients: [String]
+    /// Every currently present client, including tabs hidden from this row.
+    let presentClients: [String]
     @Binding var active: String
     /// Show ⌘1…⌘9 pins while Cmd is held (the discoverability overlay).
     var kbdHints = false
@@ -119,11 +122,18 @@ struct DashboardTabs: View {
 
     // MARK: - Drag reorder
 
+    /// Fill an incomplete persisted order with current clients before a visible-
+    /// subset reorder, so a hidden tab keeps its implicit slot on first drag.
+    nonisolated static func completeOrder(_ saved: [String], present: [String]) -> [String] {
+        var seen = Set(saved)
+        return saved + present.filter { seen.insert($0).inserted }
+    }
+
     /// Which edge of the hovered tab the drop line sits on, matching
     /// `ClientRegistry.reorder`'s direction-aware insert (dragging right drops
     /// after the target, left drops before it). Static and pure so SelfTest can
     /// assert the direction mapping.
-    static func dropEdge(
+    nonisolated static func dropEdge(
         dragId: String?, overId: String?, tabId: String, in clients: [String]
     ) -> HorizontalEdge? {
         guard let dragId, overId == tabId, dragId != tabId,
@@ -153,10 +163,11 @@ struct DashboardTabs: View {
             .onEnded { _ in
                 if let over = overId, over != id {
                     // `clients` is a subset of the shared order (it excludes
-                    // hidden clients and quota-only ids). Merge the reordered
-                    // subset back into the saved order so off-screen ids keep
-                    // their slots instead of being dropped from the key.
-                    let full = ClientRegistry.parseIdList(orderRaw)
+                    // hidden clients and quota-only ids). Complete a fresh or
+                    // partial saved order with present clients first, then merge
+                    // the visible reorder so every known off-screen slot survives.
+                    let full = Self.completeOrder(
+                        ClientRegistry.parseIdList(orderRaw), present: presentClients)
                     let merged = ClientRegistry.mergeReorder(
                         full: full, visible: clients, from: id, to: over)
                     orderRaw = merged.joined(separator: ",")

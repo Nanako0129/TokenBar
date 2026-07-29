@@ -99,8 +99,9 @@ struct PopoverView: View {
             // there is client data, so Overview is visible alongside the clients.
             if !displayClients.isEmpty {
                 DashboardTabs(
-                    clients: displayClients, active: $activeTab,
-                    kbdHints: cmdHeld)
+                    clients: displayClients,
+                    presentClients: model.stats?.presentClients ?? [],
+                    active: $activeTab, kbdHints: cmdHeld)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
             }
