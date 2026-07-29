@@ -105,6 +105,7 @@
 "Reasoning" = "推理";
 "Model" = "模型";
 "Agent" = "Agent";
+"Window" = "時間窗";
 "Price" = "費用";
 "Show less" = "收合";
 "Show %lld more" = "再顯示 %lld 筆";
@@ -169,6 +170,8 @@
 "Language" = "語言";
 "About" = "關於";
 "Menu bar" = "選單列";
+"Dashboard" = "儀表板";
+"General" = "一般";
 "Agent limits card" = "Agent 額度卡片";
 "Live session card" = "即時工作階段卡片";
 

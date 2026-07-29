@@ -74,7 +74,10 @@ final class SettingsWindowController {
             forName: NSWindow.willCloseNotification, object: window, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.host?.rootView = AnyView(Color.clear.frame(width: 685, height: 580))
+                self?.host?.rootView = AnyView(
+                    Color.clear.frame(
+                        width: SettingsWindowView.contentSize.width,
+                        height: SettingsWindowView.contentSize.height))
             }
         }
         // The hosting view inflates the frame by the title-bar safe area

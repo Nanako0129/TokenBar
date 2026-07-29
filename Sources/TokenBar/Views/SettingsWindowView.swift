@@ -8,11 +8,14 @@ import TokenBarCore
 /// changes reflect instantly without touching the popover's transient
 /// behavior.
 struct SettingsWindowView: View {
+    static let contentSize = CGSize(width: 856, height: 580)
+
     // Default cachesSnapshot: false — this window's model must never write the
     // popover's restore snapshot (its `year` is frozen at init; clobbering the
     // cache with it would re-introduce the reopen flash).
     @State private var model = DashboardModel()
     @State private var tokensPerMin: Double?
+    @State private var selectedPage = SettingsPanel.Page.menuBar
     /// Master switch: off hides the preview's Agent-limits card too.
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
     /// Observed so the preview (tab list, limits card, trace card) re-derives
@@ -71,8 +74,18 @@ struct SettingsWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            List(SettingsPanel.Page.allCases, selection: $selectedPage) { page in
+                Label(page.localizedTitle, systemImage: page.symbolName)
+                    .tag(page)
+            }
+            .listStyle(.sidebar)
+            .frame(width: 170)
+            Divider()
             ScrollView {
-                SettingsPanel(agentUsage: model.agentUsage, presentClients: model.stats?.presentClients ?? [])
+                SettingsPanel(
+                    page: selectedPage,
+                    agentUsage: model.agentUsage,
+                    presentClients: model.stats?.presentClients ?? [])
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(OverlayScrollerEnforcer())
@@ -89,7 +102,7 @@ struct SettingsWindowView: View {
             .scrollIndicators(.never)
             .frame(width: 330)
         }
-        .frame(width: 685, height: 580)
+        .frame(width: Self.contentSize.width, height: Self.contentSize.height)
         .background(PopoverBackdrop().ignoresSafeArea())
         .task { await model.load() }
         .task { await model.pollAgentUsage() }
