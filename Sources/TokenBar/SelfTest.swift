@@ -305,6 +305,202 @@ enum SelfTest {
             modelLevelEntries.first { $0.model == "shared-model" }?.msPer1kTokens == nil,
             "provider-split model fold omits unrecomputable throughput")
 
+        // Usage attribution: declarations are explicit, provider-level by
+        // default, and model overrides are more specific. Suggestions never
+        // participate in effective-state resolution.
+        func attributionEntry(
+            client: String, provider: String, model: String
+        ) -> ModelReportEntry {
+            let json = """
+            {"client":"\(client)","model":"\(model)","provider":"\(provider)",
+             "input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+             "total":1,"messageCount":1,"cost":0.0,"msPer1kTokens":null}
+            """
+            return try! JSONDecoder().decode(
+                ModelReportEntry.self, from: Data(json.utf8))
+        }
+        let claudeOpenAIEntry = attributionEntry(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol")
+        expect(
+            UsageAttribution.resolve(
+                client: "claude", provider: "openai", model: "gpt-5.6-sol", records: [])
+                == .unassigned,
+            "empty attribution table resolves unassigned")
+
+        let providerDeclaration = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .excluded)
+        let modelDeclaration = UsageAttribution.Record(
+            client: "claude", provider: "openai", model: "gpt-5.6-sol",
+            state: .assigned("codex"))
+        expect(
+            UsageAttribution.resolve(claudeOpenAIEntry, records: [providerDeclaration, modelDeclaration])
+                == .assigned("codex"),
+            "model attribution override wins over provider declaration")
+
+        let crossAssignment = UsageAttribution.Record(
+            client: "claude", provider: "openai", state: .assigned("codex"))
+        let crossAssignmentRaw = UsageAttribution.confirmedRaw(
+            updating: nil, record: crossAssignment)
+        expect(
+            crossAssignmentRaw
+                == "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+                && UsageAttribution.parseRaw(crossAssignmentRaw).records.first?.state
+                    == .assigned("codex"),
+            "cross-client attribution round-trips its target")
+
+        let emptyProviderDeclaration = UsageAttribution.Record(
+            client: "opencode", provider: "", state: .assigned("codex"))
+        let namedProviderDeclaration = UsageAttribution.Record(
+            client: "opencode", provider: "nvidia", state: .excluded)
+        let emptyProviderEntry = attributionEntry(
+            client: "opencode", provider: "", model: "deepseek-v4-pro")
+        let namedProviderEntry = attributionEntry(
+            client: "opencode", provider: "nvidia", model: "deepseek-v4-pro")
+        func applyConfirmed(_ records: [UsageAttribution.Record]) -> String? {
+            records.reduce(String?.none) { raw, record in
+                UsageAttribution.confirmedRaw(updating: raw, record: record)
+            }
+        }
+        let emptyProviderRaw = applyConfirmed([namedProviderDeclaration, emptyProviderDeclaration])
+        expect(
+            UsageAttribution.resolve(emptyProviderEntry, records: [namedProviderDeclaration, emptyProviderDeclaration])
+                == .assigned("codex")
+                && UsageAttribution.resolve(namedProviderEntry, records: [namedProviderDeclaration, emptyProviderDeclaration])
+                    == .excluded
+                && emptyProviderRaw
+                    == "[{\"client\":\"opencode\",\"model\":null,\"provider\":\"\",\"state\":\"assigned\",\"target\":\"codex\"},{\"client\":\"opencode\",\"model\":null,\"provider\":\"nvidia\",\"state\":\"excluded\"}]",
+            "empty provider is a distinct usable source key")
+
+        let canonicalRecords = [
+            UsageAttribution.Record(
+                client: "opencode", provider: "nvidia", model: "deepseek-v4-pro",
+                state: .assigned("codex")),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .assigned("codex")),
+            UsageAttribution.Record(
+                client: "opencode", provider: "nvidia", state: .excluded),
+        ]
+        let canonicalExpected = "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"},{\"client\":\"opencode\",\"model\":null,\"provider\":\"nvidia\",\"state\":\"excluded\"},{\"client\":\"opencode\",\"model\":\"deepseek-v4-pro\",\"provider\":\"nvidia\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+        let canonicalForward = applyConfirmed(canonicalRecords)
+        let canonicalReverse = applyConfirmed(Array(canonicalRecords.reversed()))
+        let excludedEntry = attributionEntry(
+            client: "opencode", provider: "nvidia", model: "other-model")
+        let unassignedEntry = attributionEntry(
+            client: "gemini", provider: "openai", model: "other-model")
+        let canonicalTable = UsageAttribution.parseRaw(canonicalForward)
+        expect(
+            canonicalForward == canonicalExpected && canonicalReverse == canonicalExpected
+                && UsageAttribution.resolve(claudeOpenAIEntry, records: canonicalTable.records)
+                    == .assigned("codex")
+                && UsageAttribution.resolve(excludedEntry, records: canonicalTable.records)
+                    == .excluded
+                && UsageAttribution.resolve(unassignedEntry, records: canonicalTable.records)
+                    == .unassigned,
+            "attribution serialization is canonical and preserves all states")
+        expect(
+            UsageAttribution.confirmedRaw(
+                updating: nil,
+                record: UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .unassigned)
+            ) == "[]",
+            "unassigned attribution update removes its declaration")
+
+        let attributionDefaultsName = "TokenBar.SelfTest.UsageAttribution.\(UUID().uuidString)"
+        if let attributionDefaults = UserDefaults(suiteName: attributionDefaultsName) {
+            defer { attributionDefaults.removePersistentDomain(forName: attributionDefaultsName) }
+            let suggestion = UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .assigned("codex"))
+            let suggestionRaw = UsageAttribution.suggestionsRaw(updating: nil, record: suggestion)
+            attributionDefaults.set(suggestionRaw, forKey: UsageAttribution.suggestionsKey)
+            expect(
+                UsageAttribution.suggestions(defaults: attributionDefaults).records.count == 1
+                    && UsageAttribution.effectiveState(
+                        for: claudeOpenAIEntry, defaults: attributionDefaults) == .unassigned,
+                "suggestion alone does not affect effective attribution")
+        } else {
+            expect(false, "isolated attribution defaults suite is available")
+        }
+
+        let malformedAttributionRaw = "not-json"
+        let invalidAttributionRecordRaw = "[{\"client\":\"not-registered\",\"model\":null,\"provider\":\"openai\",\"state\":\"excluded\"}]"
+        expect(
+            UsageAttribution.parseRaw(malformedAttributionRaw).records.isEmpty
+                && !UsageAttribution.parseRaw(malformedAttributionRaw).isWritable
+                && UsageAttribution.confirmedRaw(
+                    updating: malformedAttributionRaw, record: crossAssignment) == nil,
+            "malformed attribution raw fails closed and refuses writes")
+        expect(
+            UsageAttribution.parseRaw(invalidAttributionRecordRaw).records.isEmpty
+                && !UsageAttribution.parseRaw(invalidAttributionRecordRaw).isWritable
+                && UsageAttribution.confirmedRaw(
+                    updating: invalidAttributionRecordRaw, record: crossAssignment) == nil,
+            "invalid attribution records are rejected at parse time")
+
+        let malformedDefaultsName = "TokenBar.SelfTest.UsageAttribution.Malformed.\(UUID().uuidString)"
+        if let malformedDefaults = UserDefaults(suiteName: malformedDefaultsName) {
+            defer { malformedDefaults.removePersistentDomain(forName: malformedDefaultsName) }
+            malformedDefaults.set("not-json", forKey: UsageAttribution.confirmedKey)
+            let read = UsageAttribution.confirmed(defaults: malformedDefaults)
+            var records = read.records
+            records.append(crossAssignment)
+            let attemptedRaw = UsageAttribution.confirmedRaw(
+                updating: malformedDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: records.last!)
+            if let attemptedRaw {
+                malformedDefaults.set(attemptedRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                records.count == 1 && !read.isWritable && attemptedRaw == nil
+                    && (malformedDefaults.object(forKey: UsageAttribution.confirmedKey) as? String)
+                        == "not-json",
+                "public attribution read-modify-write preserves rejected raw bytes")
+        } else {
+            expect(false, "isolated malformed attribution defaults suite is available")
+        }
+
+        let wrongTypeDefaultsName = "TokenBar.SelfTest.UsageAttribution.WrongType.\(UUID().uuidString)"
+        if let wrongTypeDefaults = UserDefaults(suiteName: wrongTypeDefaultsName) {
+            defer { wrongTypeDefaults.removePersistentDomain(forName: wrongTypeDefaultsName) }
+            wrongTypeDefaults.set(["foreign"], forKey: UsageAttribution.confirmedKey)
+            let read = UsageAttribution.confirmed(defaults: wrongTypeDefaults)
+            var records = read.records
+            records.append(crossAssignment)
+            let attemptedRaw = UsageAttribution.confirmedRaw(
+                updating: wrongTypeDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: records.last!)
+            if let attemptedRaw {
+                wrongTypeDefaults.set(attemptedRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                records.count == 1 && !read.isWritable && attemptedRaw == nil
+                    && (wrongTypeDefaults.object(forKey: UsageAttribution.confirmedKey)
+                        as? [String]) == ["foreign"],
+                "wrong-typed attribution defaults value is non-writable")
+        } else {
+            expect(false, "isolated wrong-type attribution defaults suite is available")
+        }
+
+        let absentDefaultsName = "TokenBar.SelfTest.UsageAttribution.Absent.\(UUID().uuidString)"
+        if let absentDefaults = UserDefaults(suiteName: absentDefaultsName) {
+            defer { absentDefaults.removePersistentDomain(forName: absentDefaultsName) }
+            let read = UsageAttribution.confirmed(defaults: absentDefaults)
+            let firstWriteRaw = UsageAttribution.confirmedRaw(
+                updating: absentDefaults.object(forKey: UsageAttribution.confirmedKey),
+                record: crossAssignment)
+            if let firstWriteRaw {
+                absentDefaults.set(firstWriteRaw, forKey: UsageAttribution.confirmedKey)
+            }
+            expect(
+                read.records.isEmpty && read.isWritable
+                    && firstWriteRaw
+                        == "[{\"client\":\"claude\",\"model\":null,\"provider\":\"openai\",\"state\":\"assigned\",\"target\":\"codex\"}]"
+                    && absentDefaults.string(forKey: UsageAttribution.confirmedKey)
+                        == firstWriteRaw,
+                "absent attribution defaults value remains writable")
+        } else {
+            expect(false, "fresh attribution defaults suite is available")
+        }
+
         // ModelColorMap: cost ranking drives shades; unseen models fall back.
         let map = ModelColorMap(entries: [
             ("anthropic", "claude-opus-4-8", 100.0),
