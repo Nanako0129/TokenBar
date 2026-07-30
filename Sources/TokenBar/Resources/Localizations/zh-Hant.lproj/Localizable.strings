@@ -149,6 +149,8 @@
 "%@ — quota unavailable" = "%@ — 額度無法使用";
 "%@ — selected quota window unavailable" = "%@ — 所選的額度時間窗無法使用";
 "%@, selected quota window unavailable" = "%@，所選的額度時間窗無法使用";
+"%@ — %lld%% last known quota remaining" = "%1$@ — 上次已知剩餘額度 %2$lld%%";
+"%@, %lld percent last known quota remaining" = "%1$@，上次已知剩餘額度 %2$lld%%";
 "Copy command" = "複製指令";
 "Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？TokenBar 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
 

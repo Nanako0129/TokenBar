@@ -762,7 +762,7 @@ enum SelfTest {
         let clientGraphJSON = """
         {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"2026-07-01"}},
          "summary":{"totalTokens":0,"totalCost":0,"totalDays":0,"activeDays":0,"averagePerDay":0,
-                    "maxCostInSingleDay":0,"clients":["claude","codex"],"models":[]},
+                    "maxCostInSingleDay":0,"clients":["claude","codex","grok"],"models":[]},
          "years":[],"contributions":[]}
         """
         let clientGraph = try! JSONDecoder().decode(
@@ -1131,6 +1131,17 @@ enum SelfTest {
             runtimePresentations.map(\.clientId) == ["codex"]
                 && runtimePresentations.first?.valueText == "35%",
             "runtime shells use graph presence, enabled state, official assets, and hidden tabs")
+        let lastGoodRuntime = ClientTray.runtimePresentations(
+            graph: clientGraph, payload: quotaPayload, enabled: ["grok"],
+            selections: ["grok": "billing.weekly.v1"], hidden: [],
+            officialClients: officialClientIDs).first
+        expect(
+            lastGoodRuntime?.status == .errorExplicit
+                && lastGoodRuntime?.valueText == "1%"
+                && lastGoodRuntime?.toolTip.contains("last known") == true
+                && lastGoodRuntime?.accessibilityLabel.contains("last known") == true
+                && lastGoodRuntime?.toolTip.contains("timed out") == false,
+            "explicit error fallback is labeled as last-known quota, not current data")
 
         // Rows must not depend on Set iteration order. With no saved tab order
         // and no payload, every row comes from the preserved-enabled path, which

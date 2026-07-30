@@ -165,6 +165,10 @@ enum ClientTray {
                 return "%@ — selected quota window unavailable".localized(displayName)
             }
             if let percent = ClientTray.percentInt(remainingPercent) {
+                if status == .errorExplicit {
+                    return "%@ — %lld%% last known quota remaining".localized(
+                        displayName, percent)
+                }
                 return "%@ — %lld%% quota remaining".localized(displayName, percent)
             }
             return "%@ — quota unavailable".localized(displayName)
@@ -173,6 +177,12 @@ enum ClientTray {
         var accessibilityLabel: String {
             if status == .missingSelection {
                 return "%@, selected quota window unavailable".localized(displayName)
+            }
+            if status == .errorExplicit,
+               let percent = ClientTray.percentInt(remainingPercent)
+            {
+                return "%@, %lld percent last known quota remaining".localized(
+                    displayName, percent)
             }
             return ClientTray.quotaAccessibilityLabel(displayName, remainingPercent)
         }
@@ -376,14 +386,16 @@ enum ClientTray {
                 // window you picked no longer exists", which needs a Settings
                 // change rather than waiting. The message is fixed text; the raw
                 // cardId is never surfaced.
-                let windows = payload?.agents
-                    .first { $0.clientId == quotaClientID(for: clientId) }?
-                    .uniqueCardWindows ?? []
+                let snapshot = payload?.agents
+                    .first { $0.clientId == quotaClientID(for: clientId) }
+                let windows = snapshot?.uniqueCardWindows ?? []
                 let selectionIsMissing = selection != autoSelection
                     && !windows.contains { $0.cardId == selection }
                 let status: Status
                 if selectionIsMissing {
                     status = .missingSelection
+                } else if snapshot?.error != nil {
+                    status = selection == autoSelection ? .errorAuto : .errorExplicit
                 } else {
                     status = resolved == nil ? .unavailable : .available
                 }
