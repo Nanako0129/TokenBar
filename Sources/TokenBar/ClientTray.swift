@@ -161,6 +161,9 @@ enum ClientTray {
         var valueText: String { ClientTray.percentText(remainingPercent) }
 
         var toolTip: String {
+            if status == .missingSelection {
+                return "%@ — selected quota window unavailable".localized(displayName)
+            }
             if let percent = ClientTray.percentInt(remainingPercent) {
                 return "%@ — %lld%% quota remaining".localized(displayName, percent)
             }
@@ -168,7 +171,10 @@ enum ClientTray {
         }
 
         var accessibilityLabel: String {
-            ClientTray.quotaAccessibilityLabel(displayName, remainingPercent)
+            if status == .missingSelection {
+                return "%@, selected quota window unavailable".localized(displayName)
+            }
+            return ClientTray.quotaAccessibilityLabel(displayName, remainingPercent)
         }
     }
 
@@ -270,7 +276,6 @@ enum ClientTray {
         officialClients: Set<String>
     ) -> [SettingsRow] {
         let present = canonicalIDs(presentClients)
-        let presentSet = Set(present)
         // Agent presence in the quota payload is the stable capability signal.
         // A supported provider can temporarily return only an error and zero
         // windows (for example while its local OAuth client is unavailable);
@@ -280,7 +285,13 @@ enum ClientTray {
         let newlyConfigurable = present.filter {
             quotaCapable.contains(quotaClientID(for: $0)) && officialClients.contains($0)
         }
-        let preserved = enabled.filter { presentSet.contains($0) && officialClients.contains($0) }
+        // Derived from the ordered `present` array, not by iterating the enabled
+        // Set: `orderedClients` returns its input untouched when no tab order is
+        // saved, so hash order would leak into the UI and then visibly reshuffle
+        // once the payload lands and `newlyConfigurable` supplies graph order.
+        let preserved = present.filter {
+            enabled.contains($0) && officialClients.contains($0)
+        }
         var ids = newlyConfigurable
         for id in preserved where !ids.contains(id) { ids.append(id) }
         ids = ClientRegistry.orderedClients(ids, orderRaw: orderRaw)
@@ -358,15 +369,29 @@ enum ClientTray {
             .filter { enabled.contains($0) && officialClients.contains($0) && !hidden.contains($0) }
             .sorted()
             .map { clientId in
+                let selection = selections[clientId] ?? autoSelection
                 let resolved = resolveWindow(
-                    payload: payload,
-                    clientId: clientId,
-                    selection: selections[clientId] ?? autoSelection)
+                    payload: payload, clientId: clientId, selection: selection)
+                // Distinguish "this provider has no value right now" from "the
+                // window you picked no longer exists", which needs a Settings
+                // change rather than waiting. The message is fixed text; the raw
+                // cardId is never surfaced.
+                let windows = payload?.agents
+                    .first { $0.clientId == quotaClientID(for: clientId) }?
+                    .uniqueCardWindows ?? []
+                let selectionIsMissing = selection != autoSelection
+                    && !windows.contains { $0.cardId == selection }
+                let status: Status
+                if selectionIsMissing {
+                    status = .missingSelection
+                } else {
+                    status = resolved == nil ? .unavailable : .available
+                }
                 return Presentation(
                     clientId: clientId,
                     displayName: ClientRegistry.style(clientId).displayName,
                     remainingPercent: resolved?.remainingPercent,
-                    status: resolved == nil ? .unavailable : .available)
+                    status: status)
             }
     }
 

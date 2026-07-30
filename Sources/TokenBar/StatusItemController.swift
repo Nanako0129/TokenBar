@@ -226,6 +226,12 @@ final class StatusItemController: NSObject {
             presentPopover(from: button, identity: identity)
             return
         }
+        // Re-clamp against the DESTINATION item's screen before moving: a height
+        // the user chose on a taller display would otherwise stay taller than a
+        // shorter display's visible frame and leave the popover clipped. Same
+        // resolve the normal presentation path does.
+        let visible = (button.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
+        chrome.resolve(visibleHeight: visible)
         // NSPopover supports changing the relative anchor while shown. Keep the
         // live host and Dashboard tasks intact; only the native anchor moves.
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)

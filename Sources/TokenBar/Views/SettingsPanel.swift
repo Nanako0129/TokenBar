@@ -51,6 +51,9 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.updates.beta") private var betaUpdates = false
     /// Loaded once per panel appearance without blocking SwiftUI body creation.
     @State private var autostartEnabled = false
+    /// Set once the user drives the switch, so a slower initial read cannot
+    /// overwrite their change with its pre-change value.
+    @State private var autostartUserChanged = false
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
     @AppStorage("tokenbar.limits.asUsed") private var limitsAsUsed = false
@@ -157,7 +160,11 @@ struct SettingsPanel: View {
         .task {
             guard AutostartService.isAvailable else { return }
             let enabled = await AutostartService.readEnabled()
-            guard !Task.isCancelled else { return }
+            // The query takes ~0.5-0.9s. If the user flipped the switch while it
+            // was in flight, `setEnabled` has already changed the service and
+            // this result is stale — applying it would leave the control showing
+            // the opposite of the real state until Settings is reopened.
+            guard !Task.isCancelled, !autostartUserChanged else { return }
             autostartEnabled = enabled
         }
         .alert("Restart TokenBar?", isPresented: $showLanguageRestartPrompt) {
@@ -538,6 +545,7 @@ struct SettingsPanel: View {
                     isOn: Binding(
                         get: { autostartEnabled },
                         set: { next in
+                            autostartUserChanged = true
                             if AutostartService.setEnabled(next) {
                                 autostartEnabled = next
                             }

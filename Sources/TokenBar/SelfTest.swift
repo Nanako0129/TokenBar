@@ -1126,6 +1126,35 @@ enum SelfTest {
                 && runtimePresentations.first?.valueText == "35%",
             "runtime shells use graph presence, enabled state, official assets, and hidden tabs")
 
+        // Rows must not depend on Set iteration order. With no saved tab order
+        // and no payload, every row comes from the preserved-enabled path, which
+        // must follow the ordered `present` array.
+        expect(
+            ClientTray.settingsRows(
+                presentClients: ["codex", "claude", "grok"], payload: nil,
+                enabled: ["grok", "claude", "codex"], selections: [:], hidden: [],
+                orderRaw: "", officialClients: officialClientIDs
+            ).map(\.clientId) == ["codex", "claude", "grok"],
+            "preserved enabled rows follow graph order, not enabled-set hash order")
+
+        // A vanished explicit card is reported as a missing selection on the item
+        // itself, not as a generic provider outage — the user has to change the
+        // saved window, and waiting will not fix it. The raw card ID stays hidden.
+        let missingRuntime = ClientTray.runtimePresentations(
+            graph: clientGraph, payload: quotaPayload, enabled: ["codex"],
+            selections: ["codex": "missing.v1"], hidden: [],
+            officialClients: officialClientIDs).first
+        expect(
+            missingRuntime?.status == .missingSelection
+                && missingRuntime?.valueText == "—%"
+                && missingRuntime?.toolTip.contains("missing.v1") == false
+                && missingRuntime?.accessibilityLabel.contains("missing.v1") == false
+                && missingRuntime?.toolTip != ClientTray.runtimePresentations(
+                    graph: clientGraph, payload: nil, enabled: ["codex"],
+                    selections: [:], hidden: [],
+                    officialClients: officialClientIDs).first?.toolTip,
+            "a missing explicit card reads as an unavailable selection, not a provider outage")
+
         let sensitiveQuotaJSON = """
         {"generatedAt":"now","agents":[
           {"clientId":"codex","source":"SECRET_SOURCE","updatedAt":"now",
