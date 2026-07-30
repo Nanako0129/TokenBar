@@ -4,8 +4,8 @@ id: kb-verification
 kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
-last_verified: 2026-07-29
-sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "Sources/TokenBar/ClientTray.swift", "Sources/TokenBar/StatusItemController.swift", "Sources/TokenBar/Views/AgentIconView.swift", "Sources/TokenBar/Views/SettingsPanel.swift", "Sources/TokenBar/SelfTest.swift", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/agent_history.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
+last_verified: 2026-07-31
+sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "Sources/TokenBar/ClientTray.swift", "Sources/TokenBar/StatusItemController.swift", "Sources/TokenBar/Views/AgentIconView.swift", "Sources/TokenBar/Views/SettingsPanel.swift", "Sources/TokenBar/SelfTest.swift", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 
 # Verification contract
@@ -52,13 +52,15 @@ PT0 的 hermetic authorities are Rust last-good and binding decisions, refresh s
 | Provider cost | 缺失成本可估算；明確 provider-reported 成本不可被 stale pricing 覆蓋 |
 | Hidden client | non-empty partial selection 在 Rust fold 前排除未選 client；`nil`／empty clients 依 C ABI contract 代表 all clients；all-hidden 由 Swift lens strict membership 阻擋 |
 | Quota account scope | 以temporary application-data root驗證exact 32-byte key、每次reload、cross-process winner、key-loss orphan recovery、atomic failure與raw-value scan；macOS／Unix驗證directory `0700`／file `0600`、symlink／non-regular／inode swap fail-closed。Windows另驗證system-preferred CNG、current-user owner、protected current-user／LocalSystem exact allow DACL、foreign／deny／inherited ACE拒絕、final symlink／junction／device／wrong type拒絕、volume plus 128-bit file identity replacement、no-delete-share lock、concurrent first-key winner、replace pre／post-commit failure、collision-safe quarantine與identity-bound rollback、sticky secure-root fallback、insecure legacy v2留原位不匯入，以及錯誤不洩漏path／SID／raw value；不得呼叫真實Keychain或provider credential |
-| Quota history | Reset jitter、floating zero、duration lifecycle、partial／future-reset cycles、active-series capacity、account isolation、corrupt recovery與current-actual shift都以temporary v3 store驗證；Codex v2只驗byte-exact current-account migration，live provider refresh只作smoke |
+| Quota history | Reset jitter、floating zero、duration lifecycle、partial／future-reset cycles、active-series capacity、account isolation、corrupt recovery與current-actual shift都以temporary v3 store驗證；Codex schema-2只驗current-account-only、byte-exact read-only migration，live provider refresh只作smoke |
 | Overflow input | old arithmetic fails or wraps in the targeted site；new saturating path remains bounded |
 | Individual client tray | UI-free SelfTest鎖定兩個defaults的parse前byte cap、entry／ID cap、deterministic serialization與超限no-writeback；client-scoped Auto／explicit／missing、error-only quota provider仍可配置、`antigravity-cli`只在quota lookup映射到`antigravity`且identity保持獨立、main完整route與per-client lens記憶互不污染、Settings row／picker狀態、official icon 1x＋2x reps、newer accepted publication與visible／AX／tooltip privacy都由synthetic graph／quota payload驗證，不建立真實system status items |
 | Cache schema | 舊版本 cache 不被當成新 layout 靜默接受；新 layout 可重建並 reload |
 | Provider transport fallback | last-good binding、refresh status-before-body、terminal/absent/4xx/schema/required-meter clearing、Grok additive monthly、Copilot loader、以及 diagnostic allowlist 都以 hermetic responses 驗證 |
 | FFI publication | Provider run、JSON serialize、envelope、raw C-pointer publication 的 single-flight、gate-assigned checked `publicationGeneration`、exhaustion fail-closed、可反轉的 C return order，以及單次 run 內 provider 並行分別驗證 |
 | Source-aware filter parity | `tb_filter_parity_probe` uses one context, fresh graph, `token0…token5`, exact integer comparison, diagnostic-only cost deltas because pricing refreshes independently from source generations, and short-circuits invalid later scans. Its synchronous callback seam tests stable match/mismatch, price-only refresh, tokenUnavailable versus graph failure, every source-change boundary, Agents-only late changes, call ordering, and a size-changing append token. The dedicated vendor fixture covers canonical, cc-mirror exact gating, synthetic gateway, duplicate canonical paths, inherited scanner-root isolation, unattributed `Main`, and cold/warm cache parity. |
+
+> Historical runtime retirement checkpoint（2026-07-31）：`agent_history.rs` 的 v2 writer／evaluator 與專用 evaluator tests 已刪除；現行 gate 是 `agent_quota_history.rs` 的 schema-3 v3 evaluator 加上 current-account-only schema-2 importer regressions。舊 Historical pace v2 cross-port checkpoint 仍保留於下方，僅作歷史 parity 證據，不是 current gate。
 
 ## Runtime and FFI gates
 

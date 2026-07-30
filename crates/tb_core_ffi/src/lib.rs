@@ -18,7 +18,6 @@ mod agent_account_scope;
 mod agent_antigravity;
 mod agent_copilot;
 mod agent_grok;
-mod agent_history;
 mod agent_quota_duration;
 mod agent_quota_history;
 #[cfg(target_os = "windows")]

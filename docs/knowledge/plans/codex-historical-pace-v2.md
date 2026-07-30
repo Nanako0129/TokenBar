@@ -3,9 +3,9 @@ status: superseded
 id: kb-plan-codex-historical-pace-v2
 kind: plan
 scope: repository
-read_when: implementing or reviewing Codex weekly historical pace v2
-last_verified: 2026-07-17
-sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/CrossCheckHarness/main.swift", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "docs/knowledge/plans/provider-quota-pace.md", "public CodexBar PR #901", "public CodexBar PR #1581"]
+read_when: reading the retired Codex weekly v2 design or schema-2 migration history
+last_verified: 2026-07-31
+sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/CrossCheckHarness/main.swift", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "docs/knowledge/plans/provider-quota-pace.md", "public CodexBar PR #901", "public CodexBar PR #1581"]
 superseded_by: provider-quota-pace.md
 superseded_on: 2026-07-17
 ---
@@ -14,26 +14,28 @@ superseded_on: 2026-07-17
 
 ## 文件目的
 
-這份計畫修正 Codex Weekly historical pace 會因不穩定的 reset timestamp 與不完整歷史群組而錯誤顯示 `Lasts until reset` 的問題。實作採用新的 v2 history store，完全不讀取、改寫或刪除既有 v1 history；所有使用者從乾淨資料重新學習，資料不足時自動使用 Linear pace。
+這份計畫記錄 Codex Weekly historical pace v2 曾採用的 reset timestamp、歷史群組與 Linear fallback 設計；其 runtime writer、persistence 與 evaluator 已退役，以下內容不再是可執行的 current contract。
 
-> **後續範圍：** 本計畫已成為 Codex Weekly 的 implemented foundation，不是 provider-wide completion。所有 provider quota cards 的 duration、identity、learning state 與 generic v3 history 由 [`provider-quota-pace.md`](provider-quota-pace.md) 接手。
+> **退役狀態（2026-07-31）：** `crates/tb_core_ffi/src/agent_history.rs` module 已移除，v2 writer／evaluator 與專用 evaluator tests 不再編譯。現行 Historical runtime 只由 [`agent_quota_history.rs`](../../../crates/tb_core_ffi/src/agent_quota_history.rs) 的 schema-3 v3 擁有；`codex-weekly-history-v2.json` 現在只由 `migrate_codex_v2` 作 current-account-bound、read-only migration input。本文的舊設計、fixtures 與 checkpoints 均保留作 historical record，不得當成 current gate。
 
-> **已鎖定決策：** v1 不做 migration。v2 只從新版收集的可信 raw samples 建立 historical curve；舊檔保留作為 rollback 與診斷材料，但不再影響新版本的計算。
+> **後續範圍：** Provider quota cards 的 duration、identity、learning state、generic v3 history 與 schema-2 importer 由 [`provider-quota-pace.md`](provider-quota-pace.md) 接手；本文件只保留退役 v2 writer／evaluator 的歷史背景。
+
+> **已鎖定決策（歷史）：** v1 不做 migration。退役 v2 曾只從新版收集的可信 raw samples 建立 historical curve；舊檔保留作為 rollback 與診斷材料，但不再影響現行 v3 計算。
 
 ## 目錄
 
 - [目標](#目標)
 - [範圍](#範圍)
-- [設計決策](#設計決策)
-- [Frozen evaluator and recovery contract](#frozen-evaluator-and-recovery-contract)
-- [Target data flow](#target-data-flow)
-- [執行階段](#執行階段)
-- [驗收條件](#驗收條件)
-- [交付與驗證](#交付與驗證)
-- [Rollout and rollback](#rollout-and-rollback)
-- [風險與相依](#風險與相依)
-- [Implementation checkpoint](#implementation-checkpoint)
-- [Compact handoff](#compact-handoff)
+- [歷史設計決策](#歷史設計決策)
+- [歷史 Frozen evaluator and recovery contract](#歷史-frozen-evaluator-and-recovery-contract)
+- [歷史 Target data flow](#歷史-target-data-flow)
+- [歷史執行階段](#歷史執行階段)
+- [歷史驗收條件](#歷史驗收條件)
+- [歷史交付與驗證](#歷史交付與驗證)
+- [歷史 Rollout and rollback](#歷史-rollout-and-rollback)
+- [歷史風險與相依](#歷史風險與相依)
+- [歷史 Implementation checkpoint](#歷史-implementation-checkpoint)
+- [歷史 Compact handoff](#歷史-compact-handoff)
 
 ---
 
@@ -58,7 +60,7 @@ superseded_on: 2026-07-17
 
 TokenBar 的本機 token 與 cost history 不代表 OpenAI subscription quota units，不能用來重建 Weekly quota percent。沒有可信 quota sample 的過去區段維持未知，不用估算值填補。
 
-## 設計決策
+## 歷史設計決策
 
 | Decision | Locked behavior | Rationale |
 |---|---|---|
@@ -78,7 +80,7 @@ TokenBar 的本機 token 與 cost history 不代表 OpenAI subscription quota un
 
 Floating-zero fixture 的最低要求是：當 `usedPercent == 0` 且 reset horizon 持續跟著 sample time 滑動時，這些 readings 不得形成可評估的 historical week。v2 固定不持久化 zero readings，但仍可用既有完整週評估當下的 `0%`；不能靠增大 reset bucket 掩蓋問題。
 
-## Frozen evaluator and recovery contract
+## 歷史 Frozen evaluator and recovery contract
 
 ### Store sequencing
 
@@ -112,7 +114,7 @@ Floating-zero fixture 的最低要求是：當 `usedPercent == 0` 且 reset hori
 
 `etaSeconds` 的原點是本次 evaluator 的 `now`，單位為 seconds，表示距離 shifted curve 首次到 100% 的時間。Historical result 中 `etaSeconds == nil` 等價於 `willLastToReset == true`；`willLastToReset == false` 必須有 non-negative ETA。若 crossing candidates 為空，evaluator 必須改判會撐到 reset，而不是產生 `false + nil`。
 
-## Target data flow
+## 歷史 Target data flow
 
 ```mermaid
 flowchart LR
@@ -139,7 +141,7 @@ flowchart LR
 
 Swift 可以用 `actual - expected` 計算現有 pace stage 與顯示文字，但不得在 historical mode 重新推導 ETA 或覆寫 `willLastToReset`。Risk label 也必須讀取同一份 `historicalPace`，不能再從 `UsageWindow` 的獨立 scalar 取得。
 
-## 執行階段
+## 歷史執行階段
 
 | Stage | Primary files | Work | Exit gate |
 |---|---|---|---|
@@ -152,7 +154,7 @@ Swift 可以用 `actual - expected` 計算現有 pace stage 與顯示文字，�
 
 每個 Stage 完成後都應保留單一 concern 的 checkpoint。若 Stage 1 無法證明 v1 完全未被碰觸，或 Stage 3 仍讓 Rust 與 Swift 各自判斷 historical run-out，應停止而不是繼續疊加 UI workaround。
 
-## 驗收條件
+## 歷史驗收條件
 
 ### Store and sampling
 
@@ -196,7 +198,7 @@ Swift 可以用 `actual - expected` 計算現有 pace stage 與顯示文字，�
 | Other providers | Claude、Copilot、Antigravity、Grok 等沒有 historical result 的 quota windows 不變 |
 | Cross-port | 完整 baseline 已執行；非 historical cases 全部無回歸，舊 scalar historical cases 的 intended mismatch 有 exact case list；nested wire cases 在 Windows 未移植前列為未完成 downstream parity，不宣稱已對拍 |
 
-## 交付與驗證
+## 歷史交付與驗證
 
 先以 Rust hermetic fixtures 證明 store 與 evaluator，再驗證 JSON payload、Swift selftest 與 UI-free text cases。Live provider refresh 只能作為常見路徑 smoke，不得取代 floating-zero、complete-week 與 shifted-run-out fixtures。
 
@@ -234,7 +236,7 @@ git diff --check origin/main...HEAD
 
 > **授權邊界：** 完成 plan 或通過全部 gates 都不代表可以 push、開 PR、merge、tag 或 release；integration 必須另行取得使用者授權。
 
-## Rollout and rollback
+## 歷史 Rollout and rollback
 
 | Scenario | Behavior |
 |---|---|
@@ -247,7 +249,7 @@ git diff --check origin/main...HEAD
 
 Release communication 應說明「歷史學習會重新開始」與「資料不足期間使用 Linear」，不要宣稱舊 history 已被 migrated、repaired 或 deleted。
 
-## 風險與相依
+## 歷史風險與相依
 
 | Risk or dependency | Impact | Mitigation |
 |---|---|---|
@@ -261,18 +263,18 @@ Release communication 應說明「歷史學習會重新開始」與「資料不�
 | Downgrade reads v1 | Rollback 可能重現舊 `Lasts until reset` | 保留已知 rollback caveat；必要時手動 Linear，不在本次變更 v1 |
 | Downstream Windows drift | Native nested DTO 與 historical semantics 先改變，C# port 尚未同步 | 跑完整 baseline 並要求非 historical cases 維持綠燈；final handoff 列出 intended mismatch、新 wire fixture 與 port delta，另行授權跨 repo 實作後才宣稱 historical parity |
 
-## Implementation checkpoint
+## 歷史 Implementation checkpoint
 
-Historical pace v2 已在本 repository 的 Rust、C header 與 Swift surface 完成。實作保留 v1、導入 clean-start v2 store，並把 expected、ETA、will-last 與 risk 收斂成 Rust 產生的單一 nested result；Swift 在結果缺席時維持 Linear fallback。
+以下 checkpoint 只記錄 Historical pace v2 當時在本 repository 的 Rust、C header 與 Swift surface 完成狀態：實作曾保留 v1、導入 clean-start v2 store，並把 expected、ETA、will-last 與 risk 收斂成 Rust 產生的單一 nested result；Swift 在結果缺席時維持 Linear fallback。它不代表現行 runtime 或 gate。
 
-| Surface | Evidence | Status |
+| Surface | Historical evidence | Current status |
 |---|---|---|
-| Rust store and evaluator | `agent_history` 15 tests、`agent_usage` 17 tests 與 workspace 1,133 executed tests 通過；另有 1 個既有 ignored test | Complete |
-| Rust lint and scoped formatting | `cargo clippy --workspace --all-targets` 零 warning；`agent_history.rs` 通過 `rustfmt --check`，`agent_usage.rs` 只保留契約相關 semantic diff | Complete |
-| Repository-wide formatting | `cargo fmt --all -- --check` 仍在既有 Rust／vendor formatting baseline 回報 delta；本變更未把該批無關 reflow 納入 diff | Baseline follow-up |
-| Swift core and ABI | `TokenBarCore` build、直接 typecheck、nested payload runtime fixture 與 `ctb.h` syntax check 通過；cross-check harness 成功編譯 | Complete |
-| Full app gate | Rust release build 通過；2026-07-16 重跑 Swift app build 時，本機 Command Line Tools 的 compiler `6.3.3` 與 SDK module `6.3.2` 不相容，`--selftest` 與 `--smoke` 因 manifest 無法編譯而未執行，需由相容 toolchain／CI 完成 | Pending compatible-toolchain rerun |
-| Cross-port baseline | 116 cases 已執行；非 historical cases 全數一致，9 個 legacy scalar historical cases 共有 27 個 intended field differences | Native complete; Windows handoff pending |
+| Rust store and evaluator | 退役 v2 implementation 當時有 `agent_history` 15 tests、`agent_usage` 17 tests 與 workspace 1,133 executed tests 通過；另有 1 個既有 ignored test | Retired; evaluator tests deleted |
+| Rust lint and scoped formatting | 當時 `cargo clippy --workspace --all-targets` 零 warning；退役 `agent_history.rs` 曾通過 `rustfmt --check`，`agent_usage.rs` 只保留契約相關 semantic diff | Historical only; not a current gate |
+| Repository-wide formatting | 退役實作當時的 `cargo fmt --all -- --check` 在既有 Rust／vendor baseline 回報 delta | Historical only; current formatting gate見 `verification.md` |
+| Swift core and ABI | 退役實作當時的 `TokenBarCore` build、直接 typecheck、nested payload runtime fixture、`ctb.h` syntax check與cross-check harness證據 | Historical evidence retained; current v3 contract見active provider plan |
+| Full app gate | 2026-07-16 的retired-v2 checkpoint曾受本機Swift toolchain不相容阻擋 | Closed with evaluator retirement; no rerun required for this module |
+| Cross-port baseline | 退役scalar baseline曾產生9案、27個intended field differences | Historical only; current provider-v3 parity已完成 |
 
 Legacy baseline 的 exact mismatch case IDs 如下；它們仍以被移除的 top-level scalar contract 驅動 C#，所以不能為了讓舊 baseline 全綠而恢復 split-brain decoder。
 
@@ -288,10 +290,10 @@ runout-risk-half-percent-rounds-up
 runout-risk-thirty
 ```
 
-Windows downstream 的下一步是新增 nested `historicalPace` DTO／wire fixtures，讓 Historical mode 直接接受 backend ETA、`willLastToReset` 與 risk，並保留缺席時的 Linear fallback。完成該 port 並重跑對拍前，只有非 historical baseline parity 已被證明。
+上述Windows mismatch清單只保留為退役scalar contract的歷史證據。現行provider-v3 DTO、state machine與cross-language parity已依active [`provider-quota-pace.md`](provider-quota-pace.md) 完成；不得從本清單推導尚有待辦。
 
-## Compact handoff
+## 歷史 Compact handoff
 
-下一個 session 應先讀 [`../README.md`](../README.md)、[`../architecture.md`](../architecture.md)、[`../verification.md`](../verification.md) 與本計畫，review 本 checkpoint 的 exact diff，並在相容 Swift toolchain 重跑完整 app build、selftest 與 smoke。不要重做 v1 migration、dashboard backfill 或恢復 top-level historical scalars。
+新的session不應續作或重建本文件描述的v2 writer／evaluator。現行實作與驗收應先讀 [`provider-quota-pace.md`](provider-quota-pace.md)、[`../architecture.md`](../architecture.md) 與 [`../verification.md`](../verification.md)；只有追查schema-2 migration歷史時才需要本文件。
 
-本 plan 不自行授權 integration；執行仍依 [`../workflow.md`](../workflow.md) 與當次使用者指令。Windows repo 不在本次寫入 scope；後續 port 必須依上方 nested DTO／semantic delta 新增 fixture，再宣稱 historical cross-port parity。若 review 改變 frozen evaluator contract，先同步更新本文件與 Rust fixtures，不在 presentation layer 補 workaround。
+V1仍不作migration，schema-2檔案只由current-account-bound importer唯讀使用。任何dashboard backfill、legacy writer復活或migration policy變更都必須另立新Plan與security review，不能從本歷史handoff取得授權。

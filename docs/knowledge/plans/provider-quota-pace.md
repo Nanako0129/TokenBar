@@ -4,8 +4,8 @@ id: kb-plan-provider-quota-pace
 kind: plan
 scope: repository
 read_when: implementing or reviewing pace duration and historical pace for provider quota cards
-last_verified: 2026-07-29
-sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
+last_verified: 2026-07-31
+sources: ["crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_usage.rs", "crates/tb_core_ffi/src/agent_antigravity.rs", "crates/tb_core_ffi/src/agent_copilot.rs", "crates/tb_core_ffi/src/agent_grok.rs", "Sources/TokenBarCore/AgentUsage.swift", "Sources/TokenBarCore/UsagePace.swift", "Sources/TokenBar/TrayAnimator.swift", "Sources/TokenBar/DashboardModel.swift", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "official GitHub Copilot billing documentation", "official Claude usage credits documentation"]
 ---
 
 # Provider-wide quota pace plan
@@ -14,7 +14,7 @@ sources: ["crates/tb_core_ffi/src/agent_history.rs", "crates/tb_core_ffi/src/age
 
 這份計畫把 pace 的修正單位從「Codex Weekly 特例」改成「每一張 provider recurring quota card」。Codex、Claude、Grok、Antigravity 與 Copilot 的額度 window 都必須先取得可信的 account scope、stable window key、reset 與 duration，才能進入同一套 Linear／Historical 計算；缺少 duration 或歷史時必須顯示可理解的學習狀態，不得永久或無聲地退回 Linear。
 
-[`codex-historical-pace-v2.md`](codex-historical-pace-v2.md) 保留為已落地的 Codex Weekly evaluator 基礎與 migration 證據，但不再代表 provider-wide outcome。這份新計畫取代它作為後續實作與驗收的 active design。
+[`codex-historical-pace-v2.md`](codex-historical-pace-v2.md) 保留為已退役的 Codex Weekly historical evaluator 設計與 schema-2 migration 歷史記錄；現行 v3 runtime 與 read-only importer 的 source of truth 是 `agent_quota_history.rs`。這份新計畫取代它作為 provider-wide outcome 的 active design。
 
 > **核心結果：** pace duration 屬於 quota window，不屬於 provider 特例。任何已顯示、具有 recurring percentage quota 語意的 card，都必須走同一個 duration lifecycle；無法證明 duration 時，UI 必須明示原因，而不是顯示看似真實的 pace。
 >
@@ -188,7 +188,7 @@ Crash before metadata save不會以 new credential寫 history；crash between me
 | Consistent full restore | Installation key、metadata、v3三者一致才恢復 |
 | Explicit full purge | 必須一起刪除installation-key file、metadata、v3與legacy v2；本Plan不新增purge UI，也不宣稱APFS secure erase |
 
-Retained v2 仍含 legacy raw Codex account key，因此分類為 legacy-sensitive rollback data；「沒有 raw identifier」只適用新 metadata與 v3。這份 Plan保留 v2 bytes／mtime／path，不隱瞞或假稱已清除；v2 retirement必須是 rollback window結束後的獨立明確決策。
+Retained v2 仍含 legacy raw Codex account key，因此分類為 legacy-sensitive migration data；「沒有 raw identifier」只適用新 metadata與 v3。這份 Plan保留 v2 bytes／mtime／path，不隱瞞或假稱已清除；v2 writer／evaluator 已退役，但 schema-2 檔案仍由 `agent_quota_history.rs` 的 importer 作 read-only migration input。
 
 Security fixtures必須覆蓋HMAC known vectors／domain separation、different-installation unlinkability、各credential source、refresh每一步crash injection、same-slot replacement、two-process create／transfer conflict、key exact-length／mode／symlink／non-regular／inode-replacement防護、key-loss orphan recovery、MAC／lock／atomic-write／quarantine failures、Antigravity stale active-email mismatch，以及metadata／v3 byte scan不含fixture raw values或其plain SHA-256。
 
@@ -447,7 +447,7 @@ Stage 0 no longer discovers mappings。It turns every row and every reject rule 
 | 0. Freeze capability fixtures | Main session；provider modules與 dedicated fixtures | 把 frozen source-field matrix、aliases、unknown-key rejects與 current silent-fallback behavior變成 old-fail fixtures | Matrix每一列與 reject rule都有 case ID；本階段不再做 product discovery |
 | 1. Secure account scope | `security-executor`；new account-scope module與provider auth hooks | 實作owner-only installation-key file、HMAC、authenticated metadata、lineage transfer與fail-closed recovery | Approved security protocol逐項有fixture；storage path／permission attacks fail closed；Antigravity stale email不能scope／label remote quota |
 | 2. V3 shell and duration lifecycle | `executor`；new duration／v3 store modules、provider-neutral `UsageWindow` internals | 建立 locked atomic `SeriesState` store，實作 provider／contract／observed resolver與 durable rollover state | Restart／corruption／account-isolation加5h／7d／monthly／missed-boundary fixtures綠燈 |
-| 3. Generic history and migration | `executor`；v3 store／evaluator modules與 legacy `agent_history.rs` reader | 加 cycle-aware sampling／retention／confidence、current-account-only v2 import與 coherent evaluator | Exact migration collision matrix與5h／7d／monthly evaluator fixtures綠燈；v1／v2 unchanged proofs成立 |
+| 3. Generic history and migration | `executor`；v3 store／evaluator與 `agent_quota_history.rs` 內的 schema-2 read-only importer | 加 cycle-aware sampling／retention／confidence、current-account-only v2 import與 coherent evaluator | Exact migration collision matrix與5h／7d／monthly evaluator fixtures綠燈；v1／v2 unchanged proofs成立 |
 | 4. Provider adapters | `executor`；`agent_usage.rs`、Antigravity／Copilot／Grok modules | 為每個 card 注入 account scope、stable key、duration與 v3 enrichment | Provider matrix逐列有 serialized fixture；Codex 不再是特殊 enrichment entry point |
 | 5. Wire and Mac UX | `executor`；`ctb.h`、Swift models、`UsagePace`、settings／quota card views | 加 `paceStatus`、移除 silent fallback、更新 learning／available文案與顏色 | Rust JSON 可由 Swift decode；yellow ahead 僅由真實 evaluator fixture 驅動 |
 | 6. Cross-port handoff | Main session；CrossCheckHarness、canonical docs、fixture artifact | 跑完整 baseline、列出 wire delta、完成 Windows DTO／state-machine handoff | 119-case Swift／C# cross-check 零 material difference；real ARM64 provider-v3 run 產生 exact 12 cases |

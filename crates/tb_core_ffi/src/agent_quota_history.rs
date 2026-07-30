@@ -263,6 +263,34 @@ pub(crate) fn partial_blend_weight(fit_quality: f64) -> Option<f64> {
     Some((0.5 * fit_quality).clamp(0.0, 0.5))
 }
 
+fn weighted_median(values: &[f64], weights: &[f64]) -> f64 {
+    if values.len() != weights.len() || values.is_empty() {
+        return 0.0;
+    }
+    let mut pairs = values
+        .iter()
+        .copied()
+        .zip(weights.iter().copied().map(|weight| weight.max(0.0)))
+        .collect::<Vec<_>>();
+    pairs.sort_by(|lhs, rhs| lhs.0.total_cmp(&rhs.0));
+    let total_weight = pairs.iter().map(|(_, weight)| *weight).sum::<f64>();
+    if total_weight <= EPSILON {
+        let mut sorted = values.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        return sorted[sorted.len() / 2];
+    }
+    let threshold = total_weight / 2.0;
+    let mut cumulative = 0.0;
+    let fallback = pairs.last().map(|(value, _)| *value).unwrap_or(0.0);
+    for (value, weight) in pairs {
+        cumulative += weight;
+        if cumulative >= threshold {
+            return value;
+        }
+    }
+    fallback
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct FitWorkCounters {
     pub(crate) series_key_comparisons: usize,
@@ -2092,7 +2120,7 @@ fn fit_loco_cycle(
                 .iter()
                 .map(|(_, weight)| *weight)
                 .collect::<Vec<_>>();
-            let predicted = crate::agent_history::weighted_median(&values, &weights);
+            let predicted = weighted_median(&values, &weights);
             let residual = predicted - point.used_percent;
             if !residual.is_finite() {
                 return None;
@@ -2210,7 +2238,7 @@ pub(crate) fn fit_completed_cycles(cycles: &[FitCycleInput]) -> Option<Completed
                 .collect::<Vec<_>>();
             let values_only = values.iter().map(|(value, _)| *value).collect::<Vec<_>>();
             let weights = values.iter().map(|(_, weight)| *weight).collect::<Vec<_>>();
-            crate::agent_history::weighted_median(&values_only, &weights)
+            weighted_median(&values_only, &weights)
         })
         .collect::<Vec<_>>();
     if historical_curve.iter().any(|value| !value.is_finite()) {
@@ -2564,7 +2592,7 @@ fn evaluate_completed_projection(
                 .iter()
                 .map(|(_, weight)| *weight)
                 .collect::<Vec<_>>();
-            eta_seconds = Some(crate::agent_history::weighted_median(&values, &weights).max(0.0));
+            eta_seconds = Some(weighted_median(&values, &weights).max(0.0));
         }
     }
     Some(HistoricalPace {
@@ -6560,10 +6588,7 @@ mod tests {
 
     #[test]
     fn evaluator_partial_coverage_gap_and_exact_half_tie_are_fail_closed() {
-        assert_eq!(
-            crate::agent_history::weighted_median(&[10.0, 20.0], &[1.0, 1.0]),
-            10.0
-        );
+        assert_eq!(weighted_median(&[10.0, 20.0], &[1.0, 1.0]), 10.0);
         let reset = 2_000_000;
         let duration = 7 * DAY;
         let mut samples = complete_cycle(reset, duration, 80.0);
