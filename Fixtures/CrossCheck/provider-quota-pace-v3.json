@@ -51,6 +51,47 @@
             }
           },
           {
+            "cardId": "current-fit.invalid",
+            "label": "Current fit",
+            "usedPercent": 36.0,
+            "remainingPercent": 64.0,
+            "resetsAt": "2026-07-10T15:00:00Z",
+            "windowMinutes": 300,
+            "paceStatus": {
+              "state": "available",
+              "windowKey": "quota.current-fit.invalid",
+              "durationSeconds": 18000,
+              "durationSource": "provider",
+              "completeCycles": 0
+            },
+            "historicalPace": {
+              "expectedUsedPercent": 30.0,
+              "etaSeconds": 5400.0,
+              "willLastToReset": false
+            }
+          },
+          {
+            "cardId": "exhausted.invalid",
+            "label": "Exhausted quota",
+            "usedPercent": 100.0,
+            "remainingPercent": 0.0,
+            "resetsAt": "2026-07-10T15:00:00Z",
+            "windowMinutes": 300,
+            "paceStatus": {
+              "state": "available",
+              "windowKey": "quota.exhausted.invalid",
+              "durationSeconds": 18000,
+              "durationSource": "provider",
+              "completeCycles": 0
+            },
+            "historicalPace": {
+              "expectedUsedPercent": 80.0,
+              "etaSeconds": 0.0,
+              "willLastToReset": false,
+              "runOutProbability": 1.0
+            }
+          },
+          {
             "cardId": "learning-history.invalid",
             "label": "Learning history",
             "usedPercent": 40.0,
@@ -140,6 +181,22 @@
       "kind": "pace",
       "clientId": "provider-fixture.invalid",
       "cardId": "behind.invalid",
+      "mode": "historical",
+      "now": "2026-07-10T12:00:00Z"
+    },
+    {
+      "name": "available-current-fit-zero-complete-cycles",
+      "kind": "pace",
+      "clientId": "provider-fixture.invalid",
+      "cardId": "current-fit.invalid",
+      "mode": "historical",
+      "now": "2026-07-10T12:00:00Z"
+    },
+    {
+      "name": "available-exhausted-fact-override",
+      "kind": "pace",
+      "clientId": "provider-fixture.invalid",
+      "cardId": "exhausted.invalid",
       "mode": "historical",
       "now": "2026-07-10T12:00:00Z"
     },

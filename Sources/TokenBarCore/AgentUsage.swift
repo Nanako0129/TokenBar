@@ -278,8 +278,9 @@ public struct UsageWindow: Decodable, Sendable {
     public let durationSeconds: Int64?
     /// Typed v3 pace state, or the internal marker for an absent whole key.
     public let paceStatus: PaceStatus
-    /// Backend-owned historical projection, present only when enough complete
-    /// cycles exist. Missing or null is state-dependent in the v3 contract.
+    /// Backend-owned learned projection, present when completed-history or
+    /// validated current-cycle evidence passes the v3 quality gate.
+    /// Missing or null is state-dependent in the v3 contract.
     public let historicalPace: HistoricalPace?
 
     // Defaults preserve existing pure Swift linear fixtures. A v3 status is

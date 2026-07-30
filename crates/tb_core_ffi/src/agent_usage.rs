@@ -8813,6 +8813,42 @@ mod tests {
                         }),
                     ),
                     window(
+                        "current-fit.invalid",
+                        "Current fit",
+                        36.0,
+                        Some("2026-07-10T15:00:00Z"),
+                        Some("quota.current-fit.invalid"),
+                        PaceState::Available,
+                        Some(18_000),
+                        Some(DurationSource::Provider),
+                        0,
+                        None,
+                        Some(HistoricalPacePayload {
+                            expected_used_percent: 30.0,
+                            eta_seconds: Some(5_400.0),
+                            will_last_to_reset: false,
+                            run_out_probability: None,
+                        }),
+                    ),
+                    window(
+                        "exhausted.invalid",
+                        "Exhausted quota",
+                        100.0,
+                        Some("2026-07-10T15:00:00Z"),
+                        Some("quota.exhausted.invalid"),
+                        PaceState::Available,
+                        Some(18_000),
+                        Some(DurationSource::Provider),
+                        0,
+                        None,
+                        Some(HistoricalPacePayload {
+                            expected_used_percent: 80.0,
+                            eta_seconds: Some(0.0),
+                            will_last_to_reset: false,
+                            run_out_probability: Some(1.0),
+                        }),
+                    ),
+                    window(
                         "learning-history.invalid",
                         "Learning history",
                         40.0,
@@ -8895,6 +8931,29 @@ mod tests {
         assert_eq!(fixture["schemaVersion"], 3);
         let mut serialized = serde_json::to_value(payload).unwrap();
         assert_eq!(serialized["publicationGeneration"], 1);
+        assert_eq!(
+            serialized["agents"][0]["windows"][2]["paceStatus"]["state"],
+            "available"
+        );
+        assert_eq!(
+            serialized["agents"][0]["windows"][2]["paceStatus"]["completeCycles"],
+            0
+        );
+        assert!(serialized["agents"][0]["windows"][2]["historicalPace"]
+            .get("runOutProbability")
+            .is_none());
+        assert_eq!(
+            serialized["agents"][0]["windows"][3]["historicalPace"]["etaSeconds"],
+            0.0
+        );
+        assert_eq!(
+            serialized["agents"][0]["windows"][3]["historicalPace"]["willLastToReset"],
+            false
+        );
+        assert_eq!(
+            serialized["agents"][0]["windows"][3]["historicalPace"]["runOutProbability"],
+            1.0
+        );
         serialized
             .as_object_mut()
             .expect("payload serializes as an object")

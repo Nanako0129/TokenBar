@@ -434,6 +434,15 @@ enum SelfTest {
          "historicalPace":{"expectedUsedPercent":55,"etaSeconds":900,
          "willLastToReset":false,"runOutProbability":0.25}}
         """
+        let currentFitReset = resetFormatter.string(from: now.addingTimeInterval(10_800))
+        let currentFitJSON = """
+        {"cardId":"current-fit.v1","label":"Current fit","usedPercent":36,"remainingPercent":64,
+         "resetsAt":"\(currentFitReset)","windowMinutes":300,
+         "paceStatus":{"state":"available","windowKey":"current-fit.v1",
+         "durationSeconds":18000,"durationSource":"provider","completeCycles":0},
+         "historicalPace":{"expectedUsedPercent":30,"etaSeconds":5400,
+         "willLastToReset":false}}
+        """
         let unavailableJSON = """
         {"cardId":"extra_usage.v1","label":"Extra usage","usedPercent":70,"remainingPercent":30,
          "paceStatus":{"state":"unavailable","windowKey":"extra_usage.v1",
@@ -442,6 +451,7 @@ enum SelfTest {
         let learningDuration = decodeWindow(learningDurationJSON)
         let learningHistory = decodeWindow(learningHistoryJSON)
         let available = decodeWindow(availableJSON)
+        let currentFit = decodeWindow(currentFitJSON)
         let unavailable = decodeWindow(unavailableJSON)
         expect(
             learningDuration?.paceStatus.state == UsagePaceState.learningDuration &&
@@ -458,6 +468,30 @@ enum SelfTest {
                 available?.durationSeconds == 18_000 &&
                 available?.historicalPace?.expectedUsedPercent == 55,
             "v3 available decodes with historical result")
+        expect(
+            currentFit?.paceStatus.state == UsagePaceState.available &&
+                currentFit?.paceStatus.completeCycles == 0 &&
+                currentFit?.durationSeconds == 18_000 &&
+                currentFit?.historicalPace?.expectedUsedPercent == 30 &&
+                currentFit?.historicalPace?.runOutProbability == nil,
+            "v3 current fit decodes zero-cycle historical result")
+        let currentFitPace = currentFit.flatMap {
+            UsagePace.compute(window: $0, mode: .historical, now: now)
+        }
+        expect(
+            currentFitPace?.basis == .historical &&
+                currentFitPace?.actualUsedPercent == 36 &&
+                currentFitPace?.expectedUsedPercent == 30 &&
+                currentFitPace?.etaSeconds == 5_400 &&
+                currentFitPace?.willLastToReset == false,
+            "zero-cycle current fit uses backend historical projection")
+        let currentFitRisk = currentFit.flatMap {
+            runOutRiskLabel(window: $0, pace: currentFitPace)
+        }
+        expect(currentFitRisk == nil, "zero-cycle current fit keeps partial risk absent")
+        expect(
+            currentFitPace?.expectedUsedPercent != 40,
+            "zero-cycle current fit does not fall back to Linear")
         expect(
             unavailable?.paceStatus.state == UsagePaceState.unavailable &&
                 unavailable?.paceStatus.reason == .nonRecurring &&
@@ -534,7 +568,7 @@ enum SelfTest {
         {"generatedAt":"2026-07-17T00:00:00Z","agents":[
           {"clientId":"codex","source":"oauth","updatedAt":"2026-07-17T00:00:00Z",
            "identity":{"email":"fixture@example.invalid","plan":"plus"},
-           "windows":[\(learningDurationJSON),\(learningHistoryJSON),\(availableJSON),\(unavailableJSON)],
+           "windows":[\(learningDurationJSON),\(learningHistoryJSON),\(availableJSON),\(currentFitJSON),\(unavailableJSON)],
            "credits":{"remaining":12.5,"unlimited":false},"error":null}
         ],"opencodeSubscriptions":["Codex"]}
         """
@@ -542,9 +576,12 @@ enum SelfTest {
             AgentUsagePayload.self, from: Data(productionPayloadJSON.utf8))
         expect(
             productionPayload?.agents.count == 1 &&
-                productionPayload?.agents.first?.windows.count == 4 &&
-                productionPayload?.agents.first?.windows[2].paceStatus.state == .available,
-            "complete AgentUsagePayload v3 shape decodes")
+                productionPayload?.agents.first?.windows.count == 5 &&
+                productionPayload?.agents.first?.windows[2].paceStatus.state == .available &&
+                productionPayload?.agents.first?.windows[3].paceStatus.state == .available &&
+                productionPayload?.agents.first?.windows[3].paceStatus.completeCycles == 0 &&
+                productionPayload?.agents.first?.windows[3].historicalPace?.expectedUsedPercent == 30,
+            "complete AgentUsagePayload v3 shape decodes zero-cycle current fit")
 
         // Rust's publication gate orders generations, while the Swift state
         // guards apply order shared by popover and Settings models.
