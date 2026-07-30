@@ -51,9 +51,10 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.updates.beta") private var betaUpdates = false
     /// Loaded once per panel appearance without blocking SwiftUI body creation.
     @State private var autostartEnabled = false
-    /// Set once the user drives the switch, so a slower initial read cannot
-    /// overwrite their change with its pre-change value.
-    @State private var autostartUserChanged = false
+    /// Set only after the service accepts a user mutation, so a slower initial
+    /// read cannot overwrite committed state while a failed mutation still lets
+    /// that authoritative read settle the switch.
+    @State private var autostartMutationCommitted = false
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
     @AppStorage("tokenbar.limits.asUsed") private var limitsAsUsed = false
@@ -164,7 +165,7 @@ struct SettingsPanel: View {
             // was in flight, `setEnabled` has already changed the service and
             // this result is stale — applying it would leave the control showing
             // the opposite of the real state until Settings is reopened.
-            guard !Task.isCancelled, !autostartUserChanged else { return }
+            guard !Task.isCancelled, !autostartMutationCommitted else { return }
             autostartEnabled = enabled
         }
         .alert("Restart TokenBar?", isPresented: $showLanguageRestartPrompt) {
@@ -545,8 +546,8 @@ struct SettingsPanel: View {
                     isOn: Binding(
                         get: { autostartEnabled },
                         set: { next in
-                            autostartUserChanged = true
                             if AutostartService.setEnabled(next) {
+                                autostartMutationCommitted = true
                                 autostartEnabled = next
                             }
                         }))
