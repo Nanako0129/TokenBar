@@ -37,10 +37,11 @@ private struct FooterLink: View {
 struct SettingsWindowView: View {
     static let contentSize = CGSize(width: 856, height: 580)
 
-    // Default cachesSnapshot: false — this window's model must never write the
-    // popover's restore snapshot (its `year` is frozen at init; clobbering the
-    // cache with it would re-introduce the reopen flash).
-    @State private var model = DashboardModel()
+    // Settings manages process-wide tray preferences, so its client universe
+    // stays all-time even when the dashboard is scoped to one saved year. The
+    // model still defaults cachesSnapshot to false: it must never overwrite the
+    // popover's restore snapshot with its independently polled data.
+    @State private var model = DashboardModel(initialYear: nil)
     @State private var tokensPerMin: Double?
     @State private var selectedPage = SettingsPanel.Page.menuBar
     /// Master switch: off hides the preview's Agent-limits card too.

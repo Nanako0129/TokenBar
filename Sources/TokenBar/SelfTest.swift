@@ -1031,6 +1031,12 @@ enum SelfTest {
                 && !SettingsWindowView.isInitialLoad(
                     phase: .failed("boom"), agentUsageAttempted: true),
             "the individual-items spinner ends once both initial requests settle, including failures")
+        let settingsModelUsesAllTime = MainActor.assumeIsolated {
+            DashboardModel(initialYear: nil).year == nil
+        }
+        expect(
+            settingsModelUsesAllTime,
+            "Settings can pin its client universe to the all-time graph")
 
         // Browsing a client inside the MAIN popover must not decide what that
         // client's own item opens on.

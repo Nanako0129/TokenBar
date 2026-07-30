@@ -130,10 +130,10 @@ private struct DashboardSnapshot {
     private static let yearKey = "tokenbar.dashboard.year"
 
     /// Resolve the active year filter: the `--year=` debug flag wins, else the
-    /// persisted selection. Shared by `init()`'s snapshot guard and the `year`
-    /// property initializer so the two can never drift (the guard MUST compute
-    /// the same value the property does, or it would mis-classify a consistent
-    /// snapshot as stale). nil = all time.
+    /// persisted selection. Used as `init()`'s default so the snapshot guard and
+    /// the model's `year` can never drift (the guard MUST compare the same value
+    /// the model fetches, or it would mis-classify a consistent snapshot as stale).
+    /// Callers that own process-wide settings may explicitly pass nil for all time.
     private static func resolveYear() -> String? {
         CommandLine.arguments
             .first(where: { $0.hasPrefix("--year=") })
@@ -146,19 +146,19 @@ private struct DashboardSnapshot {
     /// settings window passes false so it never writes the shared snapshot.
     init(
         cachesSnapshot: Bool = false,
-        source: any UsageDataSource = UsageDataSources.current
+        source: any UsageDataSource = UsageDataSources.current,
+        initialYear: String? = DashboardModel.resolveYear()
     ) {
         self.cachesSnapshot = cachesSnapshot
         self.source = source
+        self.year = initialYear
         // Guard snapshot restore on year-consistency: if the user changed the
         // year filter after the snapshot was written (e.g. setYear() persisted
         // the new year but reload() failed before apply() ran), the cached
         // payload is for the wrong slice — fall through to .loading so load()
-        // fetches fresh. resolveYear() is a static (no `self`); @Observable
-        // turns `year` into a computed accessor that touches self, so it is not
-        // readable here until `phase` is set — hence the shared static helper,
-        // which mirrors the `year` property initializer exactly.
-        if let snap = Self.lastSnapshot, snap.year == Self.resolveYear() {
+        // fetches fresh. Settings passes nil explicitly because its client-item
+        // controls must use the same all-time graph universe as AppDelegate.
+        if let snap = Self.lastSnapshot, snap.year == initialYear {
             payload = snap.payload
             stats = snap.stats
             modelReport = snap.modelReport
@@ -178,7 +178,7 @@ private struct DashboardSnapshot {
     /// nil = all time. Persisted so the selection survives the popover's
     /// rootView teardown/rebuild cycle.
     /// `--year=<yyyy>` preselects a year (debug/screenshot aid).
-    private(set) var year: String? = DashboardModel.resolveYear()
+    private(set) var year: String?
     /// Union of `payload.years` across loads — a year-filtered payload only
     /// reports the selected year, so remember the rest for the picker.
     private(set) var knownYears: [String] = []
