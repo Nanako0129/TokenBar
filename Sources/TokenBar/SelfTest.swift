@@ -273,6 +273,38 @@ enum SelfTest {
         // rank 1 factor 0.11: 59→81 (0x51), 130→144 (0x90), 246→247 (0xf7)
         expect(ModelColors.shadeFromBase("#3b82f6", rank: 1) == "#5190f7", "shade rank 1 lerp")
 
+        let providerSplitReportJSON = """
+        {"entries":[
+          {"client":"claude","model":"shared-model","provider":"openai",
+           "input":100,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":100,"messageCount":1,"cost":6.0,"msPer1kTokens":2.0},
+          {"client":"claude","model":"shared-model","provider":"nvidia",
+           "input":200,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":200,"messageCount":1,"cost":5.0,"msPer1kTokens":3.0},
+          {"client":"claude","model":"runner-up","provider":"openai",
+           "input":150,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+           "total":150,"messageCount":1,"cost":9.0,"msPer1kTokens":1.0}
+        ],"totalInput":450,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+        "totalMessages":3,"totalCost":20.0}
+        """
+        let providerSplitReport = try! JSONDecoder().decode(
+            ModelReport.self, from: Data(providerSplitReportJSON.utf8))
+        let modelLevelEntries = providerSplitReport.modelLevelEntries
+        let favoriteModel = modelLevelEntries.max { $0.cost < $1.cost }
+        expect(
+            favoriteModel?.model == "shared-model" && favoriteModel?.cost == 11.0,
+            "provider-split favorite uses combined model cost")
+        let modelCardRows = modelLevelEntries.filter { $0.client == "claude" }
+        expect(
+            modelCardRows.count == 2 && modelCardRows.filter { $0.model == "shared-model" }.count == 1,
+            "provider-split model count treats one model as one row")
+        expect(
+            modelLevelEntries.first { $0.model == "shared-model" }?.provider == "nvidia, openai",
+            "provider-split model fold preserves merged providers")
+        expect(
+            modelLevelEntries.first { $0.model == "shared-model" }?.msPer1kTokens == nil,
+            "provider-split model fold omits unrecomputable throughput")
+
         // ModelColorMap: cost ranking drives shades; unseen models fall back.
         let map = ModelColorMap(entries: [
             ("anthropic", "claude-opus-4-8", 100.0),

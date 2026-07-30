@@ -68,6 +68,15 @@ impl LocalSourceContext {
         }
     }
 
+    /// Point the local-source scan at a fixture home so report tests never
+    /// read the developer's real session files.
+    #[cfg(test)]
+    pub(crate) fn for_home(home_dir: PathBuf) -> Self {
+        Self {
+            home_dir: Some(home_dir),
+        }
+    }
+
     pub(crate) fn report_options(
         &self,
         year: Option<String>,

@@ -16,7 +16,7 @@ struct StatsView: View {
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
-        return (modelReport?.entries ?? [])
+        return (modelReport?.modelLevelEntries ?? [])
             .filter { allow.contains($0.client) }
             .max { $0.cost < $1.cost }
     }

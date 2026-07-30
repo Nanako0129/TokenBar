@@ -31,3 +31,57 @@ public struct ModelReport: Decodable, Sendable {
     /// (drives the "Prices updated …" hint). Absent before the first fetch.
     public let pricingUpdatedAt: UInt64?
 }
+
+public extension ModelReport {
+    /// Fold provider-split rows back to the model-level view used by the
+    /// existing cards. Throughput is intentionally dropped when rows merge:
+    /// tokscale only computes it honestly over the complete rollup.
+    var modelLevelEntries: [ModelReportEntry] {
+        var indices: [String: Int] = [:]
+        var folded: [ModelReportEntry] = []
+
+        for entry in entries {
+            let key = "\(entry.client)\u{0}\(entry.model)"
+            guard let index = indices[key] else {
+                indices[key] = folded.count
+                folded.append(entry)
+                continue
+            }
+
+            let current = folded[index]
+            let input = current.input.saturatingAdding(entry.input)
+            let output = current.output.saturatingAdding(entry.output)
+            let cacheRead = current.cacheRead.saturatingAdding(entry.cacheRead)
+            let cacheWrite = current.cacheWrite.saturatingAdding(entry.cacheWrite)
+            let reasoning = current.reasoning.saturatingAdding(entry.reasoning)
+            let messageCount = current.messageCount.addingReportingOverflow(entry.messageCount)
+            folded[index] = ModelReportEntry(
+                client: current.client,
+                model: current.model,
+                provider: Self.mergedProviders(current.provider, entry.provider),
+                input: input,
+                output: output,
+                cacheRead: cacheRead,
+                cacheWrite: cacheWrite,
+                reasoning: reasoning,
+                total: input
+                    .saturatingAdding(output)
+                    .saturatingAdding(cacheRead)
+                    .saturatingAdding(cacheWrite)
+                    .saturatingAdding(reasoning),
+                messageCount: messageCount.overflow
+                    ? Int.max
+                    : messageCount.partialValue,
+                cost: current.cost + entry.cost,
+                msPer1kTokens: nil
+            )
+        }
+        return folded
+    }
+
+    private static func mergedProviders(_ first: String, _ second: String) -> String {
+        Set(([first, second].flatMap { $0.components(separatedBy: ", ") }))
+            .sorted()
+            .joined(separator: ", ")
+    }
+}
