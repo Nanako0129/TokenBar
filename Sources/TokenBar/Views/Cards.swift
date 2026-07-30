@@ -154,6 +154,29 @@ extension View {
     func glassCard(cornerRadius: CGFloat = 10) -> some View {
         modifier(GlassCardBackground(cornerRadius: cornerRadius))
     }
+
+    /// Shows `cursor` while the pointer is over this view. `onHoverChange` is for
+    /// callers that also drive their own hover styling.
+    ///
+    /// Uses `set()`, not `push()`/`pop()`: that stack is app-wide and `pop()`
+    /// removes whatever is on top rather than the entry this view pushed, so a
+    /// view torn down mid-hover — closing the popover or the Settings window
+    /// replaces the whole hosting root, with no exit callback — either leaks its
+    /// push or pops another view's cursor, and no amount of local bookkeeping
+    /// fixes that. `set()` keeps no stack, so the worst case is a stale cursor
+    /// that the next region the pointer enters corrects.
+    ///
+    /// AppKit cursor rects would be tidier still, but `NSHostingView` manages the
+    /// cursor itself and `addCursorRect` does not take effect inside it (measured:
+    /// the pointing hand never appeared).
+    func hoverCursor(
+        _ cursor: NSCursor, onHoverChange: ((Bool) -> Void)? = nil
+    ) -> some View {
+        onHover { inside in
+            onHoverChange?(inside)
+            if inside { cursor.set() } else { NSCursor.arrow.set() }
+        }
+    }
 }
 
 /// Shared dashboard-card chrome: rounded glass panel, matching the Tauri

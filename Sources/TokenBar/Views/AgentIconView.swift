@@ -55,6 +55,12 @@ struct AgentIconView: View {
         iconAliases[clientId] ?? clientId
     }
 
+    /// The only IDs allowed to create an individual status item. Aliases share
+    /// resources but remain separate client identities everywhere else.
+    static var officialClientIDs: Set<String> {
+        monoIds.union(fullIds).union(Set(iconAliases.keys))
+    }
+
     @MainActor private static var cache: [String: NSImage] = [:]
 
     @MainActor private static func image(_ id: String) -> NSImage? {
@@ -70,6 +76,40 @@ struct AgentIconView: View {
         else { return nil }
         cache[id] = image
         return image
+    }
+
+    /// Returns only official IDs whose source asset really loads from the bundle.
+    @MainActor static func availableOfficialClientIDs() -> Set<String> {
+        officialClientIDs.filter { image(iconId($0)) != nil }
+    }
+
+    /// Render a static full-color status image once at each supported backing
+    /// scale. The controller retains this image and does not re-render it.
+    /// Returns nil for any client `availableOfficialClientIDs()` would exclude,
+    /// so callers need no second eligibility check.
+    @MainActor static func statusItemImage(
+        clientId: String, size: CGFloat = 18
+    ) -> NSImage? {
+        guard availableOfficialClientIDs().contains(clientId) else { return nil }
+        let logicalSize = NSSize(width: size, height: size)
+        var representations: [NSBitmapImageRep] = []
+        for scale in [CGFloat(1), CGFloat(2)] {
+            let renderer = ImageRenderer(
+                content: AgentIconView(clientId: clientId, size: size)
+                    .frame(width: size, height: size))
+            renderer.scale = scale
+            renderer.proposedSize = ProposedViewSize(width: size, height: size)
+            guard let cgImage = renderer.cgImage else { return nil }
+            let representation = NSBitmapImageRep(cgImage: cgImage)
+            representation.size = logicalSize
+            representations.append(representation)
+        }
+        guard representations.count == 2 else { return nil }
+        let result = NSImage(size: logicalSize)
+        representations.forEach(result.addRepresentation)
+        result.isTemplate = false
+        result.accessibilityDescription = ClientRegistry.style(clientId).displayName
+        return result
     }
 
     var body: some View {

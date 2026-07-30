@@ -134,6 +134,19 @@
 "Loading quotas…" = "正在載入額度…";
 "Menu bar tracks" = "選單列追蹤對象";
 "Auto (tightest window)" = "自動（最吃緊的時間窗）";
+"Auto (tightest)" = "自動（最吃緊）";
+"Unavailable selection" = "無法使用的選擇";
+"Quota window" = "額度時間窗";
+"Quota window %lld" = "額度時間窗 %lld";
+"Hidden client tab; the item is suppressed." = "用戶端分頁已隱藏，個別項目目前停用。";
+"Quota unavailable." = "額度無法使用。";
+"Using the last good quota window." = "使用上一個可用的額度時間窗。";
+"%@, %lld percent quota remaining" = "%1$@，剩餘額度 %2$lld%%";
+"%@, quota unavailable" = "%@，額度無法使用";
+"Show %@ individual item" = "顯示 %@ 個別項目";
+"Quota window for %@" = "%@ 的額度時間窗";
+"%@ — %lld%% quota remaining" = "%1$@ — 剩餘額度 %2$lld%%";
+"%@ — quota unavailable" = "%@ — 額度無法使用";
 "Copy command" = "複製指令";
 "Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？TokenBar 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
 
@@ -162,6 +175,9 @@
 "Startup" = "啟動";
 "Menubar icon" = "選單列圖示";
 "Quota source" = "額度來源";
+"Individual items" = "個別項目";
+"No eligible individual clients yet." = "目前沒有符合資格的個別用戶端。";
+"Looking for eligible clients…" = "正在尋找符合資格的用戶端…";
 "View tabs" = "分頁";
 "Client tabs (top bar)" = "用戶端分頁（頂端列）";
 "Live trace" = "即時追蹤";
@@ -230,6 +246,7 @@
 "Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
 "Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "儀表圖示會隨著所選額度時間窗耗盡而下降。「僅警示時上色」在剩餘 25%（琥珀色）與 10%（紅色）之前維持單色，行為與電池圖示一致。";
 "Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out." = "決定儀表圖示與「剩餘額度」標題的資料來源。自動會追蹤最接近用盡的時間窗。";
+"Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 TokenBar 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
 "Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
 "On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
 "Full is the wide card with the pace line; Classic is the original compact layout without pace." = "完整版是含步調線的寬版卡片，經典版則是不含步調的原始精簡版面。";
@@ -280,3 +297,4 @@
 
 /* ===== 視窗 ===== */
 "TokenBar Settings" = "TokenBar 設定";
+"Sponsor" = "贊助";

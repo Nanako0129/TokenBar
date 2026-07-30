@@ -74,8 +74,10 @@ final class UpdaterService: NSObject, SPUUpdaterDelegate {
 enum AutostartService {
     static var isAvailable: Bool { UpdaterService.isAvailable }
 
-    static var isEnabled: Bool {
-        SMAppService.mainApp.status == .enabled
+    nonisolated static func readEnabled() async -> Bool {
+        await Task.detached(priority: .utility) {
+            SMAppService.mainApp.status == .enabled
+        }.value
     }
 
     @discardableResult

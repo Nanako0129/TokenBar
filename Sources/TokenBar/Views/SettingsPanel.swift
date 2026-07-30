@@ -34,14 +34,23 @@ struct SettingsPanel: View {
     /// Present clients (used for the client tabs reorder/hide UI).
     var presentClients: [String] = []
 
+    /// True while either initial request is still in flight. An empty client list
+    /// is otherwise indistinguishable from "still loading", and the first seconds
+    /// after opening Settings would claim there are no eligible clients. The
+    /// caller derives this from request lifecycle, not payload presence — a failed
+    /// fetch leaves the payload nil forever.
+    var isLoading = false
+
     @AppStorage(TrayMode.storageKey) private var trayModeRaw = TrayMode.todayTokens.rawValue
     @AppStorage(TrayAnimator.animateKey) private var animateTray = true
     @AppStorage(TrayAnimator.styleKey) private var animationStyle = "cat"
     @AppStorage(IconColoring.storageKey) private var iconColoringRaw = IconColoring.warningOnly.rawValue
     @AppStorage(TrayAnimator.quotaSourceKey) private var quotaSource = QuotaResolver.auto
+    @AppStorage(ClientTray.enabledKey) private var individualEnabledRaw = ""
+    @AppStorage(ClientTray.selectionsKey) private var individualSelectionsRaw = "{}"
     @AppStorage("tokenbar.updates.beta") private var betaUpdates = false
-    /// Mirrors SMAppService's actual state (read once per panel appearance).
-    @State private var autostartEnabled = AutostartService.isAvailable && AutostartService.isEnabled
+    /// Loaded once per panel appearance without blocking SwiftUI body creation.
+    @State private var autostartEnabled = false
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
     @AppStorage("tokenbar.views.hidden") private var hiddenViewsRaw = ""
     @AppStorage("tokenbar.limits.asUsed") private var limitsAsUsed = false
@@ -145,6 +154,12 @@ struct SettingsPanel: View {
                 aboutPage()
             }
         }
+        .task {
+            guard AutostartService.isAvailable else { return }
+            let enabled = await AutostartService.readEnabled()
+            guard !Task.isCancelled else { return }
+            autostartEnabled = enabled
+        }
         .alert("Restart TokenBar?", isPresented: $showLanguageRestartPrompt) {
             Button("Later", role: .cancel) {}
             Button("Restart Now") { AppRelauncher.relaunch() }
@@ -181,6 +196,116 @@ struct SettingsPanel: View {
             quotaSourcePicker()
             hint("Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out.")
         }
+
+        individualItemsSection()
+    }
+
+    @ViewBuilder
+    private func individualItemsSection() -> some View {
+        let rows = ClientTray.settingsRows(
+            presentClients: presentClients,
+            payload: agentUsage,
+            enabled: ClientTray.parseEnabledRaw(individualEnabledRaw),
+            selections: ClientTray.parseSelectionsRaw(individualSelectionsRaw),
+            hidden: ClientRegistry.parseIdSet(tabsHiddenRaw),
+            orderRaw: tabsOrderRaw,
+            officialClients: AgentIconView.availableOfficialClientIDs())
+
+        section("Individual items") {
+            hint("Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client.")
+            if rows.isEmpty, isLoading {
+                HStack(spacing: 7) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .frame(width: 14, height: 14)
+                    Text("Looking for eligible clients…".localized)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if rows.isEmpty {
+                Text("No eligible individual clients yet.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 1) {
+                    ForEach(rows) { row in
+                        individualItemRow(row)
+                    }
+                }
+                .glassCard(cornerRadius: 8)
+            }
+        }
+    }
+
+    private func individualItemRow(_ row: ClientTray.SettingsRow) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 7) {
+                AgentIconView(clientId: row.clientId, size: 16)
+                    .accessibilityHidden(true)
+                Text(row.displayName)
+                    .font(.caption)
+                    .accessibilityHidden(true)
+                Spacer()
+                Text(row.valueText)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(row.accessibilityLabel)
+                Toggle("", isOn: Binding(
+                    get: { row.isEnabled },
+                    set: { next in
+                        if let raw = ClientTray.enabledRaw(
+                            updating: individualEnabledRaw,
+                            clientId: row.clientId,
+                            enabled: next)
+                        {
+                            individualEnabledRaw = raw
+                        }
+                    }))
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .labelsHidden()
+                    .accessibilityLabel("Show %@ individual item".localized(row.displayName))
+            }
+
+            if row.isEnabled {
+                HStack {
+                    Text("Window")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Picker("", selection: Binding(
+                        get: { row.selection },
+                        set: { next in
+                            if let raw = ClientTray.selectionsRaw(
+                                updating: individualSelectionsRaw,
+                                clientId: row.clientId,
+                                selection: next)
+                            {
+                                individualSelectionsRaw = raw
+                            }
+                        })) {
+                        ForEach(row.options) { option in
+                            Text(option.label.localized)
+                                .tag(option.tag)
+                                .disabled(!option.isEnabled)
+                        }
+                    }
+                    .labelsHidden()
+                    .accessibilityLabel("Quota window for %@".localized(row.displayName))
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 210)
+                }
+            }
+
+            if let statusHint = row.statusHint {
+                Text(statusHint.localized)
+                    .font(.caption2)
+                    .foregroundStyle(row.status == .errorExplicit ? .secondary : .tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
@@ -540,6 +665,10 @@ struct SettingsPanel: View {
         if let selectedClientId {
             row("Window") {
                 if let selectedAgent {
+                    let availableSelections = Set(selectedAgent.uniqueCardWindows.map {
+                        QuotaResolver.selection(
+                            clientId: selectedClientId, cardId: $0.cardId)
+                    })
                     Picker("", selection: Binding(
                         get: { canonical },
                         set: { next in
@@ -551,6 +680,11 @@ struct SettingsPanel: View {
                             Text(window.label.localized)
                                 .tag(QuotaResolver.selection(
                                     clientId: selectedClientId, cardId: window.cardId))
+                        }
+                        if !availableSelections.contains(canonical) {
+                            Text("Unavailable selection".localized)
+                                .tag(canonical)
+                                .disabled(true)
                         }
                     }
                     .labelsHidden()
@@ -654,5 +788,11 @@ struct SettingsPanel: View {
 enum AppInfo {
     static var version: String {
         Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "dev"
+    }
+
+    /// Read from the bundle rather than hard-coded, so a rename carries into the
+    /// UI with the Info.plist instead of leaving a stale name behind.
+    static var name: String {
+        Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "TokenBar"
     }
 }

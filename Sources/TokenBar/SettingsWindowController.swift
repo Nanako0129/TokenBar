@@ -65,6 +65,12 @@ final class SettingsWindowController {
         // The glass backdrop runs under the title bar (the popover look);
         // scroll views inset their content via the safe area.
         window.titlebarAppearsTransparent = true
+        // macOS 26 draws the native title flush left next to the traffic lights
+        // and an opaque title bar only trades the seamless glass for a solid
+        // band without centering it, so show no title at all — the sidebar and
+        // the window's own content already say what this is. `window.title`
+        // stays set for Mission Control and the Window menu.
+        window.titleVisibility = .hidden
         window.isReleasedWhenClosed = false
         // Swap the live UI for a static, same-size placeholder when the window
         // closes so its preview timelines + polling .tasks are torn down (a

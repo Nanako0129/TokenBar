@@ -746,6 +746,8 @@ enum SelfTest {
           {"clientId":"claude","source":"oauth","updatedAt":"now",
            "windows":[{"cardId":"session.v1","label":"Session","usedPercent":88,"remainingPercent":12},
                       {"cardId":"weekly.v1","label":"Weekly","usedPercent":10,"remainingPercent":90}]},
+          {"clientId":"antigravity","source":"oauth","updatedAt":"now","windows":[],
+           "error":"Antigravity OAuth client was not found."},
           {"clientId":"grok","source":"oauth","updatedAt":"now",
            "windows":[{"cardId":"billing.weekly.v1","label":"Weekly","usedPercent":99,"remainingPercent":1}],
            "error":"Grok request timed out.",
@@ -754,6 +756,409 @@ enum SelfTest {
         """
         let quotaPayload = try! JSONDecoder().decode(
             AgentUsagePayload.self, from: Data(quotaJSON.utf8))
+
+        // Individual client trays: bounded persistence, client-local quota
+        // resolution, eligibility, display privacy, and static icon rendering.
+        let clientGraphJSON = """
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"2026-07-01"}},
+         "summary":{"totalTokens":0,"totalCost":0,"totalDays":0,"activeDays":0,"averagePerDay":0,
+                    "maxCostInSingleDay":0,"clients":["claude","codex"],"models":[]},
+         "years":[],"contributions":[]}
+        """
+        let clientGraph = try! JSONDecoder().decode(
+            UsagePayload.self, from: Data(clientGraphJSON.utf8))
+        let officialClientIDs = MainActor.assumeIsolated {
+            AgentIconView.availableOfficialClientIDs()
+        }
+        let registeredOfficialClientIDs = MainActor.assumeIsolated {
+            AgentIconView.officialClientIDs
+        }
+        expect(
+            officialClientIDs == registeredOfficialClientIDs,
+            "every official registry id has a loadable brand asset")
+        expect(
+            officialClientIDs.contains("antigravity-cli")
+                && officialClientIDs.contains("kilo")
+                && !officialClientIDs.contains("junie"),
+            "icon aliases are official while fallback-only clients are not")
+        let renderedBrandImage = MainActor.assumeIsolated {
+            AgentIconView.statusItemImage(clientId: "claude")
+        }
+        let brandReps = renderedBrandImage?.representations.compactMap { $0 as? NSBitmapImageRep } ?? []
+        expect(
+            renderedBrandImage?.isTemplate == false && brandReps.count == 2
+                && brandReps.map(\.pixelsWide) == [18, 36]
+                && brandReps.map(\.pixelsHigh) == [18, 36],
+            "official status icon has fixed 1x and 2x representations")
+        expect(
+            MainActor.assumeIsolated {
+                AgentIconView.statusItemImage(clientId: "junie") == nil
+                    && AgentIconView.statusItemImage(clientId: "unknown") == nil
+            },
+            "fallback-only and unknown clients cannot create status icons")
+
+        let clientDefaultsName = "TokenBar.SelfTest.ClientTray.\(UUID().uuidString)"
+        if let clientDefaults = UserDefaults(suiteName: clientDefaultsName) {
+            defer { clientDefaults.removePersistentDomain(forName: clientDefaultsName) }
+            expect(ClientTray.enabled(defaults: clientDefaults).isEmpty, "individual trays default off")
+            expect(
+                ClientTray.canonicalEnabledRaw(["codex", "claude"]) == "claude,codex",
+                "enabled clients serialize as deterministic sorted CSV")
+            expect(
+                ClientTray.enabledRaw(
+                    updating: "claude", clientId: "codex", enabled: true)
+                    == "claude,codex"
+                    && ClientTray.enabledRaw(
+                        updating: "claude,codex", clientId: "codex", enabled: false)
+                        == "claude",
+                "Settings can commit enabled state through its observed AppStorage raw")
+
+            func boundedClientID(_ index: Int, length: Int) -> String {
+                let prefix = "c\(index)_"
+                return prefix + String(repeating: "a", count: length - prefix.utf8.count)
+            }
+            var boundaryEnabledIDs = (0 ..< 64).map { boundedClientID($0, length: 127) }
+            boundaryEnabledIDs[0] = boundedClientID(0, length: 128)
+            let boundaryEnabledRaw = ClientTray.canonicalEnabledRaw(Set(boundaryEnabledIDs))
+            expect(
+                boundaryEnabledRaw?.utf8.count == ClientTray.maxEnabledRawBytes
+                    && boundaryEnabledRaw.map(ClientTray.parseEnabledRaw)?.count == 64,
+                "enabled codec accepts an exact raw-byte boundary")
+            expect(
+                boundaryEnabledRaw.map { ClientTray.parseEnabledRaw($0 + "a").isEmpty } == true,
+                "enabled codec rejects one byte over the raw boundary")
+            let outgoingOversizedEnabled = Set(
+                (0 ..< 65).map { boundedClientID($0, length: 128) })
+            expect(
+                ClientTray.canonicalEnabledRaw(outgoingOversizedEnabled) == nil,
+                "enabled codec refuses to serialize an oversized valid set")
+
+            let selectionRaw = ClientTray.selectionsRaw(
+                updating: "{\"codex\":\"weekly.v1\"}",
+                clientId: "claude", selection: "model.gpt|preview.v1")
+            expect(
+                selectionRaw == "{\"claude\":\"model.gpt|preview.v1\",\"codex\":\"weekly.v1\"}",
+                "selection map uses deterministic sorted JSON")
+            clientDefaults.set(selectionRaw, forKey: ClientTray.selectionsKey)
+            expect(
+                ClientTray.selections(defaults: clientDefaults)["claude"] == "model.gpt|preview.v1",
+                "selection codec preserves card delimiters exactly")
+            expect(
+                ClientTray.selectionsRaw(
+                    updating: "{}", clientId: "codex", selection: "weekly.v1")
+                    == "{\"codex\":\"weekly.v1\"}",
+                "Settings can commit selection state through its observed AppStorage raw")
+
+            var boundarySelections = Dictionary(uniqueKeysWithValues: (0 ..< 15).map {
+                ("c\($0)", String(repeating: "x", count: ClientTray.maxCardIDBytes))
+            })
+            boundarySelections["final"] = "x"
+            let initialBoundaryData = try! JSONSerialization.data(
+                withJSONObject: boundarySelections, options: [.sortedKeys])
+            let boundaryPadding = ClientTray.maxSelectionRawBytes - initialBoundaryData.count
+            boundarySelections["final"] = String(repeating: "x", count: 1 + boundaryPadding)
+            let boundarySelectionRaw = ClientTray.canonicalSelectionsRaw(boundarySelections)
+            expect(
+                boundarySelectionRaw?.utf8.count == ClientTray.maxSelectionRawBytes
+                    && boundarySelectionRaw.map(ClientTray.parseSelectionsRaw)?.count == 16,
+                "selection codec accepts an exact raw-byte boundary")
+            expect(
+                boundarySelectionRaw.map {
+                    ClientTray.parseSelectionsRaw($0 + " ").isEmpty
+                } == true,
+                "selection codec rejects one byte over the raw boundary")
+            var outgoingOversizedSelections = boundarySelections
+            outgoingOversizedSelections["overflow"] = String(
+                repeating: "x", count: ClientTray.maxCardIDBytes)
+            expect(
+                ClientTray.canonicalSelectionsRaw(outgoingOversizedSelections) == nil,
+                "selection codec refuses to serialize an oversized valid map")
+
+            let tooManyEnabled = Set((0 ..< ClientTray.maxEntries + 1).map { "c\($0)" })
+            expect(
+                ClientTray.canonicalEnabledRaw(tooManyEnabled) == nil,
+                "over-limit enabled mutation does not serialize")
+            let oversizedEnabled = String(repeating: "a,", count: ClientTray.maxEnabledRawBytes)
+            clientDefaults.set(oversizedEnabled, forKey: ClientTray.enabledKey)
+            expect(
+                ClientTray.enabled(defaults: clientDefaults).isEmpty,
+                "oversized enabled input fails closed before splitting")
+            expect(
+                ClientTray.enabledRaw(
+                    updating: oversizedEnabled, clientId: "claude", enabled: true) == nil,
+                "oversized enabled input is not repaired by write-back")
+
+            let mixedSelections = """
+            {"claude":"auto","Codex":"bad","codex":42,"unknown":"bounded"}
+            """
+            clientDefaults.set(mixedSelections, forKey: ClientTray.selectionsKey)
+            expect(
+                ClientTray.selections(defaults: clientDefaults) == [
+                    "claude": "auto", "unknown": "bounded"],
+                "selection codec drops invalid entries but preserves bounded unknown ids")
+            clientDefaults.set(42, forKey: ClientTray.selectionsKey)
+            expect(
+                ClientTray.selections(defaults: clientDefaults).isEmpty,
+                "non-string selection defaults fail closed")
+
+            var oversizedRoot: [String: String] = [:]
+            for index in 0 ..< ClientTray.maxEntries + 1 {
+                oversizedRoot["c\(index)"] = "card\(index)"
+            }
+            let oversizedRootData = try! JSONSerialization.data(
+                withJSONObject: oversizedRoot, options: [.sortedKeys])
+            let oversizedRootRaw = String(data: oversizedRootData, encoding: .utf8)!
+            clientDefaults.set(oversizedRootRaw, forKey: ClientTray.selectionsKey)
+            expect(
+                ClientTray.selections(defaults: clientDefaults).isEmpty,
+                "selection root over the entry cap fails closed")
+            expect(
+                ClientTray.selectionsRaw(
+                    updating: oversizedRootRaw, clientId: "claude", selection: "auto") == nil,
+                "over-limit selection root is not written back")
+        } else {
+            expect(false, "isolated individual-tray defaults suite is available")
+        }
+
+        expect(
+            ClientTray.resolveWindow(
+                payload: quotaPayload, clientId: "claude", selection: ClientTray.autoSelection
+            )?.cardId == "session.v1",
+            "client Auto resolves only that client's tightest healthy window")
+        expect(
+            ClientTray.resolveWindow(
+                payload: quotaPayload, clientId: "grok", selection: ClientTray.autoSelection
+            ) == nil,
+            "client Auto rejects an unhealthy snapshot")
+        expect(
+            ClientTray.resolveWindow(
+                payload: quotaPayload, clientId: "grok", selection: "billing.weekly.v1"
+            )?.remainingPercent == 1,
+            "explicit client selection accepts an error snapshot fallback")
+        expect(
+            ClientTray.resolveWindow(
+                payload: quotaPayload, clientId: "codex", selection: "missing.v1"
+            ) == nil
+                && ClientTray.resolveWindow(
+                    payload: quotaPayload, clientId: "claude", selection: "weekly.v1")?.cardId
+                    != "missing.v1",
+            "missing explicit cards never fall back across cards or clients")
+        expect(
+            ClientTray.percentText(-2) == "0%"
+                && ClientTray.percentText(101) == "100%"
+                && ClientTray.percentText(.nan) == "—%"
+                && ClientTray.percentText(nil) == "—%",
+            "client percentage presentation clamps finite values and fails closed")
+        expect(
+            ClientTray.quotaClientID(for: "antigravity-cli") == "antigravity"
+                && ClientTray.processIdentity(for: "antigravity")
+                    != ClientTray.processIdentity(for: "antigravity-cli")
+                && ClientTray.autosaveName(for: "kilo")
+                    != ClientTray.autosaveName(for: "kilocode"),
+            "quota lookup aliases never collide in process or placement identity")
+        let routeMemory = StatusItemRouteMemory(
+            mainClient: ClientTray.overviewTab, mainView: AppView.monthly.rawValue)
+        let firstClaudeRoute = routeMemory.activateClient(
+            "claude", currentClient: ClientTray.overviewTab,
+            currentView: AppView.monthly.rawValue)
+        routeMemory.record(clientId: "claude", view: AppView.models.rawValue)
+        let firstCodexRoute = routeMemory.activateClient(
+            "codex", currentClient: "claude", currentView: AppView.models.rawValue)
+        routeMemory.record(clientId: "codex", view: AppView.hourly.rawValue)
+        let restoredClaudeRoute = routeMemory.activateClient(
+            "claude", currentClient: "codex", currentView: AppView.hourly.rawValue)
+        let restoredMainRoute = routeMemory.activateMain(
+            currentClient: "claude", currentView: restoredClaudeRoute.view)
+        let mainCodexRoute = routeMemory.switchClient(
+            from: restoredMainRoute.clientId, currentView: restoredMainRoute.view, to: "codex")
+        _ = routeMemory.activateClient(
+            "claude", currentClient: mainCodexRoute.clientId, currentView: mainCodexRoute.view)
+        let mainAgainRoute = routeMemory.activateMain(
+            currentClient: "claude", currentView: AppView.models.rawValue)
+        expect(
+            ClientTray.activeViewKey == "tokenbar.view"
+                && firstClaudeRoute == .init(
+                    clientId: "claude", view: AppView.overview.rawValue)
+                && firstCodexRoute == .init(
+                    clientId: "codex", view: AppView.overview.rawValue)
+                && restoredClaudeRoute.view == AppView.models.rawValue
+                && restoredMainRoute == .init(
+                    clientId: ClientTray.overviewTab, view: AppView.monthly.rawValue)
+                // The main item keeps its OWN per-client lens: switching to a tab
+                // it has not visited opens Overview, regardless of where the
+                // individual Codex item was left (hourly, above).
+                && mainCodexRoute == .init(
+                    clientId: "codex", view: AppView.overview.rawValue)
+                && mainAgainRoute == mainCodexRoute,
+            "main and individual items restore independent process-lifetime routes")
+
+        // A session that quit on a client tab persists that tab and lens for the
+        // MAIN item. The first click on that client's own item must still open
+        // Overview instead of inheriting the previous session's main lens.
+        let persistedMainMemory = StatusItemRouteMemory(
+            mainClient: "claude", mainView: AppView.models.rawValue)
+        let firstItemVisit = persistedMainMemory.activateClient(
+            "claude", currentClient: "claude", currentView: AppView.models.rawValue)
+        let mainAfterItemVisit = persistedMainMemory.activateMain(
+            currentClient: "claude", currentView: firstItemVisit.view)
+        expect(
+            firstItemVisit == .init(clientId: "claude", view: AppView.overview.rawValue)
+                && mainAfterItemVisit == .init(
+                    clientId: "claude", view: AppView.models.rawValue),
+            "an unvisited client item ignores the persisted main lens and cannot clobber it")
+
+        // The individual-items spinner must terminate. `stats`/`agentUsage` stay
+        // nil when a fetch fails, so a payload-presence check would spin forever;
+        // the gate is request lifecycle, and a failed phase is terminal.
+        //
+        // This table treats `.loading` as "a request is still in flight", which
+        // holds only because DashboardModel settles phase on EVERY initial path —
+        // including the stale-year recovery, where apply() clears the filter and
+        // spawns an unfiltered reload before reaching `.ready`, and that reload's
+        // failure branch has to move a never-ready model to `.failed`. If a new
+        // path can leave phase on `.loading` with no request running, this
+        // spinner silently becomes permanent again.
+        expect(
+            SettingsWindowView.isInitialLoad(phase: .loading, agentUsageAttempted: false)
+                && SettingsWindowView.isInitialLoad(
+                    phase: .loading, agentUsageAttempted: true)
+                && SettingsWindowView.isInitialLoad(
+                    phase: .ready, agentUsageAttempted: false)
+                && !SettingsWindowView.isInitialLoad(
+                    phase: .ready, agentUsageAttempted: true)
+                && SettingsWindowView.isInitialLoad(
+                    phase: .failed("boom"), agentUsageAttempted: false)
+                && !SettingsWindowView.isInitialLoad(
+                    phase: .failed("boom"), agentUsageAttempted: true),
+            "the individual-items spinner ends once both initial requests settle, including failures")
+
+        // Browsing a client inside the MAIN popover must not decide what that
+        // client's own item opens on.
+        let mainBrowsingMemory = StatusItemRouteMemory(
+            mainClient: ClientTray.overviewTab, mainView: AppView.overview.rawValue)
+        _ = mainBrowsingMemory.switchClient(
+            from: ClientTray.overviewTab, currentView: AppView.overview.rawValue,
+            to: "claude")
+        mainBrowsingMemory.record(clientId: "claude", view: AppView.models.rawValue)
+        expect(
+            mainBrowsingMemory.activateClient(
+                "claude", currentClient: "claude", currentView: AppView.models.rawValue
+            ) == .init(clientId: "claude", view: AppView.overview.rawValue),
+            "main-popover browsing never seeds an individual item's lens")
+
+        let errorOnlyRows = ClientTray.settingsRows(
+            presentClients: ["antigravity-cli"], payload: quotaPayload,
+            enabled: [], selections: [:], hidden: [], orderRaw: "",
+            officialClients: officialClientIDs)
+        expect(
+            errorOnlyRows.count == 1
+                && errorOnlyRows[0].clientId == "antigravity-cli"
+                && errorOnlyRows[0].status == .errorAuto
+                && errorOnlyRows[0].valueText == "—%"
+                && errorOnlyRows[0].options.map(\.tag) == [ClientTray.autoSelection],
+            "error-only quota providers remain configurable while windows are unavailable")
+
+        let normalRows = ClientTray.settingsRows(
+            presentClients: ["codex", "claude"], payload: quotaPayload,
+            enabled: ["codex"], selections: ["codex": "missing.v1"], hidden: [],
+            orderRaw: "claude,codex", officialClients: officialClientIDs)
+        expect(
+            normalRows.map(\.clientId) == ["claude", "codex"],
+            "Settings rows follow the existing client tab order")
+        let missingRow = normalRows.first { $0.clientId == "codex" }
+        expect(
+            missingRow?.status == .missingSelection
+                && missingRow?.options.last?.label == "Unavailable selection"
+                && missingRow?.options.last?.tag == "missing.v1"
+                && missingRow?.options.last?.isEnabled == false
+                && missingRow?.valueText == "—%",
+            "explicitly missing selection stays selected but unavailable")
+        let hiddenRows = ClientTray.settingsRows(
+            presentClients: ["codex"], payload: quotaPayload,
+            enabled: ["codex"], selections: ["codex": "weekly.v1"], hidden: ["codex"],
+            orderRaw: "", officialClients: officialClientIDs)
+        expect(
+            hiddenRows.first?.status == .suppressed && hiddenRows.first?.isEnabled == true,
+            "hidden tabs preserve Settings enablement and selection")
+        let errorAutoRow = ClientTray.settingsRows(
+            presentClients: ["grok"], payload: quotaPayload,
+            enabled: ["grok"], selections: ["grok": ClientTray.autoSelection], hidden: [],
+            orderRaw: "", officialClients: officialClientIDs).first
+        let errorExplicitRow = ClientTray.settingsRows(
+            presentClients: ["grok"], payload: quotaPayload,
+            enabled: ["grok"], selections: ["grok": "billing.weekly.v1"], hidden: [],
+            orderRaw: "", officialClients: officialClientIDs).first
+        expect(
+            errorAutoRow?.status == .errorAuto && errorAutoRow?.valueText == "—%"
+                && errorExplicitRow?.status == .errorExplicit
+                && errorExplicitRow?.valueText == "1%",
+            "error snapshots distinguish Auto from explicit fallback")
+        expect(
+            ClientTray.settingsRows(
+                presentClients: ["codex"], payload: nil, enabled: ["codex"], selections: [:],
+                hidden: [], orderRaw: "", officialClients: officialClientIDs).first?.status == .unavailable,
+            "enabled rows survive a temporarily missing payload")
+        let absentExplicitRow = ClientTray.settingsRows(
+            presentClients: ["codex"], payload: nil, enabled: ["codex"],
+            selections: ["codex": "missing.v1"], hidden: [], orderRaw: "",
+            officialClients: officialClientIDs).first
+        expect(
+            absentExplicitRow?.status == .missingSelection
+                && absentExplicitRow?.options.last?.label == "Unavailable selection"
+                && absentExplicitRow?.options.last?.tag == "missing.v1",
+            "missing payload keeps an explicit selection represented without exposing its id")
+        expect(
+            ClientTray.settingsRows(
+                presentClients: ["claude"], payload: quotaPayload, enabled: ["codex"], selections: [:],
+                hidden: [], orderRaw: "", officialClients: officialClientIDs).map(\.clientId) == ["claude"],
+            "disabled clients disappear when no longer present while capable rows remain")
+        expect(
+            ClientTray.settingsRows(
+                presentClients: [], payload: nil, enabled: [], selections: [:], hidden: [],
+                orderRaw: "", officialClients: officialClientIDs).isEmpty,
+            "Settings uses a fixed empty state when no rows are eligible")
+        let runtimePresentations = ClientTray.runtimePresentations(
+            graph: clientGraph, payload: quotaPayload, enabled: ["claude", "codex"],
+            selections: ["codex": "weekly.v1"], hidden: ["claude"],
+            officialClients: officialClientIDs)
+        expect(
+            runtimePresentations.map(\.clientId) == ["codex"]
+                && runtimePresentations.first?.valueText == "35%",
+            "runtime shells use graph presence, enabled state, official assets, and hidden tabs")
+
+        let sensitiveQuotaJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"SECRET_SOURCE","updatedAt":"now",
+           "identity":{"email":"SECRET_IDENTITY","plan":"SECRET_PLAN"},
+           "windows":[{"cardId":"SECRET_CARD","label":"SECRET_LABEL","usedPercent":1,"remainingPercent":99}],
+           "error":"SECRET_ERROR"}
+        ]}
+        """
+        let sensitiveQuota = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(sensitiveQuotaJSON.utf8))
+        let sensitiveRow = ClientTray.settingsRows(
+            presentClients: ["codex"], payload: sensitiveQuota, enabled: ["codex"],
+            selections: ["codex": "SECRET_CARD"], hidden: [], orderRaw: "",
+            officialClients: officialClientIDs).first!
+        let sensitiveRuntime = ClientTray.runtimePresentations(
+            graph: clientGraph, payload: sensitiveQuota, enabled: ["codex"],
+            selections: ["codex": "SECRET_CARD"], hidden: [],
+            officialClients: officialClientIDs).first!
+        let sensitiveVisibleText = ([
+            sensitiveRow.displayName,
+            sensitiveRow.valueText,
+            sensitiveRow.statusHint ?? "",
+            sensitiveRow.accessibilityLabel,
+        ] + sensitiveRow.options.filter(\.isEnabled).map(\.label)).joined(separator: "|")
+        let sensitiveRuntimeText = [
+            sensitiveRuntime.valueText,
+            sensitiveRuntime.toolTip,
+            sensitiveRuntime.accessibilityLabel,
+        ].joined(separator: "|")
+        expect(
+            !sensitiveVisibleText.contains("SECRET_")
+                && !sensitiveRuntimeText.contains("SECRET_"),
+            "client Settings and status surfaces redact provider and card input")
 
         func transportPayload(_ body: String) -> AgentUsagePayload? {
             do {

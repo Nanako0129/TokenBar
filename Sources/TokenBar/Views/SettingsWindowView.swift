@@ -7,6 +7,33 @@ import TokenBarCore
 /// piece reads the same keys (plus the real menu bar reacts anyway), so
 /// changes reflect instantly without touching the popover's transient
 /// behavior.
+/// Sidebar footer link: plain (not the loud system link blue), a pointing-hand
+/// cursor AppKit does not give `Link` on its own, and a hover chip so two
+/// adjacent links read as two separate targets.
+private struct FooterLink: View {
+    let title: String
+    let systemImage: String
+    let url: String
+
+    @State private var hovering = false
+
+    var body: some View {
+        Link(destination: URL(string: url)!) {
+            Label(title.localized, systemImage: systemImage)
+                .font(.caption2)
+                .foregroundStyle(hovering ? Color.primary : Color.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.primary.opacity(hovering ? 0.09 : 0)))
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .hoverCursor(.pointingHand) { hovering = $0 }
+    }
+}
+
 struct SettingsWindowView: View {
     static let contentSize = CGSize(width: 856, height: 580)
 
@@ -74,25 +101,32 @@ struct SettingsWindowView: View {
 
     var body: some View {
         HStack(spacing: 0) {
+            // The footer rides in the List's own safe area, not a sibling VStack:
+            // .sidebar vibrancy belongs to the List, so anything outside it shows
+            // the window backdrop instead and reads as the wrong material.
             List(SettingsPanel.Page.allCases, selection: $selectedPage) { page in
                 Label(page.localizedTitle, systemImage: page.symbolName)
                     .tag(page)
             }
             .listStyle(.sidebar)
+            .safeAreaInset(edge: .bottom, spacing: 0) { sidebarFooter }
             .frame(width: 170)
-            Divider()
+            // The columns sit inside the title-bar safe area, so a plain Divider
+            // stops ~32pt short of the top edge and reads as a broken seam.
+            Divider().ignoresSafeArea(edges: .top)
             ScrollView {
                 SettingsPanel(
                     page: selectedPage,
                     agentUsage: model.agentUsage,
-                    presentClients: model.stats?.presentClients ?? [])
+                    presentClients: model.stats?.presentClients ?? [],
+                    isLoading: isInitialLoad)
                     .padding(14)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .background(OverlayScrollerEnforcer())
             }
             .scrollIndicators(.never)
             .frame(width: 354)
-            Divider()
+            Divider().ignoresSafeArea(edges: .top)
             ScrollView {
                 previewColumn
                     .padding(14)
@@ -122,6 +156,67 @@ struct SettingsWindowView: View {
         // Key the rate poll on the hidden raw so a hide toggle restarts it and
         // re-fetches the filtered rate immediately, instead of lagging ≤10s.
         .task(id: tabsHiddenRaw) { await pollTokensPerMin() }
+    }
+
+    /// Whether either initial request is still in flight. Keyed on request
+    /// lifecycle, NOT on payload presence: `stats`/`agentUsage` stay nil when a
+    /// fetch fails (`load()` leaves `stats` nil on error and `pollAgentUsage()`
+    /// only assigns on success), so waiting for a payload would spin forever
+    /// against a persistent failure instead of reaching a terminal state.
+    private var isInitialLoad: Bool {
+        Self.isInitialLoad(
+            phase: model.phase, agentUsageAttempted: model.agentUsageAttempted)
+    }
+
+    nonisolated static func isInitialLoad(
+        phase: DashboardModel.Phase, agentUsageAttempted: Bool
+    ) -> Bool {
+        if case .loading = phase { return true }
+        return !agentUsageAttempted
+    }
+
+    /// Fills the empty bottom of the sidebar: app icon, name, running version
+    /// (the first thing an issue report needs), and the two outbound links. Name
+    /// and version come from the bundle, so a rename does not leave a stale
+    /// brand here. `Link` opens the default browser without an NSWorkspace detour.
+    private var sidebarFooter: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Image(nsImage: appIcon)
+                    .resizable()
+                    .frame(width: 26, height: 26)
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(AppInfo.name)
+                        .font(.caption.weight(.medium))
+                    Text(AppInfo.version)
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .padding(.leading, 6)
+            HStack(spacing: 4) {
+                FooterLink(
+                    title: "GitHub",
+                    systemImage: "chevron.left.forwardslash.chevron.right",
+                    url: "https://github.com/Nanako0129/TokenBar")
+                FooterLink(
+                    title: "Sponsor",
+                    systemImage: "heart",
+                    url: "https://www.patreon.com/cw/Nanako0129/membership")
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.bottom, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// `NSApp.applicationIconImage` returns the icon with the macOS 26 system
+    /// mask applied, which leaves a light rim on the dark sidebar. The bundled
+    /// icns is already the finished artwork, so read that directly
+    /// (`NSImage(named:)` caches it); an unbundled dev build falls back to the
+    /// masked one.
+    private var appIcon: NSImage {
+        NSImage(named: "icon") ?? NSApp.applicationIconImage
     }
 
     nonisolated static func applyQuotaRemaining(

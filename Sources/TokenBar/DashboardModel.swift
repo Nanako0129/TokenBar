@@ -189,6 +189,10 @@ private struct DashboardSnapshot {
     private(set) var hourly: HourlyReport?
     private(set) var agents: AgentsReport?
     private(set) var agentUsage: AgentUsagePayload?
+    /// True once the first `pollAgentUsage()` attempt has finished, whether it
+    /// succeeded or not. Lets a view show a terminal state instead of waiting on
+    /// a payload that may never arrive.
+    private(set) var agentUsageAttempted = false
     private(set) var trace: [TraceBucket] = []
 
     // Memo for the hidden-client Overview slice: lensContent re-evals on every
@@ -299,7 +303,21 @@ private struct DashboardSnapshot {
             ? source.refreshGraph(year: year, priority: .userInitiated)
             : source.graph(year: year, priority: .userInitiated)
         async let reportTask = source.modelReport(year: year, priority: .userInitiated)
-        guard let payload = try? await payloadTask else { return }
+        let payload: UsagePayload
+        do {
+            payload = try await payloadTask
+        } catch {
+            // A model that has never reached `.ready` must still settle. apply()
+            // spawns this reload for an emptied year filter and returns BEFORE
+            // setting `.ready`, so a failure here would otherwise strand phase on
+            // `.loading` forever — the dashboard spins and Settings keeps
+            // "looking for clients". Once ready, keep the stale-data-over-error
+            // behavior a manual refresh relies on.
+            if case .loading = phase {
+                phase = .failed("Failed to load usage: \(error)")
+            }
+            return
+        }
         let report = try? await reportTask
         apply(payload: payload, report: report)
         // If apply() cleared a now-empty year filter, it spawned its own
@@ -454,6 +472,11 @@ private struct DashboardSnapshot {
                 reconcileQuotaRemaining(with: resolved)
                 refreshSnapshotLiveData() // keep the reopen cache's quota cards current
             }
+            // Set on failure too: `agentUsage == nil` alone cannot distinguish
+            // "the first attempt is still in flight" from "the attempt finished
+            // and produced nothing", and UI that waits on the payload would spin
+            // forever against a persistent failure.
+            agentUsageAttempted = true
             try? await Task.sleep(for: .seconds(60))
         }
     }

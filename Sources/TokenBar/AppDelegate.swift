@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var trayAnimator: TrayAnimator?
     private var titleRefreshTask: Task<Void, Never>?
     private var defaultsObserver: NSObjectProtocol?
+    private var defaultsApplyScheduled = false
     // Last good fetches — a failed refresh keeps showing these.
     private var lastGraph: UsagePayload?
     private var lastRate: Double?
@@ -59,38 +60,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         trayAnimator = animator
         controller.quotaPayloadProvider = { [weak animator] in animator?.quota }
         // A fresh quota or rate fetch re-renders the title right away.
-        animator.onQuotaUpdated = { [weak self] in self?.applyTitle() }
+        animator.onQuotaUpdated = { [weak self] in self?.applyMenuBarState() }
         animator.start()
         startTitleRefresh()
 
-        // Re-render the title the moment any setting changes (tray mode, quota
-        // source) — cheap, recomputes from cached data. The refresh LOOP is
-        // restarted only when the data-refresh interval actually changes:
-        // didChangeNotification carries no key and fires for every write
-        // (popover height slider, active tab, year, quota cache…), so an
-        // unconditional restart turned each of those into a forced full
-        // log re-read. Gate on the interval value to avoid that storm.
+        // didChangeNotification carries no key and fires for EVERY write — the
+        // popover height slider mid-drag, active tab, lens, quota cache. Coalesce
+        // onto the next main-queue turn so one burst of writes costs one pass
+        // (which now also creates status items and renders their 1x/2x images)
+        // instead of one per write, without adding a timer or poller. The
+        // interval and hidden-set restarts stay value-gated inside the pass for
+        // the same reason: an unconditional restart turned each unrelated write
+        // into a forced full log re-read.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main
-        ) { _ in
-            MainActor.assumeIsolated {
-                guard let self = NSApp.delegate as? AppDelegate else { return }
-                self.applyTitle()
-                let next = AppDelegate.readIntervalMin()
-                if next != self.refreshIntervalMin {
-                    self.refreshIntervalMin = next
-                    self.titleRefreshTask?.cancel()
-                    self.startTitleRefresh()
-                }
-                // A visibility change alters the FILTERED live rate, which
-                // applyTitle above can't recompute (it reuses the cached rate).
-                // Value-gate on the hidden set and refetch once when it changes.
-                let hiddenRaw = UserDefaults.standard.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
-                if hiddenRaw != self.lastHiddenRaw {
-                    self.lastHiddenRaw = hiddenRaw
-                    self.refreshFilteredRate()
-                }
-            }
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.scheduleDefaultsApply() }
         }
 
         // Debug hooks: `--open-popover` shows the popover shortly after
@@ -108,6 +93,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if CommandLine.arguments.contains("--icon-gallery") {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
                 IconGalleryWindowController.show()
+            }
+        }
+    }
+
+    private func scheduleDefaultsApply() {
+        guard !defaultsApplyScheduled else { return }
+        defaultsApplyScheduled = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.defaultsApplyScheduled = false
+            self.applyMenuBarState()
+
+            let next = AppDelegate.readIntervalMin()
+            if next != self.refreshIntervalMin {
+                self.refreshIntervalMin = next
+                self.titleRefreshTask?.cancel()
+                self.startTitleRefresh()
+            }
+
+            // A visibility change alters the filtered live rate, which applyMenuBarState
+            // cannot recompute from its cached rate. Value-gate the extra fetch.
+            let hiddenRaw = UserDefaults.standard.string(
+                forKey: ClientRegistry.tabHiddenKey) ?? ""
+            if hiddenRaw != self.lastHiddenRaw {
+                self.lastHiddenRaw = hiddenRaw
+                self.refreshFilteredRate()
             }
         }
     }
@@ -136,16 +147,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusController?.tearDown()
     }
 
-    /// Compose the tray title from the cached data and the current settings.
-    /// The rate prefers the animator's 30s-fresh value over lastRate (which
-    /// is only updated on the 5-minute title-refresh cycle).
-    private func applyTitle() {
+    /// Re-derive every menu-bar surface from the cached data and the current
+    /// settings: the main item's title plus the individual client items. The
+    /// rate prefers the animator's 30s-fresh value over lastRate (which is only
+    /// updated on the 5-minute title-refresh cycle). Both halves recompute from
+    /// cache and the item pass is diffed, so calling this often is cheap.
+    private func applyMenuBarState() {
         let mode = TrayMode.current
         let quotaRemaining = trayAnimator?.quotaRemaining
         let rate = trayAnimator?.tokensPerMinRate ?? lastRate
         statusController?.updateTitle(
             mode.title(graph: lastGraph, tokensPerMin: rate, quotaRemaining: quotaRemaining),
             color: mode.titleColor(quotaRemaining: quotaRemaining))
+
+        statusController?.reconcileClientItems(ClientTray.runtimePresentations(
+            graph: lastGraph,
+            payload: trayAnimator?.quota,
+            enabled: ClientTray.enabled(),
+            selections: ClientTray.selections(),
+            hidden: ClientRegistry.hiddenClients(),
+            officialClients: AgentIconView.availableOfficialClientIDs()))
     }
 
     /// The hidden-tabs set changed: fetch the filtered live rate once, off the
@@ -198,7 +219,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                     if let rate { self.lastRate = rate }
                 }
                 guard !Task.isCancelled else { break }
-                self.applyTitle()
+                self.applyMenuBarState()
                 // Wake at least as often as the force interval (so a short
                 // interval is honored) but never sleep longer than the 5-min
                 // cached-refresh cap (so graph titles don't lag a long interval).
