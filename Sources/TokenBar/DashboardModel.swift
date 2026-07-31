@@ -88,12 +88,20 @@ enum AgentUsagePublicationCoordinator {
 private struct DashboardSnapshot {
     let payload: UsagePayload
     let stats: UsageStats
-    let modelReport: ModelReport?
+    let loadedModelReport: LoadedModelReport?
     let colors: ModelColorMap
     let knownYears: [String]
     let year: String?
     let agentUsage: AgentUsagePayload?
     let trace: [TraceBucket]
+}
+
+/// The report and the year filter used to load it are one display value. A
+/// failed later reload can change the selected filter without replacing this
+/// snapshot, so a card cannot label stale rows with the new selection.
+struct LoadedModelReport: Sendable {
+    let report: ModelReport
+    let year: String?
 }
 
 /// Shared dashboard data for every lens. Base data (graph + model report)
@@ -175,7 +183,7 @@ private struct DashboardSnapshot {
         if let snap = Self.lastSnapshot, snap.year == initialYear {
             payload = snap.payload
             stats = snap.stats
-            modelReport = snap.modelReport
+            loadedModelReport = snap.loadedModelReport
             colors = snap.colors
             knownYears = snap.knownYears
             acceptedPayloadYear = Self.identityYear(initialYear)
@@ -199,7 +207,8 @@ private struct DashboardSnapshot {
     private(set) var knownYears: [String] = []
     private(set) var payload: UsagePayload?
     private(set) var stats: UsageStats?
-    private(set) var modelReport: ModelReport?
+    private(set) var loadedModelReport: LoadedModelReport?
+    var modelReport: ModelReport? { loadedModelReport?.report }
     private(set) var colors = ModelColorMap(report: nil)
     private(set) var hourly: HourlyReport?
     private(set) var hourlyLoading = false
@@ -287,7 +296,7 @@ private struct DashboardSnapshot {
             // so apply() never tags the new year — and the static snapshot —
             // with the old year's payload. Mirrors reload()/pollGraph().
             guard self.year == year else { return }
-            apply(payload: payload, report: report, expectedYear: year)
+            apply(payload: payload, report: report, loadedFor: year, expectedYear: year)
         } catch {
             // Keep showing stale data over an error screen when a previous
             // load succeeded — a transient failure must not blank the UI.
@@ -393,7 +402,7 @@ private struct DashboardSnapshot {
         }
         let report = try? await reportTask
         guard !Task.isCancelled, self.year == year else { return }
-        apply(payload: payload, report: report, expectedYear: year)
+        apply(payload: payload, report: report, loadedFor: year, expectedYear: year)
         // If apply() cleared a now-empty year filter, it spawned its own
         // unfiltered reload that re-fetches the lazy lenses for the new (nil)
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
@@ -431,7 +440,8 @@ private struct DashboardSnapshot {
     }
 
     private func apply(
-        payload: UsagePayload, report: ModelReport?, expectedYear: String? = nil
+        payload: UsagePayload, report: ModelReport?, loadedFor reportYear: String?,
+        expectedYear: String? = nil
     ) {
         guard expectedYear == nil || self.year == expectedYear else { return }
         // A year-filtered payload reports only the selected year (empty if that
@@ -451,7 +461,7 @@ private struct DashboardSnapshot {
         self.payload = payload
         acceptedPayloadYear = Self.identityYear(year)
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
-        modelReport = report
+        loadedModelReport = report.map { LoadedModelReport(report: $0, year: reportYear) }
         colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
@@ -466,7 +476,7 @@ private struct DashboardSnapshot {
     private func cacheSnapshot() {
         guard cachesSnapshot, let payload, let stats else { return }
         Self.lastSnapshot = DashboardSnapshot(
-            payload: payload, stats: stats, modelReport: modelReport,
+            payload: payload, stats: stats, loadedModelReport: loadedModelReport,
             colors: colors, knownYears: knownYears, year: year,
             agentUsage: agentUsage, trace: trace)
     }
@@ -483,7 +493,8 @@ private struct DashboardSnapshot {
     private func refreshSnapshotLiveData() {
         guard cachesSnapshot, let snap = Self.lastSnapshot else { return }
         Self.lastSnapshot = DashboardSnapshot(
-            payload: snap.payload, stats: snap.stats, modelReport: snap.modelReport,
+            payload: snap.payload, stats: snap.stats,
+            loadedModelReport: snap.loadedModelReport,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
             agentUsage: agentUsage, trace: trace)
     }
@@ -512,7 +523,7 @@ private struct DashboardSnapshot {
             // The year may have changed while we were off-actor; drop a stale
             // slice so the chart never flickers to the wrong year.
             guard self.year == year, let payload = fetched else { continue }
-            apply(payload: payload, report: report, expectedYear: year)
+            apply(payload: payload, report: report, loadedFor: year, expectedYear: year)
             // apply() may have cleared a now-empty year filter and spawned an
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.

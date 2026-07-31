@@ -120,6 +120,71 @@ private func waitUntil(
     return false
 }
 
+private enum DashboardModelTestError: Error {
+    case graphUnavailable
+}
+
+private struct DashboardModelTestSource: UsageDataSource {
+    let failingGraphYear: String
+    let allowsQuotaCachePersistence = false
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = priority
+        if year == failingGraphYear { throw DashboardModelTestError.graphUnavailable }
+        return DemoData.payload(for: year)
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await graph(year: year, priority: priority)
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        let marker = year ?? "all"
+        let tokens = year == "2024" ? 24 : year == "2023" ? 23 : 1
+        let json = """
+        {"entries":[{"client":"claude","model":"loaded-MARKER","provider":"test",
+         "input":TOKENS,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
+         "total":TOKENS,"messageCount":1,"cost":1.0,"msPer1kTokens":null}],
+         "totalInput":TOKENS,"totalOutput":0,"totalCacheRead":0,"totalCacheWrite":0,
+         "totalMessages":1,"totalCost":1.0}
+        """
+        .replacingOccurrences(of: "MARKER", with: marker)
+        .replacingOccurrences(of: "TOKENS", with: String(tokens))
+        return try JSONDecoder().decode(ModelReport.self, from: Data(json.utf8))
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
+private struct DashboardModelTestObservation: Sendable {
+    let selectedYear: String?
+    let loadedYear: String?
+    let loadedModel: String?
+    let loadedTokens: Int64?
+    let cardRangeLabel: String
+}
+
 enum SelfTest {
     static func run() -> Never {
         var failures = 0
@@ -393,6 +458,191 @@ enum SelfTest {
                 && providerRows.map(\.cost) == [7.0, 5.0],
             "attribution rows retain two providers for one model")
 
+        // Stats attribution consumes raw provider rows. Keep bucket totals
+        // lossless so a mixed model cannot hide a source classification.
+        let breakdownEntries = [
+            attributionEntry(
+                client: "claude", provider: "anthropic", model: "claude-model",
+                total: 100, cost: 1.0),
+            attributionEntry(
+                client: "claude", provider: "openai", model: "gpt-model",
+                total: 200, cost: 2.0),
+            attributionEntry(
+                client: "claude", provider: "nvidia", model: "deepseek-model",
+                total: 300, cost: 3.0),
+        ]
+        let breakdownRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "anthropic", state: .assigned("claude")),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+        ]
+        let oneEachBreakdown = UsageAttributionBreakdown.rows(
+            entries: breakdownEntries, clientIds: ["claude"], confirmed: breakdownRecords)
+        expect(
+            oneEachBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .excluded, .unassigned,
+            ]
+                && oneEachBreakdown.map(\.tokens) == [100, 200, 300]
+                && oneEachBreakdown.map(\.cost) == [1.0, 2.0, 3.0],
+            "attribution breakdown reports assigned, excluded, and unassigned buckets")
+
+        // Unpriced/local usage still carries tokens. Keep every bucket's
+        // non-zero guard load-bearing so zero-cost rows cannot vanish.
+        let zeroCostBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "zero-assigned",
+                    total: 11, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "zero-excluded",
+                    total: 22, cost: 0.0),
+                attributionEntry(
+                    client: "claude", provider: "local", model: "zero-unassigned",
+                    total: 33, cost: 0.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .assigned("claude")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .excluded),
+            ])
+        expect(
+            zeroCostBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .excluded, .unassigned,
+            ]
+                && zeroCostBreakdown.map(\.tokens) == [11, 22, 33]
+                && zeroCostBreakdown.map(\.cost) == [0.0, 0.0, 0.0],
+            "zero-cost tokens remain visible in every attribution bucket")
+
+        let mergedBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "one",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "two",
+                    total: 20, cost: 2.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "three",
+                    total: 30, cost: 3.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "nvidia", state: .assigned("claude")),
+            ])
+        expect(
+            mergedBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("claude"), .assigned("codex"),
+            ]
+                && mergedBreakdown.map(\.tokens) == [30, 30]
+                && mergedBreakdown.map(\.cost) == [3.0, 3.0],
+            "attribution breakdown merges same targets and keeps targets separate")
+
+        expect(
+            oneEachBreakdown.reduce(Int64.zero) { $0 + $1.tokens } == 600
+                && oneEachBreakdown.reduce(0.0) { $0 + $1.cost } == 6.0,
+            "attribution breakdown preserves pinned unfiltered totals")
+
+        let overrideBreakdown = UsageAttributionBreakdown.rows(
+            entries: [claudeOpenAIEntry],
+            clientIds: ["claude"],
+            confirmed: [providerDeclaration, modelDeclaration])
+        expect(
+            overrideBreakdown.count == 1
+                && overrideBreakdown[0].state == .assigned("codex")
+                && overrideBreakdown[0].tokens == 1
+                && overrideBreakdown[0].cost == 0.0,
+            "attribution breakdown delegates model override resolution")
+
+        let suggestionOnlyRecords = UsageAttributionSettings.suggestionRecords(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "claude-model",
+                    total: 40, cost: 4.0),
+            ],
+            confirmed: [],
+            subscriptionClients: ["claude"])
+        let suggestionOnlyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "claude-model",
+                    total: 40, cost: 4.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [])
+        expect(
+            suggestionOnlyRecords.count == 1
+                && suggestionOnlyBreakdown.count == 1
+                && suggestionOnlyBreakdown[0].state == .unassigned
+                && suggestionOnlyBreakdown[0].tokens == 40
+                && suggestionOnlyBreakdown[0].cost == 4.0,
+            "suggestion-only attribution remains unassigned")
+
+        let emptyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "one",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "two",
+                    total: 20, cost: 2.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [])
+        expect(
+            emptyBreakdown.count == 1
+                && emptyBreakdown[0].state == .unassigned
+                && emptyBreakdown[0].tokens == 30
+                && emptyBreakdown[0].cost == 3.0,
+            "empty attribution table puts all usage in unassigned")
+
+        let selectedOnlyBreakdown = UsageAttributionBreakdown.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "selected-assigned",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "anthropic", model: "selected-excluded",
+                    total: 20, cost: 2.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "selected-unassigned",
+                    total: 30, cost: 3.0),
+                attributionEntry(
+                    client: "codex", provider: "openai", model: "hidden-assigned",
+                    total: 100, cost: 10.0),
+                attributionEntry(
+                    client: "codex", provider: "anthropic", model: "hidden-excluded",
+                    total: 200, cost: 20.0),
+                attributionEntry(
+                    client: "codex", provider: "nvidia", model: "hidden-unassigned",
+                    total: 300, cost: 30.0),
+            ],
+            clientIds: ["claude"],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "anthropic", state: .excluded),
+                UsageAttribution.Record(
+                    client: "codex", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "codex", provider: "anthropic", state: .excluded),
+            ])
+        expect(
+            selectedOnlyBreakdown.map(\.state) == [
+                UsageAttribution.State.assigned("codex"), .excluded, .unassigned,
+            ]
+                && selectedOnlyBreakdown.map(\.tokens) == [10, 20, 30]
+                && selectedOnlyBreakdown.map(\.cost) == [1.0, 2.0, 3.0],
+            "attribution breakdown filters every bucket by selected clients")
+
         let emptyProviderRow = UsageAttributionSettings.rows(
             entries: [attributionEntry(
                 client: "opencode", provider: "", model: "shared-model", total: 7, cost: 1.5)],
@@ -489,7 +739,7 @@ enum SelfTest {
                 && refusedAttributionWrite?.message.contains("Could not save") == true,
             "refused attribution writes are reported as failures")
         expect(
-            UsageAttributionSettings.Copy.all.allSatisfy {
+            (UsageAttributionSettings.Copy.all + UsageAttributionBreakdown.Copy.all).allSatisfy {
                 let copy = $0.lowercased()
                 return !copy.contains("consumed") && !copy.contains("deducted")
             },
@@ -1553,6 +1803,55 @@ enum SelfTest {
             settingsModelUsesAllTime,
             "Settings can pin its client universe to the all-time graph")
 
+        // The selected year may move ahead of a stale report while reload is
+        // failing. The card must keep the report's own range and rows paired.
+        let dashboardYearKey = "tokenbar.dashboard.year"
+        let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearKey)
+        let reportRangeSequence: [DashboardModelTestObservation] = awaitMainActorValue {
+            let source = DashboardModelTestSource(failingGraphYear: "2022")
+            let model = DashboardModel(source: source, initialYear: "2024")
+            await model.load()
+            let initial = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.loadedModelReport?.year,
+                loadedModel: model.loadedModelReport?.report.entries.first?.model,
+                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    for: model.loadedModelReport))
+            await model.setYear("2023")
+            let successfulSwitch = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.loadedModelReport?.year,
+                loadedModel: model.loadedModelReport?.report.entries.first?.model,
+                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    for: model.loadedModelReport))
+            await model.setYear("2022")
+            let failedSwitch = DashboardModelTestObservation(
+                selectedYear: model.year,
+                loadedYear: model.loadedModelReport?.year,
+                loadedModel: model.loadedModelReport?.report.entries.first?.model,
+                loadedTokens: model.loadedModelReport?.report.entries.first?.total,
+                cardRangeLabel: UsageAttributionBreakdownCard.rangeLabel(
+                    for: model.loadedModelReport))
+            return [initial, successfulSwitch, failedSwitch]
+        } ?? []
+        if let savedDashboardYear {
+            UserDefaults.standard.set(savedDashboardYear, forKey: dashboardYearKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: dashboardYearKey)
+        }
+        expect(
+            reportRangeSequence.count == 3
+                && reportRangeSequence.map(\.selectedYear) == ["2024", "2023", "2022"]
+                && reportRangeSequence.map(\.loadedYear) == ["2024", "2023", "2023"]
+                && reportRangeSequence.map(\.loadedModel)
+                    == ["loaded-2024", "loaded-2023", "loaded-2023"]
+                && reportRangeSequence.map(\.loadedTokens) == [24, 23, 23]
+                && reportRangeSequence.map(\.cardRangeLabel)
+                    == ["2024", "2023", "2023"],
+            "attribution report range follows new data and stays with stale rows on failure")
+
         // Browsing a client inside the MAIN popover must not decide what that
         // client's own item opens on.
         let mainBrowsingMemory = StatusItemRouteMemory(
@@ -2606,7 +2905,7 @@ enum SelfTest {
             "a message-only Daily row retains its model drill-down")
 
         let dashboardYearDefaultsKey = "tokenbar.dashboard.year"
-        let savedDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
+        let savedAttributionDashboardYear = UserDefaults.standard.object(forKey: dashboardYearDefaultsKey)
         let turnTransitionChecks = awaitMainActorValue { () async -> [String: Bool] in
             let yearA = "2037"
             let yearB = "2038"
@@ -2670,8 +2969,8 @@ enum SelfTest {
                 "emptyDidNotFetch": emptyDidNotFetch,
             ]
         }
-        if let savedDashboardYear {
-            UserDefaults.standard.set(savedDashboardYear, forKey: dashboardYearDefaultsKey)
+        if let savedAttributionDashboardYear {
+            UserDefaults.standard.set(savedAttributionDashboardYear, forKey: dashboardYearDefaultsKey)
         } else {
             UserDefaults.standard.removeObject(forKey: dashboardYearDefaultsKey)
         }

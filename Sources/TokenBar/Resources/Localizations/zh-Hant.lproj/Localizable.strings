@@ -198,6 +198,9 @@
 "Agent limits card" = "Agent 額度卡片";
 "Live session card" = "即時工作階段卡片";
 "Usage attribution" = "用量歸屬";
+"API-list-price equivalent" = "API 列表價格等值";
+"Nothing is classified yet. Classify sources in Settings → Usage attribution." = "目前尚未分類任何內容。請前往「設定」→「用量歸屬」分類來源。";
+"No attributed usage in this range." = "這個區間沒有歸屬用量。";
 "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event." = "將每個觀察到的用戶端／供應商來源分類到它應計入的訂閱。這裡沒有任何內容是推測出的帳務事件。";
 "Provider IDs are canonicalized before they reach TokenBar: openai_codex becomes openai, and vertex / vertex_ai become anthropic. Routes that canonicalize to the same provider cannot be separated here." = "供應商 ID 在進入 TokenBar 前會先正規化：openai_codex 會變成 openai，vertex／vertex_ai 會變成 anthropic。在這裡無法分開正規化後相同的路由。";
 "A declaration is your classification, not a billing fact." = "這項宣告是你的分類，不是帳務事實。";

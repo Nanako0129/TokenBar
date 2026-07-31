@@ -9,14 +9,14 @@ struct StatsView: View {
     /// The active tab's client slice.
     let clientIds: [String]
     let stats: UsageStats
-    let modelReport: ModelReport?
+    let loadedModelReport: LoadedModelReport?
     let colors: ModelColorMap
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
-        return (modelReport?.modelLevelEntries ?? [])
+        return (loadedModelReport?.report.modelLevelEntries ?? [])
             .filter { allow.contains($0.client) }
             .max { $0.cost < $1.cost }
     }
@@ -27,6 +27,8 @@ struct StatsView: View {
                 payload: payload, clientIds: clientIds, stats: stats, colors: colors,
                 year: year)
             summaryCard
+            UsageAttributionBreakdownCard(
+                loadedModelReport: loadedModelReport, clientIds: clientIds)
         }
     }
 
