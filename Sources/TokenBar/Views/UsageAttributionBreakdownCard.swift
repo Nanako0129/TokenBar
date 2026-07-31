@@ -51,39 +51,74 @@ struct UsageAttributionBreakdownCard: View {
         }
     }
 
+    /// The two non-subscription buckets each get their own tint because they
+    /// mean opposite things: `excluded` is money actually charged, `unassigned`
+    /// is work left for the user. Sharing one colour, or leaving `unassigned`
+    /// bare, would read as "nothing to do here".
+    private enum RowTint {
+        case assigned
+        case excluded
+        case unassigned
+
+        var fill: Color {
+            switch self {
+            case .assigned: return .clear
+            case .excluded: return Color.orange.opacity(0.12)
+            case .unassigned: return Color(hex: "#3b82f6").opacity(0.12)
+            }
+        }
+
+        var amount: Color {
+            switch self {
+            case .assigned, .unassigned: return Color(hex: "#22c55e")
+            case .excluded: return .orange
+            }
+        }
+
+        var label: AnyShapeStyle {
+            self == .assigned ? AnyShapeStyle(.secondary) : AnyShapeStyle(Color.primary)
+        }
+    }
+
     private func breakdownRow(_ row: UsageAttributionBreakdown.Row) -> some View {
-        let excluded: Bool
+        let tint: RowTint
         let label: String
         switch row.state {
         case let .assigned(target):
-            excluded = false
+            tint = .assigned
             label = UsageAttributionSettings.Copy.assigned.localized(
                 ClientRegistry.shortName(target))
         case .excluded:
-            excluded = true
+            tint = .excluded
             label = UsageAttributionSettings.Copy.excluded.localized
         case .unassigned:
-            excluded = false
+            tint = .unassigned
             label = UsageAttributionSettings.Copy.unassigned.localized
         }
 
         return HStack(spacing: 8) {
             Text(label)
-                .font(.caption.weight(excluded ? .semibold : .regular))
-                .foregroundStyle(
-                    excluded ? AnyShapeStyle(Color.primary) : AnyShapeStyle(.secondary))
+                .font(.caption.weight(tint == .assigned ? .regular : .semibold))
+                .foregroundStyle(tint.label)
                 .lineLimit(1)
             Spacer(minLength: 8)
+            // Both figure columns reserve a minimum width and align trailing,
+            // so short values pad with blank space instead of sliding their
+            // column's left edge per row. minWidth rather than a fixed width:
+            // an unusually long total still grows instead of clipping.
             Text(Format.compactTokens(row.tokens))
                 .font(.caption.monospacedDigit())
+                .frame(minWidth: 52, alignment: .trailing)
             Text(Format.usd(row.cost))
                 .font(.caption.monospacedDigit())
-                .foregroundStyle(excluded ? Color.orange : Color(hex: "#22c55e"))
+                .foregroundStyle(tint.amount)
+                .frame(minWidth: 76, alignment: .trailing)
         }
+        // Every row carries the same inset so a tinted row's text and figures
+        // stay on the same left and right edges as the untinted ones; padding
+        // only the tinted rows visibly shortened them at both ends.
         .padding(.vertical, 3)
-        .padding(.horizontal, excluded ? 6 : 0)
-        .background(
-            excluded ? Color.orange.opacity(0.12) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 6))
+        .padding(.horizontal, 6)
+        .background(tint.fill, in: RoundedRectangle(cornerRadius: 6))
     }
 }
