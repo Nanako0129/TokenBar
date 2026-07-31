@@ -1852,6 +1852,29 @@ enum SelfTest {
                     == ["2024", "2023", "2023"],
             "attribution report range follows new data and stays with stale rows on failure")
 
+        // The card's figures change with BOTH the year and the client tab, so
+        // naming only the year let a client subtotal read as an account-wide
+        // breakdown. Overview passes nil rather than relying on a one-element
+        // clientIds, which Overview can legitimately produce.
+        let scopedReport = LoadedModelReport(
+            report: try! JSONDecoder().decode(
+                ModelReport.self,
+                from: Data("""
+                {"entries":[],"totalInput":0,"totalOutput":0,"totalCacheRead":0,
+                 "totalCacheWrite":0,"totalMessages":0,"totalCost":0}
+                """.utf8)),
+            year: "2026")
+        expect(
+            UsageAttributionBreakdownCard.subtitle(
+                for: scopedReport, singleClient: nil) == "2026"
+                && UsageAttributionBreakdownCard.subtitle(
+                    for: scopedReport, singleClient: "claude")
+                    == "2026 · \(ClientRegistry.shortName("claude"))"
+                && UsageAttributionBreakdownCard.subtitle(
+                    for: nil, singleClient: "claude")
+                    == "All years · \(ClientRegistry.shortName("claude"))",
+            "attribution card subtitle names the client scope, not only the year")
+
         // Browsing a client inside the MAIN popover must not decide what that
         // client's own item opens on.
         let mainBrowsingMemory = StatusItemRouteMemory(

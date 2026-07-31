@@ -7,6 +7,8 @@ import TokenBarCore
 struct UsageAttributionBreakdownCard: View {
     let loadedModelReport: LoadedModelReport?
     let clientIds: [String]
+    /// The client tab this card is scoped to, or nil on Overview.
+    var singleClient: String?
 
     private var confirmed: [UsageAttribution.Record] {
         UsageAttribution.confirmed(defaults: .standard).records
@@ -14,6 +16,20 @@ struct UsageAttributionBreakdownCard: View {
 
     static func rangeLabel(for loadedModelReport: LoadedModelReport?) -> String {
         loadedModelReport?.year ?? "All years"
+    }
+
+    /// The card states both scopes that change its figures. Naming only the
+    /// year made a client tab's subtotal read as an account-wide breakdown,
+    /// which is exactly the misreading the whole feature exists to prevent.
+    /// Parts are localized before composing because `DashCard` looks the
+    /// finished subtitle up once, and a composed string is never a key.
+    static func subtitle(
+        for loadedModelReport: LoadedModelReport?, singleClient: String?
+    ) -> String {
+        let range = rangeLabel(for: loadedModelReport).localized
+        guard let singleClient else { return range }
+        return UsageAttributionSettings.Copy.source.localized(
+            range, ClientRegistry.shortName(singleClient))
     }
 
     var body: some View {
@@ -26,7 +42,8 @@ struct UsageAttributionBreakdownCard: View {
 
         DashCard(
             UsageAttributionBreakdown.Copy.title,
-            subtitle: Self.rangeLabel(for: loadedModelReport)
+            subtitle: Self.subtitle(
+                for: loadedModelReport, singleClient: singleClient)
         ) {
             if let rows {
                 if rows.isEmpty {

@@ -13,6 +13,11 @@ struct StatsView: View {
     let colors: ModelColorMap
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
+    /// The client tab this slice belongs to, or nil on Overview. Passed
+    /// explicitly rather than inferred from `clientIds.count == 1`, because
+    /// Overview legitimately displays exactly one client when the others are
+    /// hidden or absent.
+    var singleClient: String?
 
     private var favorite: ModelReportEntry? {
         let allow = Set(clientIds)
@@ -28,7 +33,8 @@ struct StatsView: View {
                 year: year)
             summaryCard
             UsageAttributionBreakdownCard(
-                loadedModelReport: loadedModelReport, clientIds: clientIds)
+                loadedModelReport: loadedModelReport, clientIds: clientIds,
+                singleClient: singleClient)
         }
     }
 

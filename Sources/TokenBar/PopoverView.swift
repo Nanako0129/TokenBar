@@ -487,7 +487,7 @@ struct PopoverView: View {
                 StatsView(
                     payload: payload, clientIds: clientIds, stats: activeStats,
                     loadedModelReport: model.loadedModelReport, colors: model.colors,
-                    year: model.year)
+                    year: model.year, singleClient: singleClient)
             case .agents:
                 AgentsView(report: model.agents, clientIds: clientIds)
             }
