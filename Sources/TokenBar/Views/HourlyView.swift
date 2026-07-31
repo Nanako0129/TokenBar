@@ -89,9 +89,7 @@ struct HourlyView: View {
             trailing: { modeToggle }
         ) {
             if report == nil {
-                Text("Loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                LoadingLine(title: "Loading…")
             } else if !hasData {
                 Text("No usage in this range")
                     .font(.caption)

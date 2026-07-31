@@ -26,9 +26,7 @@ struct AgentsView: View {
             }
         ) {
             if report == nil {
-                Text("Loading…")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                LoadingLine(title: "Loading…")
             } else if rows.isEmpty {
                 Text("No agent activity in this range")
                     .font(.caption)

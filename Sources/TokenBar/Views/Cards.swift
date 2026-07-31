@@ -230,6 +230,25 @@ struct DashCard<Content: View>: View {
     }
 }
 
+/// A card's "still fetching" line: spinner plus label, at the same weight as
+/// the empty-state text it alternates with. Shared so the several places that
+/// wait on the same dashboard fetch cannot drift into looking like different
+/// kinds of waiting — a bare label reads as a final state, not a pending one.
+struct LoadingLine: View {
+    let title: String
+
+    var body: some View {
+        HStack(spacing: 7) {
+            ProgressView()
+                .controlSize(.small)
+                .frame(width: 14, height: 14)
+            Text(title.localized)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
+
 /// The three-cell totals row (Total / Tokens / Best day), ported from
 /// TokenUsageCard.tsx in its bare form.
 struct TokenUsageRow: View {

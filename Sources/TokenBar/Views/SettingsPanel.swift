@@ -253,14 +253,7 @@ struct SettingsPanel: View {
         section("Individual items") {
             hint("Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client.")
             if rows.isEmpty, isLoading {
-                HStack(spacing: 7) {
-                    ProgressView()
-                        .controlSize(.small)
-                        .frame(width: 14, height: 14)
-                    Text("Looking for eligible clients…".localized)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                }
+                LoadingLine(title: "Looking for eligible clients…")
             } else if rows.isEmpty {
                 Text("No eligible individual clients yet.")
                     .font(.caption)
@@ -605,9 +598,7 @@ struct SettingsPanel: View {
             }
 
             if modelReport == nil {
-                Text("Loading usage…".localized)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                LoadingLine(title: "Loading usage…")
             } else if rows.isEmpty {
                 Text(UsageAttributionSettings.Copy.noRows.localized)
                     .font(.caption)
@@ -647,7 +638,12 @@ struct SettingsPanel: View {
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
-                Spacer(minLength: 4)
+                // The label takes the slack instead of a Spacer so a long
+                // source name uses the full width before wrapping, and the
+                // picker below keeps a fixed width rather than shrinking to
+                // its selected title — otherwise every row's control starts
+                // and ends at a different x.
+                .frame(maxWidth: .infinity, alignment: .leading)
                 Picker(UsageAttributionSettings.Copy.classification.localized, selection: Binding(
                     get: { row.state },
                     set: { next in
@@ -666,7 +662,7 @@ struct SettingsPanel: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
-                .frame(maxWidth: 168)
+                .frame(width: 168)
                 .accessibilityLabel(UsageAttributionSettings.Copy.classificationFor.localized(
                     row.providerLabel.localized))
             }
