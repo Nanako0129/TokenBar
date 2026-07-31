@@ -197,6 +197,25 @@
 "General" = "一般";
 "Agent limits card" = "Agent 額度卡片";
 "Live session card" = "即時工作階段卡片";
+"Usage attribution" = "用量歸屬";
+"Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event." = "將每個觀察到的用戶端／供應商來源分類到它應計入的訂閱。這裡沒有任何內容是推測出的帳務事件。";
+"Provider IDs are canonicalized before they reach TokenBar: openai_codex becomes openai, and vertex / vertex_ai become anthropic. Routes that canonicalize to the same provider cannot be separated here." = "供應商 ID 在進入 TokenBar 前會先正規化：openai_codex 會變成 openai，vertex／vertex_ai 會變成 anthropic。在這裡無法分開正規化後相同的路由。";
+"A declaration is your classification, not a billing fact." = "這項宣告是你的分類，不是帳務事實。";
+"No provider-split usage in this range." = "這個區間沒有按供應商分列的用量。";
+"Accept all suggestions (%lld)" = "接受所有建議（%lld）";
+"Suggestions are proposals; they do not change your classification until accepted." = "建議只是提案；接受前不會改變你的分類。";
+"%@ · %@" = "%1$@ · %2$@";
+"Observed %@ tokens · %@" = "觀察到 %@ tokens · %@";
+"Classification" = "分類";
+"Unassigned" = "未指定";
+"Not a subscription" = "不是訂閱";
+"Counts toward %@" = "計入 %@";
+"Suggested: counts toward %@" = "建議：計入 %@";
+"Unspecified provider" = "未指定供應商";
+"Classification for %@" = "%@ 的分類";
+"Could not save this classification: existing attribution data is invalid or foreign." = "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。";
+"Could not save this classification: the attribution entry limit was reached." = "無法儲存這項分類：已達歸屬項目上限。";
+"Could not save this classification: the new value is too large or unsupported." = "無法儲存這項分類：新值太大或不受支援。";
 
 /* ===== 設定：選項 ===== */
 "Launch at login" = "登入時開啟";

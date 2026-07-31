@@ -9,6 +9,7 @@ struct SettingsPanel: View {
     enum Page: String, CaseIterable, Identifiable {
         case menuBar = "Menu bar"
         case dashboard = "Dashboard"
+        case usageAttribution = "Usage attribution"
         case general = "General"
         case about = "About"
 
@@ -20,6 +21,7 @@ struct SettingsPanel: View {
             switch self {
             case .menuBar: "menubar.rectangle"
             case .dashboard: "chart.bar.xaxis"
+            case .usageAttribution: "arrow.triangle.branch"
             case .general: "gearshape"
             case .about: "info.circle"
             }
@@ -30,6 +32,10 @@ struct SettingsPanel: View {
 
     /// For the quota-source picker (the windows currently known).
     var agentUsage: AgentUsagePayload?
+
+    /// Settings receives the all-time report so every observed provider stays
+    /// configurable even when the dashboard itself is scoped to one year.
+    var modelReport: ModelReport?
 
     /// Present clients (used for the client tabs reorder/hide UI).
     var presentClients: [String] = []
@@ -64,6 +70,8 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.refresh.intervalMin") private var refreshIntervalMin = 30
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.system.rawValue
     @State private var showLanguageRestartPrompt = false
+    @State private var attributionNotice: String?
+    @State private var attributionRevision = 0
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
     @AppStorage(PopoverChrome.heightKey) private var popoverHeight = 0.0
@@ -152,6 +160,8 @@ struct SettingsPanel: View {
                     limitOrdered: limitOrdered,
                     presentSet: presentSet,
                     tabsUniverse: tabsUniverse)
+            case .usageAttribution:
+                usageAttributionPage()
             case .general:
                 generalPage()
             case .about:
@@ -174,6 +184,27 @@ struct SettingsPanel: View {
         } message: {
             Text("Restart TokenBar to apply the new language.")
         }
+        .task(id: attributionInputSignature) {
+            refreshAttributionSuggestions()
+        }
+    }
+
+    private var attributionTables: (
+        confirmed: UsageAttribution.Table, suggestions: UsageAttribution.Table
+    ) {
+        _ = attributionRevision
+        return (UsageAttribution.confirmed(), UsageAttribution.suggestions())
+    }
+
+    private var attributionTargetClients: [String] {
+        UsageAttributionSettings.subscriptionClients(from: agentUsage)
+    }
+
+    private var attributionInputSignature: String? {
+        guard let modelReport else { return nil }
+        return UsageAttributionSettings.signature(
+            entries: modelReport.entries,
+            subscriptionClients: attributionTargetClients)
     }
 
     @ViewBuilder
@@ -535,6 +566,211 @@ struct SettingsPanel: View {
             .glassCard(cornerRadius: 8)
             hint("Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height.")
         }
+    }
+
+    @ViewBuilder
+    private func usageAttributionPage() -> some View {
+        let tables = attributionTables
+        let targetClients = attributionTargetClients
+        let rows = UsageAttributionSettings.rows(
+            entries: modelReport?.entries ?? [],
+            confirmed: tables.confirmed.records,
+            suggestions: tables.suggestions.records)
+        let suggestedRows = rows.filter { $0.suggestedTarget != nil }
+
+        section(UsageAttributionSettings.Copy.section) {
+            hint(UsageAttributionSettings.Copy.classifyHint)
+            hint(UsageAttributionSettings.Copy.canonicalizationHint)
+            hint(UsageAttributionSettings.Copy.declarationHint)
+
+            if let attributionNotice {
+                Text(attributionNotice.localized)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            if !suggestedRows.isEmpty {
+                Button {
+                    acceptAllAttributionSuggestions()
+                } label: {
+                    Label(
+                        UsageAttributionSettings.Copy.acceptSuggestions.localized(
+                            Int64(suggestedRows.count)),
+                        systemImage: "checkmark.circle")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.small)
+                hint(UsageAttributionSettings.Copy.suggestionsHint)
+            }
+
+            if modelReport == nil {
+                Text("Loading usage…".localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if rows.isEmpty {
+                Text(UsageAttributionSettings.Copy.noRows.localized)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                VStack(spacing: 1) {
+                    ForEach(rows) { row in
+                        attributionRow(row, targetClients: targetClients)
+                    }
+                }
+                .glassCard(cornerRadius: 8)
+            }
+        }
+    }
+
+    private func attributionRow(
+        _ row: UsageAttributionSettings.Row, targetClients: [String]
+    ) -> some View {
+        let assignedTarget: String? = {
+            guard case let .assigned(target) = row.state else { return nil }
+            return target
+        }()
+        var pickerTargets = targetClients
+        if let assignedTarget, !pickerTargets.contains(assignedTarget) {
+            pickerTargets.append(assignedTarget)
+        }
+
+        return VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .top, spacing: 8) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(UsageAttributionSettings.Copy.source.localized(
+                        ClientRegistry.style(row.client).displayName,
+                        row.providerLabel.localized))
+                        .font(.caption.weight(.medium))
+                    Text(UsageAttributionSettings.Copy.observed.localized(
+                        Format.compactTokens(row.tokens), Format.usd(row.cost)))
+                        .font(.caption2.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                }
+                Spacer(minLength: 4)
+                Picker(UsageAttributionSettings.Copy.classification.localized, selection: Binding(
+                    get: { row.state },
+                    set: { next in
+                        saveAttribution(row: row, state: next)
+                    }))
+                {
+                    Text(UsageAttributionSettings.Copy.unassigned.localized)
+                        .tag(UsageAttribution.State.unassigned)
+                    Text(UsageAttributionSettings.Copy.excluded.localized)
+                        .tag(UsageAttribution.State.excluded)
+                    ForEach(pickerTargets, id: \.self) { target in
+                        Text(UsageAttributionSettings.Copy.assigned.localized(
+                            ClientRegistry.style(target).displayName))
+                            .tag(UsageAttribution.State.assigned(target))
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: 168)
+                .accessibilityLabel(UsageAttributionSettings.Copy.classificationFor.localized(
+                    row.providerLabel.localized))
+            }
+
+            if let suggestedTarget = row.suggestedTarget {
+                Text(UsageAttributionSettings.Copy.suggested.localized(
+                    ClientRegistry.style(suggestedTarget).displayName))
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 8)
+    }
+
+    private func saveAttribution(
+        row: UsageAttributionSettings.Row, state: UsageAttribution.State
+    ) {
+        let record = UsageAttribution.Record(
+            client: row.client, provider: row.provider, state: state)
+        let defaults = UserDefaults.standard
+        let table = UsageAttribution.confirmed(defaults: defaults)
+        let result = UsageAttribution.confirmedRaw(
+            updating: defaults.object(forKey: UsageAttribution.confirmedKey), record: record)
+        guard let result else {
+            attributionNotice = UsageAttributionSettings.writeFailure(
+                table: table, record: record, result: result)?.message
+            return
+        }
+        defaults.set(result, forKey: UsageAttribution.confirmedKey)
+        attributionNotice = nil
+        attributionRevision += 1
+    }
+
+    private func refreshAttributionSuggestions() {
+        guard let report = modelReport, agentUsage != nil else { return }
+        let defaults = UserDefaults.standard
+        let confirmed = UsageAttribution.confirmed(defaults: defaults)
+        let targetClients = attributionTargetClients
+        let proposed = UsageAttributionSettings.suggestionRecords(
+            entries: report.entries,
+            confirmed: confirmed.records,
+            subscriptionClients: targetClients)
+        let proposedBySource = Dictionary(uniqueKeysWithValues: proposed.map {
+            ("\($0.client)\u{0}\($0.provider)", $0)
+        })
+
+        for row in UsageAttributionSettings.rows(
+            entries: report.entries, confirmed: confirmed.records, suggestions: [])
+        {
+            let record = proposedBySource[row.id] ?? UsageAttribution.Record(
+                client: row.client, provider: row.provider, state: .unassigned)
+            let table = UsageAttribution.suggestions(defaults: defaults)
+            let result = UsageAttribution.suggestionsRaw(
+                updating: defaults.object(forKey: UsageAttribution.suggestionsKey), record: record)
+            guard let result else {
+                attributionNotice = UsageAttributionSettings.writeFailure(
+                    table: table, record: record, result: result)?.message
+                attributionRevision += 1
+                return
+            }
+            defaults.set(result, forKey: UsageAttribution.suggestionsKey)
+        }
+        attributionNotice = nil
+        attributionRevision += 1
+    }
+
+    private func acceptAllAttributionSuggestions() {
+        let tables = attributionTables
+        let rows = UsageAttributionSettings.rows(
+            entries: modelReport?.entries ?? [],
+            confirmed: tables.confirmed.records,
+            suggestions: tables.suggestions.records)
+        let records = UsageAttributionSettings.acceptanceRecords(rows: rows)
+        guard !records.isEmpty else { return }
+
+        let defaults = UserDefaults.standard
+        for record in records {
+            let confirmedTable = UsageAttribution.confirmed(defaults: defaults)
+            let confirmedRaw = UsageAttribution.confirmedRaw(
+                updating: defaults.object(forKey: UsageAttribution.confirmedKey), record: record)
+            guard let confirmedRaw else {
+                attributionNotice = UsageAttributionSettings.writeFailure(
+                    table: confirmedTable, record: record, result: confirmedRaw)?.message
+                attributionRevision += 1
+                return
+            }
+            defaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
+
+            let suggestionTable = UsageAttribution.suggestions(defaults: defaults)
+            let removedSuggestion = UsageAttribution.suggestionsRaw(
+                updating: defaults.object(forKey: UsageAttribution.suggestionsKey),
+                record: UsageAttribution.Record(
+                    client: record.client, provider: record.provider, state: .unassigned))
+            guard let removedSuggestion else {
+                attributionNotice = UsageAttributionSettings.writeFailure(
+                    table: suggestionTable, record: record, result: removedSuggestion)?.message
+                attributionRevision += 1
+                return
+            }
+            defaults.set(removedSuggestion, forKey: UsageAttribution.suggestionsKey)
+        }
+        attributionNotice = nil
+        attributionRevision += 1
     }
 
     @ViewBuilder

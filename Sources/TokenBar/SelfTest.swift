@@ -309,12 +309,13 @@ enum SelfTest {
         // default, and model overrides are more specific. Suggestions never
         // participate in effective-state resolution.
         func attributionEntry(
-            client: String, provider: String, model: String
+            client: String, provider: String, model: String,
+            total: Int64 = 1, cost: Double = 0.0
         ) -> ModelReportEntry {
             let json = """
             {"client":"\(client)","model":"\(model)","provider":"\(provider)",
              "input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,
-             "total":1,"messageCount":1,"cost":0.0,"msPer1kTokens":null}
+             "total":\(total),"messageCount":1,"cost":\(cost),"msPer1kTokens":null}
             """
             return try! JSONDecoder().decode(
                 ModelReportEntry.self, from: Data(json.utf8))
@@ -370,6 +371,129 @@ enum SelfTest {
                 && emptyProviderRaw
                     == "[{\"client\":\"opencode\",\"model\":null,\"provider\":\"\",\"state\":\"assigned\",\"target\":\"codex\"},{\"client\":\"opencode\",\"model\":null,\"provider\":\"nvidia\",\"state\":\"excluded\"}]",
             "empty provider is a distinct usable source key")
+
+        let providerRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "shared-model",
+                    total: 100, cost: 6.0),
+                attributionEntry(
+                    client: "claude", provider: "nvidia", model: "shared-model",
+                    total: 200, cost: 5.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "other-model",
+                    total: 50, cost: 1.0),
+            ],
+            confirmed: [],
+            suggestions: [])
+        expect(
+                providerRows.count == 2
+                && providerRows.map(\.provider) == ["openai", "nvidia"]
+                && providerRows.map(\.tokens) == [150, 200]
+                && providerRows.map(\.cost) == [7.0, 5.0],
+            "attribution rows retain two providers for one model")
+
+        let emptyProviderRow = UsageAttributionSettings.rows(
+            entries: [attributionEntry(
+                client: "opencode", provider: "", model: "shared-model", total: 7, cost: 1.5)],
+            confirmed: [],
+            suggestions: []).first
+        expect(
+            emptyProviderRow?.provider.isEmpty == true
+                && emptyProviderRow?.providerLabel == "Unspecified provider",
+            "empty provider row has a readable label")
+
+        let attributionTargets = UsageAttributionSettings.subscriptionClients(
+            from: DemoData.agentUsage)
+        let claudeProviderRow = providerRows.first { $0.client == "claude" }
+        expect(
+            claudeProviderRow?.client == "claude" && attributionTargets.contains("codex"),
+            "claude source rows can target a different subscription client")
+
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "openai",
+                subscriptionClients: attributionTargets) == "copilot",
+            "copilot openai usage suggests copilot")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "anthropic",
+                subscriptionClients: attributionTargets) == "copilot",
+            "copilot anthropic usage suggests copilot")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "anthropic",
+                subscriptionClients: attributionTargets) == "claude",
+            "claude anthropic usage suggests claude")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: attributionTargets) == nil,
+            "claude openai usage has no cross-client suggestion")
+
+        let codexOnlyPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"codex","source":"fixture","updatedAt":"now","windows":[]}]}"#.utf8))
+        let codexOnlySubscriptions = UsageAttributionSettings.subscriptionClients(
+            from: codexOnlyPayload)
+        let missingSourceSuggestions = UsageAttributionSettings.suggestionRecords(
+            entries: [
+                attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
+                attributionEntry(client: "copilot", provider: "anthropic", model: "claude-sonnet-4-6"),
+            ],
+            confirmed: [],
+            subscriptionClients: codexOnlySubscriptions)
+        expect(
+            missingSourceSuggestions.isEmpty,
+            "source client missing from quota payload has no suggestion")
+
+        let suggestionRows = UsageAttributionSettings.rows(
+            entries: [
+                attributionEntry(
+                    client: "copilot", provider: "openai", model: "gpt-5.6-sol",
+                    total: 10, cost: 1.0),
+                attributionEntry(
+                    client: "claude", provider: "openai", model: "gpt-5.6-sol",
+                    total: 20, cost: 2.0),
+            ],
+            confirmed: [],
+            suggestions: UsageAttributionSettings.suggestionRecords(
+                entries: [
+                    attributionEntry(client: "copilot", provider: "openai", model: "gpt-5.6-sol"),
+                    attributionEntry(client: "claude", provider: "openai", model: "gpt-5.6-sol"),
+                ],
+                confirmed: [],
+                subscriptionClients: attributionTargets))
+        let acceptedAttributionRecords = UsageAttributionSettings.acceptanceRecords(
+            rows: suggestionRows)
+        let acceptedAttributionRaw = acceptedAttributionRecords.reduce(String?.none) {
+            UsageAttribution.confirmedRaw(updating: $0, record: $1)
+        }
+        let acceptedAttributionTable = UsageAttribution.parseRaw(acceptedAttributionRaw)
+        expect(
+            acceptedAttributionRecords.count == 1
+                && UsageAttribution.resolve(
+                    client: "copilot", provider: "openai", model: nil,
+                    records: acceptedAttributionTable.records) == .assigned("copilot")
+                && UsageAttribution.resolve(
+                    client: "claude", provider: "openai", model: nil,
+                    records: acceptedAttributionTable.records) == .unassigned,
+            "accept all assigns only suggested rows")
+
+        let refusedAttributionWrite = UsageAttributionSettings.writeFailure(
+            table: UsageAttribution.parseRaw("not-json"),
+            record: crossAssignment,
+            result: nil)
+        expect(
+            refusedAttributionWrite != nil
+                && refusedAttributionWrite?.message.contains("Could not save") == true,
+            "refused attribution writes are reported as failures")
+        expect(
+            UsageAttributionSettings.Copy.all.allSatisfy {
+                let copy = $0.lowercased()
+                return !copy.contains("consumed") && !copy.contains("deducted")
+            },
+            "attribution screen copy does not claim consumption or deduction")
 
         let canonicalRecords = [
             UsageAttribution.Record(

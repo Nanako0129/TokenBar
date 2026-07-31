@@ -119,6 +119,7 @@ struct SettingsWindowView: View {
                 SettingsPanel(
                     page: selectedPage,
                     agentUsage: model.agentUsage,
+                    modelReport: model.modelReport,
                     presentClients: model.stats?.presentClients ?? [],
                     isLoading: isInitialLoad)
                     .padding(14)
