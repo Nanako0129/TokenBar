@@ -5,7 +5,7 @@ kind: canonical
 scope: repository
 read_when: assessing upstream commits, changing shared-engine code or its consumer pin, or changing parser output
 last_verified: 2026-07-31
-sources: [".gitmodules", "vendor/README.md", "public tokscale-core UPSTREAM at b31e394", "public tokscale-core PR #2 and commit fd2f916", "public tokscale-core PR #3 and commit 84e0d66", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public issue #45", "public issue #118", "public TokenBar PR #114", "public TokenBar-Windows PR #12"]
+sources: [".gitmodules", "vendor/README.md", "public tokscale-core UPSTREAM at b31e394", "public tokscale-core PR #2 and commit fd2f916", "public tokscale-core PR #3 and commit 84e0d66", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public issue #45", "public issue #118", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20"]
 ---
 
 # Shared tokscale engine alignment
@@ -32,7 +32,7 @@ The engine's true baseline is recorded in `tokscale-core/UPSTREAM.md`; the Cargo
 
 > **不要在 consumer branch 直接改 submodule source。** Shared Rust changes first land and pass review in `tokscale-core`; TokenBar then advances only the reviewed gitlink and runs its consumer gates. A clean build alone cannot prove that streaming or cache semantics were preserved.
 
-Native 暫時 pin reviewed engine commit `84e0d66413d4e0d87b734f66f7a848b3bc323258`、Windows 暫時維持 `b31e39425859393504a2d56cb5af7c93e6461c7d`。這證明 Native 已採用該 shared source、Windows migration 尚待完成；兩個 consumer 仍各自擁有 FFI、C header、Swift／C# bridge 與 build surfaces。Shared Rust changes land in the engine first；each consumer then advances its gitlink and runs its own app gates, while app-owned ABI changes are ported and independently cross-checked. See [`architecture.md`](architecture.md#windows-downstream-consumer) and the completed [`shared-rust-engine-extraction.md`](plans/shared-rust-engine-extraction.md).
+兩個 consumer 現在都 pin reviewed engine commit `84e0d66413d4e0d87b734f66f7a848b3bc323258`。這只證明兩邊採用同一份 shared source，不構成 cross-port parity 主張，也不取代 cross-check 這道跨語言 gate；兩個 consumer 仍各自擁有 FFI、C header、Swift／C# bridge 與 build surfaces。Shared Rust changes land in the engine first；each consumer then advances its gitlink and runs its own app gates, while app-owned ABI changes are ported and independently cross-checked. See [`architecture.md`](architecture.md#windows-downstream-consumer) and the completed [`shared-rust-engine-extraction.md`](plans/shared-rust-engine-extraction.md).
 
 ### Grok attribution adoption
 
@@ -44,11 +44,11 @@ Follow-up engine [PR #3](https://github.com/Nanako0129/tokscale-core/pull/3) mer
 |---|---|
 | Cache identity | Grok parser identity advances `1 → 3` across the two adopted revisions（`1 → 2` in PR #2, `2 → 3` in PR #3）, so same-fingerprint parser-v1 and parser-v2 shards rebuild cold. Active `CACHE_FORMAT_VERSION` remains 2, other parser identities do not change, and the inert schema-32 monolith stays untouched. |
 | Cost authority | Raw unified rows still have zero cost and `CostSource::Unknown`. Recovering an exact model only lets the existing post-cache pricing stage produce `Estimated`; it does not change provider-reported cost or usage totals. |
-| Consumer adoption | Native adopts `84e0d66413d4e0d87b734f66f7a848b3bc323258`; Windows remains on `b31e39425859393504a2d56cb5af7c93e6461c7d` pending its separate migration and gates. |
+| Consumer adoption | Native and Windows both adopt `84e0d66413d4e0d87b734f66f7a848b3bc323258`. Windows landed it in [PR #20](https://github.com/Nanako0129/TokenBar-Windows/pull/20), merge `eb3a7f3`. |
 | Presentation | TokenBar [issue #118](https://github.com/Nanako0129/TokenBar/issues/118) may group a recovered raw identity such as `grok-4.5-build` for display. Presentation aliases do not repair parser attribution and must not absorb `grok-unknown`. |
 | Upstream status | [`junhoyeo/tokscale#849`](https://github.com/junhoyeo/tokscale/issues/849) remains open. Closed, unmerged [PR #924](https://github.com/junhoyeo/tokscale/pull/924) does not contain this current-schema attribution fix. |
 
-The immutable implementation ledger for this adopted engine revision is [`UPSTREAM.md` at `84e0d66`](https://github.com/Nanako0129/tokscale-core/blob/84e0d66413d4e0d87b734f66f7a848b3bc323258/UPSTREAM.md). The pending Windows consumer migration must review the complete engine delta from `b31e394` and run its normal gates；Native adoption is limited to this reviewed gitlink advance and does not change app-owned FFI or Swift surfaces.
+The immutable implementation ledger for this adopted engine revision is [`UPSTREAM.md` at `84e0d66`](https://github.com/Nanako0129/tokscale-core/blob/84e0d66413d4e0d87b734f66f7a848b3bc323258/UPSTREAM.md). The Windows consumer migration reviewed the complete engine delta from `b31e394` and ran its normal gates: hosted x64 and ARM64 builds, packaged-FFI, and the 119-case cross-check, plus a same-snapshot comparison in which `totalTokens` stayed byte-identical at 333,370,649 while the model bucket count moved 4 → 3. Native adoption is limited to this reviewed gitlink advance and does not change app-owned FFI or Swift surfaces.
 
 ## Selective-port method
 

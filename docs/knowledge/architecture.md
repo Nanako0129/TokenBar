@@ -5,7 +5,7 @@ kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
 last_verified: 2026-07-29
-sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar PR #114", "public TokenBar-Windows PR #12"]
+sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20"]
 ---
 
 # Runtime architecture and data flow
@@ -64,7 +64,7 @@ The issue-107 `tb_filter_parity_probe` is a separate additive diagnostic. Rust o
 
 ## Windows downstream consumer
 
-C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native 暫時 pin `84e0d66413d4e0d87b734f66f7a848b3bc323258`，Windows 暫時維持 `b31e39425859393504a2d56cb5af7c93e6461c7d`；兩個 default branch 的 shared-engine gitlink 因此暫時分歧。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
+C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。兩個 default branch 現在都 pin reviewed engine commit `84e0d66413d4e0d87b734f66f7a848b3bc323258`；Windows 於 [PR #20](https://github.com/Nanako0129/TokenBar-Windows/pull/20)（merge `eb3a7f3`）完成其 consumer migration 與 gates。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
 
 | 不變量 | 規則 |
 |---|---|
