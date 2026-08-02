@@ -10,6 +10,6 @@
 ## Fixes
 
 - **Historical quota pace now starts from validated evidence instead of a fixed completed-cycle requirement.** A stable current cycle can qualify earlier; insufficient or low-quality history stays in learning mode, and risk remains hidden until enough evidence exists. [#120](https://github.com/Nanako0129/TokenBar/pull/120)
-- **Claude quota cards now reflect live Pro and Max subscription changes** instead of relying only on a login-time plan snapshot. If the live lookup is unavailable, TokenBar falls back without delaying other quota updates. [#124](https://github.com/Nanako0129/TokenBar/pull/124)
+- **Claude quota cards now reflect live Pro and Max subscription changes** instead of relying only on a login-time plan snapshot. The live lookup is bounded and cached, with stored plan data used as a fallback when needed. [#124](https://github.com/Nanako0129/TokenBar/pull/124)
 - **Grok usage is attributed to models more safely across process restarts and subagents.** Ambiguous or conflicting evidence remains unattributed instead of being guessed. [#123](https://github.com/Nanako0129/TokenBar/pull/123)
 - **Popover height dragging stays responsive,** and Settings and Quit continue responding normally after a resize. [#110](https://github.com/Nanako0129/TokenBar/pull/110)
