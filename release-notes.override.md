@@ -1,9 +1,15 @@
 ## Highlights
 
-- **TokenBar now includes Traditional Chinese.** Choose System, English, or Traditional Chinese in Settings; when the selection changes, TokenBar offers to restart immediately so the new preference can take effect. Dashboards, settings, menus, charts, quota reset countdowns, usage pace and risk text, and graph controls are localized, with English fallback for missing entries. [#106](https://github.com/Nanako0129/TokenBar/pull/106) [#108](https://github.com/Nanako0129/TokenBar/pull/108)
+- **Add optional menu bar items for individual clients.** Enable eligible clients in Settings to show their brand icon and the remaining quota for Auto or a selected window; clicking an item opens TokenBar on that client. [#119](https://github.com/Nanako0129/TokenBar/pull/119)
+- **Settings now uses native sidebar navigation.** Menu Bar, Dashboard, General, and About each get a focused page while the live preview remains visible, and quota source selection is now organized as Agent then Window. [#117](https://github.com/Nanako0129/TokenBar/pull/117)
+
+## Changes
+
+- **Reorder client tabs directly in the popover.** Drag tabs along the top bar; Overview stays first, and hidden clients keep their saved positions. [#116](https://github.com/Nanako0129/TokenBar/pull/116) — thanks @amikai
 
 ## Fixes
 
-- **Copilot quota and activity data now withstand more imperfect inputs.** An optional reset date with an unexpected type no longer discards otherwise valid quota windows, and duplicate OTEL spans keep the earliest start through the latest endpoint without adding replayed token usage. [#102](https://github.com/Nanako0129/TokenBar/pull/102)
-- **Kimi Code discovery now treats an empty `KIMI_CODE_HOME` as unset,** returning to the default Kimi Code directory instead of scanning an invalid root. Non-empty overrides keep their existing behavior. [#101](https://github.com/Nanako0129/TokenBar/pull/101)
-- **Provider connection errors now retain typed DNS and TLS diagnostics without exposing raw transport text.** Existing timeout and connection-failure precedence remains unchanged. [#102](https://github.com/Nanako0129/TokenBar/pull/102)
+- **Historical quota pace now starts from validated evidence instead of a fixed completed-cycle requirement.** A stable current cycle can qualify earlier; insufficient or low-quality history stays in learning mode, and risk remains hidden until enough evidence exists. [#120](https://github.com/Nanako0129/TokenBar/pull/120)
+- **Claude quota cards now reflect live Pro and Max subscription changes** instead of relying only on a login-time plan snapshot. If the live lookup is unavailable, TokenBar falls back without delaying other quota updates. [#124](https://github.com/Nanako0129/TokenBar/pull/124)
+- **Grok usage is attributed to models more safely across process restarts and subagents.** Ambiguous or conflicting evidence remains unattributed instead of being guessed. [#123](https://github.com/Nanako0129/TokenBar/pull/123)
+- **Popover height dragging stays responsive,** and Settings and Quit continue responding normally after a resize. [#110](https://github.com/Nanako0129/TokenBar/pull/110)

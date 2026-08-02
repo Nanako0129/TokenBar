@@ -1,7 +1,10 @@
 New:
-- TokenBar now includes Traditional Chinese. Choose System, English, or Traditional Chinese in Settings; when the selection changes, TokenBar offers to restart immediately so the new preference can take effect. Dashboards, settings, menus, charts, quota reset countdowns, usage pace and risk text, and graph controls are localized, with English fallback for missing entries.
-
+- Add optional menu bar items for individual clients, showing a brand icon and remaining quota for Auto or a selected window; clicking one opens TokenBar on that client.
+- Settings now uses native sidebar navigation for Menu Bar, Dashboard, General, and About, with the live preview kept visible.
+- Drag client tabs to reorder them directly in the popover; Overview stays first and hidden clients keep their saved positions.
+Improved:
+- Historical quota pace can start once current-cycle evidence passes quality checks; insufficient history remains in learning mode and unvalidated risk stays hidden.
 Fixes:
-- Copilot quota windows survive optional reset dates with unexpected types, and duplicate OTEL spans keep the full observed activity duration without adding replayed token usage.
-- Empty KIMI_CODE_HOME values fall back to the default Kimi Code directory; non-empty overrides keep their existing behavior.
-- Provider connection errors retain typed DNS and TLS diagnostics without exposing raw transport text.
+- Claude quota cards reflect live Pro and Max plan changes instead of a stale login-time label.
+- Grok usage is attributed more safely across process restarts and subagents; ambiguous evidence stays unattributed.
+- Popover height dragging remains responsive, and Settings and Quit continue responding normally after resizing.
