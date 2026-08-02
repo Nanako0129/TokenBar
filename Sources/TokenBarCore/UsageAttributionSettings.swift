@@ -5,7 +5,7 @@ public enum UsageAttributionSettings {
     public enum Copy {
         public static let section = "Usage attribution"
         public static let classifyHint = "Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event."
-        public static let canonicalizationHint = "Provider IDs are canonicalized before they reach TokenBar: openai_codex becomes openai, and vertex / vertex_ai become anthropic. Routes that canonicalize to the same provider cannot be separated here."
+        public static let canonicalizationHint = "Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently."
         public static let declarationHint = "A declaration is your classification, not a billing fact."
         public static let noRows = "No provider-split usage in this range."
         public static let acceptSuggestions = "Accept all suggestions (%lld)"

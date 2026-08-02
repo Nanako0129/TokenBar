@@ -177,6 +177,168 @@ private struct DashboardModelTestSource: UsageDataSource {
     func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
 }
 
+private final class AttributedSeriesTestSource: UsageDataSource, @unchecked Sendable {
+    let graphPayload: UsagePayload
+    let refreshPayload: UsagePayload
+    let allowsQuotaCachePersistence = false
+    var graphYears: [String?] = []
+    var refreshYears: [String?] = []
+
+    init(graphPayload: UsagePayload, refreshPayload: UsagePayload) {
+        self.graphPayload = graphPayload
+        self.refreshPayload = refreshPayload
+    }
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = priority
+        graphYears.append(year)
+        return graphPayload
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = priority
+        refreshYears.append(year)
+        return refreshPayload
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        return DemoData.modelReport(for: year)
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
+/// Runs a hook while an acquisition is suspended, so a self-test can make the
+/// world change underneath an in-flight load.
+private final class AttributedSeriesHookSource: UsageDataSource, @unchecked Sendable {
+    let payload: UsagePayload
+    let allowsQuotaCachePersistence = false
+    var onAcquire: (@MainActor @Sendable () -> Void)?
+    var graphCalls = 0
+    var refreshCalls = 0
+
+    init(payload: UsagePayload) { self.payload = payload }
+
+    private func serve() async -> UsagePayload {
+        if let onAcquire { await MainActor.run { onAcquire() } }
+        return payload
+    }
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        graphCalls += 1
+        return await serve()
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        refreshCalls += 1
+        return await serve()
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        return DemoData.modelReport(for: year)
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
+/// Serves one payload until `failing` is set, then throws from both acquisition
+/// paths — the transient-dependency-failure case.
+private final class AttributedSeriesFailingSource: UsageDataSource, @unchecked Sendable {
+    struct Failure: Error {}
+
+    let graphPayload: UsagePayload
+    let allowsQuotaCachePersistence = false
+    var failing = false
+
+    init(graphPayload: UsagePayload) { self.graphPayload = graphPayload }
+
+    private func serve() throws -> UsagePayload {
+        if failing { throw Failure() }
+        return graphPayload
+    }
+
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        return try serve()
+    }
+
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        _ = (year, priority)
+        return try serve()
+    }
+
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        _ = priority
+        return DemoData.modelReport(for: year)
+    }
+
+    func hourlyReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> HourlyReport {
+        _ = priority
+        return DemoData.hourlyReport(for: year, clients: clients)
+    }
+
+    func agentsReport(
+        year: String?, clients: [String]?, priority: TaskPriority
+    ) async throws -> AgentsReport {
+        _ = priority
+        return DemoData.agentsReport(for: year, clients: clients)
+    }
+
+    func agentUsage() async throws -> AgentUsagePayload { DemoData.agentUsage }
+
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        DemoData.trace(windowSecs: windowSecs)
+    }
+
+    func tokensPerMin() async throws -> Double { DemoData.tokensPerMin }
+}
+
 private struct DashboardModelTestObservation: Sendable {
     let selectedYear: String?
     let loadedYear: String?
@@ -385,6 +547,34 @@ enum SelfTest {
             return try! JSONDecoder().decode(
                 ModelReportEntry.self, from: Data(json.utf8))
         }
+
+        func contributionJSON(
+            date: String,
+            clients: [(String, String, String, Int64, Double)],
+            totalsTokens: Int64,
+            totalsCost: Double
+        ) -> String {
+            let clientJSON = clients.map { client in
+                """
+                {"client":"\(client.0)","modelId":"\(client.1)","providerId":"\(client.2)","tokens":{"input":\(client.3),"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},"cost":\(client.4),"messages":1}
+                """
+            }.joined(separator: ",")
+            return """
+            {"date":"\(date)","totals":{"tokens":\(totalsTokens),"cost":\(totalsCost),"messages":\(clients.count)},"intensity":0,"tokenBreakdown":{"input":\(totalsTokens),"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},"clients":[\(clientJSON)]}
+            """
+        }
+
+        func contributionFixture(_ json: String) -> Contribution {
+            try! JSONDecoder().decode(Contribution.self, from: Data(json.utf8))
+        }
+
+        func payloadFixture(_ contributionJSON: [String]) -> UsagePayload {
+            let json = """
+            {"meta":{"generatedAt":"now","version":"selftest","dateRange":{"start":"2023-12-31","end":"2024-12-31"}},"summary":{"totalTokens":0,"totalCost":0.0,"totalDays":0,"activeDays":0,"averagePerDay":0.0,"maxCostInSingleDay":0.0,"clients":[],"models":[]},"years":[],"contributions":[\(contributionJSON.joined(separator: ","))]}
+            """
+            return try! JSONDecoder().decode(UsagePayload.self, from: Data(json.utf8))
+        }
+
         let claudeOpenAIEntry = attributionEntry(
             client: "claude", provider: "openai", model: "gpt-5.6-sol")
         expect(
@@ -874,6 +1064,690 @@ enum SelfTest {
         } else {
             expect(false, "fresh attribution defaults suite is available")
         }
+
+        // QD-1: retain date, attribution bucket, and canonical model while
+        // resolving each raw contribution-client row.
+        let oneDayContributions = [contributionFixture(contributionJSON(
+            date: "2024-01-01",
+            clients: [
+                ("opencode", "excluded-model", "nvidia", 10, 1.0),
+                ("claude", "cross-model", "openai", 20, 2.0),
+                ("claude", "merged-model", "anthropic, github_copilot", 30, 3.0),
+                ("claude", "zero-model", "openai", 0, 0.0),
+            ],
+            totalsTokens: 999,
+            totalsCost: 999.0))]
+        let oneDayConfirmed = [
+            UsageAttribution.Record(
+                client: "opencode", provider: "nvidia", state: .excluded),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .assigned("codex")),
+        ]
+        let oneDaySuggestions = [
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+        ]
+        let oneDayPoints = AttributedDailySeries.points(
+            contributions: oneDayContributions, confirmed: oneDayConfirmed)
+        let expectedOneDayPoints = [
+            AttributedDailySeries.Point(
+                date: "2024-01-01", state: .assigned("codex"), model: "cross-model",
+                tokens: 20, cost: 2.0),
+            AttributedDailySeries.Point(
+                date: "2024-01-01", state: .excluded, model: "excluded-model",
+                tokens: 10, cost: 1.0),
+            AttributedDailySeries.Point(
+                date: "2024-01-01", state: .unassigned, model: "merged-model",
+                tokens: 30, cost: 3.0),
+        ]
+        let suggestionRaw = oneDaySuggestions.reduce(String?.none) {
+            UsageAttribution.suggestionsRaw(updating: $0, record: $1)
+        }
+        let suggestionTable = UsageAttribution.parseRaw(suggestionRaw)
+        let oneDayDefaultsName = "TokenBar.SelfTest.AttributedSeries.\(UUID().uuidString)"
+        if let oneDayDefaults = UserDefaults(suiteName: oneDayDefaultsName) {
+            defer { oneDayDefaults.removePersistentDomain(forName: oneDayDefaultsName) }
+            let confirmedRaw = oneDayConfirmed.reduce(String?.none) {
+                UsageAttribution.confirmedRaw(updating: $0, record: $1)
+            }
+            oneDayDefaults.set(confirmedRaw, forKey: UsageAttribution.confirmedKey)
+            oneDayDefaults.set(suggestionRaw, forKey: UsageAttribution.suggestionsKey)
+            let storedConfirmed = UsageAttribution.confirmed(defaults: oneDayDefaults).records
+            let storedSuggestions = UsageAttribution.suggestions(defaults: oneDayDefaults).records
+            let oneDayFromStore = AttributedDailySeries.points(
+                contributions: oneDayContributions, confirmed: storedConfirmed)
+            expect(
+                oneDayPoints == expectedOneDayPoints
+                    && suggestionTable.records == oneDaySuggestions
+                    && storedSuggestions == oneDaySuggestions
+                    && oneDayFromStore == expectedOneDayPoints,
+                "attributed daily series keeps buckets and ignores stored suggestions")
+        } else {
+            expect(false, "attributed series defaults suite is available")
+        }
+
+        let fullKeyContributions = [
+            contributionFixture(contributionJSON(
+                date: "2024-01-02",
+                clients: [
+                    ("claude", "shared-model", "openai", 30, 3.0),
+                    ("opencode", "shared-model", "nvidia", 40, 4.0),
+                ],
+                totalsTokens: 70,
+                totalsCost: 7.0)),
+            contributionFixture(contributionJSON(
+                date: "2024-01-01",
+                clients: [
+                    ("claude", "shared-model", "openai", 10, 1.0),
+                    ("opencode", "shared-model", "nvidia", 20, 2.0),
+                ],
+                totalsTokens: 30,
+                totalsCost: 3.0)),
+        ]
+        let fullKeyPoints = AttributedDailySeries.points(
+            contributions: fullKeyContributions,
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "opencode", provider: "nvidia", state: .assigned("claude")),
+            ])
+        let expectedFullKeyPoints = [
+            AttributedDailySeries.Point(
+                date: "2024-01-01", state: .assigned("claude"), model: "shared-model",
+                tokens: 20, cost: 2.0),
+            AttributedDailySeries.Point(
+                date: "2024-01-01", state: .assigned("codex"), model: "shared-model",
+                tokens: 10, cost: 1.0),
+            AttributedDailySeries.Point(
+                date: "2024-01-02", state: .assigned("claude"), model: "shared-model",
+                tokens: 40, cost: 4.0),
+            AttributedDailySeries.Point(
+                date: "2024-01-02", state: .assigned("codex"), model: "shared-model",
+                tokens: 30, cost: 3.0),
+        ]
+        expect(
+            fullKeyPoints == expectedFullKeyPoints,
+            "attributed daily series sorts and retains the full date-state-model key")
+
+        let maxContribution = contributionFixture(contributionJSON(
+            date: "2024-01-03",
+            clients: [
+                ("claude", "max-model", "openai", Int64.max, 1.0),
+                ("claude", "max-model", "openai", 7, 2.0),
+            ],
+            totalsTokens: 0,
+            totalsCost: 0.0))
+        let maxPoints = AttributedDailySeries.points(
+            contributions: [maxContribution],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+            ])
+        expect(
+            maxPoints.count == 1 && maxPoints[0].tokens == Int64.max
+                && maxPoints[0].cost == 3.0,
+            "attributed daily series saturates Int64.max token folds")
+
+        let droppedPointContribution = contributionFixture(contributionJSON(
+            date: "2024-01-03",
+            clients: [
+                ("claude", "cancels-model", "openai", 1, 0.0),
+                ("claude", "cancels-model", "openai", -1, 0.0),
+            ],
+            totalsTokens: 0,
+            totalsCost: 0.0))
+        let droppedPoints = AttributedDailySeries.points(
+            contributions: [droppedPointContribution],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .assigned("codex")),
+            ])
+        expect(
+            droppedPoints.isEmpty,
+            "attributed daily series drops a point that aggregates to zero")
+
+        let mergedBypassContribution = contributionFixture(contributionJSON(
+            date: "2024-01-04",
+            clients: [
+                ("opencode", "merged-model", "nvidia, openai", 9, 0.9),
+            ],
+            totalsTokens: 9,
+            totalsCost: 0.9))
+        let mergedBypassPoints = AttributedDailySeries.points(
+            contributions: [mergedBypassContribution],
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "opencode", provider: "nvidia", state: .excluded),
+                UsageAttribution.Record(
+                    client: "opencode", provider: "nvidia, openai", state: .assigned("codex")),
+            ])
+        expect(
+            mergedBypassPoints.count == 1 && mergedBypassPoints[0].state == .unassigned,
+            "merged providers remain unassigned despite a literal joined declaration")
+
+        let conservationContributions = [
+            contributionFixture(contributionJSON(
+                date: "2024-02-01",
+                clients: [("claude", "conservation-model", "anthropic", 7, 0.1)],
+                totalsTokens: 999,
+                totalsCost: 999.0)),
+            contributionFixture(contributionJSON(
+                date: "2024-02-01",
+                clients: [("claude", "conservation-model", "anthropic", 5, 0.2)],
+                totalsTokens: 999,
+                totalsCost: 999.0)),
+            contributionFixture(contributionJSON(
+                date: "2024-02-01",
+                clients: [("claude", "conservation-model", "openai", 11, 4.75)],
+                totalsTokens: 999,
+                totalsCost: 999.0)),
+            contributionFixture(contributionJSON(
+                date: "2024-02-01",
+                clients: [("claude", "conservation-model", "nvidia", 13, 0.125)],
+                totalsTokens: 999,
+                totalsCost: 999.0)),
+        ]
+        let conservationRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "anthropic", state: .assigned("claude")),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+        ]
+        let conservationPoints = AttributedDailySeries.points(
+            contributions: conservationContributions, confirmed: conservationRecords)
+        let permutedConservationPoints = AttributedDailySeries.points(
+            contributions: Array(conservationContributions.reversed()), confirmed: conservationRecords)
+        let conservationTokens = conservationPoints.reduce(Int64.zero) {
+            $0.saturatingAdding($1.tokens)
+        }
+        let conservationCost = conservationPoints.reduce(0.0) { $0 + $1.cost }
+        let conservationBucketsCorrect = conservationPoints.count == 3
+            && conservationPoints[0].state == .assigned("claude")
+            && conservationPoints[0].tokens == 12
+            && abs(conservationPoints[0].cost - 0.3) < 1e-9
+            && conservationPoints[1].state == .excluded
+            && conservationPoints[1].tokens == 11
+            && abs(conservationPoints[1].cost - 4.75) < 1e-9
+            && conservationPoints[2].state == .unassigned
+            && conservationPoints[2].tokens == 13
+            && abs(conservationPoints[2].cost - 0.125) < 1e-9
+        let conservationOrderIndependent = conservationPoints.count == permutedConservationPoints.count
+            && zip(conservationPoints, permutedConservationPoints).allSatisfy { left, right in
+                left.date == right.date && left.state == right.state && left.model == right.model
+                    && left.tokens == right.tokens && abs(left.cost - right.cost) < 1e-9
+            }
+        expect(
+            conservationBucketsCorrect && conservationTokens == 36
+                && abs(conservationCost - 5.175) < 1e-9
+                && conservationOrderIndependent,
+            "attributed daily series conserves row-derived tokens and costs")
+
+        let literalProviderContributions = [contributionFixture(contributionJSON(
+            date: "2024-02-02",
+            clients: [
+                ("claude", "codex-model", "openai-codex", 8, 0.8),
+                ("claude", "openai-model", "openai", 9, 0.9),
+            ],
+            totalsTokens: 17,
+            totalsCost: 1.7))]
+        let literalProviderPoints = AttributedDailySeries.points(
+            contributions: literalProviderContributions,
+            confirmed: [
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai-codex", state: .assigned("codex")),
+                UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .excluded),
+            ])
+        expect(
+            literalProviderPoints.map(\.state) == [.assigned("codex"), .excluded],
+            "attributed daily series compares provider IDs literally")
+
+        let exactResolverRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", model: "exact-model",
+                state: .assigned("codex")),
+        ]
+        let nonMatchingResolverRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", model: "other-model",
+                state: .assigned("codex")),
+        ]
+        let coexistingResolverRecords = [
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", state: .excluded),
+            UsageAttribution.Record(
+                client: "claude", provider: "openai", model: "exact-model",
+                state: .assigned("codex")),
+        ]
+        // Drive the three model-record cases through the producer, not the
+        // resolver: calling resolve directly would stay green even if the
+        // producer stopped passing the row's model at all.
+        func modelRecordState(
+            model: String, records: [UsageAttribution.Record]
+        ) -> UsageAttribution.State? {
+            let points = AttributedDailySeries.points(
+                contributions: [contributionFixture(contributionJSON(
+                    date: "2024-04-01",
+                    clients: [("claude", model, "openai", 5, 0.5)],
+                    totalsTokens: 5,
+                    totalsCost: 0.5))],
+                confirmed: records)
+            guard points.count == 1, points[0].model == model else { return nil }
+            return points[0].state
+        }
+        expect(
+            modelRecordState(model: "exact-model", records: exactResolverRecords)
+                == .assigned("codex")
+                // The row's model has no override of its own, so the only
+                // override present must not apply and the provider-level
+                // declaration stands.
+                && modelRecordState(model: "unlisted-model", records: nonMatchingResolverRecords)
+                    == .excluded
+                && modelRecordState(model: "exact-model", records: coexistingResolverRecords)
+                    == .assigned("codex"),
+            "attributed daily series resolves exact, non-matching, and provider model records")
+
+        expect(
+            UsageAttributionSettings.Copy.all.contains(UsageAttributionSettings.Copy.canonicalizationHint)
+                && UsageAttributionSettings.Copy.canonicalizationHint.contains(
+                    "compared exactly as the source emitted")
+                && !UsageAttributionSettings.Copy.canonicalizationHint.contains("canonicalized"),
+            "attribution copy describes exact provider comparison")
+
+        let allTimeSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2023-12-31",
+                    clients: [("claude", "year-model", "openai", 12, 1.2)],
+                    totalsTokens: 12,
+                    totalsCost: 1.2),
+                contributionJSON(
+                    date: "2024-01-01",
+                    clients: [("claude", "year-model", "openai", 34, 3.4)],
+                    totalsTokens: 34,
+                    totalsCost: 3.4),
+            ]),
+            refreshPayload: payloadFixture([]))
+        let allTimePoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("UTC")
+            let model = AttributedSeriesModel()
+            await model.load(source: allTimeSource, confirmed: [], timeZone: "UTC")
+            return model.points
+        }
+        expect(
+            allTimeSource.graphYears == [nil] && allTimeSource.refreshYears.isEmpty
+                && allTimePoints??.map(\.date) == ["2023-12-31", "2024-01-01"],
+            "attributed series acquisition always requests the all-time graph")
+
+        let timezoneSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-02",
+                    clients: [("claude", "timezone-model", "openai", 2, 0.2)],
+                    totalsTokens: 2,
+                    totalsCost: 0.2),
+            ]))
+        let timezonePoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(source: timezoneSource, confirmed: [], timeZone: "Zone/A")
+            await model.load(source: timezoneSource, confirmed: [], timeZone: "Zone/B")
+            return model.points
+        }
+        expect(
+            timezoneSource.graphYears == [nil] && timezoneSource.refreshYears == [nil]
+                && timezonePoints??.map(\.date) == ["2024-03-02"],
+            "attributed series refreshes when the effective timezone changes")
+
+        // The baseline has to outlive the model: PopoverView holds these as
+        // @State and StatusItemController rebuilds it on every open, so a
+        // per-instance baseline would be nil again by the time the user's new
+        // timezone reaches a load and the stale cached day keys would be served.
+        let remountSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-02",
+                    clients: [("claude", "timezone-model", "openai", 2, 0.2)],
+                    totalsTokens: 2,
+                    totalsCost: 0.2),
+            ]))
+        let remountPoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            await AttributedSeriesModel().load(
+                source: remountSource, confirmed: [], timeZone: "Zone/A")
+            // A brand-new model, exactly as a reopened popover would build it.
+            let remounted = AttributedSeriesModel()
+            await remounted.load(source: remountSource, confirmed: [], timeZone: "Zone/B")
+            return remounted.points
+        }
+        expect(
+            remountSource.refreshYears == [nil]
+                && remountPoints??.map(\.date) == ["2024-03-02"],
+            "attributed series still refreshes when a remounted model sees a new timezone")
+
+        // AppDelegate's title-refresh loop warms the all-time graph cache from
+        // launch, so the very first QD-1 load can be the first one to see a
+        // changed timezone. Without the launch baseline it would accept those
+        // cached pre-change day buckets and then stamp them as current.
+        let firstLoadSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-02",
+                    clients: [("claude", "timezone-model", "openai", 2, 0.2)],
+                    totalsTokens: 2,
+                    totalsCost: 0.2),
+            ]))
+        let firstLoadPoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(source: firstLoadSource, confirmed: [], timeZone: "Zone/B")
+            return model.points
+        }
+        expect(
+            firstLoadSource.graphYears.isEmpty && firstLoadSource.refreshYears == [nil]
+                && firstLoadPoints??.map(\.date) == ["2024-03-02"],
+            "attributed series recomputes on its first load when the timezone already changed")
+
+        // A failed fetch must not go on publishing the classification the user
+        // just changed away from: the rows are still held, so re-derive them.
+        let failingSource = AttributedSeriesFailingSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-05-01",
+                    clients: [("claude", "stale-model", "openai", 4, 0.4)],
+                    totalsTokens: 4,
+                    totalsCost: 0.4),
+            ]))
+        let staleInputStates = awaitMainActorValue { () -> [UsageAttribution.State]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(
+                source: failingSource, confirmed: [], timeZone: "Zone/A")
+            let before = model.points?.map(\.state) ?? []
+            failingSource.failing = true
+            await model.load(
+                source: failingSource,
+                confirmed: [UsageAttribution.Record(
+                    client: "claude", provider: "openai", state: .excluded)],
+                timeZone: "Zone/A")
+            return before + (model.points?.map(\.state) ?? [])
+        }
+        expect(
+            staleInputStates ?? [] == [.unassigned, .excluded],
+            "a failed reload re-derives held rows against the current declarations")
+
+        // Day keys cannot be salvaged that way, so a recompute that fails after
+        // a timezone change publishes nothing rather than known-misdated buckets.
+        let failingTimezoneSource = AttributedSeriesFailingSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-05-01",
+                    clients: [("claude", "stale-model", "openai", 4, 0.4)],
+                    totalsTokens: 4,
+                    totalsCost: 0.4),
+            ]))
+        let droppedOnTimezoneFailure = awaitMainActorValue { () -> Bool in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(source: failingTimezoneSource, confirmed: [], timeZone: "Zone/A")
+            guard model.points?.isEmpty == false else { return false }
+            failingTimezoneSource.failing = true
+            await model.load(source: failingTimezoneSource, confirmed: [], timeZone: "Zone/B")
+            return model.points == nil
+        }
+        expect(
+            droppedOnTimezoneFailure == true,
+            "a failed recompute after a timezone change drops the series")
+
+        // Travel A -> B -> A. Another consumer rewrites the shared cache under
+        // B; by the time QD-1 first loads the zone reads A again, so comparing
+        // identifiers would see a match and accept B's day buckets. Only having
+        // dropped the marker on the transitions catches it.
+        let roundTripSource = AttributedSeriesTestSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]),
+            refreshPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-02",
+                    clients: [("claude", "timezone-model", "openai", 2, 0.2)],
+                    totalsTokens: 2,
+                    totalsCost: 0.2),
+            ]))
+        let roundTripPoints = awaitMainActorValue { () -> [AttributedDailySeries.Point]? in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            // NotificationCenter delivers to the main queue on a later turn, so
+            // wait for the observer to actually run rather than assuming one
+            // yield is enough. Giving up here fails the assertion below; it can
+            // never pass by luck.
+            let before = AttributedSeriesModel.timeZoneGenerationForTesting
+            NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+            NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+            for _ in 0..<1000
+            where AttributedSeriesModel.timeZoneGenerationForTesting == before {
+                await Task.yield()
+            }
+            let model = AttributedSeriesModel()
+            await model.load(source: roundTripSource, confirmed: [], timeZone: "Zone/A")
+            return model.points
+        }
+        expect(
+            roundTripSource.graphYears.isEmpty && roundTripSource.refreshYears == [nil]
+                && roundTripPoints??.map(\.date) == ["2024-03-02"],
+            "a timezone round trip still recomputes rather than trusting the shared cache")
+
+        // The same round trip, but landing while an acquisition is suspended.
+        // Stamping unconditionally on resume would overwrite the invalidation
+        // with a zone nobody verified this payload was built under — and unlike
+        // a stale in-flight payload, no later load could correct that.
+        let suspendedSource = AttributedSeriesHookSource(
+            payload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]))
+        let suspendedOutcome = awaitMainActorValue { () -> (Int, Bool) in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            suspendedSource.onAcquire = {
+                // A -> B -> A while the first acquisition is in flight.
+                AttributedSeriesModel.invalidateTimeZoneProvenance()
+                AttributedSeriesModel.invalidateTimeZoneProvenance()
+            }
+            let stranded = AttributedSeriesModel()
+            await stranded.load(
+                source: suspendedSource, confirmed: [], timeZone: "Zone/A")
+            // Its payload was acquired under a zone nobody can vouch for, so it
+            // must not reach the view either.
+            let published = stranded.points == nil
+            suspendedSource.onAcquire = nil
+            await AttributedSeriesModel().load(
+                source: suspendedSource, confirmed: [], timeZone: "Zone/A")
+            return (suspendedSource.refreshCalls, published)
+        }
+        expect(
+            suspendedSource.graphCalls == 1 && suspendedOutcome?.0 == 1
+                && suspendedOutcome?.1 == true,
+            "a transition during a suspended acquisition is neither published nor stamped")
+
+        // Invalidation is process-wide but retained rows are per-instance. A
+        // model that last succeeded before a transition must not re-derive its
+        // old-zone rows on a later failure, even once another model has already
+        // stamped the new zone and made the marker match again.
+        let strandedRowsSource = AttributedSeriesFailingSource(
+            graphPayload: payloadFixture([
+                contributionJSON(
+                    date: "2024-06-01",
+                    clients: [("claude", "stranded-model", "openai", 3, 0.3)],
+                    totalsTokens: 3,
+                    totalsCost: 0.3),
+            ]))
+        let strandedRowsDropped = awaitMainActorValue { () -> Bool in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let stale = AttributedSeriesModel()
+            await stale.load(source: strandedRowsSource, confirmed: [], timeZone: "Zone/A")
+            guard stale.points?.isEmpty == false else { return false }
+            AttributedSeriesModel.invalidateTimeZoneProvenance()
+            // Another model brings the process up to date under the new zone.
+            await AttributedSeriesModel().load(
+                source: strandedRowsSource, confirmed: [], timeZone: "Zone/B")
+            strandedRowsSource.failing = true
+            await stale.load(source: strandedRowsSource, confirmed: [], timeZone: "Zone/B")
+            return stale.points == nil
+        }
+        expect(
+            strandedRowsDropped == true,
+            "rows retained before a transition are never re-derived after it")
+
+        // One recompute cannot outrun the producer race: a computation begun
+        // before the transition can still land in the shared entry afterwards.
+        // So once a transition is seen, stop reading that entry for good.
+        let bypassSource = AttributedSeriesHookSource(
+            payload: payloadFixture([
+                contributionJSON(
+                    date: "2024-06-02",
+                    clients: [("claude", "bypass-model", "openai", 6, 0.6)],
+                    totalsTokens: 6,
+                    totalsCost: 0.6),
+            ]))
+        let bypassCalls = awaitMainActorValue { () -> (Int, Int) in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            let model = AttributedSeriesModel()
+            await model.load(source: bypassSource, confirmed: [], timeZone: "Zone/A")
+            AttributedSeriesModel.invalidateTimeZoneProvenance()
+            await model.load(source: bypassSource, confirmed: [], timeZone: "Zone/B")
+            // Third load, zone unchanged since the second and the marker now
+            // matches — the cheap cached path must still not come back.
+            await model.load(source: bypassSource, confirmed: [], timeZone: "Zone/B")
+            return (bypassSource.graphCalls, bypassSource.refreshCalls)
+        }
+        expect(
+            bypassCalls?.0 == 1 && bypassCalls?.1 == 2,
+            "the shared cache is never read again after a transition")
+
+        // Seeding is a launch-time statement about an empty cache. Repeating it
+        // later would re-assert a provenance that has since been invalidated.
+        let reseedSource = AttributedSeriesHookSource(
+            payload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]))
+        // Deliberately a re-capture under a DIFFERENT zone with no transition
+        // observed. Pairing it with a transition instead would prove nothing:
+        // the post-transition cache bypass would force a refresh on its own and
+        // mask whether this guard exists at all.
+        let reseedRefreshCalls = awaitMainActorValue { () -> Int in
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/B")
+            await AttributedSeriesModel().load(
+                source: reseedSource, confirmed: [], timeZone: "Zone/B")
+            return reseedSource.refreshCalls
+        }
+        expect(
+            reseedRefreshCalls == 1 && reseedSource.graphCalls == 0,
+            "a repeated launch capture cannot re-seed provenance to another zone")
+
+        // Without the launch hook provenance simply starts unknown, so the first
+        // load recomputes and installs the observer itself. That is what makes
+        // deleting the hook a cost, not a correctness defect — assert it rather
+        // than asserting it in prose.
+        let unseededSource = AttributedSeriesHookSource(
+            payload: payloadFixture([
+                contributionJSON(
+                    date: "2024-03-01",
+                    clients: [("claude", "timezone-model", "openai", 1, 0.1)],
+                    totalsTokens: 1,
+                    totalsCost: 0.1),
+            ]))
+        let unseededRefreshCalls = awaitMainActorValue { () -> Int in
+            AttributedSeriesModel.resetForTesting()
+            let model = AttributedSeriesModel()
+            await model.load(source: unseededSource, confirmed: [], timeZone: "Zone/A")
+            let before = AttributedSeriesModel.timeZoneGenerationForTesting
+            NotificationCenter.default.post(name: .NSSystemTimeZoneDidChange, object: nil)
+            for _ in 0..<1000
+            where AttributedSeriesModel.timeZoneGenerationForTesting == before {
+                await Task.yield()
+            }
+            await model.load(source: unseededSource, confirmed: [], timeZone: "Zone/A")
+            return unseededSource.refreshCalls
+        }
+        expect(
+            unseededRefreshCalls == 2 && unseededSource.graphCalls == 0,
+            "an unseeded process still observes transitions without the launch hook")
+
+        let savedCardRaw = UserDefaults.standard.object(forKey: UsageAttribution.confirmedKey)
+        let cardRaw = UsageAttribution.confirmedRaw(updating: nil, record: crossAssignment)
+        UserDefaults.standard.set(cardRaw, forKey: UsageAttribution.confirmedKey)
+        let cardState = awaitMainActorValue { () -> UsageAttribution.State? in
+            let card = UsageAttributionBreakdownCard(
+                loadedModelReport: nil, clientIds: [], singleClient: nil)
+            return UsageAttribution.resolve(
+                client: "claude", provider: "openai", model: nil, records: card.confirmed)
+        }
+        // Reading the right value is not the defect that shipped — the old
+        // computed property read the same store and returned the same records.
+        // What was missing is a dependency SwiftUI can invalidate on, so the
+        // mounted card never redrew after Settings wrote. Only a stored
+        // @AppStorage creates it, so assert the storage itself is there.
+        let cardObservesStore = awaitMainActorValue { () -> Bool in
+            let card = UsageAttributionBreakdownCard(
+                loadedModelReport: nil, clientIds: [], singleClient: nil)
+            return Mirror(reflecting: card).children.contains {
+                String(describing: type(of: $0.value)).hasPrefix("AppStorage<")
+            }
+        }
+        if let savedCardRaw {
+            UserDefaults.standard.set(savedCardRaw, forKey: UsageAttribution.confirmedKey)
+        } else {
+            UserDefaults.standard.removeObject(forKey: UsageAttribution.confirmedKey)
+        }
+        expect(
+            cardState == .some(.assigned("codex")) && cardObservesStore == true,
+            "attribution card derives confirmed records from an observed stored value")
 
         // ModelColorMap: cost ranking drives shades; unseen models fall back.
         let map = ModelColorMap(entries: [

@@ -53,6 +53,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // staying at the pre-migration default until the next defaults write.
         refreshIntervalMin = AppDelegate.readIntervalMin()
         _ = UpdaterService.shared // arm Sparkle when bundled
+        // Record the timezone the (still empty) graph cache will be filled
+        // under, before the title-refresh loop below starts warming it.
+        AttributedSeriesModel.captureLaunchTimeZone()
 
         let controller = StatusItemController()
         statusController = controller

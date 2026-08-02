@@ -10,8 +10,10 @@ struct UsageAttributionBreakdownCard: View {
     /// The client tab this card is scoped to, or nil on Overview.
     var singleClient: String?
 
-    private var confirmed: [UsageAttribution.Record] {
-        UsageAttribution.confirmed(defaults: .standard).records
+    @AppStorage(UsageAttribution.confirmedKey) private var raw = ""
+
+    var confirmed: [UsageAttribution.Record] {
+        UsageAttribution.parseRaw(raw).records
     }
 
     static func rangeLabel(for loadedModelReport: LoadedModelReport?) -> String {
