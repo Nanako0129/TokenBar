@@ -5059,6 +5059,62 @@ mod tests {
         scope.cleanup();
     }
 
+    /// Claude's model-scoped weekly limits reach the binding table like any
+    /// other identified window, so a curve can be requested for them.
+    ///
+    /// The keys asserted here are produced by the real mapper from a provider
+    /// payload rather than written into the fixture by hand: the binding table
+    /// is keyed by the literal `(client_id, window_key)` tuple, so a mapper-side
+    /// identity change would otherwise unbind the curve silently and surface
+    /// only as "quota curve binding is unavailable" at the Swift call site.
+    ///
+    /// The `Sonnet` entry covers the frozen flat-successor lane
+    /// (`CLAUDE_SCOPED_FLAT_SUCCESSORS`) and `Fable` the dynamic
+    /// `weekly_scoped.{slug}.v1` lane; those are the two shapes a scoped window
+    /// key can take, and they bind on the same terms.
+    #[test]
+    fn quota_curve_series_binds_claude_scoped_weekly_windows() {
+        let raw = r#"{
+            "five_hour": {"utilization": 20, "resets_at": "2026-08-04T12:00:00Z"},
+            "seven_day": {"utilization": 30, "resets_at": "2026-08-10T00:00:00Z"},
+            "limits": [
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 40,
+                 "resets_at": "2026-08-10T00:00:00Z",
+                 "scope": {"model": {"display_name": "Sonnet"}}},
+                {"kind": "weekly_scoped", "group": "weekly", "percent": 50,
+                 "resets_at": "2026-08-10T00:00:00Z",
+                 "scope": {"model": {"id": "claude/fable.5", "display_name": "Fable"}}}
+            ]
+        }"#;
+        let usage: ClaudeUsageResponse = serde_json::from_str(raw).unwrap();
+        let now = Utc.timestamp_opt(1_700_000_000, 0).single().unwrap();
+        let windows = claude_windows(&usage, now);
+        let scope = TestRefreshScope::new("quota-curve", "scoped-weekly");
+        let trusted = scope
+            .resolve_current("fixture", "account-a", b"marker-a")
+            .unwrap();
+        let payload = AgentUsagePayload {
+            generated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            publication_generation: 1,
+            agents: vec![AgentUsageSnapshot {
+                windows,
+                ..cache_test_snapshot("claude", Ok(trusted.clone()), now)
+            }],
+            opencode_subscriptions: Vec::new(),
+        };
+
+        assert_eq!(
+            payload.quota_curve_series(),
+            vec![
+                SeriesKey::new("claude", trusted.as_str(), "session.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "weekly.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "sonnet.weekly.v1"),
+                SeriesKey::new("claude", trusted.as_str(), "weekly_scoped.fable.v1"),
+            ]
+        );
+        scope.cleanup();
+    }
+
     fn claude_test_login_credentials() -> ClaudeCredentials {
         ClaudeCredentials {
             access_token: "claude-access".to_string(),
