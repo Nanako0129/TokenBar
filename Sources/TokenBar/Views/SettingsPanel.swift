@@ -569,7 +569,7 @@ struct SettingsPanel: View {
             entries: modelReport?.entries ?? [],
             confirmed: tables.confirmed.records,
             suggestions: tables.suggestions.records)
-        let suggestedRows = rows.filter { $0.suggestedTarget != nil }
+        let suggestedRows = rows.filter { $0.suggestedState != nil }
 
         section(UsageAttributionSettings.Copy.section) {
             hint(UsageAttributionSettings.Copy.classifyHint)
@@ -667,15 +667,28 @@ struct SettingsPanel: View {
                     row.providerLabel.localized))
             }
 
-            if let suggestedTarget = row.suggestedTarget {
-                Text(UsageAttributionSettings.Copy.suggested.localized(
-                    ClientRegistry.style(suggestedTarget).displayName))
+            if let suggestedState = row.suggestedState {
+                Text(Self.suggestionLabel(for: suggestedState))
                     .font(.caption2.weight(.medium))
                     .foregroundStyle(.orange)
             }
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
+    }
+
+    /// A suggestion can propose "not a subscription" as readily as a target, so
+    /// the label follows the proposed state rather than assuming an assignment.
+    static func suggestionLabel(for state: UsageAttribution.State) -> String {
+        switch state {
+        case let .assigned(target):
+            return UsageAttributionSettings.Copy.suggested.localized(
+                ClientRegistry.style(target).displayName)
+        case .excluded:
+            return UsageAttributionSettings.Copy.suggestedExcluded.localized
+        case .unassigned:
+            return UsageAttributionSettings.Copy.unassigned.localized
+        }
     }
 
     private func saveAttribution(

@@ -853,23 +853,74 @@ enum SelfTest {
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "copilot", provider: "openai",
-                subscriptionClients: attributionTargets) == "copilot",
+                subscriptionClients: attributionTargets) == .assigned("copilot"),
             "copilot openai usage suggests copilot")
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "copilot", provider: "anthropic",
-                subscriptionClients: attributionTargets) == "copilot",
+                subscriptionClients: attributionTargets) == .assigned("copilot"),
             "copilot anthropic usage suggests copilot")
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "claude", provider: "anthropic",
-                subscriptionClients: attributionTargets) == "claude",
+                subscriptionClients: attributionTargets) == .assigned("claude"),
             "claude anthropic usage suggests claude")
+        // The case the whole feature exists for: a gateway routes Claude Code to
+        // an OpenAI model, so the row says claude/openai while the subscription
+        // consumed is Codex. Asking source-first would leave exactly these rows
+        // unsuggested, which is most of the usage on a gateway user's machine.
         expect(
             UsageAttributionSettings.suggestionTarget(
                 sourceClient: "claude", provider: "openai",
-                subscriptionClients: attributionTargets) == nil,
-            "claude openai usage has no cross-client suggestion")
+                subscriptionClients: ["claude", "codex"]) == .assigned("codex"),
+            "gateway-routed openai usage suggests the codex subscription")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "opencode", provider: "anthropic",
+                subscriptionClients: ["claude", "codex"]) == .excluded,
+            "anthropic reached from another client is suggested as API spend, not the subscription")
+        // copilot accepts openai too, so with both subscribed nothing here can
+        // tell which one paid. Suggesting either would be a coin flip presented
+        // as an inference.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: ["claude", "codex", "copilot"]) == nil,
+            "two subscriptions covering one provider produce no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "openai",
+                subscriptionClients: ["claude"]) == nil,
+            "no subscription covering the provider produces no suggestion")
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "copilot", provider: "openai",
+                subscriptionClients: ["codex", "copilot"]) == .assigned("copilot"),
+            "an owning source client wins over another subscription that also covers it")
+        // xAI signs third-party agents in with the subscription itself, and
+        // that usage draws on the same weekly pool, so it really is the
+        // subscription being spent.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "claude", provider: "xai",
+                subscriptionClients: ["claude", "grok"]) == .assigned("grok"),
+            "xai reached from another client is spending the grok subscription")
+        // The two policies contradict each other, so no provider may appear in
+        // both — otherwise which one wins depends on the order of the branches.
+        expect(
+            UsageAttributionSettings.crossAgentSubscriptionProviders
+                .isDisjoint(with: UsageAttributionSettings.subscriptionBoundProviders),
+            "a provider cannot be both safe and unsafe to assign across agents")
+        // Every provider a subscription can serve needs a decided policy. This
+        // is what stops a new entry in the map from silently inheriting the
+        // permissive branch: adding one without choosing a side fails here.
+        let policedProviders = UsageAttributionSettings.crossAgentSubscriptionProviders
+            .union(UsageAttributionSettings.subscriptionBoundProviders)
+        let servedProviders = Set(
+            UsageAttributionSettings.subscriptionProviderMap.values.flatMap { $0 })
+        expect(
+            servedProviders.isSubset(of: policedProviders),
+            "every provider a subscription serves has a checked cross-agent policy")
 
         let codexOnlyPayload = try! JSONDecoder().decode(
             AgentUsagePayload.self,
@@ -883,9 +934,15 @@ enum SelfTest {
             ],
             confirmed: [],
             subscriptionClients: codexOnlySubscriptions)
+        // Whether the source client appears in the quota payload is irrelevant:
+        // the user has no Copilot subscription here, so the question is only
+        // which subscription covers each provider. openai is covered by codex;
+        // anthropic is covered by nothing they subscribe to.
         expect(
-            missingSourceSuggestions.isEmpty,
-            "source client missing from quota payload has no suggestion")
+            missingSourceSuggestions.map(\.state)
+                == [UsageAttribution.State.assigned("codex"), .excluded]
+                && missingSourceSuggestions.map(\.provider) == ["openai", "anthropic"],
+            "openai routes to the one subscription covering it; anthropic defaults to API spend")
 
         let suggestionRows = UsageAttributionSettings.rows(
             entries: [

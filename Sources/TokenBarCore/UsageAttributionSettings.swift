@@ -17,6 +17,7 @@ public enum UsageAttributionSettings {
         public static let excluded = "Not a subscription"
         public static let assigned = "Counts toward %@"
         public static let suggested = "Suggested: counts toward %@"
+        public static let suggestedExcluded = "Suggested: not a subscription"
         public static let unspecifiedProvider = "Unspecified provider"
         public static let classificationFor = "Classification for %@"
 
@@ -24,7 +25,7 @@ public enum UsageAttributionSettings {
             [
                 section, classifyHint, canonicalizationHint, declarationHint, noRows,
                 acceptSuggestions, suggestionsHint, source, observed, classification,
-                unassigned, excluded, assigned, suggested, unspecifiedProvider,
+                unassigned, excluded, assigned, suggested, suggestedExcluded, unspecifiedProvider,
                 classificationFor,
                 WriteFailure.invalidExistingValue.message,
                 WriteFailure.entryLimit.message,
@@ -39,7 +40,7 @@ public enum UsageAttributionSettings {
         public let tokens: Int64
         public let cost: Double
         public let state: UsageAttribution.State
-        public let suggestedTarget: String?
+        public let suggestedState: UsageAttribution.State?
 
         public var id: String { "\(client)\u{0}\(provider)" }
 
@@ -71,6 +72,24 @@ public enum UsageAttributionSettings {
     /// or quota payloads. Suggestions are limited to a client's own
     /// subscription so cross-client routing cannot become a guessed billing
     /// declaration (for example, Claude traffic using an OpenAI model).
+    /// Providers whose subscription terms allow it to be reached through some
+    /// other agent. Only these can carry a cross-client assignment suggestion.
+    ///
+    /// An allowlist rather than a denylist, because being wrong in the
+    /// permissive direction proposes that the user did something their provider
+    /// forbids. Extend it per provider, with the terms checked.
+    ///
+    /// xAI ships OAuth sign-in for SuperGrok / X Premium+ into third-party
+    /// agents (Pi, OpenCode) and its own ACP protocol for them, and that usage
+    /// draws on the same shared weekly pool as grok.com — so a row of theirs
+    /// logged elsewhere really did consume the subscription.
+    public static let crossAgentSubscriptionProviders: Set<String> = ["openai", "xai"]
+
+    /// Providers whose subscription may only be used by its own client. A row
+    /// of theirs logged by a different client is API spend under any compliant
+    /// reading, so that is what gets suggested — never their subscription.
+    public static let subscriptionBoundProviders: Set<String> = ["anthropic", "google"]
+
     public static let subscriptionProviderMap: [String: Set<String>] = [
         "claude": ["anthropic"],
         "codex": ["openai"],
@@ -116,14 +135,13 @@ public enum UsageAttributionSettings {
             guard let value = aggregate[key] else { return nil }
             let state = UsageAttribution.resolve(
                 client: value.client, provider: value.provider, model: nil, records: confirmed)
-            let suggestion: String?
+            // A stored suggestion carries its own state now: `excluded` is a
+            // proposal in its own right, not the absence of one.
+            let suggestion: UsageAttribution.State?
             if case .unassigned = state {
                 suggestion = suggestions.first {
                     $0.client == value.client && $0.provider == value.provider && $0.model == nil
-                }.flatMap { record in
-                    if case let .assigned(target) = record.state { return target }
-                    return nil
-                }
+                }?.state
             } else {
                 suggestion = nil
             }
@@ -133,17 +151,48 @@ public enum UsageAttributionSettings {
                 tokens: value.tokens,
                 cost: value.cost,
                 state: state,
-                suggestedTarget: suggestion)
+                suggestedState: suggestion)
         }
     }
 
+    /// Which subscription a source row could plausibly belong to, or nil when
+    /// nothing can be said.
+    ///
+    /// The question is asked provider-first, not source-first: a row records
+    /// which provider served the tokens, and the answer is which of the user's
+    /// subscriptions covers that provider — usually *not* the client that
+    /// happened to log it. Routing a Claude Code session through a gateway to
+    /// an OpenAI model produces `("claude", "openai")`, and the subscription it
+    /// consumed is Codex.
+    ///
+    /// Still only a suggestion. The same row on another machine is an OpenAI
+    /// API key, whose right answer is `excluded`, and no field in the data tells
+    /// the two apart. This turns N clicks into one confirmation; it never
+    /// decides.
     public static func suggestionTarget(
         sourceClient: String, provider: String, subscriptionClients: [String]
-    ) -> String? {
-        guard subscriptionClients.contains(sourceClient),
-              subscriptionProviderMap[sourceClient]?.contains(provider) == true
+    ) -> UsageAttribution.State? {
+        let owners = subscriptionClients.filter {
+            subscriptionProviderMap[$0]?.contains(provider) == true
+        }
+        // A client talking to its own provider is the plainest reading, and
+        // stays unambiguous even when another subscription also accepts it.
+        if owners.contains(sourceClient) { return .assigned(sourceClient) }
+        // Reached from somewhere else, and this provider's subscription cannot
+        // legitimately be reached that way. Assume the user is complying and
+        // that the tokens were bought, not drawn from the subscription.
+        if subscriptionBoundProviders.contains(provider) { return .excluded }
+        // Otherwise a cross-client assignment is only suggestible when the
+        // provider permits it AND exactly one subscription covers it: two that
+        // both accept this provider cannot be told apart from here.
+        //
+        // The allowlist check is unreachable while every provider a
+        // subscription can serve carries a policy — which the self-test pins.
+        // It stays as the runtime backstop if that ever stops holding.
+        guard crossAgentSubscriptionProviders.contains(provider),
+              owners.count == 1
         else { return nil }
-        return sourceClient
+        return .assigned(owners[0])
     }
 
     public static func suggestionRecords(
@@ -153,13 +202,13 @@ public enum UsageAttributionSettings {
     ) -> [UsageAttribution.Record] {
         rows(entries: entries, confirmed: confirmed, suggestions: []).compactMap { row in
             guard case .unassigned = row.state,
-                  let target = suggestionTarget(
+                  let proposed = suggestionTarget(
                     sourceClient: row.client,
                     provider: row.provider,
                     subscriptionClients: subscriptionClients)
             else { return nil }
             return UsageAttribution.Record(
-                client: row.client, provider: row.provider, state: .assigned(target))
+                client: row.client, provider: row.provider, state: proposed)
         }
     }
 
@@ -169,10 +218,10 @@ public enum UsageAttributionSettings {
     public static func acceptanceRecords(rows: [Row]) -> [UsageAttribution.Record] {
         rows.compactMap { row in
             guard case .unassigned = row.state,
-                  let target = row.suggestedTarget
+                  let proposed = row.suggestedState
             else { return nil }
             return UsageAttribution.Record(
-                client: row.client, provider: row.provider, state: .assigned(target))
+                client: row.client, provider: row.provider, state: proposed)
         }
     }
 
