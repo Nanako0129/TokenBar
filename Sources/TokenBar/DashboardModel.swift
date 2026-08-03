@@ -202,6 +202,7 @@ private struct DashboardSnapshot {
     private(set) var modelReport: ModelReport?
     private(set) var colors = ModelColorMap(report: nil)
     private(set) var hourly: HourlyReport?
+    private(set) var hourlyLoading = false
     private(set) var agents: AgentsReport?
     private(set) var agentUsage: AgentUsagePayload?
     /// True once the first `pollAgentUsage()` attempt has finished, whether it
@@ -344,6 +345,7 @@ private struct DashboardSnapshot {
 
     private func invalidateHourly() {
         hourly = nil
+        hourlyLoading = false
         hourlyClients = nil
         hourlyYear = nil
         _ = beginHourlyRequest()
@@ -630,13 +632,12 @@ private struct DashboardSnapshot {
             hourlyYear = nil
         }
         let requestToken = beginHourlyRequest()
+        hourlyLoading = true
         let report = try? await source.hourlyReport(
             year: year, clients: clients, priority: .userInitiated)
-        guard !Task.isCancelled,
-              self.year == year,
-              hourlyRequestToken == requestToken,
-              let report
-        else { return }
+        guard self.year == year, hourlyRequestToken == requestToken else { return }
+        hourlyLoading = false
+        guard !Task.isCancelled, let report else { return }
         publishHourly(report, year: year, clients: selection)
     }
 

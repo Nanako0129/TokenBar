@@ -16,6 +16,7 @@ struct MonthlyView: View {
     var clientIds: [String] = []
     let hourlyReport: HourlyReport?
     var turnClientIds: [String] = []
+    var turnsLoading = false
     let colors: ModelColorMap
 
     @State private var openMonth: String?
@@ -174,6 +175,14 @@ struct MonthlyView: View {
                         Text("%@ turns".localized(turns.formatted()))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                    } else if TurnCountBuckets.showsLoading(
+                        report: hourlyReport, requestInFlight: turnsLoading,
+                        clientIds: turnClientIds)
+                    {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 10, height: 10)
+                            .accessibilityLabel("Loading…")
                     }
                     Spacer()
                     Text(Format.compactTokens(row.tokens))

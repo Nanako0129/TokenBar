@@ -22,6 +22,12 @@ enum TurnCountBuckets {
         }
     }
 
+    static func showsLoading(
+        report: HourlyReport?, requestInFlight: Bool, clientIds: [String]
+    ) -> Bool {
+        report == nil && requestInFlight && !clientIds.isEmpty
+    }
+
     private static func fold(
         _ report: HourlyReport?, key: (String) -> String
     ) -> [String: Int64] {
@@ -69,6 +75,7 @@ struct DailyView: View {
     var clientIds: [String] = []
     let hourlyReport: HourlyReport?
     var turnClientIds: [String] = []
+    var turnsLoading = false
     let colors: ModelColorMap
 
     @State private var openDate: String?
@@ -211,6 +218,14 @@ struct DailyView: View {
                         Text("%@ turns".localized(turns.formatted()))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                    } else if TurnCountBuckets.showsLoading(
+                        report: hourlyReport, requestInFlight: turnsLoading,
+                        clientIds: turnClientIds)
+                    {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .frame(width: 10, height: 10)
+                            .accessibilityLabel("Loading…")
                     }
                     Spacer()
                     Text(Format.compactTokens(row.tokens))

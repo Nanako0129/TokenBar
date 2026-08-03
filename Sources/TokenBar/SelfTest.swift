@@ -2225,6 +2225,16 @@ enum SelfTest {
             ) == ["claude", "codex"]
                 && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
             "turn scope preserves display order and excludes unsupported clients")
+        expect(
+            TurnCountBuckets.showsLoading(
+                report: nil, requestInFlight: true, clientIds: ["codex", "claude"])
+                && !TurnCountBuckets.showsLoading(
+                    report: turnReport, requestInFlight: true, clientIds: ["codex"])
+                && !TurnCountBuckets.showsLoading(
+                    report: nil, requestInFlight: false, clientIds: ["codex"])
+                && !TurnCountBuckets.showsLoading(
+                    report: nil, requestInFlight: true, clientIds: []),
+            "turn spinner appears only while a supported report is in flight")
         let dailyMessageOnlyView = DailyView(
             payload: messageOnlyPayload, clientIds: ["codex"], hourlyReport: turnReport,
             turnClientIds: ["codex", "claude"], colors: ModelColorMap(report: nil)
