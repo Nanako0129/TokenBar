@@ -13,6 +13,7 @@ rust:
 
 build: rust
 	@$(call relink_if_stale,debug)
+	@$(call rebuild_if_header_stale,debug)
 	swift build
 	@$(call sync_localizations,debug)
 
@@ -33,6 +34,7 @@ clean:
 
 bundle: rust
 	@$(call relink_if_stale,release)
+	@$(call rebuild_if_header_stale,release)
 	swift build -c release
 	scripts/bundle.sh
 
@@ -42,6 +44,20 @@ bundle: rust
 define relink_if_stale
 	if [ target/release/libtb_core_ffi.a -nt .build/$(1)/TokenBar ]; then \
 		rm -f .build/$(1)/TokenBar; \
+	fi
+endef
+
+# The same blind spot one level down: SwiftPM caches the CTB Clang module, so a
+# header-only edit can compile against the previous declarations. That makes the
+# ABI-seam selftest pass against a ctb.h which no longer matches the built
+# symbol, until some unrelated Swift edit forces a recompile. Dropping the
+# module cache alone is not enough — with no Swift source change SwiftPM never
+# recompiles the importing target at all, so the old object keeps the old call
+# and links fine. Drop the importing targets' build products too.
+define rebuild_if_header_stale
+	if [ Sources/CTB/include/ctb.h -nt .build/$(1)/TokenBar ]; then \
+		rm -rf .build/*/$(1)/ModuleCache .build/*/$(1)/TokenBarCore.build \
+			.build/*/$(1)/TokenBar.build .build/$(1)/TokenBar; \
 	fi
 endef
 

@@ -67,6 +67,27 @@ public enum TBCore {
     }
 
     /// Decode an enveloped payload, surfacing `{"ok":false}` as a thrown error.
+    /// Like `unwrap`, but a successful envelope may legitimately carry `null`.
+    /// `tb_quota_curve` uses that for "this series is bound but has no history
+    /// yet", which is an answer rather than a failure. Kept as its own path so
+    /// every other entry point still treats a missing payload on `ok:true` as a
+    /// decode failure.
+    static func unwrapOptional<T: Decodable>(_ raw: UnsafeMutablePointer<CChar>?) throws -> T? {
+        guard let data = takeBytes(raw) else {
+            ffiLog.error("FFI returned NULL for \(String(describing: T.self), privacy: .public)")
+            throw TBCoreError.nullPointer
+        }
+        return try decodeOptionalEnvelope(data)
+    }
+
+    package static func decodeOptionalEnvelope<T: Decodable>(_ data: Data) throws -> T? {
+        let envelope = try JSONDecoder().decode(TBEnvelope<T>.self, from: data)
+        guard envelope.ok else {
+            throw TBCoreError.bridge(envelope.err ?? "unknown")
+        }
+        return envelope.data
+    }
+
     static func unwrap<T: Decodable>(_ raw: UnsafeMutablePointer<CChar>?) throws -> T {
         guard let data = takeBytes(raw) else {
             ffiLog.error("FFI returned NULL for \(String(describing: T.self), privacy: .public)")
@@ -167,6 +188,22 @@ public enum TBCore {
     /// report calls with one opaque local-source token sequence.
     public static func filterParityProbe() throws -> FilterParityProbe {
         try unwrap(tb_filter_parity_probe())
+    }
+
+    /// Read-only quota curve snapshot for one bound series. `generation` must be
+    /// the publication generation the series identity was bound under; a stale
+    /// one, or a series this process never verified, fails closed rather than
+    /// serving a curve.
+    ///
+    /// Returns nil when the series exists but has no stored history yet.
+    public static func quotaCurve(
+        clientId: String, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? {
+        try clientId.withCString { client in
+            try windowKey.withCString { window in
+                try unwrapOptional(tb_quota_curve(client, window, generation))
+            }
+        }
     }
 
     /// Live trace buckets over the trailing `windowSecs`.

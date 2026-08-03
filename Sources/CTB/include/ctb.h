@@ -89,6 +89,11 @@ char *tb_tokens_per_min(void);
 // Network-bound; per-provider failures are reported inside each snapshot.
 char *tb_agent_usage(void);
 
+// Read-only quota curve snapshot for one series selected by the latest
+// successful agent-usage publication generation. This call performs no network
+// request; the returned JSON is released with tb_free.
+char *tb_quota_curve(const char *client_id, const char *window_key, uint64_t generation);
+
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
 

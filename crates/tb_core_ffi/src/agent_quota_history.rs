@@ -13,7 +13,7 @@ use crate::agent_quota_duration::{
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read as _, Write as _};
@@ -41,6 +41,10 @@ pub(crate) const EPSILON: f64 = 1e-9;
 
 static HISTORY_PROCESS_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+thread_local! {
+    static SAVE_CALL_COUNT: Cell<u64> = Cell::new(0);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum StorageMode {
@@ -61,6 +65,7 @@ pub(crate) enum HistoryError {
     LockAcquire,
     LockRelease,
     Read,
+    Corrupt,
     CorruptQuarantine,
     InvalidSeriesKey,
     StoreCapacity,
@@ -76,6 +81,7 @@ impl std::fmt::Display for HistoryError {
             Self::LockAcquire => "quota pace lock could not be acquired",
             Self::LockRelease => "quota pace lock could not be released",
             Self::Read => "quota pace history could not be read",
+            Self::Corrupt => "quota pace history is corrupt and was quarantined",
             Self::CorruptQuarantine => "quota pace history could not be quarantined",
             Self::InvalidSeriesKey => "quota pace series key is invalid",
             Self::StoreCapacity => "quota pace history store capacity is exhausted",
@@ -404,6 +410,7 @@ struct LegacyV2Store {
 #[derive(Debug)]
 struct LoadedStore {
     store: Store,
+    quarantined: bool,
 }
 
 /// Record a provider-neutral quota observation in the production v3 store.
@@ -454,6 +461,51 @@ pub(crate) fn production_history_path() -> Option<PathBuf> {
     #[cfg(not(target_os = "windows"))]
     let directory = preferred;
     Some(directory.join(HISTORY_FILE_NAME))
+}
+
+pub(crate) fn read_series_at_path(
+    key: &SeriesKey,
+    path: &Path,
+    now: i64,
+) -> Result<Option<SeriesState>, HistoryError> {
+    read_series_at_path_with_mode(StorageMode::Generic, key, path, now)
+}
+
+pub(crate) fn read_series(key: &SeriesKey, now: i64) -> Result<Option<SeriesState>, HistoryError> {
+    let path = production_history_path().ok_or(HistoryError::StorageUnavailable)?;
+    read_series_at_path_with_mode(StorageMode::System, key, &path, now)
+}
+
+fn read_series_at_path_with_mode(
+    mode: StorageMode,
+    key: &SeriesKey,
+    path: &Path,
+    now: i64,
+) -> Result<Option<SeriesState>, HistoryError> {
+    if !key.is_valid() {
+        return Err(HistoryError::InvalidSeriesKey);
+    }
+    let directory = path.parent().ok_or(HistoryError::StorageUnavailable)?;
+    ensure_real_directory_with_mode(mode, directory)
+        .map_err(|_| HistoryError::StorageUnavailable)?;
+
+    let _process_guard = HISTORY_PROCESS_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let lock_file = open_history_lock(mode, &directory.join(HISTORY_LOCK_FILE_NAME))?;
+    let result = load_store_at_with_mode(mode, path, now, now).and_then(|loaded| {
+        if loaded.quarantined {
+            Err(HistoryError::Corrupt)
+        } else {
+            Ok(find_target_series(&loaded.store, key).cloned())
+        }
+    });
+    let unlock = fs2::FileExt::unlock(&lock_file).map_err(|_| HistoryError::LockRelease);
+    match (result, unlock) {
+        (Err(error), _) => Err(error),
+        (Ok(_), Err(error)) => Err(error),
+        (Ok(series), Ok(())) => Ok(series),
+    }
 }
 
 /// Import only the legacy Codex records bound to the account ID used by the
@@ -2794,6 +2846,7 @@ fn load_store_at_with_mode(
     let Some(bytes) = read_owner_only_with_mode(mode, path).map_err(|_| HistoryError::Read)? else {
         return Ok(LoadedStore {
             store: Store::default(),
+            quarantined: false,
         });
     };
 
@@ -2801,13 +2854,17 @@ fn load_store_at_with_mode(
         .ok()
         .filter(|store| validate_store_at(store, validation_now));
     if let Some(store) = parsed {
-        return Ok(LoadedStore { store });
+        return Ok(LoadedStore {
+            store,
+            quarantined: false,
+        });
     }
 
     quarantine_corrupt_with_mode(mode, path, quarantine_now)
         .map_err(|_| HistoryError::CorruptQuarantine)?;
     Ok(LoadedStore {
         store: Store::default(),
+        quarantined: true,
     })
 }
 
@@ -2916,6 +2973,8 @@ where
 }
 
 fn save_store_atomic_with_mode(mode: StorageMode, path: &Path, store: &Store) -> io::Result<()> {
+    #[cfg(test)]
+    SAVE_CALL_COUNT.with(|count| count.set(count.get().saturating_add(1)));
     #[cfg(target_os = "windows")]
     if mode.uses_windows_secure_storage() {
         return save_store_atomic_windows_secure_with_replace(
@@ -2931,6 +2990,16 @@ fn save_store_atomic_with_mode(mode: StorageMode, path: &Path, store: &Store) ->
         |temp, destination| tokscale_core::fs_atomic::replace_file(temp, destination),
         |directory| sync_directory_with_mode(mode, directory),
     )
+}
+
+#[cfg(test)]
+pub(crate) fn save_call_count() -> u64 {
+    SAVE_CALL_COUNT.with(Cell::get)
+}
+
+#[cfg(test)]
+pub(crate) fn reset_save_call_count() {
+    SAVE_CALL_COUNT.with(|count| count.set(0));
 }
 
 #[cfg(target_os = "windows")]

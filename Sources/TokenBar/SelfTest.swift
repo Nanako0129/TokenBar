@@ -1749,6 +1749,63 @@ enum SelfTest {
             cardState == .some(.assigned("codex")) && cardObservesStore == true,
             "attribution card derives confirmed records from an observed stored value")
 
+        // tb_quota_curve across the real seam: the ctb.h declaration, the built
+        // symbol, and the envelope. A Rust-side unit test cannot see a header
+        // that disagrees with the library. No binding exists in this process
+        // (no agent-usage publication has run), so every selection must fail
+        // closed — and the polarity matters as much as the message, since a
+        // success envelope carrying an error string would read the same to a
+        // substring check.
+        func quotaCurveFailure(client: String, window: String, generation: UInt64) -> String? {
+            do {
+                _ = try TBCore.quotaCurve(
+                    clientId: client, windowKey: window, generation: generation)
+                return nil
+            } catch let TBCoreError.bridge(message) {
+                return message
+            } catch {
+                return "unexpected: \(error)"
+            }
+        }
+        let unboundCurve = quotaCurveFailure(
+            client: "codex", window: "main.session.v1", generation: 1)
+        let emptyClientCurve = quotaCurveFailure(client: "", window: "weekly.v1", generation: 1)
+        let emptyWindowCurve = quotaCurveFailure(client: "codex", window: "", generation: 1)
+        expect(
+            unboundCurve?.contains("binding") == true
+                && emptyClientCurve?.contains("client_id") == true
+                && emptyWindowCurve?.contains("window_key") == true,
+            "tb_quota_curve fails closed through the built C ABI for unbound and invalid selections")
+
+        // A bound series with no history answers {"ok":true,"data":null}. The
+        // ordinary envelope path treats a missing payload on ok:true as a decode
+        // failure, which is right everywhere else and wrong here — so the
+        // optional path gets its own check, including that it still rejects a
+        // failure envelope rather than swallowing it as "no history".
+        func decodeOptionalCurve(_ json: String) -> Result<QuotaCurve?, any Error> {
+            Result { try TBCore.decodeOptionalEnvelope(Data(json.utf8)) as QuotaCurve? }
+        }
+        func curveValue(_ result: Result<QuotaCurve?, any Error>) -> QuotaCurve?? {
+            switch result {
+            case let .success(value): return .some(value)
+            case .failure: return nil
+            }
+        }
+        let curvePointJSON = #"{"sampledAt":10,"usedPercent":4.5,"resetAt":106,"durationSeconds":96,"durationSource":"provider","origin":"liveV3"}"#
+        let curveCoverageJSON = #"{"oldestSampledAt":10,"newestSampledAt":10,"sampleCount":1}"#
+        let curveDataJSON = #"{"points":["# + curvePointJSON + #"],"coverage":"# + curveCoverageJSON
+            + #","activeResetAt":106,"generation":3}"#
+        let nullCurve = curveValue(decodeOptionalCurve(#"{"ok":true,"data":null}"#))
+        let realCurve = curveValue(decodeOptionalCurve(#"{"ok":true,"data":"# + curveDataJSON + "}"))
+        let failedCurve = curveValue(decodeOptionalCurve(#"{"ok":false,"err":"nope"}"#))
+        expect(
+            nullCurve == .some(nil)
+                && realCurve??.points.first?.sampledAt == 10
+                && realCurve??.coverage.sampleCount == 1
+                && realCurve??.generation == 3
+                && failedCurve == nil,
+            "an empty-history curve decodes as nil while a failure envelope still throws")
+
         // ModelColorMap: cost ranking drives shades; unseen models fall back.
         let map = ModelColorMap(entries: [
             ("anthropic", "claude-opus-4-8", 100.0),
