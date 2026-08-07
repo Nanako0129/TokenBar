@@ -18,6 +18,7 @@ History 文件保留已驗證、仍能影響維護決策的結論，不是完整
 |---|---|---|
 | [`native-rewrite.md`](native-rewrite.md) | Tauri 到 native SwiftUI、Rust FFI 與出貨遷移 | historical baseline |
 | [`liquid-glass-experiments.md`](liquid-glass-experiments.md) | Liquid Glass 調查、否決的 spike 路線與 parked 結論 | parked |
+| [`dashboard-load-performance.md`](dashboard-load-performance.md) | 載入延遲調查：量測方法、被推翻的假設、剖析結果與三項改動的實測 | historical |
 | [`release-and-ui-incidents.md`](release-and-ui-incidents.md) | 發版、更新、UI lifecycle 與效能事故的根因 | historical runbook context |
 
 > 新程式碼的現況以 current source、workflow 與 vendor README 為準；history 只提供 rationale 與已知陷阱。
