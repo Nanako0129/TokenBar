@@ -32,6 +32,10 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     /// Fail the next model request once, then behave normally — the shape of a
     /// transient FFI error, which is the case that must self-heal.
     private var failModelOnce = false
+    /// Same shape for the graph: a transient failure leaves whatever payload
+    /// was already restored on screen, which is the state a model request must
+    /// not mistake for a committed one.
+    private var failGraphOnce = false
     private var pendingModel: [CheckedContinuation<ModelReport, Never>] = []
     private var pendingModelYears: [String?] = []
     /// When set, each graph response advances the fixture's "today" so
@@ -81,6 +85,10 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 
     func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         _ = priority
+        if failGraphOnce {
+            failGraphOnce = false
+            throw CancellationError()
+        }
         let key = Self.key(year)
         if blockedGraphYears.contains(key) {
             return await withCheckedContinuation { pendingGraphs[key, default: []].append($0) }
@@ -125,6 +133,7 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func modelCallsRacingGraph() -> Int { modelCallsWhileGraphPending }
     func blockModel() { blockedModel = true }
     func failNextModel() { failModelOnce = true }
+    func failNextGraph() { failGraphOnce = true }
     func pendingModelCount() -> Int { pendingModel.count }
 
     /// Retire the oldest parked model request while leaving the rest parked —
@@ -2549,6 +2558,45 @@ enum SelfTest {
             let commitGenAdvanced = commitGenModel.committedSliceKey != seededKey
             let commitGenScannedOnce = await commitGenSource.modelCallCount() == 1
 
+            // Codex P2 — a restored payload is not a committed one. When the
+            // reopen's graph fetch fails, `try?` leaves the restored payload
+            // standing; scanning against it puts a reading of now beside a
+            // chart from the previous session, tagged as if they agreed.
+            // `tb_model_report` takes a year and nothing else, so the scan is
+            // always current logs — the generation is a cache identity, not a
+            // filter. Before the split, a throwing graph discarded the model
+            // with it, so this was the branch's own regression.
+            let failGraphSource = ControlledTurnUsageDataSource()
+            await failGraphSource.advanceGraphGenerationPerCall()
+            // Its own year: `lastSnapshot` is process-static and keyed on the
+            // year alone, so an all-time seed here would inherit — and re-cache
+            // — the model report an earlier all-time fixture published, leaving
+            // the control below unable to observe an absent report.
+            let failGraphYear = "2043"
+            let failGraphSeed = DashboardModel(
+                cachesSnapshot: true, source: failGraphSource, initialYear: failGraphYear)
+            await failGraphSeed.load()
+            let failGraphReopened = DashboardModel(
+                cachesSnapshot: true, source: failGraphSource, initialYear: failGraphYear)
+            // Control: the reopen really restores a renderable payload, so the
+            // assertion below cannot pass merely because nothing was on screen.
+            let failGraphRestored =
+                failGraphReopened.payload != nil && failGraphReopened.modelReport == nil
+            await failGraphSource.failNextGraph()
+            await failGraphReopened.load()
+            let failGraphCallsBefore = await failGraphSource.modelCallCount()
+            await failGraphReopened.ensureModelData(for: .overview)
+            let failGraphIssuedNoScan =
+                await failGraphSource.modelCallCount() == failGraphCallsBefore
+            // Absent, but the answer is not "none": the cards must read as
+            // loading rather than claim the range has no model usage.
+            let failGraphReadsAsLoading = failGraphReopened.modelLoading
+            // A later successful commit heals it — the guard defers the scan,
+            // it does not abandon it.
+            await failGraphReopened.load()
+            await failGraphReopened.ensureModelData(for: .overview)
+            let failGraphHealed = failGraphReopened.modelReport != nil
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -2906,6 +2954,10 @@ enum SelfTest {
                 "commitGenRestoredStale": commitGenRestoredStale,
                 "commitGenAdvanced": commitGenAdvanced,
                 "commitGenScannedOnce": commitGenScannedOnce,
+                "failGraphRestored": failGraphRestored,
+                "failGraphIssuedNoScan": failGraphIssuedNoScan,
+                "failGraphReadsAsLoading": failGraphReadsAsLoading,
+                "failGraphHealed": failGraphHealed,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -3013,6 +3065,19 @@ enum SelfTest {
             "a reopen whose graph commits a new generation scans the model exactly once "
                 + "(a double-scan guard — it does not discriminate where the gate opens; "
                 + "see the comment at the fixture)")
+        expect(
+            turnTransitionChecks?["failGraphRestored"] == true,
+            "the failed-graph fixture really reopens on a renderable restored payload — "
+                + "without this the assertion below would pass on an empty dashboard")
+        expect(
+            turnTransitionChecks?["failGraphIssuedNoScan"] == true
+                && turnTransitionChecks?["failGraphReadsAsLoading"] == true,
+            "a model request issues no scan against a restored payload whose refresh "
+                + "failed, and reads as loading rather than as no model usage")
+        expect(
+            turnTransitionChecks?["failGraphHealed"] == true,
+            "the next successful commit releases that deferral — the guard defers the "
+                + "model scan, it does not abandon it")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "

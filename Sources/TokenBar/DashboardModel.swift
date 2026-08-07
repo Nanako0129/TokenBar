@@ -320,9 +320,17 @@ private struct DashboardSnapshot {
         commit: @escaping (UsagePayload) -> Void
     ) async throws -> UsagePayload {
         let task = Task {
-            let payload = try await fetch()
-            commit(payload)
-            return payload
+            do {
+                let payload = try await fetch()
+                commit(payload)
+                return payload
+            } catch {
+                // Inside the task for the same reason `commit` is: a waiter
+                // that resumes the instant the gate opens must not read this
+                // before the failure is recorded.
+                self.graphFetchFailed = true
+                throw error
+            }
         }
         graphLoadTask = task
         defer { if graphLoadTask == task { graphLoadTask = nil } }
@@ -620,6 +628,7 @@ private struct DashboardSnapshot {
         }
         self.payload = payload
         acceptedPayloadYear = Self.identityYear(year)
+        graphFetchFailed = false
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
@@ -825,6 +834,27 @@ private struct DashboardSnapshot {
         payload != nil && acceptedPayloadYear == Self.identityYear(year)
     }
 
+    /// Whether the last graph fetch threw without committing. Set inside the
+    /// gated task, so a waiter reading it after the gate opens sees the same
+    /// answer the fetch's owner does; cleared by the next commit.
+    ///
+    /// `tb_model_report` takes a year and nothing else: it always scans current
+    /// logs, and the payload generation is a cache identity rather than a
+    /// filter. So when the fetch fails, `try?` leaves the RESTORED payload
+    /// standing and a scan issued against it puts a reading of now beside a
+    /// chart from the previous popover session — hours apart, tagged as if they
+    /// agreed. Before the graph/model split this could not happen: `load()`
+    /// awaited both, and a throwing graph discarded the model with it.
+    ///
+    /// This is not the ordinary skew of two independent scans. `tb_graph`
+    /// serves a payload up to `ONESHOT_MAX_AGE_SECS` old while the model report
+    /// is uncached, so a 30-second lead is normal and bounded; the failure path
+    /// is bounded only by how long the graph keeps failing.
+    ///
+    /// A restored payload with a fetch still IN FLIGHT is not this state — that
+    /// one is what waiting on the gate is for.
+    @ObservationIgnored private var graphFetchFailed = false
+
     private func ensureModelReport(priority: TaskPriority) async {
         modelWanted = true
         // Raise the flag BEFORE waiting. A restored snapshot is already
@@ -861,7 +891,7 @@ private struct DashboardSnapshot {
         if let inFlight = graphLoadTask {
             _ = try? await inFlight.value
         }
-        guard let payload, modelSliceIsCommitted else {
+        guard let payload, modelSliceIsCommitted, !graphFetchFailed else {
             modelLoading = true
             return
         }
