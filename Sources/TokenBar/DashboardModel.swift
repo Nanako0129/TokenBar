@@ -274,8 +274,9 @@ private struct DashboardSnapshot {
     /// Only then is a missing report worth retrying on the poll — a session that
     /// never leaves Daily must not pay for a scan it does not render.
     @ObservationIgnored private var modelWanted = false
-    /// The base graph load currently running, held so a deferred model request
-    /// waits for it instead of racing it.
+    /// The graph fetch currently running, held so a deferred model request
+    /// waits for it instead of racing it. EVERY graph fetch installs it — the
+    /// initial load, a manual refresh and the 60s poll alike.
     ///
     /// A restored snapshot makes the dashboard renderable before `load()` has
     /// fetched anything, so the model task's key is already a real value on the
@@ -283,7 +284,25 @@ private struct DashboardSnapshot {
     /// scan until a payload commits" property therefore held only for a
     /// first-ever open; every reopen whose snapshot lacked a current model
     /// report put both full scans back on the same bounded pool.
-    @ObservationIgnored private var graphLoadTask: Task<Void, Never>?
+    ///
+    /// Refresh and poll need the same gate for a different reason: the model
+    /// task is keyed on the LENS as well as the committed slice, so opening
+    /// Overview (or expanding a row) mid-refresh raises a request even though
+    /// the slice key has not moved and no payload has committed.
+    @ObservationIgnored private var graphLoadTask: Task<UsagePayload, Error>?
+
+    /// Runs a graph fetch under that gate. Only the fetch is gated — holding
+    /// the slot across `apply()` and the lazy-lens re-fetches would make the
+    /// model wait on work it does not depend on, and each caller keeps its own
+    /// cancellation and error handling where it already lives.
+    private func gatedGraph(
+        _ fetch: @escaping () async throws -> UsagePayload
+    ) async throws -> UsagePayload {
+        let task = Task { try await fetch() }
+        graphLoadTask = task
+        defer { if graphLoadTask == task { graphLoadTask = nil } }
+        return try await task.value
+    }
     /// Identity of the last payload/hourly report that actually committed.
     /// These are separate from `year`: a newer request may complete in the
     /// inverse order, and the presentation accessors must stay fail-closed.
@@ -347,21 +366,11 @@ private struct DashboardSnapshot {
     /// to render, so model-dependent lenses request it afterwards through
     /// `ensureModelData(for:)`, keyed on the committed payload generation.
     func load() async {
-        // Published so `ensureModelReport` can await this rather than scan
-        // alongside it; cleared by whoever still owns the slot on completion.
-        let task = Task { [weak self] in
-            await self?.performLoad()
-            return ()
-        }
-        graphLoadTask = task
-        await task.value
-        if graphLoadTask == task { graphLoadTask = nil }
-    }
-
-    private func performLoad() async {
         do {
             let year = self.year
-            let payload = try await source.graph(year: year, priority: .userInitiated)
+            let payload = try await gatedGraph { [source] in
+                try await source.graph(year: year, priority: .userInitiated)
+            }
             // The year may have changed while we were off-actor (the user can
             // open the year menu during the initial load); drop a stale slice
             // so apply() never tags the new year — and the static snapshot —
@@ -491,12 +500,13 @@ private struct DashboardSnapshot {
         let year = self.year
         // Graph-first here too: the model is refreshed after the graph commits,
         // and only when a lens had already loaded it (mirrors hourly/agents).
-        async let payloadTask = force
-            ? source.refreshGraph(year: year, priority: .userInitiated)
-            : source.graph(year: year, priority: .userInitiated)
         let payload: UsagePayload
         do {
-            payload = try await payloadTask
+            payload = try await gatedGraph { [source] in
+                force
+                    ? try await source.refreshGraph(year: year, priority: .userInitiated)
+                    : try await source.graph(year: year, priority: .userInitiated)
+            }
         } catch {
             // A model that has never reached `.ready` must still settle. apply()
             // spawns this reload for an emptied year filter and returns BEFORE
@@ -637,7 +647,9 @@ private struct DashboardSnapshot {
             // Don't race an in-flight manual Refresh or year switch.
             guard !refreshing else { continue }
             let year = self.year
-            let fetched = try? await source.graph(year: year, priority: .utility)
+            let fetched = try? await gatedGraph { [source] in
+                try await source.graph(year: year, priority: .utility)
+            }
             if Task.isCancelled { break }
             // The year may have changed while we were off-actor; drop a stale
             // slice so the chart never flickers to the wrong year.
@@ -780,43 +792,64 @@ private struct DashboardSnapshot {
     /// re-render does not re-request, while a graph refresh that actually moved
     /// the payload does. A failure keeps the last-good report rather than
     /// blanking the card.
+    /// True when the committed payload describes the slice `year` currently
+    /// selects — the only state in which a model scan is worth issuing. False
+    /// on first paint (no payload yet) and mid-year-switch.
+    private var modelSliceIsCommitted: Bool {
+        payload != nil && acceptedPayloadYear == Self.identityYear(year)
+    }
+
     private func ensureModelReport(priority: TaskPriority) async {
         modelWanted = true
-        // Wait for a base load already running rather than scanning beside it.
-        // A restored snapshot hands this task a real key on the first body
-        // evaluation, so on every popover reopen it would otherwise start while
-        // `load()` is still scanning — putting both back on the bounded pool,
-        // which is the contention this separation exists to remove. Read the
-        // payload only after, since the load may have committed a new one.
-        if let inFlight = graphLoadTask {
-            await inFlight.value
-        }
-        // No graph yet means the popover is still on its first paint; the
-        // committed-slice key changes once apply() commits and re-fires this.
-        guard let payload else { return }
-        let year = self.year
-        // `setYear` moves `year` synchronously while the payload only catches up
-        // when reload commits, and PopoverView's task id contains both — so this
-        // can be entered with a phantom slice (new year, previous payload).
-        // Scanning for it would issue a full report that the year guard below
-        // must then discard. Wait for the committed payload to agree instead;
-        // apply() re-fires this task the moment it does.
-        guard acceptedPayloadYear == Self.identityYear(year) else {
-            // Mid-slice-change, and the scan for the new slice cannot be issued
-            // yet. The report is absent but the answer is not "none" — leaving
-            // the flag down here let the cards render their empty copy for the
-            // whole graph reload, telling the user a year has no model usage
-            // while it was still being read. apply() re-fires this task the
-            // moment the payload commits, which resolves the flag either way.
+        // Raise the flag BEFORE waiting. A restored snapshot is already
+        // `.ready`, so the model cards are on screen for the whole wait below —
+        // and with the flag down they render "No model usage in this range",
+        // reporting a deferred read as an answered one. Only when nothing is
+        // displayable: a last-good report stays visible unflagged.
+        if modelReport == nil { modelLoading = true }
+        // Settle the slice BEFORE waiting on anything. `setYear` moves `year`
+        // synchronously while the payload only catches up when reload commits,
+        // and PopoverView's task id contains both — so this can be entered with
+        // a phantom slice (new year, previous payload). There is nothing to
+        // wait for in that state: the answer for the requested slice cannot
+        // exist until the reload commits, and apply() re-fires this task the
+        // moment it does. Parking behind the gate instead would hold the caller
+        // behind the very fetch that invalidates its question — and, since
+        // `setYear` installs that gate synchronously, would deadlock a caller
+        // that awaits this directly.
+        //
+        // The report is absent but the answer is not "none" — leaving the flag
+        // down here let the cards render their empty copy for the whole graph
+        // reload, telling the user a year has no model usage while it was
+        // still being read.
+        guard modelSliceIsCommitted else {
             modelLoading = true
             return
         }
+        // Wait for a graph fetch already running rather than scanning beside
+        // it. A restored snapshot hands this task a real key on the first body
+        // evaluation, so on every popover reopen it would otherwise start while
+        // `load()` is still scanning — putting both back on the bounded pool,
+        // which is the contention this separation exists to remove. Read the
+        // payload only after, since the fetch may have committed a new one.
+        if let inFlight = graphLoadTask {
+            _ = try? await inFlight.value
+        }
+        guard let payload, modelSliceIsCommitted else {
+            modelLoading = true
+            return
+        }
+        let year = self.year
         let generation = payload.meta.generatedAt
         let identity = ModelSliceIdentity(year: Self.identityYear(year), generation: generation)
         if modelReport != nil,
            modelYear == identity.year,
            modelPayloadGeneratedAt == generation
         {
+            // A report can land from another task while this one waits on the
+            // graph gate above, so the flag raised there has to come back down
+            // — nothing is in flight to lower it later.
+            modelLoading = false
             return
         }
         // Coalesce re-entry onto the request already running for this exact

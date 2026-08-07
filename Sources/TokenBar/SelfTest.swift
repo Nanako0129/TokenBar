@@ -2445,11 +2445,50 @@ enum SelfTest {
             let reopenLens = Task { await reopened.ensureModelData(for: .overview) }
             let reopenRaced = await waitUntil { await reopenSource.modelCallCount() > 0 }
             let reopenDidNotRace = !reopenRaced
+            // Codex P2 — deferring the scan must not read as an answered
+            // "none". The restored snapshot is already `.ready`, so the model
+            // cards are on screen for the whole wait above; with the flag down
+            // they render "No model usage in this range" for the length of a
+            // cold scan, reporting a deferred read as a finished one.
+            let reopenLoadingWhileDeferred = reopened.modelLoading
             await reopenSource.releaseGraph(year: reopenYear)
             await reopenLoad.value
             await reopenLens.value
             // Deferring must not mean dropping: the report still arrives.
             let reopenModelArrived = await reopened.modelReport != nil
+
+            // Codex P2 — a manual refresh must share the same gate. Only the
+            // initial load installed it, and the reasoning that excused refresh
+            // ("the slice key cannot move while it runs, so no model task
+            // fires") covered one trigger of two: the task is keyed on the LENS
+            // as well as the slice, so opening Overview mid-refresh raises a
+            // request with the key standing still.
+            let refreshGateYear = "2042"
+            let refreshGateSource = ControlledTurnUsageDataSource()
+            let refreshGateModel = DashboardModel(
+                source: refreshGateSource, initialYear: refreshGateYear)
+            await refreshGateModel.load()
+            // Control: the graph-only load leaves no report, so the lens below
+            // has a real scan to issue rather than an idempotent no-op.
+            let refreshGateCallsBefore = await refreshGateSource.modelCallCount()
+            let refreshGateNeedsModel =
+                refreshGateModel.modelReport == nil && refreshGateCallsBefore == 0
+            await refreshGateSource.blockGraph(year: refreshGateYear)
+            let refreshGateTask = Task { await refreshGateModel.refresh() }
+            _ = await waitUntil { await refreshGateSource.hasPendingGraph(year: refreshGateYear) }
+            let refreshGateLens = Task {
+                await refreshGateModel.ensureModelData(for: .overview)
+            }
+            let refreshGateRaced = await waitUntil {
+                await refreshGateSource.modelCallCount() > 0
+            }
+            let refreshGateDeferred = !refreshGateRaced
+            await refreshGateSource.releaseGraph(year: refreshGateYear)
+            await refreshGateTask.value
+            await refreshGateLens.value
+            let refreshGateRacingCalls = await refreshGateSource.modelCallsRacingGraph()
+            let refreshGateModelArrived =
+                refreshGateModel.modelReport != nil && refreshGateRacingCalls == 0
 
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
@@ -2797,7 +2836,11 @@ enum SelfTest {
                 "seededWithoutModel": seededWithoutModel,
                 "reopenRestored": reopenRestored,
                 "reopenDidNotRace": reopenDidNotRace,
+                "reopenLoadingWhileDeferred": reopenLoadingWhileDeferred,
                 "reopenModelArrived": reopenModelArrived,
+                "refreshGateNeedsModel": refreshGateNeedsModel,
+                "refreshGateDeferred": refreshGateDeferred,
+                "refreshGateModelArrived": refreshGateModelArrived,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -2870,6 +2913,19 @@ enum SelfTest {
                 && turnTransitionChecks?["reopenModelArrived"] == true,
             "reopening onto a model lens waits for the base load instead of scanning beside "
                 + "it, and still receives its report")
+        expect(
+            turnTransitionChecks?["reopenLoadingWhileDeferred"] == true,
+            "a deferred model request reads as loading, not as \"no model usage\" — the "
+                + "restored dashboard is already showing those cards while it waits")
+        expect(
+            turnTransitionChecks?["refreshGateNeedsModel"] == true,
+            "the refresh fixture really starts without a model report — without this the "
+                + "gate assertion below would pass on a request that was never issued")
+        expect(
+            turnTransitionChecks?["refreshGateDeferred"] == true
+                && turnTransitionChecks?["refreshGateModelArrived"] == true,
+            "a lens opened during a manual refresh waits for that refresh's graph fetch "
+                + "instead of scanning beside it, and still receives its report")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "
