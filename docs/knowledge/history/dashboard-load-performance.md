@@ -154,10 +154,17 @@ env HOME="$HOME" \
 
 ```bash
 run() { rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
-        printf "%-8s " "$1"
-        env HOME="$HOME" TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
-            TOKSCALE_PRICING_CACHE_ONLY=1 RAYON_NUM_THREADS=2 \
-            "$2" "$HOME" 2>&1 | tail -1; }
+        # 用命令替換而不是管線：管線的結束狀態是 tail 的（幾乎永遠 0），
+        # 被殺掉或 panic 的量測會被當成完成的樣本記錄下來。
+        out=$(env HOME="$HOME" TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
+                  TOKSCALE_PRICING_CACHE_ONLY=1 RAYON_NUM_THREADS=2 \
+                  "$2" "$HOME" 2>&1); st=$?
+        if [ $st -ne 0 ]; then
+          printf '%-8s DISCARD status=%s\n' "$1" "$st"
+          printf '%s\n' "$out" | tail -3
+          return 1
+        fi
+        printf '%-8s %s\n' "$1" "$(printf '%s\n' "$out" | tail -1)"; }
 
 for i in 1 2 3 4 5 6 7; do
   if [ $((i % 2)) -eq 1 ]; then run "NEW-$i" "$NEW_BIN"; run "OLD-$i" "$OLD_BIN"
@@ -176,12 +183,21 @@ done
 計時可以容忍語料漂移，**digest 不行**。本專案的開發過程本身在寫 log，所以要先凍結語料：
 
 ```bash
-mkdir -p "$WORK/corpus"
+mkdir -p "$WORK/corpus" && chmod 700 "$WORK/corpus"
 cp -Rc ~/.claude "$WORK/corpus/.claude"
 cp -Rc ~/.codex  "$WORK/corpus/.codex"
+
+# 這兩個目錄裡有活的 provider 憑證，整份複製會一起帶進來。複製完的下一件事
+# 就是把 clone 內的憑證檔剝掉——確切清單放 .agent-local/，不列在公開文件裡
+# （見 AGENTS.md「Public repository」）。量測結束後整個 $WORK 一併刪除，
+# 語料不留過夜。
 # 之後所有執行都傳 "$WORK/corpus" 當 HOME
 # （目錄別取名 home：文件 gate 會把 "/home/" 當成 Unix 根路徑擋下）
 ```
+
+> **不要改成「只複製掃描器讀的那兩個目錄」。** 這條捷徑看起來更安全——憑證從構造上就進不來——但**實測會改變結果**。只複製 `~/.claude/projects` 與 `~/.codex/sessions`，訊息數從 171,984 掉到 171,983，digest 從 `796241964421401448` 變成 `10899483104831728860`。掃描器實際讀的東西比那兩個 root 定義多，差一則訊息就足以讓 digest 失去對照價值。
+>
+> 記在這裡是因為這正是本文想防的那種錯誤：一個聽起來顯然更好的做法，沒跑過就寫進 runbook。它的代價不是「稍微不準」，而是往後每一次對拍都在跟一個不同的語料比。
 
 digest 的建構規則：
 
@@ -353,6 +369,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | oracle 必須先在零改動上證明，否則它的綠燈毫無意義 | 第一版 digest 在兩次未改動執行上就不同 |
 | 穩定的 oracle 仍可能是瞎的：要另外證明「輸出真的變了它會變」 | 第二版 digest 只雜湊摘要欄位，對 provider 與 token 分桶的換位完全無感——而那正是排序改動唯一會製造的回歸 |
 | 破壞性步驟的守衛要拿 fixture 證明它**會拒絕**，不能只看它沒擋路 | 圍堵檢查同時有「永遠拒絕」與「穿過 symlink 父目錄刪到正式快取」兩個缺陷，兩個都是外部審查抓的 |
+| 複製整份 profile 當語料＝把憑證一起複製；剝除與事後刪除都要寫進步驟 | 本輪就有兩份活的 codex token 被這份 recipe 放進 benchmark 工作區 |
+| 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
 | 「通過」不等於「能失敗」——加測試的速度容易快過驗證測試能失敗的速度 | 本輪兩次寫出不可能失敗的斷言，都只有靠變異跑才發現 |
