@@ -312,6 +312,19 @@ private struct DashboardSnapshot {
     }
 
 
+    /// Identity of the slice whose payload is actually committed and rendering.
+    ///
+    /// Distinct from `year`, which moves the instant the user picks a filter —
+    /// before the payload catches up. Keying the model task on `year` meant the
+    /// id changed at the moment of intent and then stayed put when the new
+    /// payload landed, so a slice whose generation matched the previous one
+    /// never re-fired the task and no model request followed. Two slices can
+    /// share a generation: an all-years payload and a current-year payload are
+    /// both dated today.
+    var committedSliceKey: String {
+        "\(acceptedPayloadYear ?? "-")|\(payload?.meta.generatedAt ?? "")"
+    }
+
     /// The source owns the blocking FFI hop in live mode; demo mode returns
     /// synthetic values through the same async contract.
     ///
@@ -410,6 +423,11 @@ private struct DashboardSnapshot {
         modelTask?.cancel()
         modelTask = nil
         modelWanted = false
+        // Every caller discards the model because a new slice is arriving, so
+        // the honest state is "not known yet", not "none". Setting it here
+        // rather than relying on a task to enter and set it is what survives a
+        // key that does not change until the payload commits.
+        modelLoading = true
         _ = beginModelRequest()
     }
 

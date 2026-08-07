@@ -196,13 +196,16 @@ struct PopoverView: View {
         .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lazyClientIds.joined(separator: ","))") {
             await model.ensureData(for: activeView.wrappedValue, clients: lazyClientIds)
         }
-        // Model report, deliberately keyed on the COMMITTED payload generation
-        // rather than only the lens/year. While the graph is still loading the
-        // generation is empty, so this fires as a no-op; it re-fires with a real
-        // id the moment apply() commits, which is what keeps the model scan off
-        // the graph's critical path instead of racing it for the same Rayon
-        // pool. A graph refresh that moves the payload re-fires it again.
-        .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(model.payload?.meta.generatedAt ?? "")") {
+        // Model report, keyed on the COMMITTED slice rather than the requested
+        // one. Before any payload lands the key is empty, so this fires as a
+        // no-op; it re-fires the moment apply() commits, which is what keeps
+        // the model scan off the graph's critical path instead of racing it
+        // for the same Rayon pool, and again whenever a refresh moves the
+        // payload. Keying on `model.year` instead looked equivalent but was
+        // not: that changes at the moment of intent, so a slice whose payload
+        // shares the previous generation — an all-years and a current-year
+        // view are both dated today — never re-fired and never fetched.
+        .task(id: "\(activeViewRaw)|\(model.committedSliceKey)") {
             await model.ensureModelData(for: activeView.wrappedValue)
         }
         // Auto-clear a year filter scoped to a year only hidden clients used —

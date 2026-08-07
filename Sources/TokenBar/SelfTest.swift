@@ -2421,6 +2421,40 @@ enum SelfTest {
             await phantomSource.releaseGraph(year: yearB)
             await phantomSwitch.value
 
+            // Codex P2 — the task key must change when the committed slice
+            // changes, even when two slices share a payload generation. An
+            // all-years payload and a current-year payload are both dated
+            // today, so a key built from the REQUESTED year moved at the moment
+            // of intent and then sat still when the new payload committed: the
+            // task never re-fired and no model request followed.
+            let sameGenSource = ControlledTurnUsageDataSource()
+            let sameGenModel = DashboardModel(source: sameGenSource, initialYear: nil)
+            await sameGenModel.load()
+            let allYearsKey = sameGenModel.committedSliceKey
+            let allYearsGeneration = sameGenModel.payload?.meta.generatedAt
+            let thisYear = String(Format.todayKey().prefix(4))
+            // Sample the key DURING the switch, before the new payload commits.
+            // Measured only after `setYear` returns, `year` and
+            // `acceptedPayloadYear` already agree and a key built from either
+            // one looks identical — which is exactly why the defect survived a
+            // terminal-state assertion.
+            await sameGenSource.blockGraph(year: thisYear)
+            let sameGenSwitch = Task { await sameGenModel.setYear(thisYear) }
+            _ = await waitUntil { await sameGenSource.hasPendingGraph(year: thisYear) }
+            let midSwitchKey = sameGenModel.committedSliceKey
+            await sameGenSource.releaseGraph(year: thisYear)
+            await sameGenSwitch.value
+            let thisYearKey = sameGenModel.committedSliceKey
+            let thisYearGeneration = sameGenModel.payload?.meta.generatedAt
+            // The key must not move until the payload does: moving at the
+            // moment of intent is what left it unchanged at commit time.
+            let keyHeldUntilCommit = midSwitchKey == allYearsKey
+            // Control: without this the assertion below would pass on any key,
+            // because the collision it guards against would not be present.
+            let generationsCollide =
+                allYearsGeneration != nil && allYearsGeneration == thisYearGeneration
+            let keyChangedDespiteCollision = allYearsKey != thisYearKey
+
             // Codex P2 — a transient model failure must self-heal. Before the
             // graph/model split the 60s poll re-fetched the report
             // unconditionally, so a failed attempt recovered on its own;
@@ -2722,6 +2756,9 @@ enum SelfTest {
                 "modelHeldForA": modelHeldForA,
                 "survivesLensSwitch": survivesLensSwitch,
                 "failedLeftEmpty": failedLeftEmpty,
+                "generationsCollide": generationsCollide,
+                "keyHeldUntilCommit": keyHeldUntilCommit,
+                "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
                 "phantomReadsAsLoading": phantomReadsAsLoading,
@@ -2782,6 +2819,18 @@ enum SelfTest {
                 && turnTransitionChecks?["modelDroppedOnYearSwitch"] == true,
             "a year switch drops the previous year's model report instead of leaving it "
                 + "rendered beside the new year's graph")
+        expect(
+            turnTransitionChecks?["generationsCollide"] == true,
+            "the fixture really does give two slices the same payload generation — without "
+                + "this the key assertion below would pass on a collision that never happens")
+        expect(
+            turnTransitionChecks?["keyChangedDespiteCollision"] == true,
+            "the model task key still changes when the committed slice changes under a "
+                + "shared generation, so the new slice actually requests its report")
+        expect(
+            turnTransitionChecks?["keyHeldUntilCommit"] == true,
+            "the key does not move on the requested year alone — moving at the moment of "
+                + "intent is what left it unchanged when the payload finally committed")
         expect(
             turnTransitionChecks?["failedLeftEmpty"] == true
                 && turnTransitionChecks?["healedAfterRetry"] == true,
@@ -2867,13 +2916,13 @@ enum SelfTest {
         // the call it guards — that survives any rewrap while still pinning
         // every component of the key.
         let lp2bFlat = lp2bPopover.filter { !$0.isWhitespace }
-        let lp2bModelTask = #".task(id:"\(activeViewRaw)|\(model.year??"")|"#
-            + #"\(model.payload?.meta.generatedAt??"")"){"#
+        let lp2bModelTask = #".task(id:"\(activeViewRaw)|\(model.committedSliceKey)"){"#
             + "awaitmodel.ensureModelData(for:activeView.wrappedValue)}"
         expect(
             lp2bFlat.contains(lp2bModelTask),
-            "the model task is keyed on lens, year AND the committed payload generation — "
-                + "the generation is what keeps the model scan off the graph's critical path")
+            "the model task is keyed on the COMMITTED slice, not the requested year — "
+                + "the requested year changes before the payload does, so a slice sharing "
+                + "the previous generation would never re-fire")
         expect(
             turnTransitionChecks?["flatBeforeExpand"] == true
                 && turnTransitionChecks?["gradedAfterExpand"] == true,
