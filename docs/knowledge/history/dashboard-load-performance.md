@@ -36,7 +36,7 @@ sources: ["sanitized local benchmark output", "macOS sample profiles", "PR #187"
 
 ### 隔離語料，不要動正式快取
 
-每次量測用 `cp -Rc` 對 `~/.config/tokscale` 做 APFS clone，剝除 `codex-credentials.json`，只清 clone 內的 `cache/source-message-cache-v2`。正式設定與快取永不作為刪除或寫入目標。
+每次量測用 `cp -Rc` 對 `~/.config/tokscale` 做 APFS clone，**剝除 clone 內的 provider 憑證檔**，只清 clone 內的 `cache/source-message-cache-v2`。正式設定與快取永不作為刪除或寫入目標。
 
 `TOKSCALE_CONFIG_DIR` 同時控制**快取根目錄與 `PathRoot::Config` 的 scanner roots**，所以整份 profile clone 才能保住 config-root 來源；一個空目錄不是 production-equivalent 語料。
 
@@ -82,8 +82,12 @@ chmod 700 "$WORK"
 # 未寫入前與原檔共用區塊。-R 遞迴，-c 走 clonefile(2)。
 cp -Rc ~/.config/tokscale "$WORK/tokscale"
 
-# benchmark clone 永遠不得攜帶正式 provider 憑證。
-rm -f "$WORK/tokscale"/codex-credentials.json "$WORK/tokscale"/codex-credentials.lock
+# benchmark clone 永遠不得攜帶正式 provider 憑證。整份 profile clone 會把
+# 設定目錄裡的憑證檔一起帶進來，所以複製完的第一件事就是剝除它們。
+# 確切檔名不列在公開文件裡（見 AGENTS.md「Public repository」），清單放
+# .agent-local/；下面是機制，執行時以該清單為準並在使用前確認 clone 內確實
+# 一個都不剩。
+find "$WORK/tokscale" -maxdepth 1 -type f -name '*credential*' -delete
 ```
 
 `cp -R`（不加 `-c`）會真的複製 92 MB；`-c` 才是 clone。大語料（凍結 `~/.claude` 與 `~/.codex` 約 7.9 GB）時差別是「瞬間」與「數十秒＋佔滿磁碟」。
