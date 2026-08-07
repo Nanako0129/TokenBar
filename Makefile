@@ -36,20 +36,35 @@ selftest: build
 # #146 and all three were escaped, because the gap is not in the source text.
 # See the constants in DiscordIPC.swift.
 #
-# Deliberately NOT the shipping identifier. A bundled run reads the real
-# preference domain and this suite does write to `UserDefaults.standard`, so
-# the shipping id would put test writes in the installed app's preferences.
-# The escape class turns on the identifier being non-nil, not on its value, so
-# a throwaway one observes exactly the same thing. The app name is distinct for
-# the same reason: this artifact must not be mistaken for — or overwrite — a
-# real dist/TokenBar.app.
-#
 # Not a superset of `selftest`: assertions behind `#if DEBUG` do not exist in
 # release, so this run is the smaller one. Both are gates; neither replaces
 # the other.
+#
+# The identity below is the one knob, and it trades two hazards against each
+# other. A bundled run resolves `UserDefaults.standard` to whatever domain the
+# identifier names, and this suite does write there — `PopoverChrome.heightKey`
+# and the dashboard year key are staged and restored, because the production
+# types read `.standard` directly. Under the shipping identifier those writes
+# land in the installed app's own preferences.
+#
+# So the default is a throwaway, and that is the WEAKER gate: it catches a value
+# keyed on the identifier being nil, but not one keyed on the production string
+# itself, which would take the safe branch here and the other branch only once
+# installed. CI closes that by passing the empty override, which is what the
+# push-to-main gate actually runs — see .github/workflows/ci.yml. An ephemeral
+# runner has no installation to pollute; a developer's Mac does.
+#
+# Empty means "whatever scripts/bundle.sh defaults to", which IS the shipping
+# identifier — deliberately not spelled out again here, so a future rename has
+# one place to change and cannot silently weaken this gate to a string that no
+# longer matches.
+#
+# The app name stays distinct in both cases: this artifact must not be mistaken
+# for — or overwrite — a real dist/TokenBar.app.
+SELFTEST_BUNDLE_ID ?= com.nyanako.tokenbar.selftest
 selftest-bundled: rust
 	@$(call relink_if_stale,release)
-	BUNDLE_ID=com.nyanako.tokenbar.selftest APP_DISPLAY=TokenBarSelfTest scripts/bundle.sh
+	BUNDLE_ID=$(SELFTEST_BUNDLE_ID) APP_DISPLAY=TokenBarSelfTest scripts/bundle.sh
 	dist/TokenBarSelfTest.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
 
 clean:

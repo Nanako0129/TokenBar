@@ -65,9 +65,20 @@ jobs:
       # Same push-only trade as the step above, and it reuses that release
       # build, so the marginal cost here is the bundling and one suite run.
       #
-      # `make selftest-bundled` and not an inline command: the throwaway bundle
-      # identifier is the point (see the Makefile), and a second copy of it here
-      # is a second place to get it wrong.
+      # `SELFTEST_BUNDLE_ID=` — empty, on purpose. The Makefile defaults to a
+      # throwaway identifier so a local run cannot write into the installed
+      # app's preference domain, and empty here means "whatever
+      # scripts/bundle.sh defaults to", which is the shipping identifier.
+      #
+      # That difference is the gate. A value keyed on the identifier merely
+      # being non-nil is caught either way, but one keyed on the production
+      # string takes the safe branch under any other identity — so the run that
+      # blocks a release has to carry the real one. This runner is ephemeral and
+      # has no TokenBar installed, which is what makes that safe here and not on
+      # a developer's Mac.
+      #
+      # Empty rather than the literal: a second copy of the identifier is a
+      # second place for a rename to silently weaken this into a no-op.
       - name: Selftest from the bundled release binary
         if: github.event_name == 'push'
-        run: make selftest-bundled
+        run: make selftest-bundled SELFTEST_BUNDLE_ID=

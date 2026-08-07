@@ -75,7 +75,11 @@ swift run TokenBar --smoke
 
 每一項都跑 debug configuration 的 bare executable，`Bundle.main.bundleIdentifier` 因此是 nil。凡是以那個差異為條件的值，在 suite 看得到的地方是一種樣子、在出貨的地方是另一種樣子，而任何 source scan 都關不掉這個缺口（#146 寫過三道、三道都被繞過，缺口不在原始碼文字裡）。CI 因此在 push 到 main 時多跑一次 `make selftest-bundled`：release build、裝進 `.app`、從 bundled binary 執行同一套 suite。
 
-它刻意使用拋棄式的 bundle identifier `com.nyanako.tokenbar.selftest` 與 app 名稱 `TokenBarSelfTest`——bundled run 讀的是真實 preference domain，而 suite 確實會寫 `UserDefaults.standard`；這個 escape class 取決於 identifier 非 nil 而非它的值，所以拋棄式的觀察到完全一樣的東西，卻不碰安裝版的偏好設定，也不會覆蓋真正的 `dist/TokenBar.app`。
+bundle identity 是這個 target 唯一的旋鈕，而它在兩個危害之間取捨。bundled run 會把 `UserDefaults.standard` 解析到 identifier 指名的 domain，而 suite 確實會寫進去（`PopoverChrome.heightKey` 與 dashboard year key 都是先寫再還原，因為生產型別直接讀 `.standard`）；用出貨 identifier 就會寫進安裝版自己的偏好設定。
+
+所以本機預設是拋棄式的 `com.nyanako.tokenbar.selftest`，而**那是比較弱的 gate**：它抓得到以「identifier 為 nil」為條件的值，抓不到以出貨字串本身為條件的值——後者在本機走安全分支，只有裝起來之後才走另一條。CI 用 `make selftest-bundled SELFTEST_BUNDLE_ID=` 補上，空值代表「`scripts/bundle.sh` 的預設」也就是出貨 identifier；runner 是拋棄式的、沒有安裝版可污染，開發者的 Mac 有。空值而非再寫一次字面值，是為了讓未來改名只有一處要動、不會把這道 gate 無聲地弱化成對不上的字串。
+
+app 名稱兩種情況下都用 `TokenBarSelfTest`：這個產物不可以被誤認為、也不可以覆蓋真正的 `dist/TokenBar.app`。
 
 **它不是 `make selftest` 的超集**：`#if DEBUG` 後面的斷言在 release configuration 不存在，所以 bundled run 的斷言數比較少。兩者都是 gate，互不取代。
 
@@ -101,7 +105,7 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 | Rust | Release static library builds from the current source |
 | Swift | SwiftPM links against the freshly built library from repository root |
 | Selftest | UI-free TokenBarCore assertions pass。部分斷言逐字比對英文 UI 文案，因此語系必須鎖定 `en`（用 `make selftest`，或自行帶 `-AppleLanguages "(en)"`）；在中文系統上直接跑 `swift run TokenBar --selftest` 會因 `Format` 輸出中文而假性失敗，入口會先印出提示 |
-| Bundled selftest | 同一套 suite 從 `dist/TokenBarSelfTest.app` 的 release binary 通過（`make selftest-bundled`），證明斷言看到的是出貨 configuration。CI 只在 push 到 main 時跑；斷言數少於 debug run（`#if DEBUG` 的部分不存在），不是超集 |
+| Bundled selftest | 同一套 suite 從 `dist/TokenBarSelfTest.app` 的 release binary 通過（`make selftest-bundled`），證明斷言看到的是出貨 configuration。CI 只在 push 到 main 時跑，並以 `SELFTEST_BUNDLE_ID=` 帶出貨 identifier；本機預設拋棄式 identifier＝較弱版本。斷言數少於 debug run（`#if DEBUG` 的部分不存在），不是超集 |
 | Smoke | Every C ABI entry point decodes or reports an intentional error envelope；account-scope path不得存取Keychain或顯示credential authorization UI |
 | Account-scope storage | Hermetic security tests先證明permission、path、locking、atomicity與recovery；live smoke只驗證shipping data flow不彈授權UI，不取代fixture correctness |
 | Windows secure storage | M19-B0證明Native candidate與核准Windows security/storage semantic source等價；M19-B1又在hosted Windows x64 runtime執行CNG、owner／exact protected DACL、final-component reparse、file identity、exclusive no-delete-share lock、replace、quarantine、legacy upgrade與error-privacy tests。合併後的exact Windows source另在real ARM64 Windows通過351項Rust tests、12-case provider-v3 CrossCheck、ARM64 PE checks與synthetic WinUI startup；macOS tests與GitHub ARM64 cross-package都不取代這些runtime assertions |
