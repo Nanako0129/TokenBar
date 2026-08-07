@@ -44,7 +44,7 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     /// always matches, and any test about per-generation refetching would pass
     /// no matter what the production code does.
     private var advancingGraphDays: Int?
-    private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Never>]] = [:]
+    private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Error>]] = [:]
     private var pendingHourly: [String: [PendingHourly]] = [:]
 
     init(hourlyResponses: [Set<String>: HourlyReport] = [:]) {
@@ -72,6 +72,16 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         continuations.forEach { $0.resume(returning: payload) }
     }
 
+    /// Release a parked graph fetch as a FAILURE. Needed to land a stale
+    /// fetch's error after a newer one has already committed, which no
+    /// one-shot `failNextGraph` can order.
+    func failPendingGraph(year: String?) {
+        let key = Self.key(year)
+        blockedGraphYears.remove(key)
+        let continuations = pendingGraphs.removeValue(forKey: key) ?? []
+        continuations.forEach { $0.resume(throwing: CancellationError()) }
+    }
+
     func releaseHourly(year: String?) {
         let key = Self.key(year)
         blockedHourlyYears.remove(key)
@@ -91,7 +101,9 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         }
         let key = Self.key(year)
         if blockedGraphYears.contains(key) {
-            return await withCheckedContinuation { pendingGraphs[key, default: []].append($0) }
+            return try await withCheckedThrowingContinuation {
+                pendingGraphs[key, default: []].append($0)
+            }
         }
         if let day = advancingGraphDays {
             advancingGraphDays = day + 1
@@ -2597,6 +2609,29 @@ enum SelfTest {
             await failGraphReopened.ensureModelData(for: .overview)
             let failGraphHealed = failGraphReopened.modelReport != nil
 
+            // Codex P2 — an overtaken fetch must not report failure over a
+            // newer commit. `load()` for year A can still be in flight when the
+            // user picks year B (the phantom-slice guards exist for exactly
+            // that overlap); if B commits first and A then fails, an
+            // unconditional flag marks the DISPLAYED slice failed and strands
+            // its model cards on a spinner until the next successful poll.
+            let overtakeA = "2044"
+            let overtakeB = "2045"
+            let overtakeSource = ControlledTurnUsageDataSource()
+            let overtakeModel = DashboardModel(source: overtakeSource, initialYear: overtakeA)
+            await overtakeSource.blockGraph(year: overtakeA)
+            let overtakeLoad = Task { await overtakeModel.load() }
+            _ = await waitUntil { await overtakeSource.hasPendingGraph(year: overtakeA) }
+            // B overtakes and commits while A is still parked.
+            await overtakeModel.setYear(overtakeB)
+            // Control: B really is the committed slice before A settles, or the
+            // assertion below would pass on a model that was never displaced.
+            let overtakeBCommitted = overtakeModel.committedSliceKey.hasPrefix(overtakeB)
+            await overtakeSource.failPendingGraph(year: overtakeA)
+            await overtakeLoad.value
+            await overtakeModel.ensureModelData(for: .overview)
+            let overtakeServedB = overtakeModel.modelReport != nil
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -2958,6 +2993,8 @@ enum SelfTest {
                 "failGraphIssuedNoScan": failGraphIssuedNoScan,
                 "failGraphReadsAsLoading": failGraphReadsAsLoading,
                 "failGraphHealed": failGraphHealed,
+                "overtakeBCommitted": overtakeBCommitted,
+                "overtakeServedB": overtakeServedB,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -3078,6 +3115,15 @@ enum SelfTest {
             turnTransitionChecks?["failGraphHealed"] == true,
             "the next successful commit releases that deferral — the guard defers the "
                 + "model scan, it does not abandon it")
+        expect(
+            turnTransitionChecks?["overtakeBCommitted"] == true,
+            "the overtake fixture really commits the newer slice before the older fetch "
+                + "settles — without this the assertion below would pass on a slice that "
+                + "was never displaced")
+        expect(
+            turnTransitionChecks?["overtakeServedB"] == true,
+            "a stale graph fetch that fails after a newer slice committed does not mark "
+                + "that newer slice failed — its model request still runs")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "

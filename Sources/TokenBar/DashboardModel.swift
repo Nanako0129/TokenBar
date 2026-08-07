@@ -319,6 +319,8 @@ private struct DashboardSnapshot {
         fetch: @escaping () async throws -> UsagePayload,
         commit: @escaping (UsagePayload) -> Void
     ) async throws -> UsagePayload {
+        graphFetchToken += 1
+        let token = graphFetchToken
         let task = Task {
             do {
                 let payload = try await fetch()
@@ -327,8 +329,10 @@ private struct DashboardSnapshot {
             } catch {
                 // Inside the task for the same reason `commit` is: a waiter
                 // that resumes the instant the gate opens must not read this
-                // before the failure is recorded.
-                self.graphFetchFailed = true
+                // before the failure is recorded. Only the newest fetch may
+                // record it — an overtaken one describes a slice that is no
+                // longer displayed.
+                if self.graphFetchToken == token { self.graphFetchFailed = true }
                 throw error
             }
         }
@@ -854,6 +858,14 @@ private struct DashboardSnapshot {
     /// A restored payload with a fetch still IN FLIGHT is not this state — that
     /// one is what waiting on the gate is for.
     @ObservationIgnored private var graphFetchFailed = false
+    /// Issued per graph fetch so an obsolete one cannot report failure over a
+    /// newer commit. `load()` for year A can still be in flight when the user
+    /// picks year B — the existing phantom-slice guards exist for exactly that
+    /// overlap — and if B commits first, A's later failure would otherwise mark
+    /// the displayed slice failed and strand its model cards on a spinner until
+    /// the next successful poll. Release by ownership, not by value: the same
+    /// rule `modelRequestToken` follows.
+    @ObservationIgnored private var graphFetchToken = 0
 
     private func ensureModelReport(priority: TaskPriority) async {
         modelWanted = true
