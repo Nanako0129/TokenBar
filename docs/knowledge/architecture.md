@@ -64,7 +64,7 @@ The issue-107 `tb_filter_parity_probe` is a separate additive diagnostic. Rust o
 
 ## Windows downstream consumer
 
-C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。兩個 default branch 現在都 pin reviewed engine commit `84e0d66413d4e0d87b734f66f7a848b3bc323258`；Windows 於 [PR #20](https://github.com/Nanako0129/TokenBar-Windows/pull/20)（merge `eb3a7f3`）完成其 consumer migration 與 gates。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
+C ABI 有第二個消費者：Windows port（[Nanako0129/TokenBar-Windows](https://github.com/Nanako0129/TokenBar-Windows)，WinUI 3 + C#）。Native pin 為 `5546bd59095af9f267dcb399287637b0f34a3e1c`，Windows 仍為 `84e0d66413d4e0d87b734f66f7a848b3bc323258`；新增的 `DailyContribution.turns_by_client` 是 additive 且 `#[serde(default)]`，未認得它的 decoder 仍可解，故此差異不阻塞 Windows。 Windows 於 [PR #20](https://github.com/Nanako0129/TokenBar-Windows/pull/20)（merge `eb3a7f3`）完成其 consumer migration 與 gates。Shared parser／cache／aggregation changes belong in `tokscale-core`; each app repository owns its own `tb_core_ffi`、C header、Swift／C# bridge and build wiring. Windows 的 `vendor/ENGINE.md` records its consumer pin and historical sync provenance.
 
 | 不變量 | 規則 |
 |---|---|

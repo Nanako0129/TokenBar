@@ -266,6 +266,14 @@ private struct DashboardSnapshot {
     /// The slice a model scan is currently running for, used to coalesce
     /// re-entry. Nil when nothing is in flight.
     @ObservationIgnored private var modelInFlight: ModelSliceIdentity?
+    /// The unstructured task carrying the in-flight scan. Held so a re-entrant
+    /// caller can await the same work instead of starting its own, and so the
+    /// scan can be cancelled when its slice stops being displayed.
+    @ObservationIgnored private var modelTask: Task<ModelReport?, Never>?
+    /// Whether a model-dependent lens has asked for the report in this slice.
+    /// Only then is a missing report worth retrying on the poll — a session that
+    /// never leaves Daily must not pay for a scan it does not render.
+    @ObservationIgnored private var modelWanted = false
     /// Identity of the last payload/hourly report that actually committed.
     /// These are separate from `year`: a newer request may complete in the
     /// inverse order, and the presentation accessors must stay fail-closed.
@@ -399,6 +407,9 @@ private struct DashboardSnapshot {
         // slice being discarded, and leaving its identity set would let it
         // block a legitimate request should the user return to that slice.
         modelInFlight = nil
+        modelTask?.cancel()
+        modelTask = nil
+        modelWanted = false
         _ = beginModelRequest()
     }
 
@@ -596,6 +607,16 @@ private struct DashboardSnapshot {
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
             guard self.year == year, !Task.isCancelled else { continue }
+            // Retry a model report a lens asked for but never received. Before
+            // the graph/model split this poll re-fetched it unconditionally, so
+            // a transient failure self-healed within 60s; deferring the fetch
+            // removed that path and left the cards claiming "no model usage"
+            // until the user changed lens or refreshed by hand. Gated on
+            // `modelWanted` so a Daily-only session still pays nothing.
+            if modelWanted, modelReport == nil {
+                await ensureModelReport(priority: .utility)
+                guard self.year == year, !Task.isCancelled else { continue }
+            }
             // Re-fetch the lazy lenses that were already loaded (mirrors reload),
             // keeping each one's last-fetched client slice.
             // Re-check the stored slice after the await (see reload()): a tab
@@ -730,6 +751,7 @@ private struct DashboardSnapshot {
         // Scanning for it would issue a full report that the year guard below
         // must then discard. Wait for the committed payload to agree instead;
         // apply() re-fires this task the moment it does.
+        modelWanted = true
         guard acceptedPayloadYear == Self.identityYear(year) else {
             // Mid-slice-change, and the scan for the new slice cannot be issued
             // yet. The report is absent but the answer is not "none" — leaving
@@ -755,11 +777,35 @@ private struct DashboardSnapshot {
         // ordinary interaction: each Daily/Monthly row expand calls
         // `ensureModelColors`, and PopoverView's model task id includes the
         // lens, so Overview→Models mid-scan re-enters too.
-        if modelInFlight == identity { return }
+        // Adopt the scan already running for this exact slice rather than
+        // returning: the caller is a lens-keyed SwiftUI task, and switching
+        // lens mid-scan cancels the one that started it. If publication rode
+        // that task, the cancelled owner would discard the result and the
+        // re-entrant lens would sit empty with nothing left to publish. Awaiting
+        // the shared task instead means whoever is still around gets the value.
+        if modelInFlight == identity, let running = modelTask {
+            await running.value
+            return
+        }
         modelInFlight = identity
         let requestToken = beginModelRequest()
         modelLoading = true
-        let report = try? await source.modelReport(year: year, priority: priority)
+        // Unstructured, so the fetch and its publication outlive the view task
+        // that triggered them. `Task {}` does not inherit cancellation, which is
+        // exactly the property needed here; `invalidateModel` cancels it
+        // explicitly when the slice it belongs to stops being displayed.
+        let task = Task { [source] in
+            try? await source.modelReport(year: year, priority: priority)
+        }
+        modelTask = task
+        // Publish from inside the unstructured task, not after awaiting it: the
+        // caller is a lens-keyed view task, and a lens switch cancels it while
+        // the scan runs. Gating publication on the caller's liveness is what
+        // let a cancelled Overview task discard the report the Models lens was
+        // waiting for. Slice identity — year plus request token — decides
+        // whether the result is still wanted; the caller's fate does not.
+        let report = await task.value
+        if modelTask == task { modelTask = nil }
         // Release by OWNERSHIP, not by value. `ModelSliceIdentity` is a value,
         // so two different scans can carry an identical one: a year round-trip
         // A→B→A during a scan returns the same payload from `tb_graph`'s 30s
@@ -774,9 +820,16 @@ private struct DashboardSnapshot {
         // Only the current request owns the flag; a superseded one must leave it
         // set for the request that replaced it, and must not strand it either.
         if isCurrent { modelLoading = false }
-        guard self.year == year, isCurrent, !Task.isCancelled else { return }
+        guard self.year == year, isCurrent else { return }
         guard let report else { return }
         publishModel(report, year: year, generation: generation)
+    }
+
+    /// The retry `pollGraph` performs, exposed so a test can drive it without
+    /// waiting 60 seconds for the loop.
+    func retryMissingModelForTest() async {
+        guard modelWanted, modelReport == nil else { return }
+        await ensureModelReport(priority: .utility)
     }
 
     /// Model-dependent lenses. Separate from `ensureData` because that task is

@@ -29,6 +29,9 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     private var modelCalls = 0
     private var modelCallsWhileGraphPending = 0
     private var blockedModel = false
+    /// Fail the next model request once, then behave normally — the shape of a
+    /// transient FFI error, which is the case that must self-heal.
+    private var failModelOnce = false
     private var pendingModel: [CheckedContinuation<ModelReport, Never>] = []
     private var pendingModelYears: [String?] = []
     /// When set, each graph response advances the fixture's "today" so
@@ -107,6 +110,10 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         if !pendingGraphs.values.allSatisfy(\.isEmpty) || !blockedGraphYears.isEmpty {
             modelCallsWhileGraphPending += 1
         }
+        if failModelOnce {
+            failModelOnce = false
+            throw CancellationError()
+        }
         if blockedModel {
             pendingModelYears.append(year)
             return await withCheckedContinuation { pendingModel.append($0) }
@@ -117,6 +124,7 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     func modelCallCount() -> Int { modelCalls }
     func modelCallsRacingGraph() -> Int { modelCallsWhileGraphPending }
     func blockModel() { blockedModel = true }
+    func failNextModel() { failModelOnce = true }
     func pendingModelCount() -> Int { pendingModel.count }
 
     /// Retire the oldest parked model request while leaving the rest parked —
@@ -2413,6 +2421,39 @@ enum SelfTest {
             await phantomSource.releaseGraph(year: yearB)
             await phantomSwitch.value
 
+            // Codex P2 — a transient model failure must self-heal. Before the
+            // graph/model split the 60s poll re-fetched the report
+            // unconditionally, so a failed attempt recovered on its own;
+            // deferring the fetch removed that path and left the cards claiming
+            // "no model usage" until the user intervened.
+            let healSource = ControlledTurnUsageDataSource()
+            let healModel = DashboardModel(source: healSource, initialYear: yearA)
+            await healModel.load()
+            await healSource.failNextModel()
+            await healModel.ensureModelData(for: .overview)
+            let failedLeftEmpty = await healModel.modelReport == nil
+            // The poll is what used to heal this; drive its retry directly.
+            await healModel.retryMissingModelForTest()
+            let healedAfterRetry = await healModel.modelReport != nil
+
+            // Codex P1 — switching lens mid-scan must still publish. SwiftUI
+            // cancels the lens-keyed task on the switch, so if the cancelled
+            // task owns publication and the re-entrant one merely coalesces
+            // and returns, nobody publishes and the new lens sits empty.
+            let handoffSource = ControlledTurnUsageDataSource()
+            let handoffModel = DashboardModel(source: handoffSource, initialYear: yearA)
+            await handoffModel.load()
+            await handoffSource.blockModel()
+            let overviewTask = Task { await handoffModel.ensureModelData(for: .overview) }
+            _ = await waitUntil { await handoffSource.pendingModelCount() > 0 }
+            overviewTask.cancel()
+            let modelsTask = Task { await handoffModel.ensureModelData(for: .models) }
+            _ = await waitUntil { await handoffSource.pendingModelCount() > 0 }
+            await handoffSource.releaseModel()
+            await overviewTask.value
+            await modelsTask.value
+            let survivesLensSwitch = await handoffModel.modelReport != nil
+
             // A year switch must drop the previous year's model report. Two
             // sites enforce it — `setYear` calls `invalidateModel()`, and
             // `apply()` discards a report whose `modelYear` disagrees with the
@@ -2679,6 +2720,9 @@ enum SelfTest {
                 "neverRacedGraph": neverRacedGraph,
                 "lensesSkipModel": lensesSkipModel,
                 "modelHeldForA": modelHeldForA,
+                "survivesLensSwitch": survivesLensSwitch,
+                "failedLeftEmpty": failedLeftEmpty,
+                "healedAfterRetry": healedAfterRetry,
                 "phantomIssuedNoScan": phantomIssuedNoScan,
                 "phantomReadsAsLoading": phantomReadsAsLoading,
                 "modelDroppedOnYearSwitch": modelDroppedOnYearSwitch,
@@ -2738,6 +2782,14 @@ enum SelfTest {
                 && turnTransitionChecks?["modelDroppedOnYearSwitch"] == true,
             "a year switch drops the previous year's model report instead of leaving it "
                 + "rendered beside the new year's graph")
+        expect(
+            turnTransitionChecks?["failedLeftEmpty"] == true
+                && turnTransitionChecks?["healedAfterRetry"] == true,
+            "a transient model failure is retried rather than left showing an empty result")
+        expect(
+            turnTransitionChecks?["survivesLensSwitch"] == true,
+            "a lens switch during a model scan still publishes — the cancelled task must "
+                + "not take the only publication path with it")
         expect(
             turnTransitionChecks?["phantomIssuedNoScan"] == true,
             "no model scan is issued for a phantom slice — a new year paired with the "
