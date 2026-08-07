@@ -142,6 +142,12 @@ public struct TrayTotals: Sendable {
 }
 
 extension UsagePayload {
+    /// The one membership test both stages use, so the published top client can
+    /// never disagree with the figures beside it.
+    static func survives(_ id: String, hidden: Set<String>, only: Set<String>?) -> Bool {
+        (only?.contains(id) ?? true) && !hidden.contains(id)
+    }
+
     /// Fold per-client×model×provider stripes into per-client totals and return
     /// the id with the most tokens. `hidden` uses the same membership test as
     /// `trayTotals`, with no normalization, so both agree by construction.
@@ -156,11 +162,22 @@ extension UsagePayload {
     /// tokens, then higher cost, then lexicographically smallest id. The fold
     /// walks the keys in sorted order because `Dictionary`'s own iteration order
     /// is unspecified (and per-process seeded).
+    /// `only`, when non-nil, is a POSITIVE allowlist: a stripe survives when
+    /// `id ∈ only && id ∉ hidden`. Both conditions must hold, which is what
+    /// makes "a selection cannot defeat hiding" structural rather than guarded.
+    ///
+    /// Positive rather than a complement, and that is not a style choice. The
+    /// obvious `hidden ∪ (allIds − {selected})` is wrong: the aggregator emits
+    /// ids that are not in `allIds` — `cc-mirror/<name>`, and any agent
+    /// detected before the registry catches up — so a complement cannot
+    /// subtract what it does not know about and those ids survive the filter.
+    /// The published figure would be "the selected agent plus every
+    /// unregistered client".
     public static func topVisibleClient(
-        in clients: [ContributionClient], hidden: Set<String>
+        in clients: [ContributionClient], hidden: Set<String>, only: Set<String>? = nil
     ) -> String? {
         var byClient: [String: (tokens: Int64, cost: Double)] = [:]
-        for cc in clients where !hidden.contains(cc.client) {
+        for cc in clients where survives(cc.client, hidden: hidden, only: only) {
             let prev = byClient[cc.client] ?? (0, 0)
             byClient[cc.client] = (prev.tokens.saturatingAdding(cc.tokens.total), prev.cost + cc.cost)
         }
@@ -196,13 +213,18 @@ extension UsagePayload {
     /// `summary` — the day-level clamp is not reproducible from the stripes
     /// alone, so we do NOT try to. Smoke's `trayDrift` probe compares the two
     /// on real data every run to catch any vendor-sync regression.
-    public func trayTotals(hidden: Set<String>, today: String) -> TrayTotals {
+    public func trayTotals(
+        hidden: Set<String>, today: String, only: Set<String>? = nil
+    ) -> TrayTotals {
         let todayEntry = contributions.last(where: { $0.date == today })
         // Shared by both paths so the published top client can never disagree
         // with the figures next to it (same stripes, same membership test).
         let todayTopClient = UsagePayload.topVisibleClient(
-            in: todayEntry?.clients ?? [], hidden: hidden)
-        if hidden.isEmpty {
+            in: todayEntry?.clients ?? [], hidden: hidden, only: only)
+        // `only == nil` as well as an empty hidden set: the fast path reads
+        // `summary`, which is unfiltered, so a positive filter must never take
+        // it. Callers that pass no `only` keep the byte-identical fast path.
+        if hidden.isEmpty && only == nil {
             return TrayTotals(
                 todayTokens: todayEntry?.totals.tokens ?? 0,
                 todayCost: todayEntry?.totals.cost ?? 0,
@@ -216,7 +238,7 @@ extension UsagePayload {
         var todayCost = 0.0
         for c in contributions {
             let isToday = c.date == today
-            for cc in c.clients where !hidden.contains(cc.client) {
+            for cc in c.clients where UsagePayload.survives(cc.client, hidden: hidden, only: only) {
                 let sum = cc.tokens.total
                 totalTokens = totalTokens.saturatingAdding(sum)
                 totalCost += cc.cost

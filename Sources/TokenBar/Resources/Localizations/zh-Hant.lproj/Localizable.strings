@@ -193,6 +193,7 @@
 "Popover size" = "視窗尺寸";
 "Data refresh" = "資料更新";
 "Language" = "語言";
+"Discord" = "Discord";
 "About" = "關於";
 "Menu bar" = "選單列";
 "Dashboard" = "儀表板";
@@ -213,6 +214,16 @@
 "Check for updates" = "檢查更新";
 "Check Now" = "立即檢查";
 "Receive beta updates" = "接收 beta 版更新";
+"Show today's usage on Discord" = "在 Discord 顯示今日用量";
+"Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included." = "預設關閉。會把你在下方勾選的內容——今日 token 數、用戶端名稱、花費級距或取整金額——依你指定的用戶端，連同一個 TokenBar 原始碼連結，發布到你的 Discord 個人檔案。工作時會持續更新，因此活動時段也會曝光。任何看得到你檔案的人都能讀取並保存每一次更新；關閉只會停止後續更新，無法收回已經送出的內容。已隱藏的用戶端不會送出。";
+"Include today's tokens" = "包含今日 token 數";
+"Include the client name" = "包含用戶端名稱";
+"Include cost" = "包含花費";
+"Untick everything and nothing is published at all." = "全部取消勾選就完全不發布任何內容。";
+"Show cost as a figure instead of a range" = "以金額而非級距顯示花費";
+"A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend." = "級距讓你和同一區間裡的其他人混在一起。金額會取整到整數美元、不含分位，但仍然每天多透露一些。若上方指定了單一用戶端，它就等於那個工具的每日花費。";
+"Whichever client you used most" = "用量最高的用戶端";
+"Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones TokenBar does not recognise. The cost becomes that one tool's daily spend rather than the whole day's." = "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 TokenBar 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
 "Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
 "Restart TokenBar?" = "重新啟動 TokenBar？";

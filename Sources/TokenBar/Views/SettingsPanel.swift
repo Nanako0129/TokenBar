@@ -63,6 +63,21 @@ struct SettingsPanel: View {
     @AppStorage("tokenbar.trace.detailed") private var detailedTrace = false
     @AppStorage("tokenbar.refresh.intervalMin") private var refreshIntervalMin = 30
     @AppStorage(AppLanguage.storageKey) private var languageRaw = AppLanguage.system.rawValue
+    /// The ONLY binding of this key in the app, and the only place other than
+    /// `DiscordPresence.enabled()` where its default appears. A second
+    /// declaration that said `true` would read as "already on" after an
+    /// upgrade — this repo has precedent (`tokenbar.limits.enabled` declares
+    /// its default in two views).
+    @AppStorage(DiscordPresence.enabledKey) private var discordEnabled = false
+    @AppStorage(DiscordPresence.wholeDollarsKey) private var discordWholeDollars = false
+    /// Stored as the raw comma-separated string the payload layer parses, so
+    /// the view and `DiscordPresence.components()` cannot drift into two
+    /// different ideas of what is selected.
+    @AppStorage(DiscordPresence.componentsKey) private var discordComponentsRaw =
+        DiscordPresence.defaultComponentsRaw
+    /// Empty means the busiest visible client. Stored as the raw id so the
+    /// panel and `DiscordPresence.selection()` read one value.
+    @AppStorage(DiscordPresence.selectionKey) private var discordSelectionRaw = ""
     @State private var showLanguageRestartPrompt = false
     /// 0 = auto (≈60% of the screen). The popover's drag handle writes the
     /// same key, so the two stay in sync.
@@ -565,6 +580,59 @@ struct SettingsPanel: View {
             hint("How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless.")
         }
 
+        section("Discord") {
+            toggleRow("Show today's usage on Discord", isOn: $discordEnabled)
+            // Consent copy, not a feature blurb. It has to say what leaves the
+            // machine, who ends up seeing it, and that switching back off does
+            // not undo it — the reference implementation ships "Show today's
+            // tokens, cost, and most-used AI tool in your Discord activity",
+            // which describes the display and hides the disclosure.
+            // Names the second switch's consequence here, in the disclosure the
+            // user reads BEFORE opting in, rather than only next to the switch
+            // itself. Saying "a cost range" while a setting below can turn it
+            // into a figure would describe a state the app may not be in.
+            hint("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included.")
+            toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
+            toggleRow("Include the client name", isOn: componentBinding(.client))
+            toggleRow("Include cost", isOn: componentBinding(.cost))
+            // Not a hint about tidiness. Unticking everything is the one
+            // combination that would otherwise still publish — an activity
+            // carrying the app name, image and button, refreshing while you
+            // work — so it is treated as switching the feature off for as long
+            // as it stays empty.
+            hint("Untick everything and nothing is published at all.")
+            radioGroup(
+                selection: Binding(
+                    get: {
+                        // Read for the SwiftUI dependency only; the ANSWER comes
+                        // from the strict accessor. `@AppStorage<String>`
+                        // substitutes its empty default for a key holding a
+                        // non-string, which would tick "most used" while the
+                        // runtime published nothing at all.
+                        _ = discordSelectionRaw
+                        switch DiscordPresence.selection() {
+                        case .mostUsed: return ""
+                        case .only(let id): return id
+                        case .malformed: return DiscordPresence.malformedSelectionLabel
+                        }
+                    },
+                    set: { discordSelectionRaw = $0 }),
+                options: [("", "Whichever client you used most")]
+                    + ClientRegistry.allIds.map { ($0, ClientRegistry.style($0).displayName) })
+            // Nothing is ticked when the stored value is malformed, which is
+            // honest: the runtime publishes nothing, and no option describes
+            // that. Picking any row writes a well-formed value and recovers.
+            // Two consequences, and neither is obvious from the control. The
+            // first reads as a bug when it is a decision; the second is the one
+            // that compounds with the switch below it.
+            hint("Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones TokenBar does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.")
+            toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
+            // Says what the trade is, not that there is one. A range puts you
+            // in a group; a figure is closer to a value only you have, and a
+            // sequence of them across weeks is closer still.
+            hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.")
+        }
+
         section("Language") {
             radioGroup(
                 selection: Binding(
@@ -736,6 +804,31 @@ struct SettingsPanel: View {
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
         .glassCard(cornerRadius: 8)
+    }
+
+    /// One checkbox over the shared composition string. Written back in
+    /// `Component.allCases` order so the stored value is canonical whatever
+    /// order the boxes were ticked in, and the value gate does not see a
+    /// reordering as a change.
+    private func componentBinding(_ component: DiscordPresence.Component) -> Binding<Bool> {
+        Binding(
+            get: {
+                // `discordComponentsRaw` is read for the SwiftUI dependency
+                // only; the ANSWER comes from the authoritative accessor.
+                // `@AppStorage<String>` substitutes its default for both an
+                // absent key and one holding a non-string, while
+                // `components()` distinguishes them — so reading the wrapper
+                // for the answer would tick all three boxes over a malformed
+                // write while the runtime published nothing, and the next tick
+                // would start from that phantom all-selected state.
+                _ = self.discordComponentsRaw
+                return DiscordPresence.components().contains(component)
+            },
+            set: { isOn in
+                var selected = DiscordPresence.components()
+                if isOn { selected.insert(component) } else { selected.remove(component) }
+                self.discordComponentsRaw = DiscordPresence.rawComponents(selected)
+            })
     }
 
     private func toggleRow(_ label: String, isOn: Binding<Bool>) -> some View {

@@ -12,7 +12,7 @@ sources: ["docs/knowledge/architecture.md", "docs/knowledge/verification.md", "v
 
 ## Decision
 
-TokenBar report consumers use the cache-aware streaming path where the local implementation provides it. Client selection is applied before any mixed report bucket is folded. A hidden client therefore contributes no tokens, cost, message count, streak, chart point, tray total, live rate, or quota-derived display that is defined as selected-client data.
+TokenBar report consumers use the cache-aware streaming path where the local implementation provides it. Client selection is applied before any mixed report bucket is folded. A hidden client therefore contributes no tokens, cost, message count, streak, chart point, tray total, live rate, quota-derived display, or outbound publication to a third party that is defined as selected-client data. Outbound publication is listed explicitly because it is the one consumer where the mistake is not recoverable: a display can be corrected on the next render, a payload already shown on a public profile cannot be taken back.
 
 ## Context
 
