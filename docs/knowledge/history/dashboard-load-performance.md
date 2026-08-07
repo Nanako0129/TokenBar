@@ -96,9 +96,32 @@ find "$WORK/tokscale" -maxdepth 1 -type f -name '*credential*' -delete
 
 ```bash
 CACHE="$WORK/tokscale/cache/source-message-cache-v2"
-case "$(cd "$WORK/tokscale" && pwd -P)" in "$WORK"*) ;; *) echo REFUSE; exit 1;; esac
+
+# $WORK 自己要先解析。macOS 的 mktemp -d 給 /var/folders/...，而 /var 是指向
+# private/var 的 symlink，拿 pwd -P 的輸出去比對未解析的 $WORK 會永遠不相等。
+WORK_P=$(cd "$WORK" && pwd -P) || exit 1
+
+# 解析的是「父目錄」不是葉節點：cd + pwd -P 會攤平路徑上的每一層 symlink。
+# 只檢查葉節點是不是 symlink 擋不住 cache 這一層被搬走的情況。
+PARENT_P=$(cd "$(dirname "$CACHE")" 2>/dev/null && pwd -P) || {
+  echo "REFUSE: cache parent unreachable"; exit 1; }
+case "$PARENT_P/$(basename "$CACHE")" in
+  "$WORK_P"/*) ;;
+  *) echo "REFUSE: resolves outside the clone"; exit 1;;
+esac
+
 [ -L "$CACHE" ] && { echo "REFUSE: symlink"; exit 1; }
+[ -d "$CACHE" ] || { echo "REFUSE: not a directory"; exit 1; }
 ```
+
+這一段被外部審查抓過，值得記下來，因為兩個缺陷都不是讀程式碼看得出來的：
+
+- **舊版把解析過的路徑拿去比對未解析的 `$WORK`**，在 macOS 上結果是**一律 REFUSE**——那份 runbook 照抄根本跑不起來。一道永遠拒絕的守衛在測試時看起來很安全，直到有人為了讓它動而把它拿掉。
+- **舊版只檢查葉節點是不是 symlink。** 若使用者把 `~/.config/tokscale/cache` 設成 symlink（搬移大快取是常見作法），`cp -R` 依 `cp(1)` 會**保留 symlink 而不是跟隨**，於是 clone 內的 `cache` 仍指向外部；葉節點是真目錄，`[ -L ]` 為假，接著的 `rm -rf` 就穿過那一層把正式快取刪掉。
+
+第二點不是推論。修正前後各跑三個 fixture（正常 clone／`cache` 是 symlink／葉節點是 symlink）：把第一個缺陷單獨修好之後，`cache` 是 symlink 的那個 fixture 被**放行**，隨後的 `rm -rf` 確實刪掉了放在外部的 sentinel 檔。新版三個 fixture 依序是 ACCEPT／REFUSE／REFUSE。
+
+**破壞性步驟的守衛要自己證明會拒絕**，跟測試要證明能失敗是同一件事——只看到它在正常輸入下沒擋路，證明不了任何事。
 
 ### 二、冷啟動：清快取
 
@@ -329,6 +352,7 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 |---|---|
 | oracle 必須先在零改動上證明，否則它的綠燈毫無意義 | 第一版 digest 在兩次未改動執行上就不同 |
 | 穩定的 oracle 仍可能是瞎的：要另外證明「輸出真的變了它會變」 | 第二版 digest 只雜湊摘要欄位，對 provider 與 token 分桶的換位完全無感——而那正是排序改動唯一會製造的回歸 |
+| 破壞性步驟的守衛要拿 fixture 證明它**會拒絕**，不能只看它沒擋路 | 圍堵檢查同時有「永遠拒絕」與「穿過 symlink 父目錄刪到正式快取」兩個缺陷，兩個都是外部審查抓的 |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
 | 「通過」不等於「能失敗」——加測試的速度容易快過驗證測試能失敗的速度 | 本輪兩次寫出不可能失敗的斷言，都只有靠變異跑才發現 |
