@@ -4069,6 +4069,59 @@ enum SelfTest {
             "a turn that both replaces content and adds some still retires the old payload, "
                 + "while a turn that only adds does not (mutation: an AND instead of an OR lets "
                 + "a payload built for the previous selection reach the socket)")
+        // The intro card. One contract, behavioural: nothing it does turns the
+        // feature on. A source scan counting writes to the key name is exactly
+        // the shape #148 removed and #147 showed gets relocated around.
+        let dpIntroSuite = "TokenBar.SelfTest.DiscordIntro"
+        if let dpIntroDefaults = UserDefaults(suiteName: dpIntroSuite) {
+            defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroSuite) }
+            let dpIntroFirst = DiscordIntro.shouldPresent(defaults: dpIntroDefaults)
+            // Presentation is what marks it, not the choice: a card that
+            // returns until the user picks the preferred action is a nag.
+            DiscordIntro.markShown(defaults: dpIntroDefaults)
+            let dpIntroAgain = DiscordIntro.shouldPresent(defaults: dpIntroDefaults)
+            var dpIntroOpened = 0
+            // Read, never written: the process's own domain is where a card
+            // that enabled the feature would actually write, and an assertion
+            // confined to the isolated suite cannot see that. Measured — a
+            // mutation adding `UserDefaults.standard.set(true, forKey:)` to the
+            // openSettings branch passed the suite-only form of this check.
+            //
+            // Known limit, stated rather than papered over: this detects a
+            // CHANGE, so it cannot see a write of `true` over an existing
+            // `true`. Under `swift run` that domain starts empty, so the case
+            // only arises from a previous mutation run leaving the key behind —
+            // which happened while writing this, and silently disabled the
+            // check. Asserting the key is absent beforehand would be the
+            // stronger form, but it would fail on a bundled run for
+            // any user who has the feature switched on.
+            let dpIntroStandardBefore =
+                UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
+            DiscordIntro.perform(.openSettings) { dpIntroOpened += 1 }
+            DiscordIntro.perform(.notNow) { dpIntroOpened += 1 }
+            let dpIntroStandardAfter =
+                UserDefaults.standard.object(forKey: DiscordPresence.enabledKey) as? Bool
+            expect(
+                dpIntroFirst && !dpIntroAgain && dpIntroOpened == 1
+                    && !DiscordPresence.enabled(defaults: dpIntroDefaults)
+                    && dpIntroStandardBefore == dpIntroStandardAfter,
+                "the intro card is shown once, marked by being presented rather than acted on, "
+                    + "and NEITHER action turns the feature on (mutation: an enable button, or "
+                    + "marking it shown only on the preferred choice, fails here)")
+            // Already using it: nothing to introduce, and interrupting would be
+            // noise. Asserted on a second suite so the flag above cannot be
+            // what makes this pass.
+            let dpIntroOnSuite = "TokenBar.SelfTest.DiscordIntroOn"
+            if let dpIntroOn = UserDefaults(suiteName: dpIntroOnSuite) {
+                defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroOnSuite) }
+                dpIntroOn.set(true, forKey: DiscordPresence.enabledKey)
+                expect(!DiscordIntro.shouldPresent(defaults: dpIntroOn),
+                    "the card is not shown to someone already using the feature")
+            }
+        } else {
+            expect(false, "the isolated intro suite could not be created")
+        }
+
         // MARK: - Discord Rich Presence transport (DISCORD-PRESENCE M2a)
         //
         // Nothing in the app calls this transport yet. These run against real
