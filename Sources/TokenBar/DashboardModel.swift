@@ -289,7 +289,19 @@ private struct DashboardSnapshot {
     /// task is keyed on the LENS as well as the committed slice, so opening
     /// Overview (or expanding a row) mid-refresh raises a request even though
     /// the slice key has not moved and no payload has committed.
-    @ObservationIgnored private var graphLoadTask: Task<UsagePayload, Error>?
+    @ObservationIgnored private var graphLoadTask: Task<GraphFetchOutcome, Error>?
+
+    /// What a gated fetch DID, which is not what it returned. A superseded
+    /// fetch holds a perfectly good payload and commits nothing, so a caller
+    /// that reads its completion as a settled slice acts on state the newer
+    /// fetch is about to replace — the poll would start its model and lazy
+    /// reports beside a graph scan still running, back on the bounded pool.
+    /// Returning the payload made those two cases indistinguishable; naming
+    /// them is what removes the question.
+    private enum GraphFetchOutcome {
+        case committed(UsagePayload)
+        case superseded
+    }
 
     /// Runs a graph fetch under that gate and commits it INSIDE the gated task,
     /// so the gate opens on the commit rather than on the fetch.
@@ -318,10 +330,10 @@ private struct DashboardSnapshot {
     private func gatedGraph(
         fetch: @escaping () async throws -> UsagePayload,
         commit: @escaping (UsagePayload) -> Void
-    ) async throws -> UsagePayload {
+    ) async throws -> GraphFetchOutcome {
         graphFetchToken += 1
         let token = graphFetchToken
-        let task = Task {
+        let task = Task { () throws -> GraphFetchOutcome in
             do {
                 let payload = try await fetch()
                 // Same ownership rule as the failure path below, and for the
@@ -333,9 +345,9 @@ private struct DashboardSnapshot {
                 // to its payload and clear the newer fetch's failure state.
                 // (The rollback itself predates the split; guarding only the
                 // error path was this file's own asymmetry.)
-                guard self.graphFetchToken == token else { return payload }
+                guard self.graphFetchToken == token else { return .superseded }
                 commit(payload)
-                return payload
+                return .committed(payload)
             } catch {
                 // Inside the task for the same reason `commit` is: a waiter
                 // that resumes the instant the gate opens must not read this
@@ -549,8 +561,9 @@ private struct DashboardSnapshot {
         let year = self.year
         // Graph-first here too: the model is refreshed after the graph commits,
         // and only when a lens had already loaded it (mirrors hourly/agents).
+        let outcome: GraphFetchOutcome
         do {
-            _ = try await gatedGraph { [source] in
+            outcome = try await gatedGraph { [source] in
                 force
                     ? try await source.refreshGraph(year: year, priority: .userInitiated)
                     : try await source.graph(year: year, priority: .userInitiated)
@@ -570,6 +583,10 @@ private struct DashboardSnapshot {
             }
             return
         }
+        // A superseded fetch settled nothing: the newer one owns this slice and
+        // re-fetches these lenses itself. Driving them here would put an hourly
+        // and an agents scan beside a graph scan still running.
+        guard case .committed = outcome else { return }
         // If apply() cleared a now-empty year filter, it spawned its own
         // unfiltered reload that re-fetches the lazy lenses for the new (nil)
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
@@ -706,7 +723,10 @@ private struct DashboardSnapshot {
                 self.apply(payload: payload, expectedYear: year)
             }
             if Task.isCancelled { break }
-            guard self.year == year, fetched != nil else { continue }
+            // Same rule as reload: a superseded poll settled nothing, so its
+            // model retry and lazy re-fetches would run beside the fetch that
+            // overtook it.
+            guard self.year == year, case .committed = fetched else { continue }
             // apply() may have cleared a now-empty year filter and spawned an
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
@@ -910,8 +930,15 @@ private struct DashboardSnapshot {
         // `load()` is still scanning — putting both back on the bounded pool,
         // which is the contention this separation exists to remove. Read the
         // payload only after, since the fetch may have committed a new one.
-        if let inFlight = graphLoadTask {
+        // Follow the chain, not just the task in hand. A fetch can be
+        // superseded while this waits, and a superseded one commits nothing —
+        // resuming on it would scan against the payload the newer fetch is
+        // about to replace, back on the same bounded pool. Terminates because
+        // each turn awaits a strictly newer task, and only a fresh
+        // `gatedGraph` call can install one.
+        while let inFlight = graphLoadTask {
             _ = try? await inFlight.value
+            if graphLoadTask == inFlight { break }
         }
         guard let payload, modelSliceIsCommitted, !graphFetchFailed else {
             modelLoading = true

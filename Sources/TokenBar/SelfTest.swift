@@ -2683,6 +2683,75 @@ enum SelfTest {
             let rollbackHeldNewer =
                 rollbackModel.committedSliceKey.contains("2037-06-19")
 
+            // Codex P2 — a superseded fetch settles nothing, so waking on it is
+            // not the same as waking on a committed slice. The waiter has to
+            // follow the chain: it captured the older task, that task returns
+            // without committing, and scanning then would put a model scan
+            // beside the newer graph fetch still running.
+            let chainYear = "2047"
+            let chainSource = ControlledTurnUsageDataSource()
+            let chainSeed = DashboardModel(
+                cachesSnapshot: true, source: chainSource, initialYear: chainYear)
+            await chainSeed.load()
+            let chainModel = DashboardModel(
+                cachesSnapshot: true, source: chainSource, initialYear: chainYear)
+            // Control: a restored payload is what lets the model request reach
+            // the gate at all — without one it returns at the slice guard and
+            // never waits, so the assertions below would pass vacuously.
+            let chainRestored = chainModel.payload != nil && chainModel.modelReport == nil
+            await chainSource.blockGraph(year: chainYear)
+            let chainLoad = Task { await chainModel.load() }
+            _ = await waitUntil { await chainSource.pendingGraphCount(year: chainYear) == 1 }
+            // Captures the OLDER task, before the refresh below supersedes it.
+            let chainLens = Task { await chainModel.ensureModelData(for: .overview) }
+            let chainRefresh = Task { await chainModel.refresh() }
+            let chainBothParked = await waitUntil {
+                await chainSource.pendingGraphCount(year: chainYear) == 2
+            }
+            // The older fetch completes and commits nothing.
+            await chainSource.releaseGraph(year: chainYear, index: 0, day: 3)
+            let chainRaced = await waitUntil { await chainSource.modelCallCount() > 0 }
+            let chainDidNotRace = !chainRaced
+            await chainSource.releaseGraph(year: chainYear, index: 0, day: 7)
+            await chainLoad.value
+            await chainRefresh.value
+            await chainLens.value
+            let chainArrived = chainModel.modelReport != nil
+            let chainNeverRacedGraph = await chainSource.modelCallsRacingGraph() == 0
+
+            // Same rule one level out: a superseded RELOAD settled nothing, so
+            // its lazy-lens re-fetch would put an hourly scan beside the graph
+            // fetch that overtook it. Blocking hourly makes the re-fetch
+            // observable as a parked request rather than needing a counter.
+            let lazyYear = "2048"
+            let lazyClients = ["codex", "claude"]
+            let lazySource = ControlledTurnUsageDataSource()
+            let lazyModel = DashboardModel(source: lazySource, initialYear: lazyYear)
+            await lazyModel.load()
+            await lazyModel.ensureData(for: .hourly, clients: lazyClients)
+            // Control: reload only re-fetches a lens it already holds, so
+            // without this the assertion below would pass on a lens that could
+            // never have been re-fetched at all.
+            let lazySeeded = await lazyModel.hourlyReport(for: lazyClients) != nil
+            await lazySource.blockGraph(year: lazyYear)
+            let lazyRefresh = Task { await lazyModel.refresh() }
+            _ = await waitUntil { await lazySource.pendingGraphCount(year: lazyYear) == 1 }
+            let lazyLoad = Task { await lazyModel.load() }
+            let lazyBothParked = await waitUntil {
+                await lazySource.pendingGraphCount(year: lazyYear) == 2
+            }
+            await lazySource.blockHourly(year: lazyYear)
+            // The refresh is now the older, overtaken fetch.
+            await lazySource.releaseGraph(year: lazyYear, index: 0, day: 3)
+            let lazyRefetched = await waitUntil {
+                await lazySource.hasPendingHourly(year: lazyYear)
+            }
+            let lazyHeldBack = !lazyRefetched
+            await lazySource.releaseGraph(year: lazyYear, index: 0, day: 7)
+            await lazySource.releaseHourly(year: lazyYear)
+            await lazyRefresh.value
+            await lazyLoad.value
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -3049,6 +3118,14 @@ enum SelfTest {
                 "rollbackBothParked": rollbackBothParked,
                 "rollbackNewerCommitted": rollbackNewerCommitted,
                 "rollbackHeldNewer": rollbackHeldNewer,
+                "chainRestored": chainRestored,
+                "chainBothParked": chainBothParked,
+                "chainDidNotRace": chainDidNotRace,
+                "chainArrived": chainArrived,
+                "chainNeverRacedGraph": chainNeverRacedGraph,
+                "lazySeeded": lazySeeded,
+                "lazyBothParked": lazyBothParked,
+                "lazyHeldBack": lazyHeldBack,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -3188,6 +3265,30 @@ enum SelfTest {
             turnTransitionChecks?["rollbackHeldNewer"] == true,
             "an overtaken graph fetch that succeeds does not commit — the dashboard and "
                 + "the reopen snapshot keep the newer slice instead of rolling back")
+        expect(
+            turnTransitionChecks?["chainRestored"] == true
+                && turnTransitionChecks?["chainBothParked"] == true,
+            "the chain fixture really restores a payload and parks two fetches — without "
+                + "this the model request would return at the slice guard and the "
+                + "assertions below would pass without ever reaching the gate")
+        expect(
+            turnTransitionChecks?["chainDidNotRace"] == true
+                && turnTransitionChecks?["chainNeverRacedGraph"] == true,
+            "a model waiter woken by a SUPERSEDED fetch keeps waiting for the one that "
+                + "overtook it instead of scanning beside a graph fetch still running")
+        expect(
+            turnTransitionChecks?["chainArrived"] == true,
+            "following that chain still delivers the report once the newer fetch commits")
+        expect(
+            turnTransitionChecks?["lazySeeded"] == true
+                && turnTransitionChecks?["lazyBothParked"] == true,
+            "the lazy fixture really holds an hourly report and parks two fetches — reload "
+                + "only re-fetches a lens it already has, so without this the assertion "
+                + "below would pass on a lens that could never be re-fetched")
+        expect(
+            turnTransitionChecks?["lazyHeldBack"] == true,
+            "a superseded reload does not re-fetch its lazy lenses — the fetch that "
+                + "overtook it owns the slice and refreshes them itself")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "
