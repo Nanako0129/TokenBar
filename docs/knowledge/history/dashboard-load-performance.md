@@ -64,6 +64,139 @@ graph 報表帶 volatile 的 `generated_at` 與 `processing_time_ms`，每日 cl
 
 ---
 
+## 操作手冊
+
+以下指令可直接照抄。路徑一律用變數，不把私有路徑寫進 tracked tree。
+
+### 一、建立隔離語料
+
+```bash
+WORK=$(mktemp -d)            # 不可預測、絕對路徑
+chmod 700 "$WORK"
+
+# APFS copy-on-write clone：92 MB 的快取複製幾乎零時間、零額外磁碟，
+# 未寫入前與原檔共用區塊。-R 遞迴，-c 走 clonefile(2)。
+cp -Rc ~/.config/tokscale "$WORK/tokscale"
+
+# benchmark clone 永遠不得攜帶正式 provider 憑證。
+rm -f "$WORK/tokscale"/codex-credentials.json "$WORK/tokscale"/codex-credentials.lock
+```
+
+`cp -R`（不加 `-c`）會真的複製 92 MB；`-c` 才是 clone。大語料（凍結 `~/.claude` 與 `~/.codex` 約 7.9 GB）時差別是「瞬間」與「數十秒＋佔滿磁碟」。
+
+**清除前務必做圍堵檢查**，這是唯一一道防止打到正式資料的守衛：
+
+```bash
+CACHE="$WORK/tokscale/cache/source-message-cache-v2"
+case "$(cd "$WORK/tokscale" && pwd -P)" in "$WORK"*) ;; *) echo REFUSE; exit 1;; esac
+[ -L "$CACHE" ] && { echo "REFUSE: symlink"; exit 1; }
+```
+
+### 二、冷啟動：清快取
+
+```bash
+rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
+```
+
+只清 clone 內的 source-message cache，**保留 pricing cache**（否則會混入定價抓取成本）。正式路徑永不作為刪除目標。
+
+> **陷阱**：若出現 `rm: Directory not empty`，代表當下還有東西在寫該目錄，那一次**不是純冷**。要記錄下來並在統計時同時給「含入」與「排除」兩種算法，不要擇一呈現。
+
+### 三、單次執行
+
+```bash
+env HOME="$HOME" \
+    TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
+    TOKSCALE_PRICING_CACHE_ONLY=1 \
+    RAYON_NUM_THREADS=2 \
+    ./target/release/examples/bench_scan "$HOME"
+```
+
+| 變數 | 為什麼 |
+|---|---|
+| `HOME` | scanner roots 來源。量測正式語料時用真實 HOME；做 digest 對拍時改指向凍結副本 |
+| `TOKSCALE_CONFIG_DIR` | 同時控制快取根目錄**與** `PathRoot::Config` 的 scanner roots |
+| `TOKSCALE_PRICING_CACHE_ONLY` | 避免網路抓取污染計時 |
+| `RAYON_NUM_THREADS=2` | 對齊出貨的 `RAYON_INIT` 上限；不設會量到不會出貨的組態 |
+
+### 四、配對交錯迴圈
+
+```bash
+run() { rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
+        printf "%-8s " "$1"
+        env HOME="$HOME" TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
+            TOKSCALE_PRICING_CACHE_ONLY=1 RAYON_NUM_THREADS=2 \
+            "$2" "$HOME" 2>&1 | tail -1; }
+
+for i in 1 2 3 4 5 6 7; do
+  if [ $((i % 2)) -eq 1 ]; then run "NEW-$i" "$NEW_BIN"; run "OLD-$i" "$OLD_BIN"
+  else                          run "OLD-$i" "$OLD_BIN"; run "NEW-$i" "$NEW_BIN"; fi
+done
+```
+
+**兩個 arm 用同一個 binary 名稱、不同 worktree**：舊版用 `git worktree add <dir> <base-sha>` 檢出基準點，兩邊各自 `cargo build --release --example bench_scan`。
+
+> **陷阱**：這個迴圈要**當成背景任務的前景指令**執行。若寫成 `( … ) &` 再放進背景任務，外層指令一結束整個程序群會被收掉——實際發生過，只留下第一行輸出。
+>
+> **陷阱**：不要 `2>/dev/null`。程序被殺掉會看起來像「跑完但沒輸出」。
+
+### 五、Digest 對拍（正確性）
+
+計時可以容忍語料漂移，**digest 不行**。本專案的開發過程本身在寫 log，所以要先凍結語料：
+
+```bash
+mkdir -p "$WORK/corpus"
+cp -Rc ~/.claude "$WORK/corpus/.claude"
+cp -Rc ~/.codex  "$WORK/corpus/.codex"
+# 之後所有執行都傳 "$WORK/corpus" 當 HOME
+# （目錄別取名 home：文件 gate 會把 "/home/" 當成 Unix 根路徑擋下）
+```
+
+digest 的建構規則：
+
+- **排除** volatile 欄位（`generated_at`、`processing_time_ms`）——同一個 binary 跑兩次就會不同
+- **遞迴正規化每一個無序容器**。每日 client 列來自 `HashMap::into_values()`，雜湊前要先 `sort_by`
+- 浮點用固定小數位字串化（`format!("{:.6}", cost)`）再雜湊
+
+執行順序**必須**是：
+
+```
+OLD-a  →  OLD-b  →  NEW
+```
+
+`OLD-a == OLD-b` 成立之前，`NEW` 的結果沒有意義。若兩者不同，要修的是 digest，不是宣布通過。
+
+### 六、剖析
+
+```bash
+sample <pid> 25 1 -file "$WORK/sample.txt"
+```
+
+25 秒窗口、1 ms 取樣。取得 pid 的方式視 harness 而定；若目標是子程序，用 `pgrep -f "<child pattern>"` 輪詢等它出現。
+
+暖階段太短（2–5 秒）抓不準時，**把暖階段重複 20 次**拉長窗口，再從固定時間點開始取樣。
+
+> **陷阱**：父程序常把子程序輸出緩衝到最後才印，所以**不能**靠 log 出現與否判斷階段已開始。改用「偵測到子程序後等固定秒數再取樣」。
+
+分析 `sample` 輸出時，先看每個 thread 的總量：工作執行緒若整段停在 `rayon_core::WorkerThread::wait_until`，代表工作沒有被分派，這時要看的是主執行緒的自身時間。
+
+### 七、變異驗證
+
+```bash
+cp src/lib.rs "$WORK/lib.rs.bak"          # 先備份，不靠 git checkout
+# …套用變異…
+cargo test --release
+cp "$WORK/lib.rs.bak" src/lib.rs          # 還原
+grep -c MUT src/lib.rs                     # 確認還原乾淨
+```
+
+判定紀律：
+
+- **建置失敗不算殺死**——那不是測試抓到的
+- **崩潰不算存活**——trap 不會印出 FAIL 行，只數 FAIL 的 harness 會誤判為通過。要同時看 exit code 與斷言總數
+- 存活代表**測試沒在測它宣稱的東西**。修測試，不要削弱變異
+- 不要用 `git checkout --` 還原：它還原到 HEAD，會連未提交的工作一起帶走
+
 ## 被推翻的假設
 
 以下每一條都量過，**都不是原因**。不要重跑。
