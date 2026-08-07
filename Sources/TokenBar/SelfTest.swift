@@ -2421,6 +2421,36 @@ enum SelfTest {
             await phantomSource.releaseGraph(year: yearB)
             await phantomSwitch.value
 
+            // Codex P2 — reopening the popover must not put the model scan
+            // back beside the graph. A restored snapshot makes the dashboard
+            // renderable before `load()` fetches anything, so the model task
+            // has a real key on its first body evaluation and fires at once.
+            // The "no model scan until a payload commits" property therefore
+            // held only for a first-ever open; a reopen whose snapshot carries
+            // no current model report is the common case that broke it.
+            let reopenYear = "2041"
+            let reopenSource = ControlledTurnUsageDataSource()
+            let reopenSeed = DashboardModel(
+                cachesSnapshot: true, source: reopenSource, initialYear: reopenYear)
+            await reopenSeed.load()
+            // Seeded from a session that never opened a model lens, so the
+            // snapshot carries a payload but no report.
+            let seededWithoutModel = await reopenSource.modelCallCount() == 0
+            await reopenSource.blockGraph(year: reopenYear)
+            let reopened = DashboardModel(
+                cachesSnapshot: true, source: reopenSource, initialYear: reopenYear)
+            let reopenRestored = reopened.payload != nil && reopened.modelReport == nil
+            let reopenLoad = Task { await reopened.load() }
+            _ = await waitUntil { await reopenSource.hasPendingGraph(year: reopenYear) }
+            let reopenLens = Task { await reopened.ensureModelData(for: .overview) }
+            let reopenRaced = await waitUntil { await reopenSource.modelCallCount() > 0 }
+            let reopenDidNotRace = !reopenRaced
+            await reopenSource.releaseGraph(year: reopenYear)
+            await reopenLoad.value
+            await reopenLens.value
+            // Deferring must not mean dropping: the report still arrives.
+            let reopenModelArrived = await reopened.modelReport != nil
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -2535,13 +2565,20 @@ enum SelfTest {
             let deferGraphPending = await waitUntil {
                 await deferSource.hasPendingGraph(year: yearA)
             }
-            // Drive the model-dependent lens while the graph is still blocked:
-            // it must find no committed payload and issue nothing.
-            await deferModel.ensureModelData(for: .overview)
-            let noModelDuringGraph = await deferSource.modelCallCount() == 0
+            // Drive the model-dependent lens while the graph is still blocked.
+            // Probed rather than awaited: the request no longer returns early,
+            // it waits for the base load, so awaiting it here would park until
+            // the release below and hang the suite instead of failing it.
+            let deferLens = Task { await deferModel.ensureModelData(for: .overview) }
+            let modelRaced = await waitUntil { await deferSource.modelCallCount() > 0 }
+            let noModelDuringGraph = !modelRaced
             await deferSource.releaseGraph(year: yearA)
             await deferLoad.value
+            // Sampled between the graph landing and the deferred request
+            // finishing: the dashboard must already be renderable on the graph
+            // alone, which is the whole point of taking the model off this path.
             let readyWithoutModel = await deferModel.modelReport == nil
+            await deferLens.value
             let phaseReadyBeforeModel = await {
                 if case .ready = await deferModel.phase { return true }
                 return false
@@ -2757,6 +2794,10 @@ enum SelfTest {
                 "survivesLensSwitch": survivesLensSwitch,
                 "failedLeftEmpty": failedLeftEmpty,
                 "generationsCollide": generationsCollide,
+                "seededWithoutModel": seededWithoutModel,
+                "reopenRestored": reopenRestored,
+                "reopenDidNotRace": reopenDidNotRace,
+                "reopenModelArrived": reopenModelArrived,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -2819,6 +2860,16 @@ enum SelfTest {
                 && turnTransitionChecks?["modelDroppedOnYearSwitch"] == true,
             "a year switch drops the previous year's model report instead of leaving it "
                 + "rendered beside the new year's graph")
+        expect(
+            turnTransitionChecks?["seededWithoutModel"] == true
+                && turnTransitionChecks?["reopenRestored"] == true,
+            "the reopen fixture really restores a payload without a model report — without "
+                + "this the race assertion below would pass on a snapshot that never raced")
+        expect(
+            turnTransitionChecks?["reopenDidNotRace"] == true
+                && turnTransitionChecks?["reopenModelArrived"] == true,
+            "reopening onto a model lens waits for the base load instead of scanning beside "
+                + "it, and still receives its report")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "

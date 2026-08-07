@@ -274,6 +274,16 @@ private struct DashboardSnapshot {
     /// Only then is a missing report worth retrying on the poll — a session that
     /// never leaves Daily must not pay for a scan it does not render.
     @ObservationIgnored private var modelWanted = false
+    /// The base graph load currently running, held so a deferred model request
+    /// waits for it instead of racing it.
+    ///
+    /// A restored snapshot makes the dashboard renderable before `load()` has
+    /// fetched anything, so the model task's key is already a real value on the
+    /// very first body evaluation and the task fires at once. The "no model
+    /// scan until a payload commits" property therefore held only for a
+    /// first-ever open; every reopen whose snapshot lacked a current model
+    /// report put both full scans back on the same bounded pool.
+    @ObservationIgnored private var graphLoadTask: Task<Void, Never>?
     /// Identity of the last payload/hourly report that actually committed.
     /// These are separate from `year`: a newer request may complete in the
     /// inverse order, and the presentation accessors must stay fail-closed.
@@ -337,6 +347,18 @@ private struct DashboardSnapshot {
     /// to render, so model-dependent lenses request it afterwards through
     /// `ensureModelData(for:)`, keyed on the committed payload generation.
     func load() async {
+        // Published so `ensureModelReport` can await this rather than scan
+        // alongside it; cleared by whoever still owns the slot on completion.
+        let task = Task { [weak self] in
+            await self?.performLoad()
+            return ()
+        }
+        graphLoadTask = task
+        await task.value
+        if graphLoadTask == task { graphLoadTask = nil }
+    }
+
+    private func performLoad() async {
         do {
             let year = self.year
             let payload = try await source.graph(year: year, priority: .userInitiated)
@@ -759,8 +781,18 @@ private struct DashboardSnapshot {
     /// the payload does. A failure keeps the last-good report rather than
     /// blanking the card.
     private func ensureModelReport(priority: TaskPriority) async {
+        modelWanted = true
+        // Wait for a base load already running rather than scanning beside it.
+        // A restored snapshot hands this task a real key on the first body
+        // evaluation, so on every popover reopen it would otherwise start while
+        // `load()` is still scanning — putting both back on the bounded pool,
+        // which is the contention this separation exists to remove. Read the
+        // payload only after, since the load may have committed a new one.
+        if let inFlight = graphLoadTask {
+            await inFlight.value
+        }
         // No graph yet means the popover is still on its first paint; the
-        // payload-generation-keyed task fires again once apply() commits.
+        // committed-slice key changes once apply() commits and re-fires this.
         guard let payload else { return }
         let year = self.year
         // `setYear` moves `year` synchronously while the payload only catches up
@@ -769,7 +801,6 @@ private struct DashboardSnapshot {
         // Scanning for it would issue a full report that the year guard below
         // must then discard. Wait for the committed payload to agree instead;
         // apply() re-fires this task the moment it does.
-        modelWanted = true
         guard acceptedPayloadYear == Self.identityYear(year) else {
             // Mid-slice-change, and the scan for the new slice cannot be issued
             // yet. The report is absent but the answer is not "none" — leaving
