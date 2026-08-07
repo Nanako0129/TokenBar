@@ -124,12 +124,9 @@ struct PopoverView: View {
         Self.supportedTurnClients(lensClientIds)
     }
 
-    private var lazyClientIds: [String] {
-        switch activeView.wrappedValue {
-        case .daily, .monthly: return turnClientIds
-        default: return lensClientIds
-        }
-    }
+    /// Daily/Monthly no longer request a lazy report — their turns ride the
+    /// graph payload — so every lazy lens now keys on the full active slice.
+    private var lazyClientIds: [String] { lensClientIds }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -198,6 +195,15 @@ struct PopoverView: View {
         // switching to effectiveView here isn't needed for correctness.
         .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(lazyClientIds.joined(separator: ","))") {
             await model.ensureData(for: activeView.wrappedValue, clients: lazyClientIds)
+        }
+        // Model report, deliberately keyed on the COMMITTED payload generation
+        // rather than only the lens/year. While the graph is still loading the
+        // generation is empty, so this fires as a no-op; it re-fires with a real
+        // id the moment apply() commits, which is what keeps the model scan off
+        // the graph's critical path instead of racing it for the same Rayon
+        // pool. A graph refresh that moves the payload re-fires it again.
+        .task(id: "\(activeViewRaw)|\(model.year ?? "")|\(model.payload?.meta.generatedAt ?? "")") {
+            await model.ensureModelData(for: activeView.wrappedValue)
         }
         // Auto-clear a year filter scoped to a year only hidden clients used —
         // re-checked on a live hide toggle (hiddenRaw) and on each payload load
@@ -465,25 +471,27 @@ struct PopoverView: View {
             case .overview:
                 OverviewView(
                     payload: payload, clientIds: clientIds, stats: activeStats,
-                    modelReport: model.modelReport, colors: model.colors,
+                    modelReport: model.modelReport, modelLoading: model.modelLoading,
+                    colors: model.colors,
                     trace: model.trace, agentUsage: model.agentUsage,
                     singleClient: singleClient, year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw))
             case .models:
                 ModelsView(
-                    report: model.modelReport, clientIds: clientIds, colors: model.colors)
+                    report: model.modelReport, clientIds: clientIds, colors: model.colors,
+                    loading: model.modelLoading)
             case .daily:
                 DailyView(
                     payload: payload, clientIds: clientIds,
-                    hourlyReport: model.turnsReport(for: turnClientIds),
-                    turnClientIds: turnClientIds, turnsLoading: model.hourlyLoading,
-                    colors: model.colors)
+                    turnClientIds: turnClientIds,
+                    colors: model.colors,
+                    onExpand: { Task { await model.ensureModelColors() } })
             case .monthly:
                 MonthlyView(
                     payload: payload, clientIds: clientIds,
-                    hourlyReport: model.turnsReport(for: turnClientIds),
-                    turnClientIds: turnClientIds, turnsLoading: model.hourlyLoading,
-                    colors: model.colors)
+                    turnClientIds: turnClientIds,
+                    colors: model.colors,
+                    onExpand: { Task { await model.ensureModelColors() } })
             case .hourly:
                 HourlyView(report: model.hourlyReport(for: clientIds), clientIds: clientIds)
             case .stats:

@@ -328,8 +328,17 @@ enum DemoData {
                 for row in rows { yearTotal.totals.add(row) }
                 yearTotals[dateYear] = yearTotal
             }
+            // Mirror the engine's per-day turn map so the demo dashboard shows
+            // the same Daily/Monthly turn column the live one does. The fixture
+            // treats every message as a turn, matching how it fills the hourly
+            // report's `turnCount`.
+            var demoTurns: [String: Int] = [:]
+            for row in rows {
+                demoTurns[row.client, default: 0] += row.messages
+            }
             contributionJSON.append([
                 "date": date,
+                "turnsByClient": demoTurns,
                 "totals": [
                     "tokens": dayTotals.total,
                     "cost": dayTotals.cost,

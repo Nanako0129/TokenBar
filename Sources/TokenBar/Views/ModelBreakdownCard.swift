@@ -26,6 +26,10 @@ struct ModelBreakdownCard: View {
     var clientIds: [String] = []
     let colors: ModelColorMap
     var title = "Models"
+    /// The model report is fetched after the graph commits, so an absent report
+    /// means "still loading" until that request finishes. Rendering the empty
+    /// copy in that window would tell the user they have no model usage.
+    var loading = false
 
     @State private var expanded = false
     @State private var hover: HoverState?
@@ -73,7 +77,11 @@ struct ModelBreakdownCard: View {
                 .font(.caption2)
             }
         ) {
-            if rows.isEmpty {
+            if rows.isEmpty, report == nil, loading {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Loading…")
+            } else if rows.isEmpty {
                 Text("No model usage in this range")
                     .font(.caption)
                     .foregroundStyle(.secondary)

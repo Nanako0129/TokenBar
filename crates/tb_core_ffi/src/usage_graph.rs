@@ -9,6 +9,7 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 
 const VERSION: &str = concat!("tokenbar-core/", env!("CARGO_PKG_VERSION"));
 
@@ -49,6 +50,11 @@ struct DailyContribution {
     intensity: u8,
     token_breakdown: TokenBreakdown,
     clients: Vec<ClientContribution>,
+    /// Per-day turns by exact client id. Daily/Monthly read these instead of
+    /// requesting the hourly report, which cost a second full scan of the
+    /// clients that dominate turn data.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    turns_by_client: BTreeMap<String, i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -197,6 +203,7 @@ fn map_contribution(day: tokscale_core::DailyContribution) -> DailyContribution 
                 messages: c.messages,
             })
             .collect(),
+        turns_by_client: day.turns_by_client,
     }
 }
 

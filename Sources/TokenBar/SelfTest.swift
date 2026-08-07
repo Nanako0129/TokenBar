@@ -22,6 +22,21 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
     private let hourlyResponses: [Set<String>: HourlyReport]
     private var blockedGraphYears: Set<String> = []
     private var blockedHourlyYears: Set<String> = []
+    /// Model-report call log. LP2B's claim is about *when* the model is
+    /// requested relative to the graph, so the count alone is not enough —
+    /// `modelCallsWhileGraphPending` records requests that arrived while a
+    /// graph was still blocked, which is exactly the contention being removed.
+    private var modelCalls = 0
+    private var modelCallsWhileGraphPending = 0
+    private var blockedModel = false
+    private var pendingModel: [CheckedContinuation<ModelReport, Never>] = []
+    private var pendingModelYears: [String?] = []
+    /// When set, each graph response advances the fixture's "today" so
+    /// `meta.generatedAt` actually moves between loads. Without this the demo
+    /// payload is byte-identical across a refresh, the model identity gate
+    /// always matches, and any test about per-generation refetching would pass
+    /// no matter what the production code does.
+    private var advancingGraphDays: Int?
     private var pendingGraphs: [String: [CheckedContinuation<UsagePayload, Never>]] = [:]
     private var pendingHourly: [String: [PendingHourly]] = [:]
 
@@ -67,8 +82,20 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         if blockedGraphYears.contains(key) {
             return await withCheckedContinuation { pendingGraphs[key, default: []].append($0) }
         }
+        if let day = advancingGraphDays {
+            advancingGraphDays = day + 1
+            return DemoData.payload(for: year, today: Self.fixtureDay(day))
+        }
         return DemoData.payload(for: year)
     }
+
+    /// Deterministic fixture dates far from any real "today" so the advancing
+    /// sequence cannot collide with the default fixture.
+    private static func fixtureDay(_ offset: Int) -> String {
+        String(format: "2037-06-%02d", 10 + offset)
+    }
+
+    func advanceGraphGenerationPerCall() { advancingGraphDays = 0 }
 
     func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
         try await graph(year: year, priority: priority)
@@ -76,7 +103,40 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
 
     func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
         _ = priority
+        modelCalls += 1
+        if !pendingGraphs.values.allSatisfy(\.isEmpty) || !blockedGraphYears.isEmpty {
+            modelCallsWhileGraphPending += 1
+        }
+        if blockedModel {
+            pendingModelYears.append(year)
+            return await withCheckedContinuation { pendingModel.append($0) }
+        }
         return DemoData.modelReport(for: year)
+    }
+
+    func modelCallCount() -> Int { modelCalls }
+    func modelCallsRacingGraph() -> Int { modelCallsWhileGraphPending }
+    func blockModel() { blockedModel = true }
+    func pendingModelCount() -> Int { pendingModel.count }
+
+    /// Retire the oldest parked model request while leaving the rest parked —
+    /// needed to reproduce a stale scan completing underneath a live one.
+    func releaseOneModel() {
+        guard !pendingModel.isEmpty else { return }
+        let continuation = pendingModel.removeFirst()
+        let year = pendingModelYears.removeFirst()
+        continuation.resume(returning: DemoData.modelReport(for: year))
+    }
+
+    func releaseModel() {
+        blockedModel = false
+        let waiting = pendingModel
+        let years = pendingModelYears
+        pendingModel = []
+        pendingModelYears = []
+        for (index, continuation) in waiting.enumerated() {
+            continuation.resume(returning: DemoData.modelReport(for: years[index]))
+        }
     }
 
     func hourlyReport(
@@ -2141,6 +2201,7 @@ enum SelfTest {
          "years":[],
          "contributions":[
            {"date":"2026-01-01","totals":{"tokens":0,"cost":0,"messages":5},"intensity":0,
+            "turnsByClient":{"codex":7},
             "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
             "clients":[
               {"client":"codex","modelId":"m1","providerId":"p","cost":0,"messages":5,
@@ -2205,38 +2266,69 @@ enum SelfTest {
         """
         let turnReport = try! JSONDecoder().decode(
             HourlyReport.self, from: Data(turnReportJSON.utf8))
-        let turnsByDay = TurnCountBuckets.byDay(turnReport)
-        let turnsByMonth = TurnCountBuckets.byMonth(turnReport)
+        // `supportedTurnClients` decides which clients Daily/Monthly sum turns
+        // for and which names the "Turns · X only" subtitle reports. Its only
+        // coverage was removed with the hourly folds it happened to sit beside;
+        // an unsupported client contributing nothing is now harmless, but
+        // wrongly EXCLUDING codex or claude would silently undercount with no
+        // test turning red.
         expect(
-            turnsByDay["2025-12-31"] == 2 && turnsByDay["2026-01-01"] == 7
-                && turnsByDay["2026-02-01"] == 0 && turnsByDay["2026-02-30"] == nil,
-            "turn buckets fold valid local hours by day and retain a loaded zero")
+            PopoverView.supportedTurnClients(["gemini", "claude", "opencode", "codex"])
+                == ["claude", "codex"],
+            "the turn scope keeps only the supported clients, in the order given")
         expect(
-            turnsByMonth["2025-12"] == 2 && turnsByMonth["2026-01"] == 7
-                && turnsByMonth["2026-02"] == 0 && turnsByMonth.count == 3,
-            "turn buckets do not leak across month or year boundaries")
+            PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty
+                && PopoverView.supportedTurnClients([]).isEmpty,
+            "a slice with no supported client yields an empty turn scope")
         expect(
-            TurnCountBuckets.byDay(nil).isEmpty
-                && TurnCountBuckets.byDay(turnReport)["2026-02-01"] == 0,
-            "a missing turn report stays distinct from a loaded zero")
+            TurnCountBuckets.scope(["codex"]) == "Turns · Codex only"
+                && TurnCountBuckets.scope([]) == nil,
+            "the turn subtitle names the scope it actually summed")
+
+        // LP2A — turns now ride the graph payload. What has to hold is that the
+        // per-client map is respected exactly: a client outside the supported
+        // turn set contributes nothing, and a hidden one is subtractable —
+        // which is precisely what a single per-day total could not express.
+        let turnsPayload = DemoData.payload(for: nil)
+        let turnsDay = turnsPayload.contributions.first { ($0.turnsByClient ?? [:]).count > 1 }
         expect(
-            PopoverView.supportedTurnClients(
-                ["gemini", "claude", "codex", "opencode"]
-            ) == ["claude", "codex"]
-                && PopoverView.supportedTurnClients(["gemini", "opencode"]).isEmpty,
-            "turn scope preserves display order and excludes unsupported clients")
+            turnsDay != nil,
+            "the demo payload carries a per-client turn map (without this every "
+                + "assertion below would pass on absent data)")
+        if let turnsDay, let map = turnsDay.turnsByClient {
+            let present = map.keys.sorted()
+            let first = present[0]
+            let both = turnsDay.turns(for: present)
+            let single = turnsDay.turns(for: [first])
+            let expectedTotal = present.reduce(Int64(0)) { $0 + (map[$1] ?? 0) }
+            expect(
+                both == expectedTotal && single == map[first],
+                "a day's turns are the sum over exactly the requested clients")
+            expect(
+                turnsDay.turns(for: present.dropFirst().map { $0 })
+                    == expectedTotal - (map[first] ?? 0),
+                "dropping a client subtracts exactly its own turns — the reason the "
+                    + "engine keys the map by client instead of emitting one daily total")
+            expect(
+                turnsDay.turns(for: ["not-a-client"]) == 0,
+                "an unknown client contributes zero rather than falling back to a total")
+            expect(
+                turnsDay.turns(for: []) == nil,
+                "an empty selection is 'nothing selected', not 'zero turns'")
+        }
+        // Monthly is the same map summed across the month's days.
+        let monthlyTurnRows = MonthlyView.monthRows(
+            payload: turnsPayload, clientIds: ClientRegistry.allIds,
+            turnClientIds: ["codex", "claude"])
+        let monthlyTurnsExpected: Int64 = turnsPayload.contributions.reduce(Int64(0)) {
+            $0 + ($1.turns(for: ["codex", "claude"]) ?? 0)
+        }
         expect(
-            TurnCountBuckets.showsLoading(
-                report: nil, requestInFlight: true, clientIds: ["codex", "claude"])
-                && !TurnCountBuckets.showsLoading(
-                    report: turnReport, requestInFlight: true, clientIds: ["codex"])
-                && !TurnCountBuckets.showsLoading(
-                    report: nil, requestInFlight: false, clientIds: ["codex"])
-                && !TurnCountBuckets.showsLoading(
-                    report: nil, requestInFlight: true, clientIds: []),
-            "turn spinner appears only while a supported report is in flight")
+            monthlyTurnRows.reduce(Int64(0)) { $0 + ($1.turns ?? 0) } == monthlyTurnsExpected,
+            "the monthly rows sum each day's turns for the same client slice")
+
         let dailyMessageOnlyView = DailyView(
-            payload: messageOnlyPayload, clientIds: ["codex"], hourlyReport: turnReport,
+            payload: messageOnlyPayload, clientIds: ["codex"],
             turnClientIds: ["codex", "claude"], colors: ModelColorMap(report: nil)
         )
         let dailyMessageOnlyRows = dailyMessageOnlyView.rows
@@ -2266,7 +2358,7 @@ enum SelfTest {
             await staleModel.load()
             await staleSource.blockHourly(year: yearA)
             let staleTask = Task {
-                await staleModel.ensureData(for: .monthly, clients: clients)
+                await staleModel.ensureData(for: .hourly, clients: clients)
             }
             let stalePending = await waitUntil {
                 await staleSource.hasPendingHourly(year: yearA)
@@ -2274,9 +2366,9 @@ enum SelfTest {
             await staleModel.setYear(yearB)
             await staleSource.releaseHourly(year: yearA)
             await staleTask.value
-            let staleSuppressed = await staleModel.turnsReport(for: clients) == nil
-            await staleModel.ensureData(for: .monthly, clients: clients)
-            let matchingBAfterStale = await staleModel.turnsReport(for: clients) != nil
+            let staleSuppressed = await staleModel.hourlyReport(for: clients) == nil
+            await staleModel.ensureData(for: .hourly, clients: clients)
+            let matchingBAfterStale = await staleModel.hourlyReport(for: clients) != nil
 
             // The inverse ordering is also fail-closed: B's hourly report may
             // arrive while graph A is still displayed, but remains hidden until
@@ -2284,36 +2376,329 @@ enum SelfTest {
             let inverseSource = ControlledTurnUsageDataSource()
             let inverseModel = DashboardModel(source: inverseSource, initialYear: yearA)
             await inverseModel.load()
-            await inverseModel.ensureData(for: .monthly, clients: clients)
-            let initialAVisible = await inverseModel.turnsReport(for: clients) != nil
+            await inverseModel.ensureData(for: .hourly, clients: clients)
+            let initialAVisible = await inverseModel.hourlyReport(for: clients) != nil
             await inverseSource.blockGraph(year: yearB)
             let switchTask = Task { await inverseModel.setYear(yearB) }
             let graphBPending = await waitUntil {
                 await inverseSource.hasPendingGraph(year: yearB)
             }
-            let oldReportSuppressed = await inverseModel.turnsReport(for: clients) == nil
-            await inverseModel.ensureData(for: .monthly, clients: clients)
-            let newReportBeforePayloadSuppressed =
-                await inverseModel.turnsReport(for: clients) == nil
+            let oldReportSuppressed = await inverseModel.hourlyReport(for: clients) == nil
+            await inverseModel.ensureData(for: .hourly, clients: clients)
             await inverseSource.releaseGraph(year: yearB)
             await switchTask.value
-            let matchingBVisible = await inverseModel.turnsReport(for: clients) != nil
+            let matchingBVisible = await inverseModel.hourlyReport(for: clients) != nil
 
-            let emptySource = ControlledTurnUsageDataSource()
-            let emptyModel = DashboardModel(source: emptySource, initialYear: yearA)
-            await emptyModel.load()
-            await emptySource.blockHourly(year: yearA)
-            await emptyModel.ensureData(for: .monthly, clients: [])
-            let emptyDidNotFetch = !(await emptySource.hasPendingHourly(year: yearA))
+            // The phantom-slice guard: `setYear` moves `year` synchronously
+            // while the payload catches up only when reload commits, so the
+            // model task can fire with a new year against the previous
+            // payload. Scanning for that pairing issues a report the year
+            // guard must then discard. Blocking the graph holds the model in
+            // exactly that window.
+            let phantomSource = ControlledTurnUsageDataSource()
+            let phantomModel = DashboardModel(source: phantomSource, initialYear: yearA)
+            await phantomModel.load()
+            await phantomSource.blockGraph(year: yearB)
+            let phantomSwitch = Task { await phantomModel.setYear(yearB) }
+            _ = await waitUntil { await phantomSource.hasPendingGraph(year: yearB) }
+            let phantomCallsBefore = await phantomSource.modelCallCount()
+            await phantomModel.ensureModelData(for: .overview)
+            let phantomIssuedNoScan =
+                await phantomSource.modelCallCount() == phantomCallsBefore
+            // Issuing nothing is only half of it. The cards distinguish
+            // "loading" from "completed and found nothing" by this flag alone,
+            // so leaving it down here made Models and Overview claim the new
+            // year had no model usage for the whole graph reload.
+            let phantomReadsAsLoading = await phantomModel.modelLoading
+            await phantomSource.releaseGraph(year: yearB)
+            await phantomSwitch.value
+
+            // A year switch must drop the previous year's model report. Two
+            // sites enforce it — `setYear` calls `invalidateModel()`, and
+            // `apply()` discards a report whose `modelYear` disagrees with the
+            // committed payload — so each masks the other under single-site
+            // mutation, and neither was covered. Without both, switching year
+            // leaves the old year's models rendered in Overview and Models.
+            let yearModelSource = ControlledTurnUsageDataSource()
+            let yearModelModel = DashboardModel(source: yearModelSource, initialYear: yearA)
+            await yearModelModel.load()
+            await yearModelModel.ensureModelData(for: .overview)
+            let modelHeldForA = await yearModelModel.modelReport != nil
+            await yearModelModel.setYear(yearB)
+            let modelDroppedOnYearSwitch = await yearModelModel.modelReport == nil
+
+            // LP2A — Daily/Monthly no longer request any lazy report; their
+            // turns ride the graph payload. Blocking hourly and driving both
+            // lenses proves the request is gone rather than merely fast.
+            let noHourlySource = ControlledTurnUsageDataSource()
+            let noHourlyModel = DashboardModel(source: noHourlySource, initialYear: yearA)
+            await noHourlyModel.load()
+            await noHourlySource.blockHourly(year: yearA)
+            // Driven in Tasks and probed, not awaited: if the request came back
+            // these would park on the blocked source forever, and a hung suite
+            // is a far worse failure signal than a red assertion.
+            let dailyDrive = Task { await noHourlyModel.ensureData(for: .daily, clients: clients) }
+            let monthlyDrive = Task {
+                await noHourlyModel.ensureData(for: .monthly, clients: clients)
+            }
+            let hourlyReappeared = await waitUntil {
+                await noHourlySource.hasPendingHourly(year: yearA)
+            }
+            let emptyDidNotFetch = !hourlyReappeared
+            await noHourlySource.releaseHourly(year: yearA)
+            await dailyDrive.value
+            await monthlyDrive.value
+
+            // LP2B — the graph must not share its scan window with the model.
+            // With the graph blocked, load() is still in flight; a model request
+            // arriving now is precisely the contention that made first paint
+            // 5x slower warm and 2.5x slower cold on a real corpus.
+            let deferSource = ControlledTurnUsageDataSource()
+            let deferModel = DashboardModel(source: deferSource, initialYear: yearA)
+            await deferSource.blockGraph(year: yearA)
+            let deferLoad = Task { await deferModel.load() }
+            let deferGraphPending = await waitUntil {
+                await deferSource.hasPendingGraph(year: yearA)
+            }
+            // Drive the model-dependent lens while the graph is still blocked:
+            // it must find no committed payload and issue nothing.
+            await deferModel.ensureModelData(for: .overview)
+            let noModelDuringGraph = await deferSource.modelCallCount() == 0
+            await deferSource.releaseGraph(year: yearA)
+            await deferLoad.value
+            let readyWithoutModel = await deferModel.modelReport == nil
+            let phaseReadyBeforeModel = await {
+                if case .ready = await deferModel.phase { return true }
+                return false
+            }()
+            // Now the payload has committed, the same call fetches once.
+            await deferModel.ensureModelData(for: .overview)
+            let modelArrives = await deferModel.modelReport != nil
+            let fetchedOnce = await deferSource.modelCallCount() == 1
+            // Idempotent per committed generation: a re-render must not refetch.
+            await deferModel.ensureModelData(for: .overview)
+            let noRefetch = await deferSource.modelCallCount() == 1
+            let neverRacedGraph = await deferSource.modelCallsRacingGraph() == 0
+
+            // Daily/Monthly do not depend on the model report at all.
+            let dailySource = ControlledTurnUsageDataSource()
+            let dailyModel = DashboardModel(source: dailySource, initialYear: yearA)
+            await dailyModel.load()
+            await dailyModel.ensureModelData(for: .daily)
+            await dailyModel.ensureModelData(for: .monthly)
+            let lensesSkipModel = await dailySource.modelCallCount() == 0
+
+            // F1 regression — a graph refresh must not fan out into two
+            // concurrent model scans. The defect only appears under the real
+            // interleaving: the background refresh bumps the request token and
+            // THEN suspends, which yields the MainActor and lets PopoverView's
+            // generation-keyed task re-fire and issue a second scan. A purely
+            // sequential drive cannot reproduce it — the first request would
+            // simply publish and the second would find matching identity — so
+            // this blocks the model source and re-fires the lens while a
+            // request is genuinely in flight.
+            let refreshSource = ControlledTurnUsageDataSource()
+            await refreshSource.advanceGraphGenerationPerCall()
+            let refreshModel = DashboardModel(source: refreshSource, initialYear: nil)
+            await refreshModel.load()
+            await refreshModel.ensureModelData(for: .overview)
+            let beforeRefresh = await refreshSource.modelCallCount()
+            await refreshSource.blockModel()
+            let refreshTask = Task { await refreshModel.refresh() }
+            // Give any background model request a chance to be issued and park.
+            let sawInFlight = await waitUntil { await refreshSource.pendingModelCount() > 0 }
+            // The lens task re-fires here, exactly as the payload-generation key
+            // makes it once apply() commits the refreshed graph.
+            let refireTask = Task { await refreshModel.ensureModelData(for: .overview) }
+            _ = await waitUntil { await refreshSource.pendingModelCount() > 0 }
+            await refreshSource.releaseModel()
+            await refreshTask.value
+            await refireTask.value
+            let afterRefresh = await refreshSource.modelCallCount()
+            // EXACTLY one scan per graph commit. `<=` alone was one-sided: it
+            // stayed green when the identity gate was mutated to never refetch,
+            // which is the opposite failure and the one deleting the background
+            // refresh could plausibly have caused.
+            let oneScanPerCommit = (afterRefresh - beforeRefresh) == 1
+            _ = sawInFlight
+
+            // Re-entry during an in-flight scan must join it, not start a
+            // second. Both triggers are ordinary interaction: expanding another
+            // Daily/Monthly row, or switching Overview→Models mid-scan.
+            let reentrySource = ControlledTurnUsageDataSource()
+            let reentryModel = DashboardModel(source: reentrySource, initialYear: yearA)
+            await reentryModel.load()
+            await reentrySource.blockModel()
+            let firstEntry = Task { await reentryModel.ensureModelColors() }
+            _ = await waitUntil { await reentrySource.pendingModelCount() > 0 }
+            let secondEntry = Task { await reentryModel.ensureModelColors() }
+            let thirdEntry = Task { await reentryModel.ensureModelData(for: .models) }
+            let coalescedWhileInFlight = await reentrySource.pendingModelCount() == 1
+            await reentrySource.releaseModel()
+            await firstEntry.value
+            await secondEntry.value
+            await thirdEntry.value
+            let reentryScans = await reentrySource.modelCallCount()
+            let reentryCoalesced = coalescedWhileInFlight && reentryScans == 1
+            // The coalesced request must still publish — collapsing re-entry is
+            // only correct if the surviving scan actually lands.
+            let coalescedStillPublished = await reentryModel.modelReport != nil
+
+            // A snapshot whose model lags its payload must refetch on the first
+            // model lens; storing only the payload's generation would silently
+            // present a stale report as current.
+            let lagSource = ControlledTurnUsageDataSource()
+            await lagSource.advanceGraphGenerationPerCall()
+            let lagSeed = DashboardModel(
+                cachesSnapshot: true, source: lagSource, initialYear: nil)
+            await lagSeed.load()
+            await lagSeed.ensureModelData(for: .overview)
+            let lagSeedCalls = await lagSource.modelCallCount()
+            // Move the graph on without touching the model, exactly as a poll
+            // does while the user sits on a lens that shows no models.
+            await lagSeed.refresh()
+            let lagRestored = DashboardModel(
+                cachesSnapshot: true, source: lagSource, initialYear: nil)
+            await lagRestored.ensureModelData(for: .overview)
+            let lagRefetched = await lagSource.modelCallCount() > lagSeedCalls
+
+            // A genuinely newer slice must supersede, not be swallowed by the
+            // coalescing guard. Without this a guard of the shape
+            // `if modelInFlight != nil { return }` would look correct.
+            let supersedeSource = ControlledTurnUsageDataSource()
+            await supersedeSource.advanceGraphGenerationPerCall()
+            // A concrete year, not nil: `lastSnapshot` is process-static and an
+            // earlier check in this same function seeds it for the all-time
+            // slice, which this model would otherwise restore — masking the
+            // first request entirely. The advancing fixture days live in 2037,
+            // so a 2037 filter still moves `generatedAt` per graph call.
+            let supersedeModel = DashboardModel(source: supersedeSource, initialYear: yearA)
+            await supersedeModel.load()
+            await supersedeSource.blockModel()
+            let staleScan = Task { await supersedeModel.ensureModelData(for: .overview) }
+            _ = await waitUntil { await supersedeSource.pendingModelCount() > 0 }
+            // Move the graph on, then request again: a different generation, so
+            // this must start its own scan rather than join the parked one.
+            await supersedeModel.refresh()
+            let newerScan = Task { await supersedeModel.ensureModelData(for: .overview) }
+            let bothInFlight = await waitUntil { await supersedeSource.pendingModelCount() >= 2 }
+            // Retire only the superseded scan. Its completion must not clear
+            // the loading flag, which still belongs to the scan replacing it —
+            // otherwise the cards fall to the empty copy while work continues.
+            await supersedeSource.releaseOneModel()
+            await staleScan.value
+            let loadingHeldBySuccessor = supersedeModel.modelLoading
+            await supersedeSource.releaseModel()
+            await newerScan.value
+            let newerSliceSupersedes = bothInFlight
+
+            // ABA — the in-flight slot must be released by the scan that owns
+            // it, not by any scan carrying an equal identity value. A year
+            // round-trip during a scan reproduces the equal-value collision
+            // because tb_graph's 30s cache returns the same payload, so the
+            // generation is unchanged.
+            let abaSource = ControlledTurnUsageDataSource()
+            let abaModel = DashboardModel(source: abaSource, initialYear: yearA)
+            await abaModel.load()
+            await abaSource.blockModel()
+            let abaFirst = Task { await abaModel.ensureModelColors() }
+            _ = await waitUntil { await abaSource.pendingModelCount() > 0 }
+            await abaModel.setYear(yearB)
+            await abaModel.setYear(yearA)
+            let abaSecond = Task { await abaModel.ensureModelColors() }
+            _ = await waitUntil { await abaSource.pendingModelCount() >= 2 }
+            // Retire only the stale scan and let it finish unwinding. If it
+            // releases the live scan's slot, the next ordinary re-entry starts a
+            // third concurrent scan.
+            await abaSource.releaseOneModel()
+            await abaFirst.value
+            let abaThird = Task { await abaModel.ensureModelColors() }
+            // Wait for the outcome instead of sampling immediately: the third
+            // task had not been scheduled yet when this read the counter, so
+            // the assertion passed even with the defect restored.
+            let abaThirdStarted = await waitUntil { await abaSource.modelCallCount() >= 3 }
+            let abaNoThirdScan = !abaThirdStarted
+            await abaSource.releaseModel()
+            await abaSecond.value
+            await abaThird.value
+
+            // modelLoading is the only thing keeping the model cards from
+            // reading "No model usage in this range" mid-scan, and nothing
+            // asserted it until now.
+            let loadingSource = ControlledTurnUsageDataSource()
+            let loadingModel = DashboardModel(source: loadingSource, initialYear: yearA)
+            await loadingModel.load()
+            await loadingSource.blockModel()
+            let loadingTask = Task { await loadingModel.ensureModelData(for: .models) }
+            _ = await waitUntil { await loadingSource.pendingModelCount() > 0 }
+            let loadingTrueInFlight = await loadingModel.modelLoading
+            await loadingSource.releaseModel()
+            await loadingTask.value
+            let loadingFalseAfter = await loadingModel.modelLoading == false
+
+            // F2 regression — Daily/Monthly render a per-model drill-down whose
+            // dots are tinted from the model report. Expanding a row must be
+            // able to populate the colour map, or every model of one provider
+            // collapses onto the same rank-0 shade.
+            let colorSource = ControlledTurnUsageDataSource()
+            let colorModel = DashboardModel(source: colorSource, initialYear: yearA)
+            await colorModel.load()
+            await colorModel.ensureModelData(for: .daily)
+            let entriesForColor = DemoData.modelReport(for: yearA).entries
+                .sorted { $0.cost > $1.cost }
+            let colorProbe: (String, String) -> String = { provider, name in
+                colorModel.colors.color(provider, name)
+            }
+            let flatBeforeExpand: Bool = {
+                guard entriesForColor.count >= 2 else { return true }
+                let a = colorProbe(entriesForColor[0].provider, entriesForColor[0].model)
+                let b = colorProbe(entriesForColor[1].provider, entriesForColor[1].model)
+                return a == b
+            }()
+            await colorModel.ensureModelColors()
+            let gradedAfterExpand: Bool = {
+                guard entriesForColor.count >= 2 else { return true }
+                let sameProvider = entriesForColor.first { entry in
+                    entry.provider == entriesForColor[0].provider
+                        && entry.model != entriesForColor[0].model
+                }
+                guard let sameProvider else { return true }
+                let a = colorProbe(entriesForColor[0].provider, entriesForColor[0].model)
+                let b = colorProbe(sameProvider.provider, sameProvider.model)
+                return a != b
+            }()
 
             return [
+                "deferGraphPending": deferGraphPending,
+                "noModelDuringGraph": noModelDuringGraph,
+                "readyWithoutModel": readyWithoutModel,
+                "phaseReadyBeforeModel": phaseReadyBeforeModel,
+                "modelArrives": modelArrives,
+                "fetchedOnce": fetchedOnce,
+                "noRefetch": noRefetch,
+                "neverRacedGraph": neverRacedGraph,
+                "lensesSkipModel": lensesSkipModel,
+                "modelHeldForA": modelHeldForA,
+                "phantomIssuedNoScan": phantomIssuedNoScan,
+                "phantomReadsAsLoading": phantomReadsAsLoading,
+                "modelDroppedOnYearSwitch": modelDroppedOnYearSwitch,
+                "oneScanPerCommit": oneScanPerCommit,
+                "flatBeforeExpand": flatBeforeExpand,
+                "gradedAfterExpand": gradedAfterExpand,
+                "reentryCoalesced": reentryCoalesced,
+                "coalescedStillPublished": coalescedStillPublished,
+                "lagRefetched": lagRefetched,
+                "newerSliceSupersedes": newerSliceSupersedes,
+                "loadingHeldBySuccessor": loadingHeldBySuccessor,
+                "abaNoThirdScan": abaNoThirdScan,
+                "loadingTrueInFlight": loadingTrueInFlight,
+                "loadingFalseAfter": loadingFalseAfter,
                 "stalePending": stalePending,
                 "staleSuppressed": staleSuppressed,
                 "matchingBAfterStale": matchingBAfterStale,
                 "initialAVisible": initialAVisible,
                 "graphBPending": graphBPending,
                 "oldReportSuppressed": oldReportSuppressed,
-                "newReportBeforePayloadSuppressed": newReportBeforePayloadSuppressed,
                 "matchingBVisible": matchingBVisible,
                 "emptyDidNotFetch": emptyDidNotFetch,
             ]
@@ -2332,12 +2717,125 @@ enum SelfTest {
             turnTransitionChecks?["initialAVisible"] == true
                 && turnTransitionChecks?["graphBPending"] == true
                 && turnTransitionChecks?["oldReportSuppressed"] == true
-                && turnTransitionChecks?["newReportBeforePayloadSuppressed"] == true
                 && turnTransitionChecks?["matchingBVisible"] == true,
-            "turns render only when payload and hourly year identities match")
+            "the Hourly lens shows a report only for the year it was fetched for")
+        expect(
+            turnTransitionChecks?["deferGraphPending"] == true
+                && turnTransitionChecks?["noModelDuringGraph"] == true
+                && turnTransitionChecks?["neverRacedGraph"] == true,
+            "the model report is never requested while the graph scan is in flight")
+        expect(
+            turnTransitionChecks?["readyWithoutModel"] == true
+                && turnTransitionChecks?["phaseReadyBeforeModel"] == true,
+            "the dashboard reaches .ready on the graph alone, without the model")
+        expect(
+            turnTransitionChecks?["modelArrives"] == true
+                && turnTransitionChecks?["fetchedOnce"] == true
+                && turnTransitionChecks?["noRefetch"] == true,
+            "a committed payload fetches the model exactly once per generation")
+        expect(
+            turnTransitionChecks?["modelHeldForA"] == true
+                && turnTransitionChecks?["modelDroppedOnYearSwitch"] == true,
+            "a year switch drops the previous year's model report instead of leaving it "
+                + "rendered beside the new year's graph")
+        expect(
+            turnTransitionChecks?["phantomIssuedNoScan"] == true,
+            "no model scan is issued for a phantom slice — a new year paired with the "
+                + "payload it has not replaced yet")
+        expect(
+            turnTransitionChecks?["phantomReadsAsLoading"] == true,
+            "during a year switch the model reads as loading, never as an empty result — "
+                + "the cards would otherwise claim the new year has no model usage")
+        expect(
+            turnTransitionChecks?["lensesSkipModel"] == true,
+            "Daily/Monthly never request the model report on activation")
+        expect(
+            turnTransitionChecks?["oneScanPerCommit"] == true,
+            "a graph refresh issues exactly one model scan — never two racing ones, "
+                + "and never zero (a moved generation must refetch)")
+        expect(
+            turnTransitionChecks?["reentryCoalesced"] == true
+                && turnTransitionChecks?["coalescedStillPublished"] == true,
+            "re-entry during an in-flight model scan joins it instead of starting a second")
+        expect(
+            turnTransitionChecks?["lagRefetched"] == true,
+            "a restored snapshot whose model lags its payload refetches instead of "
+                + "presenting the stale report as current")
+        expect(
+            turnTransitionChecks?["newerSliceSupersedes"] == true,
+            "coalescing joins only the identical slice — a moved generation still "
+                + "starts its own scan instead of being swallowed by the guard")
+        expect(
+            turnTransitionChecks?["abaNoThirdScan"] == true,
+            "a stale scan cannot release a live scan's in-flight slot — the year "
+                + "round-trip that gives both the same identity value must not open a third scan")
+        expect(
+            turnTransitionChecks?["loadingTrueInFlight"] == true
+                && turnTransitionChecks?["loadingFalseAfter"] == true
+                && turnTransitionChecks?["loadingHeldBySuccessor"] == true,
+            "modelLoading is true for the duration of a scan and clears when it lands — "
+                + "it is the only thing keeping the cards off the empty copy mid-fetch")
+
+        // The chain that actually gets a deferred model onto the screen is view
+        // wiring, and a UI-free test cannot press a SwiftUI Button. Deleting any
+        // link left every runtime assertion above green, so the tree this binary
+        // was built from is read directly — the same technique the Discord
+        // section uses for "declared in exactly one place".
+        func lp2bSource(_ name: String) -> String {
+            let root = URL(fileURLWithPath: #filePath)
+                .deletingLastPathComponent()  // Sources/TokenBar
+            for sub in ["", "Views/"] {
+                let url = root.appendingPathComponent(sub + name)
+                if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
+            }
+            return ""
+        }
+        let lp2bDaily = lp2bSource("DailyView.swift")
+        let lp2bMonthly = lp2bSource("MonthlyView.swift")
+        let lp2bPopover = lp2bSource("PopoverView.swift")
+        expect(
+            !lp2bDaily.isEmpty && !lp2bMonthly.isEmpty && !lp2bPopover.isEmpty,
+            "the LP2B source scan found its three files (without this every wiring "
+                + "assertion below would pass on empty strings)")
+        expect(
+            lp2bDaily.contains("if !isOpen { onExpand?() }")
+                && lp2bMonthly.contains("if !isOpen { onExpand?() }"),
+            "Daily and Monthly request the model colour map when a row opens")
+        expect(
+            lp2bPopover.components(separatedBy: "onExpand: { Task { await model.ensureModelColors() } }")
+                .count - 1 == 2,
+            "PopoverView wires that callback for both lenses, not just one")
+        // Pin the model task by its id components AND its body, but tolerate
+        // reformatting: an earlier version matched the whole multi-line literal
+        // including indentation, so a purely cosmetic rewrap turned it red.
+        // Matching a substring alone is the opposite failure — the sibling
+        // hidden-client task on the next line carries the same generation
+        // interpolation, which let the id lose its generation unnoticed. So
+        // strip whitespace entirely, then require the exact id triple next to
+        // the call it guards — that survives any rewrap while still pinning
+        // every component of the key.
+        let lp2bFlat = lp2bPopover.filter { !$0.isWhitespace }
+        let lp2bModelTask = #".task(id:"\(activeViewRaw)|\(model.year??"")|"#
+            + #"\(model.payload?.meta.generatedAt??"")"){"#
+            + "awaitmodel.ensureModelData(for:activeView.wrappedValue)}"
+        expect(
+            lp2bFlat.contains(lp2bModelTask),
+            "the model task is keyed on lens, year AND the committed payload generation — "
+                + "the generation is what keeps the model scan off the graph's critical path")
+        expect(
+            turnTransitionChecks?["flatBeforeExpand"] == true
+                && turnTransitionChecks?["gradedAfterExpand"] == true,
+            "expanding a Daily/Monthly row populates the model colour map")
+        // The old Daily/Monthly contract — "suppress turns until the payload and
+        // the hourly report agree on the year" — has no successor assertion on
+        // purpose. Turns now come from the very contribution the row is built
+        // from, so a row's messages and its turns cannot describe different
+        // years; the failure mode is removed by construction rather than
+        // guarded at runtime. What remains testable is that the request is gone.
         expect(
             turnTransitionChecks?["emptyDidNotFetch"] == true,
-            "an empty supported turn slice does not invoke the all-client hourly API")
+            "Daily and Monthly request no hourly report at all — their turns come "
+                + "from the graph payload")
 
         let hourlyCacheChecks = awaitMainActorValue { () async -> [String: Bool] in
             let year = "2047"
@@ -2400,8 +2898,8 @@ enum SelfTest {
             let seedModel = DashboardModel(
                 cachesSnapshot: true, source: seedSource, initialYear: year)
             await seedModel.load()
-            await seedModel.ensureData(for: .monthly, clients: turnClients)
-            let seededA = fingerprint(seedModel.turnsReport(for: turnClients))
+            await seedModel.ensureData(for: .hourly, clients: turnClients)
+            let seededA = fingerprint(seedModel.hourlyReport(for: turnClients))
                 == fingerprint(originalA)
             await seedModel.ensureData(for: .hourly, clients: hourlyClients)
             let seededB = fingerprint(seedModel.hourlyReport(for: hourlyClients))
@@ -2413,22 +2911,22 @@ enum SelfTest {
                 Set(turnClients): refreshedA,
             ])
             let (refreshModel, refreshTask, refreshPending) = await blockedModel(
-                source: refreshSource, view: .monthly, clients: turnClients)
+                source: refreshSource, view: .hourly, clients: turnClients)
             let restoredABeforeRefresh =
-                fingerprint(refreshModel.turnsReport(for: turnClients)) == fingerprint(originalA)
+                fingerprint(refreshModel.hourlyReport(for: turnClients)) == fingerprint(originalA)
             await refreshSource.releaseHourly(year: year)
             await refreshTask.value
             let acceptedRefreshVisible =
-                fingerprint(refreshModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+                fingerprint(refreshModel.hourlyReport(for: turnClients)) == fingerprint(refreshedA)
 
             // Fresh owners prove A's replacement did not overwrite sibling B.
             let verifyASource = ControlledTurnUsageDataSource(hourlyResponses: [
                 Set(turnClients): refreshedA,
             ])
             let (verifyAModel, verifyATask, verifyAPending) = await blockedModel(
-                source: verifyASource, view: .monthly, clients: turnClients)
+                source: verifyASource, view: .hourly, clients: turnClients)
             let refreshedARestored =
-                fingerprint(verifyAModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+                fingerprint(verifyAModel.hourlyReport(for: turnClients)) == fingerprint(refreshedA)
             await verifyASource.releaseHourly(year: year)
             await verifyATask.value
 
@@ -2459,20 +2957,20 @@ enum SelfTest {
             ])
             let (nonOwnerModel, nonOwnerTask, nonOwnerPending) = await blockedModel(
                 source: nonOwnerSource, cachesSnapshot: false,
-                view: .monthly, clients: turnClients)
-            let nonOwnerDidNotRead = nonOwnerModel.turnsReport(for: turnClients) == nil
+                view: .hourly, clients: turnClients)
+            let nonOwnerDidNotRead = nonOwnerModel.hourlyReport(for: turnClients) == nil
             await nonOwnerSource.releaseHourly(year: year)
             await nonOwnerTask.value
             let nonOwnerReceivedLocalB =
-                fingerprint(nonOwnerModel.turnsReport(for: turnClients)) == fingerprint(nonOwnerB)
+                fingerprint(nonOwnerModel.hourlyReport(for: turnClients)) == fingerprint(nonOwnerB)
 
             let ownerAfterSource = ControlledTurnUsageDataSource(hourlyResponses: [
                 Set(turnClients): refreshedA,
             ])
             let (ownerAfterModel, ownerAfterTask, ownerAfterPending) = await blockedModel(
-                source: ownerAfterSource, view: .monthly, clients: turnClients)
+                source: ownerAfterSource, view: .hourly, clients: turnClients)
             let nonOwnerDidNotWrite =
-                fingerprint(ownerAfterModel.turnsReport(for: turnClients)) == fingerprint(refreshedA)
+                fingerprint(ownerAfterModel.hourlyReport(for: turnClients)) == fingerprint(refreshedA)
             await ownerAfterSource.releaseHourly(year: year)
             await ownerAfterTask.value
 
@@ -2483,7 +2981,7 @@ enum SelfTest {
                 let extraModel = DashboardModel(
                     cachesSnapshot: true, source: seedSource, initialYear: extraYear)
                 await extraModel.load()
-                await extraModel.ensureData(for: .monthly, clients: turnClients)
+                await extraModel.ensureData(for: .hourly, clients: turnClients)
             }
             let evictionSource = ControlledTurnUsageDataSource(hourlyResponses: [
                 Set(turnClients): refreshedA,
@@ -2493,12 +2991,12 @@ enum SelfTest {
                 cachesSnapshot: true, source: evictionSource, initialYear: year)
             await evictionModel.load()
             let evictionTask = Task {
-                await evictionModel.ensureData(for: .monthly, clients: turnClients)
+                await evictionModel.ensureData(for: .hourly, clients: turnClients)
             }
             let evictionPending = await waitUntil {
                 await evictionSource.hasPendingHourly(year: year)
             }
-            let oldestEvicted = evictionModel.turnsReport(for: turnClients) == nil
+            let oldestEvicted = evictionModel.hourlyReport(for: turnClients) == nil
             await evictionSource.releaseHourly(year: year)
             await evictionTask.value
 

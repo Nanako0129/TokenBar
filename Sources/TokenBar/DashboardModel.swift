@@ -89,6 +89,12 @@ private struct DashboardSnapshot {
     let payload: UsagePayload
     let stats: UsageStats
     let modelReport: ModelReport?
+    /// The payload generation the cached `modelReport` was fetched for. It can
+    /// legitimately lag `payload.meta.generatedAt`: a poll may commit a newer
+    /// graph while the user sits on a lens that does not show models. Storing
+    /// the model's own generation keeps the restore honest, so a lagging report
+    /// is re-requested instead of being mistaken for current.
+    let modelGeneratedAt: String?
     let colors: ModelColorMap
     let knownYears: [String]
     let year: String?
@@ -104,6 +110,14 @@ private struct DashboardSnapshot {
     private struct HourlyCacheKey: Hashable {
         let year: String
         let clients: Set<String>
+    }
+
+    /// The (year, graph generation) pair a model report belongs to. Comparing
+    /// the whole pair is what lets an in-flight scan be reused for a re-entry
+    /// on the same slice while still being superseded by a genuinely newer one.
+    private struct ModelSliceIdentity: Equatable {
+        let year: String
+        let generation: String
     }
 
     /// Survives the model's deallocation so the next PopoverView starts with
@@ -179,6 +193,16 @@ private struct DashboardSnapshot {
             colors = snap.colors
             knownYears = snap.knownYears
             acceptedPayloadYear = Self.identityYear(initialYear)
+            // Restore the model's own slice identity alongside it, or the first
+            // model-dependent lens would re-request a report the snapshot
+            // already carries and flash a loading state on every reopen. Use
+            // the model's recorded generation rather than the payload's: when
+            // it lags, the lens SHOULD re-request instead of treating a stale
+            // report as current.
+            if snap.modelReport != nil {
+                modelYear = Self.identityYear(initialYear)
+                modelPayloadGeneratedAt = snap.modelGeneratedAt
+            }
             agentUsage = snap.agentUsage.map {
                 AgentUsagePublicationCoordinator.resolve($0)
             }
@@ -202,7 +226,10 @@ private struct DashboardSnapshot {
     private(set) var modelReport: ModelReport?
     private(set) var colors = ModelColorMap(report: nil)
     private(set) var hourly: HourlyReport?
-    private(set) var hourlyLoading = false
+    /// True while a model-report request is in flight. Model-dependent cards
+    /// must distinguish this from a completed request that genuinely found
+    /// nothing, or a deferred model reads as "no usage" during startup.
+    private(set) var modelLoading = false
     private(set) var agents: AgentsReport?
     private(set) var agentUsage: AgentUsagePayload?
     /// True once the first `pollAgentUsage()` attempt has finished, whether it
@@ -229,6 +256,16 @@ private struct DashboardSnapshot {
     // refetch. Background refreshes (reload/pollGraph) reuse the stored slice.
     @ObservationIgnored private var hourlyClients: Set<String>?
     @ObservationIgnored private var agentsClients: Set<String>?
+    /// Identity of the slice the current `modelReport` was fetched for. The
+    /// year keeps a previous year's report off a newly-filtered dashboard; the
+    /// payload generation is what makes the request idempotent per graph commit,
+    /// so a model-dependent lens re-requests only when the graph actually moves.
+    @ObservationIgnored private var modelYear: String?
+    @ObservationIgnored private var modelPayloadGeneratedAt: String?
+    @ObservationIgnored private var modelRequestToken = 0
+    /// The slice a model scan is currently running for, used to coalesce
+    /// re-entry. Nil when nothing is in flight.
+    @ObservationIgnored private var modelInFlight: ModelSliceIdentity?
     /// Identity of the last payload/hourly report that actually committed.
     /// These are separate from `year`: a newer request may complete in the
     /// inverse order, and the presentation accessors must stay fail-closed.
@@ -266,28 +303,28 @@ private struct DashboardSnapshot {
         return hourly
     }
 
-    /// Daily/Monthly receive a report only when both sides of the year
-    /// transition have committed the same slice and client set.
-    func turnsReport(for clients: [String]) -> HourlyReport? {
-        guard acceptedPayloadYear == Self.identityYear(year) else { return nil }
-        return hourlyReport(for: clients)
-    }
 
     /// The source owns the blocking FFI hop in live mode; demo mode returns
     /// synthetic values through the same async contract.
+    ///
+    /// Graph-first: the model report is NOT fetched here. Both are blocking FFI
+    /// scans that share one bounded Rayon pool, so issuing them together made
+    /// each pay for the other's contention — measured on a real corpus, graph
+    /// alone returned in 1.4s warm / 27s cold, but concurrently with the model
+    /// (and the lazy hourly) it took 7.2s / 67s to reach the same first paint
+    /// without finishing any sooner overall. The dashboard only needs the graph
+    /// to render, so model-dependent lenses request it afterwards through
+    /// `ensureModelData(for:)`, keyed on the committed payload generation.
     func load() async {
         do {
             let year = self.year
-            async let payloadTask = source.graph(year: year, priority: .userInitiated)
-            async let reportTask = source.modelReport(year: year, priority: .userInitiated)
-            let payload = try await payloadTask
-            let report = try? await reportTask
+            let payload = try await source.graph(year: year, priority: .userInitiated)
             // The year may have changed while we were off-actor (the user can
             // open the year menu during the initial load); drop a stale slice
             // so apply() never tags the new year — and the static snapshot —
             // with the old year's payload. Mirrors reload()/pollGraph().
             guard self.year == year else { return }
-            apply(payload: payload, report: report, expectedYear: year)
+            apply(payload: payload, expectedYear: year)
         } catch {
             // Keep showing stale data over an error screen when a previous
             // load succeeded — a transient failure must not blank the UI.
@@ -315,6 +352,7 @@ private struct DashboardSnapshot {
         guard newYear != year, !refreshing else { return }
         year = newYear
         invalidateHourly()
+        invalidateModel()
         UserDefaults.standard.set(newYear, forKey: Self.yearKey)
         refreshing = true
         defer { refreshing = false }
@@ -343,9 +381,37 @@ private struct DashboardSnapshot {
         return hourlyRequestToken
     }
 
+    private func beginModelRequest() -> Int {
+        modelRequestToken += 1
+        return modelRequestToken
+    }
+
+    /// Drop a model report that belongs to a slice the dashboard no longer
+    /// shows. Also cancels any in-flight request so its late completion cannot
+    /// publish the previous year's models.
+    private func invalidateModel() {
+        modelReport = nil
+        colors = ModelColorMap(report: nil)
+        modelYear = nil
+        modelPayloadGeneratedAt = nil
+        modelLoading = false
+        // Release the coalescing slot too: the in-flight scan belongs to the
+        // slice being discarded, and leaving its identity set would let it
+        // block a legitimate request should the user return to that slice.
+        modelInFlight = nil
+        _ = beginModelRequest()
+    }
+
+    private func publishModel(_ report: ModelReport, year: String?, generation: String) {
+        modelReport = report
+        colors = ModelColorMap(report: report)
+        modelYear = Self.identityYear(year)
+        modelPayloadGeneratedAt = generation
+        cacheSnapshot()
+    }
+
     private func invalidateHourly() {
         hourly = nil
-        hourlyLoading = false
         hourlyClients = nil
         hourlyYear = nil
         _ = beginHourlyRequest()
@@ -372,10 +438,11 @@ private struct DashboardSnapshot {
 
     private func reload(force: Bool) async {
         let year = self.year
+        // Graph-first here too: the model is refreshed after the graph commits,
+        // and only when a lens had already loaded it (mirrors hourly/agents).
         async let payloadTask = force
             ? source.refreshGraph(year: year, priority: .userInitiated)
             : source.graph(year: year, priority: .userInitiated)
-        async let reportTask = source.modelReport(year: year, priority: .userInitiated)
         let payload: UsagePayload
         do {
             payload = try await payloadTask
@@ -391,14 +458,20 @@ private struct DashboardSnapshot {
             }
             return
         }
-        let report = try? await reportTask
         guard !Task.isCancelled, self.year == year else { return }
-        apply(payload: payload, report: report, expectedYear: year)
+        apply(payload: payload, expectedYear: year)
         // If apply() cleared a now-empty year filter, it spawned its own
         // unfiltered reload that re-fetches the lazy lenses for the new (nil)
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
         // hourly/agents could land after it and blank those lenses.
         guard self.year == year, !Task.isCancelled else { return }
+        // No model refresh here on purpose. Committing the payload changes
+        // `meta.generatedAt`, which is part of PopoverView's model task id, so
+        // the visible model lens re-requests on its own. Refreshing here as
+        // well raced that task — this function bumps the request token before
+        // suspending, so the task's request always won and this one's result
+        // was always discarded, leaving two concurrent model scans fighting the
+        // same bounded pool: the exact contention this slice removes.
         // Re-fetch the lazy lenses that were already loaded, keeping the slice
         // they were last fetched for (an ordered array of the stored Set — the
         // FFI filter is membership-based, so order is irrelevant). Re-check the
@@ -430,9 +503,11 @@ private struct DashboardSnapshot {
         }
     }
 
-    private func apply(
-        payload: UsagePayload, report: ModelReport?, expectedYear: String? = nil
-    ) {
+    /// Commit a graph payload and make the dashboard renderable. The model
+    /// report is owned separately (`ensureModelData`/`publishModel`) so a graph
+    /// commit never has to wait for it, and a still-loading model never blanks
+    /// the cards that already have last-good data.
+    private func apply(payload: UsagePayload, expectedYear: String? = nil) {
         guard expectedYear == nil || self.year == expectedYear else { return }
         // A year-filtered payload reports only the selected year (empty if that
         // year has no data). Validate the filter against THIS fresh payload —
@@ -442,17 +517,22 @@ private struct DashboardSnapshot {
         // slice. Re-fetch unfiltered so all data shows immediately.
         if let year, !payload.years.contains(where: { $0.year == year }) {
             invalidateHourly()
+            invalidateModel()
             acceptedPayloadYear = nil
             self.year = nil
             UserDefaults.standard.removeObject(forKey: Self.yearKey)
             Task { [weak self] in await self?.reload(force: false) }
             return
         }
+        // A model report fetched for a different year describes a slice this
+        // payload no longer shows, so drop it rather than render it beside the
+        // new graph; the model-dependent lens re-requests for the new slice.
+        if modelReport != nil, modelYear != Self.identityYear(year) {
+            invalidateModel()
+        }
         self.payload = payload
         acceptedPayloadYear = Self.identityYear(year)
         stats = UsageStats(payload: payload, selectedClients: Set(payload.summary.clients))
-        modelReport = report
-        colors = ModelColorMap(report: report)
         knownYears = Set(knownYears + payload.years.map(\.year)).sorted(by: >)
         phase = .ready
         cacheSnapshot()
@@ -467,6 +547,7 @@ private struct DashboardSnapshot {
         guard cachesSnapshot, let payload, let stats else { return }
         Self.lastSnapshot = DashboardSnapshot(
             payload: payload, stats: stats, modelReport: modelReport,
+            modelGeneratedAt: modelPayloadGeneratedAt,
             colors: colors, knownYears: knownYears, year: year,
             agentUsage: agentUsage, trace: trace)
     }
@@ -484,6 +565,7 @@ private struct DashboardSnapshot {
         guard cachesSnapshot, let snap = Self.lastSnapshot else { return }
         Self.lastSnapshot = DashboardSnapshot(
             payload: snap.payload, stats: snap.stats, modelReport: snap.modelReport,
+            modelGeneratedAt: snap.modelGeneratedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
             agentUsage: agentUsage, trace: trace)
     }
@@ -504,15 +586,12 @@ private struct DashboardSnapshot {
             // Don't race an in-flight manual Refresh or year switch.
             guard !refreshing else { continue }
             let year = self.year
-            async let payloadTask = source.graph(year: year, priority: .utility)
-            async let reportTask = source.modelReport(year: year, priority: .utility)
-            let fetched = try? await payloadTask
-            let report = try? await reportTask
+            let fetched = try? await source.graph(year: year, priority: .utility)
             if Task.isCancelled { break }
             // The year may have changed while we were off-actor; drop a stale
             // slice so the chart never flickers to the wrong year.
             guard self.year == year, let payload = fetched else { continue }
-            apply(payload: payload, report: report, expectedYear: year)
+            apply(payload: payload, expectedYear: year)
             // apply() may have cleared a now-empty year filter and spawned an
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
@@ -610,13 +689,9 @@ private struct DashboardSnapshot {
     /// slice as a Set so a reorder does not refetch. The year stale-guard
     /// mirrors reload()/pollGraph().
     private func ensureHourlyData(
-        year: String?, clients: [String], clearOnEmpty: Bool
+        year: String?, clients: [String]
     ) async {
         let selection = Set(clients)
-        if clearOnEmpty, selection.isEmpty {
-            invalidateHourly()
-            return
-        }
         let yearKey = Self.identityYear(year)
         guard hourly == nil || hourlyClients != selection || hourlyYear != yearKey else { return }
 
@@ -632,25 +707,111 @@ private struct DashboardSnapshot {
             hourlyYear = nil
         }
         let requestToken = beginHourlyRequest()
-        hourlyLoading = true
         let report = try? await source.hourlyReport(
             year: year, clients: clients, priority: .userInitiated)
         guard self.year == year, hourlyRequestToken == requestToken else { return }
-        hourlyLoading = false
         guard !Task.isCancelled, let report else { return }
         publishHourly(report, year: year, clients: selection)
+    }
+
+    /// Fetch the model report for a lens that needs it, once the graph has
+    /// committed. Idempotent per (year, payload generation): a lens switch or a
+    /// re-render does not re-request, while a graph refresh that actually moved
+    /// the payload does. A failure keeps the last-good report rather than
+    /// blanking the card.
+    private func ensureModelReport(priority: TaskPriority) async {
+        // No graph yet means the popover is still on its first paint; the
+        // payload-generation-keyed task fires again once apply() commits.
+        guard let payload else { return }
+        let year = self.year
+        // `setYear` moves `year` synchronously while the payload only catches up
+        // when reload commits, and PopoverView's task id contains both — so this
+        // can be entered with a phantom slice (new year, previous payload).
+        // Scanning for it would issue a full report that the year guard below
+        // must then discard. Wait for the committed payload to agree instead;
+        // apply() re-fires this task the moment it does.
+        guard acceptedPayloadYear == Self.identityYear(year) else {
+            // Mid-slice-change, and the scan for the new slice cannot be issued
+            // yet. The report is absent but the answer is not "none" — leaving
+            // the flag down here let the cards render their empty copy for the
+            // whole graph reload, telling the user a year has no model usage
+            // while it was still being read. apply() re-fires this task the
+            // moment the payload commits, which resolves the flag either way.
+            modelLoading = true
+            return
+        }
+        let generation = payload.meta.generatedAt
+        let identity = ModelSliceIdentity(year: Self.identityYear(year), generation: generation)
+        if modelReport != nil,
+           modelYear == identity.year,
+           modelPayloadGeneratedAt == generation
+        {
+            return
+        }
+        // Coalesce re-entry onto the request already running for this exact
+        // slice. Every entry bumps the request token, so a second one would
+        // strand the first — the earlier and likely sooner-finishing scan —
+        // and put two full FFI scans on the same bounded pool. The triggers are
+        // ordinary interaction: each Daily/Monthly row expand calls
+        // `ensureModelColors`, and PopoverView's model task id includes the
+        // lens, so Overview→Models mid-scan re-enters too.
+        if modelInFlight == identity { return }
+        modelInFlight = identity
+        let requestToken = beginModelRequest()
+        modelLoading = true
+        let report = try? await source.modelReport(year: year, priority: priority)
+        // Release by OWNERSHIP, not by value. `ModelSliceIdentity` is a value,
+        // so two different scans can carry an identical one: a year round-trip
+        // A→B→A during a scan returns the same payload from `tb_graph`'s 30s
+        // cache, hence the same generation. Comparing identities would let the
+        // stale scan clear the live scan's slot, and the next ordinary
+        // re-entry would start a third scan concurrent with the second. The
+        // request token is unique per scan, so only its owner can release it.
+        if modelRequestToken == requestToken { modelInFlight = nil }
+        // A year switch or a newer request invalidates this completion: publishing
+        // it would strand another slice's models on the current dashboard.
+        let isCurrent = modelRequestToken == requestToken
+        // Only the current request owns the flag; a superseded one must leave it
+        // set for the request that replaced it, and must not strand it either.
+        if isCurrent { modelLoading = false }
+        guard self.year == year, isCurrent, !Task.isCancelled else { return }
+        guard let report else { return }
+        publishModel(report, year: year, generation: generation)
+    }
+
+    /// Model-dependent lenses. Separate from `ensureData` because that task is
+    /// keyed on the lens/year/client slice only, so folding the model into it
+    /// would start the model scan alongside the graph again — the exact
+    /// contention this split removes. PopoverView keys this on the committed
+    /// payload generation instead.
+    func ensureModelData(for view: AppView) async {
+        switch view {
+        case .overview, .models, .stats:
+            await ensureModelReport(priority: .userInitiated)
+        default:
+            break
+        }
+    }
+
+    /// Daily/Monthly render no model card, so they never fetch the report on
+    /// activation — but expanding a row reveals a per-model drill-down whose
+    /// dots are tinted by `ModelColorMap`, and that map is built from the model
+    /// report. Before the graph/model split `apply()` populated it on every
+    /// load; without this hook the drill-down would flatten every model of a
+    /// provider onto the same rank-0 shade. Idempotent, so repeated expands
+    /// cost nothing once the report has landed.
+    func ensureModelColors() async {
+        await ensureModelReport(priority: .userInitiated)
     }
 
     func ensureData(for view: AppView, clients: [String]) async {
         let year = self.year
         switch view {
         case .hourly:
-            // Preserve the established nil/empty = all-client source behavior
-            // for Hourly; only Daily/Monthly treat an empty supported slice as
-            // an explicit no-data state.
-            await ensureHourlyData(year: year, clients: clients, clearOnEmpty: false)
-        case .daily, .monthly:
-            await ensureHourlyData(year: year, clients: clients, clearOnEmpty: true)
+            // Hourly keeps the established nil/empty = all clients contract
+            // from `ctb.h`. Daily/Monthly used to opt out of it; they no longer
+            // reach this call at all, since their turns ride the graph payload.
+            await ensureHourlyData(year: year, clients: clients)
         case .agents:
             let selection = Set(clients)
             guard agents == nil || agentsClients != selection else { return }

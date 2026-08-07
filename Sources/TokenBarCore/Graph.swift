@@ -59,6 +59,21 @@ public struct Contribution: Decodable, Sendable {
     public let intensity: Int
     public let tokenBreakdown: TokenBreakdown
     public let clients: [ContributionClient]
+    /// Interaction turns for this day, keyed by exact client id. Rust counts
+    /// these in the same fold that produces the day's tokens and messages, so a
+    /// day/month view no longer runs a second full report just for turns.
+    /// Absent on a payload from an engine that predates the field, and absent
+    /// for a day with no recorded turns — both decode as an empty map.
+    public let turnsByClient: [String: Int64]?
+
+    /// Turns for `clients`, summed. Empty selection yields nil rather than 0 so
+    /// a caller can tell "no clients selected" from "selected clients had none",
+    /// matching how the lenses treat an all-hidden slice everywhere else.
+    public func turns(for clients: [String]) -> Int64? {
+        guard !clients.isEmpty else { return nil }
+        let counts = turnsByClient ?? [:]
+        return clients.reduce(Int64(0)) { $0.saturatingAdding(counts[$1] ?? 0) }
+    }
 }
 
 public struct DateRange: Decodable, Sendable {

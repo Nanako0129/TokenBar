@@ -10,6 +10,9 @@ struct ModelsView: View {
     /// Restrict rows to these clients; empty = show everything.
     var clientIds: [String] = []
     let colors: ModelColorMap
+    /// See `ModelBreakdownCard.loading`: an absent report during the deferred
+    /// fetch is not the same as a completed fetch that found nothing.
+    var loading = false
 
     private static let kinds: [(label: String, pick: (ModelReportEntry) -> Int64)] = [
         ("In", { $0.input }),
@@ -46,7 +49,11 @@ struct ModelsView: View {
                 .font(.caption2)
             }
         ) {
-            if rows.isEmpty {
+            if rows.isEmpty, report == nil, loading {
+                ProgressView()
+                    .controlSize(.small)
+                    .accessibilityLabel("Loading…")
+            } else if rows.isEmpty {
                 Text("No model usage in this range")
                     .font(.caption)
                     .foregroundStyle(.secondary)

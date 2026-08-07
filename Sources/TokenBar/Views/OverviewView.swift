@@ -10,6 +10,8 @@ struct OverviewView: View {
     let clientIds: [String]
     let stats: UsageStats
     let modelReport: ModelReport?
+    /// Forwarded to ModelBreakdownCard; see its `loading` doc.
+    var modelLoading = false
     let colors: ModelColorMap
     let trace: [TraceBucket]
     let agentUsage: AgentUsagePayload?
@@ -45,7 +47,7 @@ struct OverviewView: View {
                 chart
                 ModelBreakdownCard(
                     report: modelReport, clientIds: clientIds, colors: colors,
-                    title: "%@ models".localized(name))
+                    title: "%@ models".localized(name), loading: modelLoading)
             } else {
                 chart
                 if limitsEnabled {
@@ -55,7 +57,8 @@ struct OverviewView: View {
                 }
                 UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)
                 ModelBreakdownCard(
-                    report: modelReport, clientIds: clientIds, colors: colors)
+                    report: modelReport, clientIds: clientIds, colors: colors,
+                    loading: modelLoading)
             }
             StreaksCard(streaks: stats.streaks)
         }
