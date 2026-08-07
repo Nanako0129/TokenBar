@@ -15,9 +15,20 @@ final class SettingsWindowController {
     private var host: NSHostingController<AnyView>?
     private var closeObserver: NSObjectProtocol?
 
-    func show() {
+    /// A place in Settings a caller wants brought into view. The intro card
+    /// uses it so "Open Settings" lands on the section it just described
+    /// instead of the top of the first page.
+    enum Destination {
+        case discord
+
+        var page: SettingsPanel.Page { .general }
+        /// Matched by a `.id(...)` on the section itself.
+        var anchor: String { "settings.section.discord" }
+    }
+
+    func show(scrollingTo destination: Destination? = nil) {
         let existing = self.window
-        let window = existing ?? makeWindow()
+        let window = existing ?? makeWindow(destination: destination)
         self.window = window
         // Reopening a kept-alive window: reinstall the live settings UI that
         // the previous close swapped out for a static placeholder. (Closing
@@ -25,7 +36,13 @@ final class SettingsWindowController {
         // preview TimelineView(.periodic) keep re-rendering off-screen at up
         // to 40fps and pin a core in the background — the chronic CPU spin.)
         if existing != nil {
-            host?.rootView = AnyView(SettingsWindowView())
+            // `.id` only when a destination is requested: a fresh identity
+            // re-runs the view's `@State`, which is what selects the page and
+            // fires the scroll — and is exactly what an ordinary reopen must
+            // NOT do, since it would discard the page the user was last on.
+            host?.rootView = destination.map {
+                AnyView(SettingsWindowView(destination: $0).id($0.anchor + UUID().uuidString))
+            } ?? AnyView(SettingsWindowView())
         }
         let firstShow = !window.isVisible
         // Accessory apps are never frontmost; activate or the window opens
@@ -52,8 +69,8 @@ final class SettingsWindowController {
             y: visible.midY - window.frame.height / 2))
     }
 
-    private func makeWindow() -> NSWindow {
-        let host = NSHostingController(rootView: AnyView(SettingsWindowView()))
+    private func makeWindow(destination: Destination? = nil) -> NSWindow {
+        let host = NSHostingController(rootView: AnyView(SettingsWindowView(destination: destination)))
         self.host = host
         let window = NSWindow(contentViewController: host)
         // NSWindow(contentViewController:) sizes lazily (the frame is still

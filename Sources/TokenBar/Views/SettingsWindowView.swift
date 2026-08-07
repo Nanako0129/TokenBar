@@ -43,6 +43,10 @@ struct SettingsWindowView: View {
     // popover's restore snapshot with its independently polled data.
     @State private var model = DashboardModel(initialYear: nil)
     @State private var tokensPerMin: Double?
+    /// Set only when a caller asked for a specific place; the intro card is
+    /// the one caller today. Nil means an ordinary open, which must land
+    /// wherever the user last was.
+    var destination: SettingsWindowController.Destination?
     @State private var selectedPage = SettingsPanel.Page.menuBar
     /// Master switch: off hides the preview's Agent-limits card too.
     @AppStorage("tokenbar.limits.enabled") private var limitsEnabled = true
@@ -115,18 +119,32 @@ struct SettingsWindowView: View {
             // The columns sit inside the title-bar safe area, so a plain Divider
             // stops ~32pt short of the top edge and reads as a broken seam.
             Divider().ignoresSafeArea(edges: .top)
-            ScrollView {
-                SettingsPanel(
-                    page: selectedPage,
-                    agentUsage: model.agentUsage,
-                    presentClients: model.stats?.presentClients ?? [],
-                    isLoading: isInitialLoad)
-                    .padding(14)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(OverlayScrollerEnforcer())
+            ScrollViewReader { proxy in
+                ScrollView {
+                    SettingsPanel(
+                        page: selectedPage,
+                        agentUsage: model.agentUsage,
+                        presentClients: model.stats?.presentClients ?? [],
+                        isLoading: isInitialLoad)
+                        .padding(14)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(OverlayScrollerEnforcer())
+                }
+                .scrollIndicators(.never)
+                .frame(width: 354)
+                .onAppear {
+                    guard let destination else { return }
+                    selectedPage = destination.page
+                    // Next runloop turn: the page's own sections have to exist
+                    // before the anchor can be resolved, and selecting the page
+                    // above is what creates them.
+                    DispatchQueue.main.async {
+                        withAnimation(.easeOut(duration: 0.25)) {
+                            proxy.scrollTo(destination.anchor, anchor: .top)
+                        }
+                    }
+                }
             }
-            .scrollIndicators(.never)
-            .frame(width: 354)
             Divider().ignoresSafeArea(edges: .top)
             ScrollView {
                 previewColumn

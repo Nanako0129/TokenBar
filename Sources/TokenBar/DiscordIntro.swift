@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import TokenBarCore
 
 /// The one-time card that makes the Discord Rich Presence feature findable.
@@ -63,6 +64,27 @@ enum DiscordIntro {
         }
     }
 
+    /// A mock of the activity itself. Text alone made the card read as a
+    /// warning about a feature rather than an introduction to one, and a
+    /// picture of the actual thing is also the more honest surface: seeing the
+    /// four lines that would appear says more than a sentence describing them.
+    ///
+    /// Representative values, labelled as a preview. Not the user's real
+    /// figures — the graph has not necessarily loaded 1.5s after launch, and a
+    /// card that showed a number and then published a different one would be
+    /// worse than one that showed none.
+    @MainActor
+    private static func previewView() -> NSView {
+        let preview = DiscordPresencePreview(
+            title: "TokenBar".localized,
+            details: "1.2M tokens today".localized,
+            state: "Claude Code · $10-50".localized,
+            button: DiscordIPC.buttonLabel.localized)
+        let host = NSHostingView(rootView: preview)
+        host.frame = NSRect(x: 0, y: 0, width: 300, height: 104)
+        return host
+    }
+
     @MainActor
     static func presentIfNeeded() {
         guard shouldPresent() else { return }
@@ -71,7 +93,8 @@ enum DiscordIntro {
 
         let alert = NSAlert()
         alert.messageText = "Show today's usage on Discord".localized
-        alert.informativeText = "TokenBar can publish today's tokens, a client name and a cost range to your Discord profile. It stays off until you turn it on in Settings, where the full disclosure is. Anyone who can see your profile can read and keep every update, and switching it off later cannot unshare what already went out.".localized
+        alert.informativeText = "Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings.".localized
+        alert.accessoryView = previewView()
         let settings = alert.addButton(withTitle: "Open Settings".localized)
         let notNow = alert.addButton(withTitle: "Not now".localized)
         // Neither button is the default. A filled, Return-bound button next to
@@ -81,6 +104,48 @@ enum DiscordIntro {
         notNow.keyEquivalent = "\u{1b}"
 
         let choice: Choice = alert.runModal() == .alertFirstButtonReturn ? .openSettings : .notNow
-        perform(choice) { SettingsWindowController.shared.show() }
+        perform(choice) { SettingsWindowController.shared.show(scrollingTo: .discord) }
+    }
+}
+
+/// What the presence looks like on a profile, laid out the way Discord lays it
+/// out: art on the left, the app name, then `details` and `state`, with the
+/// button underneath.
+private struct DiscordPresencePreview: View {
+    let title: String
+    let details: String
+    let state: String
+    let button: String
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            // The app's own icon, because that is literally what Discord
+            // shows: `largeImageKey` resolves to the TokenBar art uploaded to
+            // the Developer Portal. A stand-in symbol would make the preview
+            // decorative rather than accurate.
+            Image(nsImage: NSApp.applicationIconImage)
+                .resizable()
+                .frame(width: 56, height: 56)
+                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.system(size: 12, weight: .bold))
+                Text(details).font(.system(size: 11))
+                Text(state).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(button)
+                    .font(.system(size: 10, weight: .medium))
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .frame(maxWidth: .infinity)
+                    .background(
+                        RoundedRectangle(cornerRadius: 4).fill(Color.secondary.opacity(0.18)))
+                    .padding(.top, 3)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(10)
+        .background(
+            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                .fill(Color.secondary.opacity(0.10)))
+        .frame(width: 300, alignment: .leading)
     }
 }

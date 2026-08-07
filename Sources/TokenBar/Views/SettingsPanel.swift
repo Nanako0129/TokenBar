@@ -632,6 +632,7 @@ struct SettingsPanel: View {
             // sequence of them across weeks is closer still.
             hint("A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend.")
         }
+        .id(SettingsWindowController.Destination.discord.anchor)
 
         section("Language") {
             radioGroup(
