@@ -291,14 +291,39 @@ private struct DashboardSnapshot {
     /// the slice key has not moved and no payload has committed.
     @ObservationIgnored private var graphLoadTask: Task<UsagePayload, Error>?
 
-    /// Runs a graph fetch under that gate. Only the fetch is gated — holding
-    /// the slot across `apply()` and the lazy-lens re-fetches would make the
-    /// model wait on work it does not depend on, and each caller keeps its own
-    /// cancellation and error handling where it already lives.
+    /// Runs a graph fetch under that gate and commits it INSIDE the gated task,
+    /// so the gate opens on the commit rather than on the fetch.
+    ///
+    /// Ordering, not just exclusion, is what the model request needs. With only
+    /// the fetch gated, the waiter and the fetch's owner resume from the same
+    /// task in an unspecified order: the waiter could go first, read the
+    /// pre-commit payload, and scan for a generation that `apply()` was about
+    /// to supersede — two full scans, the contention this split exists to
+    /// remove.
+    ///
+    /// In practice the owner registers on the task first and does commit first
+    /// — the fetch-gated shape was mutated back in and no assertion moved. So
+    /// this removes a reliance on an unspecified ordering, not a reproduced
+    /// defect, and no test discriminates the two shapes. It also closes the
+    /// matching window where the slot still holds a finished task because the
+    /// owner has yet to resume.
+    ///
+    /// The lazy-lens re-fetches stay outside: the model does not depend on
+    /// them, and holding the gate across them would make it wait for nothing.
+    /// `commit` runs only on success, and runs on this actor — its callers
+    /// keep their own year guard, but not `Task.isCancelled`, which inside an
+    /// unstructured task no longer describes the caller. `apply()` re-checks
+    /// the year itself, and a commit that lands after a popover close only
+    /// leaves a fresher reopen snapshot behind.
     private func gatedGraph(
-        _ fetch: @escaping () async throws -> UsagePayload
+        fetch: @escaping () async throws -> UsagePayload,
+        commit: @escaping (UsagePayload) -> Void
     ) async throws -> UsagePayload {
-        let task = Task { try await fetch() }
+        let task = Task {
+            let payload = try await fetch()
+            commit(payload)
+            return payload
+        }
         graphLoadTask = task
         defer { if graphLoadTask == task { graphLoadTask = nil } }
         return try await task.value
@@ -368,15 +393,17 @@ private struct DashboardSnapshot {
     func load() async {
         do {
             let year = self.year
-            let payload = try await gatedGraph { [source] in
+            _ = try await gatedGraph { [source] in
                 try await source.graph(year: year, priority: .userInitiated)
+            } commit: { payload in
+                // The year may have changed while we were off-actor (the user
+                // can open the year menu during the initial load); drop a stale
+                // slice so apply() never tags the new year — and the static
+                // snapshot — with the old year's payload. Mirrors
+                // reload()/pollGraph().
+                guard self.year == year else { return }
+                self.apply(payload: payload, expectedYear: year)
             }
-            // The year may have changed while we were off-actor (the user can
-            // open the year menu during the initial load); drop a stale slice
-            // so apply() never tags the new year — and the static snapshot —
-            // with the old year's payload. Mirrors reload()/pollGraph().
-            guard self.year == year else { return }
-            apply(payload: payload, expectedYear: year)
         } catch {
             // Keep showing stale data over an error screen when a previous
             // load succeeded — a transient failure must not blank the UI.
@@ -500,12 +527,14 @@ private struct DashboardSnapshot {
         let year = self.year
         // Graph-first here too: the model is refreshed after the graph commits,
         // and only when a lens had already loaded it (mirrors hourly/agents).
-        let payload: UsagePayload
         do {
-            payload = try await gatedGraph { [source] in
+            _ = try await gatedGraph { [source] in
                 force
                     ? try await source.refreshGraph(year: year, priority: .userInitiated)
                     : try await source.graph(year: year, priority: .userInitiated)
+            } commit: { payload in
+                guard self.year == year else { return }
+                self.apply(payload: payload, expectedYear: year)
             }
         } catch {
             // A model that has never reached `.ready` must still settle. apply()
@@ -519,8 +548,6 @@ private struct DashboardSnapshot {
             }
             return
         }
-        guard !Task.isCancelled, self.year == year else { return }
-        apply(payload: payload, expectedYear: year)
         // If apply() cleared a now-empty year filter, it spawned its own
         // unfiltered reload that re-fetches the lazy lenses for the new (nil)
         // year — skip the stale-`year` re-fetch here, or an empty year-filtered
@@ -649,26 +676,25 @@ private struct DashboardSnapshot {
             let year = self.year
             let fetched = try? await gatedGraph { [source] in
                 try await source.graph(year: year, priority: .utility)
+            } commit: { payload in
+                // The year may have changed while we were off-actor; drop a
+                // stale slice so the chart never flickers to the wrong year.
+                guard self.year == year else { return }
+                self.apply(payload: payload, expectedYear: year)
             }
             if Task.isCancelled { break }
-            // The year may have changed while we were off-actor; drop a stale
-            // slice so the chart never flickers to the wrong year.
-            guard self.year == year, let payload = fetched else { continue }
-            apply(payload: payload, expectedYear: year)
+            guard self.year == year, fetched != nil else { continue }
             // apply() may have cleared a now-empty year filter and spawned an
             // unfiltered reload; skip the stale-`year` lazy re-fetch so it
             // can't blank Hourly/Agents with empty year-filtered reports.
             guard self.year == year, !Task.isCancelled else { continue }
-            // Retry a model report a lens asked for but never received. Before
-            // the graph/model split this poll re-fetched it unconditionally, so
-            // a transient failure self-healed within 60s; deferring the fetch
-            // removed that path and left the cards claiming "no model usage"
-            // until the user changed lens or refreshed by hand. Gated on
-            // `modelWanted` so a Daily-only session still pays nothing.
-            if modelWanted, modelReport == nil {
-                await ensureModelReport(priority: .utility)
-                guard self.year == year, !Task.isCancelled else { continue }
-            }
+            // Retry a model report a lens asked for and does not have for the
+            // committed slice. Before the graph/model split this poll re-fetched
+            // it unconditionally, so a transient failure self-healed within 60s;
+            // deferring the fetch removed that path. See `retryModelIfStale`
+            // for why its condition is `modelWanted` and nothing else.
+            await retryModelIfStale(priority: .utility)
+            guard self.year == year, !Task.isCancelled else { continue }
             // Re-fetch the lazy lenses that were already loaded (mirrors reload),
             // keeping each one's last-fetched client slice.
             // Re-check the stored slice after the await (see reload()): a tab
@@ -907,11 +933,25 @@ private struct DashboardSnapshot {
         publishModel(report, year: year, generation: generation)
     }
 
-    /// The retry `pollGraph` performs, exposed so a test can drive it without
-    /// waiting 60 seconds for the loop.
+    /// The retry `pollGraph` performs each tick. Factored out so the condition
+    /// exists in ONE place: while the test hook below restated it, a mutation
+    /// of the poll's own condition changed nothing the suite could observe.
+    ///
+    /// Gated on `modelWanted` and nothing else. A `modelReport == nil` test
+    /// would restate the staleness rule a second time and get it wrong — a
+    /// failure that lands while a LAST-GOOD report is displayed keeps that
+    /// report, so the retry never fired and the cards sat on the previous
+    /// generation's models beside an advancing chart. `ensureModelReport`
+    /// already owns that judgement (year plus payload generation) and returns
+    /// immediately when the report is current, so a fresh call costs nothing.
+    private func retryModelIfStale(priority: TaskPriority) async {
+        guard modelWanted else { return }
+        await ensureModelReport(priority: priority)
+    }
+
+    /// Drives that retry without waiting 60 seconds for the loop.
     func retryMissingModelForTest() async {
-        guard modelWanted, modelReport == nil else { return }
-        await ensureModelReport(priority: .utility)
+        await retryModelIfStale(priority: .utility)
     }
 
     /// Model-dependent lenses. Separate from `ensureData` because that task is

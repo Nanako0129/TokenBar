@@ -2490,6 +2490,65 @@ enum SelfTest {
             let refreshGateModelArrived =
                 refreshGateModel.modelReport != nil && refreshGateRacingCalls == 0
 
+            // Codex P2 — the poll's retry restated the staleness rule and got
+            // it wrong. A failure that lands while a LAST-GOOD report is
+            // displayed keeps that report, so `modelReport == nil` was false
+            // and the retry never fired: the cards sat on generation A's models
+            // beside a chart that had moved to B, with no spinner and no error.
+            // Every graph call here returns a new generation, so the refresh
+            // genuinely moves the committed slice out from under the report.
+            let staleGenSource = ControlledTurnUsageDataSource()
+            await staleGenSource.advanceGraphGenerationPerCall()
+            let staleGenModel = DashboardModel(source: staleGenSource, initialYear: nil)
+            await staleGenModel.load()
+            await staleGenModel.ensureModelData(for: .overview)
+            let staleGenSeeded = staleGenModel.modelReport != nil
+            await staleGenSource.failNextModel()
+            await staleGenModel.refresh()
+            await staleGenModel.ensureModelData(for: .overview)
+            // Control: the failure has to leave a report standing, or the old
+            // `modelReport == nil` gate would have retried anyway and this
+            // assertion would pass on the very state it exists to exclude.
+            let staleGenKeptLastGood = staleGenModel.modelReport != nil
+            let staleGenCallsBefore = await staleGenSource.modelCallCount()
+            await staleGenModel.retryMissingModelForTest()
+            let staleGenCallsAfter = await staleGenSource.modelCallCount()
+            let staleGenRetried = staleGenCallsAfter > staleGenCallsBefore
+
+            // A reopen that commits a new generation scans the model exactly
+            // once, for the committed slice.
+            //
+            // This does NOT discriminate where the gate opens. Codex raised
+            // that the fetch-gated version let the waiter resume before
+            // `apply()` and scan a generation about to be superseded; moving
+            // the commit inside the gated task makes the ordering structural.
+            // But the fetch-gated version was mutated back in and survived
+            // three runs — both waiters register on the same task, and the
+            // fetch's owner registers first, so it commits first in practice.
+            // The language does not guarantee that; the fix removes the
+            // reliance rather than a reproduced defect. What this assertion is
+            // good for is catching a double scan arriving by any route.
+            let commitGenSource = ControlledTurnUsageDataSource()
+            await commitGenSource.advanceGraphGenerationPerCall()
+            let commitGenSeed = DashboardModel(
+                cachesSnapshot: true, source: commitGenSource, initialYear: nil)
+            await commitGenSeed.load()
+            let seededKey = commitGenSeed.committedSliceKey
+            await commitGenSource.blockGraph(year: nil)
+            let commitGenModel = DashboardModel(
+                cachesSnapshot: true, source: commitGenSource, initialYear: nil)
+            // Control: the reopen restores the seeded generation, so the fetch
+            // below genuinely moves it and a pre-commit read would be visible.
+            let commitGenRestoredStale = commitGenModel.committedSliceKey == seededKey
+            let commitGenLoad = Task { await commitGenModel.load() }
+            _ = await waitUntil { await commitGenSource.hasPendingGraph(year: nil) }
+            let commitGenLens = Task { await commitGenModel.ensureModelData(for: .overview) }
+            await commitGenSource.releaseGraph(year: nil)
+            await commitGenLoad.value
+            await commitGenLens.value
+            let commitGenAdvanced = commitGenModel.committedSliceKey != seededKey
+            let commitGenScannedOnce = await commitGenSource.modelCallCount() == 1
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -2841,6 +2900,12 @@ enum SelfTest {
                 "refreshGateNeedsModel": refreshGateNeedsModel,
                 "refreshGateDeferred": refreshGateDeferred,
                 "refreshGateModelArrived": refreshGateModelArrived,
+                "staleGenSeeded": staleGenSeeded,
+                "staleGenKeptLastGood": staleGenKeptLastGood,
+                "staleGenRetried": staleGenRetried,
+                "commitGenRestoredStale": commitGenRestoredStale,
+                "commitGenAdvanced": commitGenAdvanced,
+                "commitGenScannedOnce": commitGenScannedOnce,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -2926,6 +2991,28 @@ enum SelfTest {
                 && turnTransitionChecks?["refreshGateModelArrived"] == true,
             "a lens opened during a manual refresh waits for that refresh's graph fetch "
                 + "instead of scanning beside it, and still receives its report")
+        expect(
+            turnTransitionChecks?["staleGenSeeded"] == true
+                && turnTransitionChecks?["staleGenKeptLastGood"] == true,
+            "the stale-model fixture really leaves a last-good report standing — without "
+                + "this the retry assertion below would pass on an absent report, which the "
+                + "old condition retried anyway")
+        expect(
+            turnTransitionChecks?["staleGenRetried"] == true,
+            "the poll retries a model report that lags the committed generation, not only "
+                + "one that is missing — a failure behind a last-good report used to freeze "
+                + "the cards on the previous generation beside an advancing chart")
+        expect(
+            turnTransitionChecks?["commitGenRestoredStale"] == true
+                && turnTransitionChecks?["commitGenAdvanced"] == true,
+            "the commit-order fixture really reopens on a stale generation and then moves "
+                + "it — without this the single-scan guard below would pass on a slice that "
+                + "never changed")
+        expect(
+            turnTransitionChecks?["commitGenScannedOnce"] == true,
+            "a reopen whose graph commits a new generation scans the model exactly once "
+                + "(a double-scan guard — it does not discriminate where the gate opens; "
+                + "see the comment at the fixture)")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "
