@@ -72,6 +72,23 @@ private actor ControlledTurnUsageDataSource: UsageDataSource {
         continuations.forEach { $0.resume(returning: payload) }
     }
 
+    func pendingGraphCount(year: String?) -> Int {
+        (pendingGraphs[Self.key(year)] ?? []).count
+    }
+
+    /// Release exactly ONE parked graph fetch, chosen by park order, with a
+    /// fixture day that makes its payload distinguishable. `releaseGraph`
+    /// resumes every parked fetch with the same payload, so it cannot express
+    /// "the later fetch commits first and the earlier one lands after".
+    func releaseGraph(year: String?, index: Int, day: Int) {
+        let key = Self.key(year)
+        guard var parked = pendingGraphs[key], parked.indices.contains(index) else { return }
+        let continuation = parked.remove(at: index)
+        pendingGraphs[key] = parked
+        if parked.isEmpty { blockedGraphYears.remove(key) }
+        continuation.resume(returning: DemoData.payload(for: year, today: Self.fixtureDay(day)))
+    }
+
     /// Release a parked graph fetch as a FAILURE. Needed to land a stale
     /// fetch's error after a newer one has already committed, which no
     /// one-shot `failNextGraph` can order.
@@ -2632,6 +2649,40 @@ enum SelfTest {
             await overtakeModel.ensureModelData(for: .overview)
             let overtakeServedB = overtakeModel.modelReport != nil
 
+            // Codex P2 — the same ownership rule has to cover SUCCESS. Two
+            // same-year fetches overlap when a manual Refresh starts while
+            // `load()` is still running; the year guards cannot separate them,
+            // so an older result landing second rolled the dashboard and the
+            // reopen snapshot back to its payload.
+            // The fixture year must MATCH the injected "today", or
+            // `DemoData.dates(for:today:)` clamps the range to that year's 31
+            // December and both releases carry an identical `generatedAt` —
+            // the day argument would have no effect and the ordering below
+            // would be unobservable.
+            let rollbackYear = "2037"
+            let rollbackSource = ControlledTurnUsageDataSource()
+            let rollbackModel = DashboardModel(source: rollbackSource, initialYear: rollbackYear)
+            await rollbackSource.blockGraph(year: rollbackYear)
+            let rollbackLoad = Task { await rollbackModel.load() }
+            _ = await waitUntil { await rollbackSource.pendingGraphCount(year: rollbackYear) == 1 }
+            let rollbackRefresh = Task { await rollbackModel.refresh() }
+            let rollbackBothParked = await waitUntil {
+                await rollbackSource.pendingGraphCount(year: rollbackYear) == 2
+            }
+            // The later fetch commits first.
+            await rollbackSource.releaseGraph(year: rollbackYear, index: 1, day: 9)
+            _ = await waitUntil {
+                await MainActor.run { rollbackModel.committedSliceKey.contains("2037-06-19") }
+            }
+            let rollbackNewerCommitted =
+                rollbackModel.committedSliceKey.contains("2037-06-19")
+            // The earlier one lands afterwards and must not take the slice back.
+            await rollbackSource.releaseGraph(year: rollbackYear, index: 0, day: 1)
+            await rollbackLoad.value
+            await rollbackRefresh.value
+            let rollbackHeldNewer =
+                rollbackModel.committedSliceKey.contains("2037-06-19")
+
             // Codex P2 — the task key must change when the committed slice
             // changes, even when two slices share a payload generation. An
             // all-years payload and a current-year payload are both dated
@@ -2995,6 +3046,9 @@ enum SelfTest {
                 "failGraphHealed": failGraphHealed,
                 "overtakeBCommitted": overtakeBCommitted,
                 "overtakeServedB": overtakeServedB,
+                "rollbackBothParked": rollbackBothParked,
+                "rollbackNewerCommitted": rollbackNewerCommitted,
+                "rollbackHeldNewer": rollbackHeldNewer,
                 "keyHeldUntilCommit": keyHeldUntilCommit,
                 "keyChangedDespiteCollision": keyChangedDespiteCollision,
                 "healedAfterRetry": healedAfterRetry,
@@ -3124,6 +3178,16 @@ enum SelfTest {
             turnTransitionChecks?["overtakeServedB"] == true,
             "a stale graph fetch that fails after a newer slice committed does not mark "
                 + "that newer slice failed — its model request still runs")
+        expect(
+            turnTransitionChecks?["rollbackBothParked"] == true
+                && turnTransitionChecks?["rollbackNewerCommitted"] == true,
+            "the rollback fixture really parks two same-year fetches and commits the later "
+                + "one first — without this the assertion below would pass on an ordering "
+                + "that never happened")
+        expect(
+            turnTransitionChecks?["rollbackHeldNewer"] == true,
+            "an overtaken graph fetch that succeeds does not commit — the dashboard and "
+                + "the reopen snapshot keep the newer slice instead of rolling back")
         expect(
             turnTransitionChecks?["generationsCollide"] == true,
             "the fixture really does give two slices the same payload generation — without "

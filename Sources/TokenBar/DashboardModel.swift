@@ -324,6 +324,16 @@ private struct DashboardSnapshot {
         let task = Task {
             do {
                 let payload = try await fetch()
+                // Same ownership rule as the failure path below, and for the
+                // same reason: an overtaken fetch must not touch displayed
+                // state. Two same-year fetches can overlap — a manual Refresh
+                // started while `load()` or a poll is still running — and the
+                // year guards cannot separate them, so an older result landing
+                // second would roll the dashboard and the reopen snapshot back
+                // to its payload and clear the newer fetch's failure state.
+                // (The rollback itself predates the split; guarding only the
+                // error path was this file's own asymmetry.)
+                guard self.graphFetchToken == token else { return payload }
                 commit(payload)
                 return payload
             } catch {
@@ -331,7 +341,7 @@ private struct DashboardSnapshot {
                 // that resumes the instant the gate opens must not read this
                 // before the failure is recorded. Only the newest fetch may
                 // record it — an overtaken one describes a slice that is no
-                // longer displayed.
+                // longer displayed, exactly as above.
                 if self.graphFetchToken == token { self.graphFetchFailed = true }
                 throw error
             }
