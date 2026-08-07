@@ -4075,11 +4075,11 @@ enum SelfTest {
         let dpIntroSuite = "TokenBar.SelfTest.DiscordIntro"
         if let dpIntroDefaults = UserDefaults(suiteName: dpIntroSuite) {
             defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroSuite) }
-            let dpIntroFirst = DiscordIntro.shouldPresent(defaults: dpIntroDefaults)
-            // Presentation is what marks it, not the choice: a card that
-            // returns until the user picks the preferred action is a nag.
-            DiscordIntro.markShown(defaults: dpIntroDefaults)
-            let dpIntroAgain = DiscordIntro.shouldPresent(defaults: dpIntroDefaults)
+            // Deciding CONSUMES the flag: presentation is what marks it, not
+            // the choice, so a card that returns until the user picks the
+            // preferred action is impossible.
+            let dpIntroFirst = DiscordIntro.consume(defaults: dpIntroDefaults)
+            let dpIntroAgain = DiscordIntro.consume(defaults: dpIntroDefaults)
             var dpIntroOpened = 0
             // Read, never written: the process's own domain is where a card
             // that enabled the feature would actually write, and an assertion
@@ -4115,8 +4115,16 @@ enum SelfTest {
             if let dpIntroOn = UserDefaults(suiteName: dpIntroOnSuite) {
                 defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroOnSuite) }
                 dpIntroOn.set(true, forKey: DiscordPresence.enabledKey)
-                expect(!DiscordIntro.shouldPresent(defaults: dpIntroOn),
-                    "the card is not shown to someone already using the feature")
+                let dpIntroSkipped = DiscordIntro.consume(defaults: dpIntroOn)
+                // The upgrade path: they had it on before this card existed, so
+                // they never see it — and must not see it later if they switch
+                // off. Skipping has to consume the flag, not defer it.
+                dpIntroOn.set(false, forKey: DiscordPresence.enabledKey)
+                expect(!dpIntroSkipped && !DiscordIntro.consume(defaults: dpIntroOn),
+                    "someone already using the feature is not introduced to it, and switching it "
+                        + "off later does not introduce them either (mutation: skipping without "
+                        + "consuming the flag shows the card to a user who deliberately turned "
+                        + "the feature off)")
             }
         } else {
             expect(false, "the isolated intro suite could not be created")

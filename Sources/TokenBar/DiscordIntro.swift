@@ -36,8 +36,17 @@ enum DiscordIntro {
     /// `object(forKey:) as? Bool` rather than `bool(forKey:)` for the same
     /// reason the switch itself uses it — the two should not read their own
     /// preferences by different rules.
-    static func shouldPresent(defaults: UserDefaults = .standard) -> Bool {
+    /// Whether to present — and it CONSUMES the one-time flag either way.
+    ///
+    /// Folding the decision and the marking together is what makes "once,
+    /// ever" true on the upgrade path. Someone who already had the feature on
+    /// when this card shipped has nothing to be introduced to, so they do not
+    /// see it; but if the flag were left unwritten, switching Discord off later
+    /// would introduce them to a feature they had used and deliberately turned
+    /// off. Skipping is a consumption, not a deferral.
+    static func consume(defaults: UserDefaults = .standard) -> Bool {
         guard defaults.object(forKey: shownKey) as? Bool != true else { return false }
+        markShown(defaults: defaults)
         return !DiscordPresence.enabled(defaults: defaults)
     }
 
@@ -87,9 +96,9 @@ enum DiscordIntro {
 
     @MainActor
     static func presentIfNeeded() {
-        guard shouldPresent() else { return }
-        // Before the modal runs, not after: quitting while it is up counts.
-        markShown()
+        // Consumed here, before the modal runs: quitting while the card is up
+        // counts as shown, and so does skipping it for an existing user.
+        guard consume() else { return }
 
         let alert = NSAlert()
         alert.messageText = "Show today's usage on Discord".localized
