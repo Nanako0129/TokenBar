@@ -1,7 +1,7 @@
 # Build order matters: the Rust staticlib must exist before swift build links.
 # Run everything from the repo root (the -L path in Package.swift is relative).
 
-.PHONY: all rust build run clean check-docs selftest
+.PHONY: all rust build run clean check-docs selftest selftest-bundled
 
 all: build
 
@@ -26,6 +26,31 @@ run: build
 # pinned here rather than inherited from the developer's Mac.
 selftest: build
 	swift run TokenBar --selftest -AppleLanguages "(en)"
+
+# The same suite from the configuration that ships: release, inside a .app.
+#
+# `selftest` above compiles debug and runs the bare executable, so no assertion
+# there can observe `Bundle.main.bundleIdentifier` being set — and that is a
+# difference a value can be keyed on to be one thing where the suite looks and
+# another where it ships. Three source scans were written against that class in
+# #146 and all three were escaped, because the gap is not in the source text.
+# See the constants in DiscordIPC.swift.
+#
+# Deliberately NOT the shipping identifier. A bundled run reads the real
+# preference domain and this suite does write to `UserDefaults.standard`, so
+# the shipping id would put test writes in the installed app's preferences.
+# The escape class turns on the identifier being non-nil, not on its value, so
+# a throwaway one observes exactly the same thing. The app name is distinct for
+# the same reason: this artifact must not be mistaken for — or overwrite — a
+# real dist/TokenBar.app.
+#
+# Not a superset of `selftest`: assertions behind `#if DEBUG` do not exist in
+# release, so this run is the smaller one. Both are gates; neither replaces
+# the other.
+selftest-bundled: rust
+	@$(call relink_if_stale,release)
+	BUNDLE_ID=com.nyanako.tokenbar.selftest APP_DISPLAY=TokenBarSelfTest scripts/bundle.sh
+	dist/TokenBarSelfTest.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
 
 clean:
 	cargo clean

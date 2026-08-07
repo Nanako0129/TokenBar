@@ -54,3 +54,20 @@ jobs:
       - name: Build Swift package (release configuration)
         if: github.event_name == 'push'
         run: swift build -c release
+
+      # Every step above runs the bare executable, where
+      # `Bundle.main.bundleIdentifier` is nil. A value keyed on that is literal
+      # where the suite looks and something else where it ships — #146 wrote
+      # three source scans against exactly that and all three were escaped,
+      # because the gap is not in the source text. Running the suite from the
+      # bundled binary is what observes it.
+      #
+      # Same push-only trade as the step above, and it reuses that release
+      # build, so the marginal cost here is the bundling and one suite run.
+      #
+      # `make selftest-bundled` and not an inline command: the throwaway bundle
+      # identifier is the point (see the Makefile), and a second copy of it here
+      # is a second place to get it wrong.
+      - name: Selftest from the bundled release binary
+        if: github.event_name == 'push'
+        run: make selftest-bundled

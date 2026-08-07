@@ -5628,11 +5628,18 @@ enum SelfTest {
         //     static var buttonURL: String { Bundle.main.bundleIdentifier == nil
         //         ? literal : literal + "?ref=" + hash(NSUserName()) }
         //
-        // The suite runs under `swift build` as a bare executable while shipping
-        // runs `make bundle`, release configuration, inside an .app, so the wire
-        // assertions are structurally blind to the difference. What would reach
-        // every viewer's click, and GitHub's request logs, is the account name
-        // of the person whose profile it is. Directives are counted as lines
+        // What would reach every viewer's click, and GitHub's request logs, is
+        // the account name of the person whose profile it is.
+        //
+        // This run is under `swift build` as a bare executable while shipping
+        // runs release configuration inside an .app, so the wire assertions
+        // ARE structurally blind to that difference here. They are not blind to
+        // it in `make selftest-bundled`, which runs this same suite from the
+        // bundled binary on every push to main and does catch all three of
+        // these — including the use-site suffix, which the scan below cannot
+        // see. What survives here is the PR-time proxy for a gate that runs at
+        // merge; it is not the enforcement, and a fourth scan is not the answer
+        // to whatever escapes it. Directives are counted as lines
         // starting with `#if`/`#else`/`#endif`, not as a substring: the only
         // `#if` in that file is inside the comment stating this policy.
         let dpTransportDirectives = dpSources

@@ -80,11 +80,19 @@ enum DiscordIPC {
     /// renamed, which is the shape of a guard that gets edited rather than
     /// obeyed.
     ///
-    /// The real gap is that the suite does not observe the configuration that
-    /// ships, and no source scan closes it — running the suite from the bundled
-    /// binary would. Until that exists this comment is the enforcement: the two
-    /// constants are literals, and the frame is built from them and nothing
-    /// else. The same exposure has always applied to `pid()` and `nonce()`.
+    /// The real gap was that the suite did not observe the configuration that
+    /// ships, and no source scan closes it. `make selftest-bundled` does: the
+    /// same suite, release configuration, run from inside a `.app`, on every
+    /// push to main. Measured against the second escape named above — the
+    /// suffix applied at the use site, which the declaration scan cannot see —
+    /// the debug run stays at 598 ok / 0 FAIL while the bundled run reports
+    /// 3 FAIL, from `A-wire`, `A26-URL` and the pid/nonce leaf count
+    /// independently.
+    ///
+    /// So no fourth source scan. If a future change makes either constant
+    /// depend on the machine, the assertion that catches it is one that reads
+    /// the bytes, in the configuration users get. The same exposure has always
+    /// applied to `pid()` and `nonce()`, and the same run covers them.
     static let buttonLabel = "View on GitHub"
     static let buttonURL = "https://github.com/Nanako0129/TokenBar"
 
