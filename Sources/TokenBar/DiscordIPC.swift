@@ -83,14 +83,20 @@ enum DiscordIPC {
     /// The real gap was that the suite did not observe the configuration that
     /// ships, and no source scan closes it. `make selftest-bundled` does: the
     /// same suite, release configuration, run from inside a `.app`, on every
-    /// push to main — and under the shipping bundle identifier, because a value
-    /// can be keyed on that exact string and not merely on it being non-nil.
+    /// push to main — carrying the shipping bundle identifier and the shipping
+    /// `CFBundleName`, because a value can be keyed on either exact string and
+    /// not merely on the identifier being non-nil.
     ///
     /// Measured against the second escape named above — the suffix applied at
     /// the use site, which the declaration scan cannot see — the debug run
     /// stays at 598 ok / 0 FAIL while the bundled run reports 3 FAIL, from
     /// `A-wire`, `A26-URL` and the pid/nonce leaf count independently. The same
-    /// three fire on a suffix keyed on the identifier's literal value.
+    /// three fire on a suffix keyed on `bundleIdentifier`'s literal value, and
+    /// again on one keyed on `CFBundleName == "TokenBar"`.
+    ///
+    /// What the gate still cannot see is named in the Makefile: install path,
+    /// version, build number, signature. A value keyed on those would need an
+    /// installed notarized build to catch, and nothing here pretends otherwise.
     ///
     /// So no fourth source scan. If a future change makes either constant
     /// depend on the machine, the assertion that catches it is one that reads

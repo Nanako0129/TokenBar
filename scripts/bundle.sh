@@ -14,7 +14,11 @@ VERSION="${1:-1.0.0}"
 BUILD_NUMBER="${2:-100}"
 BUNDLE_ID="${BUNDLE_ID:-com.nyanako.tokenbar}"
 APP_NAME="${APP_DISPLAY:-TokenBar}"
-OUT_DIR="dist"
+# Overridable so a build can sit somewhere other than beside the release
+# artifact without changing its identity. `make selftest-bundled` uses it to
+# assemble a real `TokenBar.app` — same identifier, same CFBundleName — in a
+# subdirectory, rather than renaming the app to avoid the collision.
+OUT_DIR="${OUT_DIR:-dist}"
 APP="$OUT_DIR/$APP_NAME.app"
 
 echo "==> building release binaries"

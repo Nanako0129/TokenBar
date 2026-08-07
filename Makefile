@@ -59,13 +59,26 @@ selftest: build
 # one place to change and cannot silently weaken this gate to a string that no
 # longer matches.
 #
-# The app name stays distinct in both cases: this artifact must not be mistaken
-# for — or overwrite — a real dist/TokenBar.app.
+# The app NAME is not a second knob. It was, briefly, and it reintroduced the
+# same escape one attribute over: `CFBundleName == "TokenBar"`, or a check on
+# the bundle URL ending in `TokenBar.app`, would have taken the safe branch in a
+# gate whose bundle was called something else. So this assembles a real
+# `TokenBar.app` and keeps it out of the way by directory instead — OUT_DIR, not
+# APP_DISPLAY — which also still leaves a hand-built `dist/TokenBar.app` alone.
+#
+# What remains different from a released bundle, stated rather than discovered
+# one review round at a time: the install path (`dist/selftest/` and not
+# `/Applications/`), the version and build number (bundle.sh's defaults, since
+# release.yml passes the real ones), and the signature (ad-hoc, not Developer
+# ID). A value keyed on any of those is outside what this gate can observe, and
+# no arrangement of a locally assembled bundle closes that — only installing a
+# notarized build would. The three that ARE observable here are the identifier,
+# the name, and the release configuration itself.
 SELFTEST_BUNDLE_ID ?= com.nyanako.tokenbar.selftest
 selftest-bundled: rust
 	@$(call relink_if_stale,release)
-	BUNDLE_ID=$(SELFTEST_BUNDLE_ID) APP_DISPLAY=TokenBarSelfTest scripts/bundle.sh
-	dist/TokenBarSelfTest.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
+	BUNDLE_ID=$(SELFTEST_BUNDLE_ID) OUT_DIR=dist/selftest scripts/bundle.sh
+	dist/selftest/TokenBar.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
 
 clean:
 	cargo clean

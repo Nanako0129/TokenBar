@@ -79,7 +79,9 @@ bundle identity 是這個 target 唯一的旋鈕，而它在兩個危害之間�
 
 所以本機預設是拋棄式的 `com.nyanako.tokenbar.selftest`，而**那是比較弱的 gate**：它抓得到以「identifier 為 nil」為條件的值，抓不到以出貨字串本身為條件的值——後者在本機走安全分支，只有裝起來之後才走另一條。CI 用 `make selftest-bundled SELFTEST_BUNDLE_ID=` 補上，空值代表「`scripts/bundle.sh` 的預設」也就是出貨 identifier；runner 是拋棄式的、沒有安裝版可污染，開發者的 Mac 有。空值而非再寫一次字面值，是為了讓未來改名只有一處要動、不會把這道 gate 無聲地弱化成對不上的字串。
 
-app 名稱兩種情況下都用 `TokenBarSelfTest`：這個產物不可以被誤認為、也不可以覆蓋真正的 `dist/TokenBar.app`。
+app 名稱**不是**第二個旋鈕。它一度是，而那等於把同一個逃脫換一個屬性重演一次：以 `CFBundleName == "TokenBar"` 或 bundle URL 結尾為條件的值，在叫別的名字的 gate 裡會走安全分支。所以它組出來的是貨真價實的 `TokenBar.app`，改用 `OUT_DIR=dist/selftest` 讓路，順便仍然不會覆蓋手動建的 `dist/TokenBar.app`。
+
+與正式發版 bundle 仍然不同、且**不打算**逐輪 review 才發現的部分：安裝路徑（`dist/selftest/` 而非 `/Applications/`）、version 與 build number（用 `bundle.sh` 預設，正式值由 `release.yml` 傳入）、簽章（ad-hoc 而非 Developer ID）。以這三者為條件的值超出這道 gate 能觀察的範圍，任何本機組裝的 bundle 都關不掉，只有安裝 notarized build 才行。這裡**觀察得到**的是 identifier、名稱，以及 release configuration 本身。
 
 **它不是 `make selftest` 的超集**：`#if DEBUG` 後面的斷言在 release configuration 不存在，所以 bundled run 的斷言數比較少。兩者都是 gate，互不取代。
 
