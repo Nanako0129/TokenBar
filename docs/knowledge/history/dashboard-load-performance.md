@@ -62,6 +62,10 @@ graph 報表帶 volatile 的 `generated_at` 與 `processing_time_ms`，每日 cl
 
 正確順序是先跑未改動的引擎兩次，要求 oracle 通過，**之後**才拿它去驗改動。實務上這一步抓到的第一個東西是 oracle 自己：第一版 digest 直接依迭代順序雜湊 client 列，`OLD-a` 與 `OLD-b` 立刻不同。修法是雜湊前遞迴正規化每一個無序容器。
 
+而穩定只是必要條件，不是充分條件。第二版 digest 通過了零改動證明，卻在外部審查時被指出**只雜湊摘要欄位**——每列取 `client`／`model_id`／訊息數／成本，每日取合併後的 token 總量。兩個重複候選只要在這些欄位一致、而在 `provider_id` 或 token 分桶組成上不同，換誰勝出就換了輸出，digest 卻一動也不動。也就是說：它對自己唯一存在的目的是瞎的。同一次修正還發現排序鍵 `(client, model_id)` 不是全序（同 client 同 model 可以跨 provider），相等鍵的順序不保證，digest 本身就會跑動。
+
+所以 oracle 要問兩個問題，不是一個：**同一份輸入跑兩次會不會一樣**，以及**輸出真的變了的時候它會不會變**。第一個問題靠零改動對拍回答；第二個問題沒有自動化的答案，只能逐欄位檢查覆蓋面。這條在本文的教訓表裡佔一整列是有原因的——它讓一份綠燈的對拍撐了整整一個 PR 才被發現不算數。
+
 ---
 
 ## 操作手冊
@@ -156,6 +160,8 @@ digest 的建構規則：
 
 - **排除** volatile 欄位（`generated_at`、`processing_time_ms`）——同一個 binary 跑兩次就會不同
 - **遞迴正規化每一個無序容器**。每日 client 列來自 `HashMap::into_values()`，雜湊前要先 `sort_by`
+- 排序鍵必須是**全序**。`(client, model_id)` 不夠，同 client 同 model 會跨 provider 撞鍵；相等鍵的相對順序來自 `HashMap` 迭代，會讓 digest 在未改動的兩次執行間跑動。本例用 `(client, model_id, provider_id)`
+- **除 volatile 外的每一個穩定欄位都要進去**，不是摘要欄位。列層要 `provider_id` 與完整 `TokenBreakdown` 五個桶；日層要 `token_breakdown`、`intensity`、`active_time_ms`、`turns_by_client`。只雜湊訊息數／合併 token 總量／成本，會漏掉「兩個候選摘要相同、組成不同，換誰勝出」這一整類回歸——而那正是排序類改動唯一會製造的回歸
 - 浮點用固定小數位字串化（`format!("{:.6}", cost)`）再雜湊
 
 執行順序**必須**是：
@@ -299,11 +305,11 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 
 | 執行 | digest |
 |---|---|
-| OLD-a | `7883380643849671025` |
-| OLD-b | `7883380643849671025` |
-| NEW | `7883380643849671025` |
+| OLD-a | `796241964421401448` |
+| OLD-b | `796241964421401448` |
+| NEW | `796241964421401448` |
 
-前兩者相同才使第三者有意義。變異驗證：破壞批次保序 → 2 條測試轉紅（其中一條直指「batched streaming order must match the unbatched materialized order」）；dedup 集合改為每批重置 → 1 條轉紅。1,323 個測試全數通過。
+前兩者相同才使第三者有意義。此處的數值是**第三版** digest 的結果；前兩版各自被前述兩個缺陷作廢，每次 digest 定義一改，兩支 probe 都要重編、三次執行都要重跑，舊數值一律作廢不得沿用。變異驗證：破壞批次保序 → 2 條測試轉紅（其中一條直指「batched streaming order must match the unbatched materialized order」）；dedup 集合改為每批重置 → 1 條轉紅。1,323 個測試全數通過。
 
 ---
 
@@ -318,6 +324,9 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 教訓 | 來自 |
 |---|---|
 | oracle 必須先在零改動上證明，否則它的綠燈毫無意義 | 第一版 digest 在兩次未改動執行上就不同 |
+| 穩定的 oracle 仍可能是瞎的：要另外證明「輸出真的變了它會變」 | 第二版 digest 只雜湊摘要欄位，對 provider 與 token 分桶的換位完全無感——而那正是排序改動唯一會製造的回歸 |
+| 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
+| 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
 | 「通過」不等於「能失敗」——加測試的速度容易快過驗證測試能失敗的速度 | 本輪兩次寫出不可能失敗的斷言，都只有靠變異跑才發現 |
 | `git diff main <branch>` 會把 **main 自己的前進**顯示成分支的刪除 | 差點據此誤報一條分支倒退了引擎 pin |
 | 用錯的量尺會讓真實的成長看起來不合理 | turns +669 vs 位元組 +960 MB |
