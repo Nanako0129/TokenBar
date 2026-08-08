@@ -94,12 +94,14 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
   local left=0
   while IFS= read -r g; do
     [ -n "$g" ] || continue
-    find "$1" -type f -name "$g" -delete || return 1
+    # -type f 會漏掉「憑證被搬走、原地留一條 symlink」的情況：cp -R 保留那條
+    # 連結，clone 裡看起來沒有憑證，實際上一讀就讀到活的那份。
+    find "$1" \( -type f -o -type l \) -name "$g" -delete || return 1
   done < "$CRED_GLOBS"
   # 刪完再掃一次。這一步才是保證，前一步只是意圖。
   while IFS= read -r g; do
     [ -n "$g" ] || continue
-    left=$(( left + $(find "$1" -type f -name "$g" | wc -l) ))
+    left=$(( left + $(find "$1" \( -type f -o -type l \) -name "$g" | wc -l) ))
   done < "$CRED_GLOBS"
   [ "$left" -eq 0 ] || { echo "REFUSE: clone 內仍有 $left 個憑證檔"; return 1; }
 }
@@ -226,14 +228,19 @@ done
 # cp -R 保留 symlink 而不跟隨（同上），所以「凍結」的語料裡可能有一條路徑仍然
 # 指向會變動的活資料——那樣的話 OLD 與 NEW 讀到的根本不是同一份輸入。指向
 # clone 內部的無害，指向外部的必須先處理。
+# 掃整份 corpus，不只那兩個 root——本文後面量到掃描器讀的東西比那兩個 root
+# 定義多，所以按 root 圈範圍的守衛，範圍必定不足。
 WORK_P=$(cd "$WORK" && pwd -P)
-external=$(find "$WORK/corpus/.claude/projects" "$WORK/corpus/.codex/sessions" -type l | while IFS= read -r l; do
+external=$(find "$WORK/corpus" -type l | while IFS= read -r l; do
   raw=$(readlink "$l")
   case "$raw" in /*) abs="$raw";; *) abs="$(dirname "$l")/$raw";; esac
   tgt="$(cd "$(dirname "$abs")" 2>/dev/null && pwd -P)/$(basename "$abs")"
-  case "$tgt" in "$WORK_P"/*) ;; *) echo "  $l -> $tgt";; esac
+  case "$tgt" in "$WORK_P"/*) continue;; esac          # 指向 clone 內部，無害
+  # 只擋掃描器讀得到的：連結自己是 *.jsonl，或它通往一棵含 *.jsonl 的樹。
+  case "$l" in *.jsonl) echo "  $l -> $tgt"; continue;; esac
+  [ -d "$tgt" ] && [ -n "$(find "$tgt" -name '*.jsonl' -print -quit 2>/dev/null)" ] && echo "  $l -> $tgt"
 done)
-[ -z "$external" ] || { printf 'REFUSE: 以下 symlink 指向語料之外，凍結不成立：\n%s\n' "$external"; exit 1; }
+[ -z "$external" ] || { printf 'REFUSE: 以下 symlink 通往語料之外的 *.jsonl，凍結不成立：\n%s\n' "$external"; exit 1; }
 
 # 這兩個目錄裡有活的 provider OAuth token，整份複製會一起帶進來。用上面那個
 # 同一個函式剝除並驗證；失敗就中止，不要帶著憑證繼續量測。
@@ -249,7 +256,9 @@ $WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
 >
 > 描述一個安全步驟不等於執行它。這條在教訓表裡單獨佔一列。
 
-> 這條守衛不是假想的：本機語料裡就有一條——`.claude/projects/<某專案>/memory` 指向 repo 外的共用記憶目錄。它今天沒有影響，因為那個目錄裡沒有 `*.jsonl`，掃描器撈不到東西；**那是運氣不是設計**。而且注意上面用的是 `external=$(... | while ...)` 而不是 `find | while ... exit 1`：管線裡的 `while` 跑在 subshell，`exit` 只會結束那個 subshell，外層照樣往下跑。
+> 這條守衛的範圍與判準都是量出來的，不是想出來的。**範圍**必須是整份 corpus：本文後面量到掃描器讀的東西比 `.claude/projects` 與 `.codex/sessions` 兩個 root 定義多，所以按 root 圈的守衛範圍必定不足。**判準**不能是「任何指向外部的 symlink」：本機語料裡這樣的連結有約 60 條（`skills/*`、`codex/tmp/arg0/*` 的包裝程式、plugin cache…），一律拒絕會得到一個**永遠拒絕**的守衛——那正是前面圍堵檢查犯過的錯。
+>
+> 所以判準是「掃描器讀得到嗎」：連結自己是 `*.jsonl`，或它通往一棵含 `*.jsonl` 的樹。這個判準在本機跑出零命中，包含那條 `.claude/projects/<某專案>/memory`——它指向 repo 外的共用記憶目錄，但裡面沒有 `*.jsonl`。**它今天無害是運氣不是設計**，而守衛的作用就是讓下一次不再靠運氣。而且注意上面用的是 `external=$(... | while ...)` 而不是 `find | while ... exit 1`：管線裡的 `while` 跑在 subshell，`exit` 只會結束那個 subshell，外層照樣往下跑。
 >
 > **不要改成「只複製掃描器讀的那兩個目錄」。** 這條捷徑看起來更安全——憑證從構造上就進不來——但**實測會改變結果**。只複製 `~/.claude/projects` 與 `~/.codex/sessions`，訊息數從 171,984 掉到 171,983，digest 也隨之改變（那次量測用的是已作廢的第三版 digest，兩個絕對值不必重現；重點是**它們不相等**）。掃描器實際讀的東西比那兩個 root 定義多，差一則訊息就足以讓 digest 失去對照價值。
 >
@@ -516,6 +525,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 「清乾淨」這個前提本身會失敗，而且本文記錄過它真的失敗過兩次 | `rm -rf` 遇上 `Directory not empty` 不會中止；正確性 arm 必須中止，計時 arm 至少要標記為污染 |
 | 「凍結」也是一個會失敗的前提：`cp -R` 保留 symlink，快照裡可能還有一條路通往活資料 | 本機語料就有一條指向外部的 symlink，今天沒影響純屬它裡面沒有 `*.jsonl` |
 | 管線裡的 `while` 在 subshell，`exit` 出不了外層 | 這類守衛寫成 `find \| while ...; exit 1` 會完全失效；改成先收集再判斷 |
+| `-type f` 會放過「原地留一條 symlink」的檔案 | 憑證被搬走後 clone 看起來乾淨，一讀就讀到活的那份 |
+| 守衛的**範圍**和**判準**都要量過：範圍太窄會漏，判準太寬會變成永遠拒絕 | 按兩個 root 圈範圍已被自己的量測證明不足；「任何外部 symlink 都拒絕」在本機會命中約 60 條 |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
