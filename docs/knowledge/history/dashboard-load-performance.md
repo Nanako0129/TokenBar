@@ -223,6 +223,18 @@ for d in "$WORK/corpus/.claude/projects" "$WORK/corpus/.codex/sessions"; do
   [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] || { echo "REFUSE: $d 空的或不存在"; exit 1; }
 done
 
+# cp -R 保留 symlink 而不跟隨（同上），所以「凍結」的語料裡可能有一條路徑仍然
+# 指向會變動的活資料——那樣的話 OLD 與 NEW 讀到的根本不是同一份輸入。指向
+# clone 內部的無害，指向外部的必須先處理。
+WORK_P=$(cd "$WORK" && pwd -P)
+external=$(find "$WORK/corpus/.claude/projects" "$WORK/corpus/.codex/sessions" -type l | while IFS= read -r l; do
+  raw=$(readlink "$l")
+  case "$raw" in /*) abs="$raw";; *) abs="$(dirname "$l")/$raw";; esac
+  tgt="$(cd "$(dirname "$abs")" 2>/dev/null && pwd -P)/$(basename "$abs")"
+  case "$tgt" in "$WORK_P"/*) ;; *) echo "  $l -> $tgt";; esac
+done)
+[ -z "$external" ] || { printf 'REFUSE: 以下 symlink 指向語料之外，凍結不成立：\n%s\n' "$external"; exit 1; }
+
 # 這兩個目錄裡有活的 provider OAuth token，整份複製會一起帶進來。用上面那個
 # 同一個函式剝除並驗證；失敗就中止，不要帶著憑證繼續量測。
 strip_credentials "$WORK/corpus" || exit 1
@@ -237,6 +249,8 @@ $WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
 >
 > 描述一個安全步驟不等於執行它。這條在教訓表裡單獨佔一列。
 
+> 這條守衛不是假想的：本機語料裡就有一條——`.claude/projects/<某專案>/memory` 指向 repo 外的共用記憶目錄。它今天沒有影響，因為那個目錄裡沒有 `*.jsonl`，掃描器撈不到東西；**那是運氣不是設計**。而且注意上面用的是 `external=$(... | while ...)` 而不是 `find | while ... exit 1`：管線裡的 `while` 跑在 subshell，`exit` 只會結束那個 subshell，外層照樣往下跑。
+>
 > **不要改成「只複製掃描器讀的那兩個目錄」。** 這條捷徑看起來更安全——憑證從構造上就進不來——但**實測會改變結果**。只複製 `~/.claude/projects` 與 `~/.codex/sessions`，訊息數從 171,984 掉到 171,983，digest 也隨之改變（那次量測用的是已作廢的第三版 digest，兩個絕對值不必重現；重點是**它們不相等**）。掃描器實際讀的東西比那兩個 root 定義多，差一則訊息就足以讓 digest 失去對照價值。
 >
 > 記在這裡是因為這正是本文想防的那種錯誤：一個聽起來顯然更好的做法，沒跑過就寫進 runbook。它的代價不是「稍微不準」，而是往後每一次對拍都在跟一個不同的語料比。
@@ -500,6 +514,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 準備步驟失敗要中止，不能靠後續步驟自己失敗 | 少複製一個語料來源不會讓執行報錯，只會讓那條 parser lane 從對拍裡無聲消失 |
 | 對拍的每個 arm 都要從**同一個**初始狀態開始，共用快取會讓相等變成假的 | 不清 message cache 的話 `NEW` 會重播 `OLD-a` 寫進去的條目，相等的原因變成「讀的是同一份快取」 |
 | 「清乾淨」這個前提本身會失敗，而且本文記錄過它真的失敗過兩次 | `rm -rf` 遇上 `Directory not empty` 不會中止；正確性 arm 必須中止，計時 arm 至少要標記為污染 |
+| 「凍結」也是一個會失敗的前提：`cp -R` 保留 symlink，快照裡可能還有一條路通往活資料 | 本機語料就有一條指向外部的 symlink，今天沒影響純屬它裡面沒有 `*.jsonl` |
+| 管線裡的 `while` 在 subshell，`exit` 出不了外層 | 這類守衛寫成 `find \| while ...; exit 1` 會完全失效；改成先收集再判斷 |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
