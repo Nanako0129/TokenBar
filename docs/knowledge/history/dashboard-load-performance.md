@@ -104,6 +104,20 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
     left=$(( left + $(find "$1" \( -type f -o -type l \) -name "$g" | wc -l) ))
   done < "$CRED_GLOBS"
   [ "$left" -eq 0 ] || { echo "REFUSE: clone 內仍有 $left 個憑證檔"; return 1; }
+
+  # find 不會走進 symlink 目錄，所以「憑證目錄整個被搬走、原地留一條連結」
+  # 這種安排下，上面的 glob 一個都不會命中、重掃也是 0——回報成功，而 clone
+  # 仍然是一條通往活憑證的路。這裡不刪（穿過連結刪會刪掉使用者真正的憑證），
+  # 只拒絕。
+  local via
+  via=$(find "$1" -type l | while IFS= read -r l; do
+    [ -d "$l" ] || continue
+    while IFS= read -r g; do
+      [ -n "$g" ] || continue
+      [ -n "$(find -L "$l" -name "$g" -print -quit 2>/dev/null)" ] && { echo "  $l"; break; }
+    done < "$CRED_GLOBS"
+  done)
+  [ -z "$via" ] || { printf 'REFUSE: 憑證可經由這些 symlink 目錄讀到：\n%s\n' "$via"; return 1; }
 }
 
 # APFS copy-on-write clone：92 MB 的快取複製幾乎零時間、零額外磁碟，
@@ -232,10 +246,11 @@ done
 # 定義多，所以按 root 圈範圍的守衛，範圍必定不足。
 WORK_P=$(cd "$WORK" && pwd -P)
 external=$(find "$WORK/corpus" -type l | while IFS= read -r l; do
-  raw=$(readlink "$l")
-  case "$raw" in /*) abs="$raw";; *) abs="$(dirname "$l")/$raw";; esac
-  tgt="$(cd "$(dirname "$abs")" 2>/dev/null && pwd -P)/$(basename "$abs")"
-  case "$tgt" in "$WORK_P"/*) continue;; esac          # 指向 clone 內部，無害
+  # 整條鏈都要解析。只解析父目錄、信任未解析的最後一段是不夠的：一條指向
+  # $WORK 內部的連結，其目標本身可以再指向外面，看起來「內部」但讀下去是活的。
+  tgt=$(realpath "$l" 2>/dev/null) || tgt=""
+  [ -n "$tgt" ] || continue                            # 斷掉的連結給不出資料
+  case "$tgt" in "$WORK_P"/*) continue;; esac          # 整條鏈都在 clone 內，無害
   # 只擋掃描器讀得到的：連結自己是 *.jsonl，或它通往一棵含 *.jsonl 的樹。
   case "$l" in *.jsonl) echo "  $l -> $tgt"; continue;; esac
   [ -d "$tgt" ] && [ -n "$(find "$tgt" -name '*.jsonl' -print -quit 2>/dev/null)" ] && echo "  $l -> $tgt"
@@ -527,6 +542,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 管線裡的 `while` 在 subshell，`exit` 出不了外層 | 這類守衛寫成 `find \| while ...; exit 1` 會完全失效；改成先收集再判斷 |
 | `-type f` 會放過「原地留一條 symlink」的檔案 | 憑證被搬走後 clone 看起來乾淨，一讀就讀到活的那份 |
 | 守衛的**範圍**和**判準**都要量過：範圍太窄會漏，判準太寬會變成永遠拒絕 | 按兩個 root 圈範圍已被自己的量測證明不足；「任何外部 symlink 都拒絕」在本機會命中約 60 條 |
+| symlink 要防的是**祖先**不只是檔案本身 | 憑證目錄整個被搬走時，`find` 不會走進去，glob 零命中、重掃零殘留、回報成功 |
+| containment 檢查要解析**整條鏈**，不能信任未解析的最後一段 | 一條指向 clone 內部的連結，其目標可以再指向外面 |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
