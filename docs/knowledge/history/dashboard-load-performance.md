@@ -80,6 +80,7 @@ chmod 700 "$WORK"
 # 中斷、失敗、正常結束都要清掉。整套量測必須在同一個 shell session 內跑完。
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT
+trap 'cleanup; exit 129' HUP      # 129 = 128 + SIGHUP（終端斷線）
 trap 'cleanup; exit 130' INT      # 130 = 128 + SIGINT
 trap 'cleanup; exit 143' TERM     # 143 = 128 + SIGTERM
 
@@ -105,7 +106,7 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
 
 # APFS copy-on-write clone：92 MB 的快取複製幾乎零時間、零額外磁碟，
 # 未寫入前與原檔共用區塊。-R 遞迴，-c 走 clonefile(2)。
-cp -Rc ~/.config/tokscale "$WORK/tokscale"
+cp -Rc ~/.config/tokscale "$WORK/tokscale" || exit 1
 strip_credentials "$WORK/tokscale" || exit 1
 ```
 
@@ -207,8 +208,13 @@ done
 
 ```bash
 mkdir -p "$WORK/corpus" && chmod 700 "$WORK/corpus"
-cp -Rc ~/.claude "$WORK/corpus/.claude"
-cp -Rc ~/.codex  "$WORK/corpus/.codex"
+# 每個 clone 都要檢查狀態。少掉一個來源不會讓後面的執行失敗，只會讓那條
+# parser lane 從對拍裡無聲消失——digest 仍然算得出來，只是在比一份殘缺的語料。
+cp -Rc ~/.claude "$WORK/corpus/.claude" || { echo "REFUSE: claude 語料複製失敗"; exit 1; }
+cp -Rc ~/.codex  "$WORK/corpus/.codex"  || { echo "REFUSE: codex 語料複製失敗";  exit 1; }
+for d in "$WORK/corpus/.claude/projects" "$WORK/corpus/.codex/sessions"; do
+  [ -d "$d" ] && [ -n "$(ls -A "$d" 2>/dev/null)" ] || { echo "REFUSE: $d 空的或不存在"; exit 1; }
+done
 
 # 這兩個目錄裡有活的 provider OAuth token，整份複製會一起帶進來。用上面那個
 # 同一個函式剝除並驗證；失敗就中止，不要帶著憑證繼續量測。
@@ -276,7 +282,11 @@ sample <pid> 25 1 -file "$WORK/sample.txt"
 ```bash
 cp src/lib.rs "$WORK/lib.rs.bak"          # 先備份，不靠 git checkout
 restore() { cp "$WORK/lib.rs.bak" src/lib.rs; }
-# 變異期間，中斷必須先還原再清理——清理會刪掉 $WORK，備份就在裡面。
+# 變異期間，**每一條**離開路徑都必須先還原再清理——清理會刪掉 $WORK，備份就
+# 在裡面。只保護 INT/TERM 不夠：終端斷線或任何其他原因造成的離開會走 EXIT，
+# 那條路徑一樣會在還原之前刪掉備份，把變異過的 lib.rs 留在樹上。
+trap 'restore; cleanup' EXIT
+trap 'restore; cleanup; exit 129' HUP
 trap 'restore; cleanup; exit 130' INT
 trap 'restore; cleanup; exit 143' TERM
 
@@ -285,7 +295,9 @@ cargo test --release
 restore
 grep -c MUT src/lib.rs                     # 確認還原乾淨
 
-trap 'cleanup; exit 130' INT               # 還原完畢，恢復原本的 handler
+trap cleanup EXIT                          # 還原完畢，恢復原本的 handler
+trap 'cleanup; exit 129' HUP
+trap 'cleanup; exit 130' INT
 trap 'cleanup; exit 143' TERM
 ```
 
@@ -446,6 +458,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 刪除類的守衛要有「刪完再掃一次」的驗證步驟 | 只呼叫 `find -delete` 是意圖，重掃一次得到 0 才是保證 |
 | `trap` 的 handler 跑完會**繼續**執行，不會終止 shell；`INT`／`TERM` 要自己 `exit` | 加上 trap 的那一版讓 Ctrl-C 會刪掉語料後繼續量測，並在還原前刪掉變異驗證的原始碼備份 |
 | 修正引入的新機制本身也要當成新程式碼審 | trap 是為了修「語料不留過夜」而加的，它自己帶進兩個更嚴重的缺陷 |
+| 保護「每一條離開路徑」，不是列舉想得到的訊號 | 只擋 `INT`／`TERM` 之後，終端斷線走 `EXIT` 依然會刪掉備份、留下變異過的原始碼 |
+| 準備步驟失敗要中止，不能靠後續步驟自己失敗 | 少複製一個語料來源不會讓執行報錯，只會讓那條 parser lane 從對拍裡無聲消失 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
