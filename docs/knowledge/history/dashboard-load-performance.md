@@ -78,12 +78,15 @@ graph 報表帶 volatile 的 `generated_at` 與 `processing_time_ms`，每日 cl
 WORK=$(mktemp -d)            # 不可預測、絕對路徑
 chmod 700 "$WORK"
 # 中斷、失敗、正常結束都要清掉。整套量測必須在同一個 shell session 內跑完。
-trap 'rm -rf "$WORK"' EXIT INT TERM
+cleanup() { rm -rf "$WORK"; }
+trap cleanup EXIT
+trap 'cleanup; exit 130' INT      # 130 = 128 + SIGINT
+trap 'cleanup; exit 143' TERM     # 143 = 128 + SIGTERM
 
-# 憑證檔名不列在公開文件裡（見 AGENTS.md「Public repository」）。清單放
-# .agent-local/，一行一個 glob。清單不存在就拒絕開始——沒有清單時「什麼都
-# 沒刪」和「沒有東西該刪」長得一模一樣。
-CRED_GLOBS="$HOME/.agent-local/benchmark-credential-globs"
+# 憑證檔名與清單位置都不進公開文件（見 AGENTS.md「Public repository」）。
+# 由操作者指向自己的私有覆蓋層，一行一個 glob；沒設就拒絕開始——沒有清單時
+# 「什麼都沒刪」和「沒有東西該刪」長得一模一樣。
+: "${CRED_GLOBS:?先指向一份憑證 glob 清單（一行一個），內容不進 repo}"
 
 strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
   [ -s "$CRED_GLOBS" ] || { echo "REFUSE: 憑證清單不存在"; return 1; }
@@ -105,6 +108,8 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
 cp -Rc ~/.config/tokscale "$WORK/tokscale"
 strip_credentials "$WORK/tokscale" || exit 1
 ```
+
+`INT`／`TERM` 的 handler **必須自己 `exit`**。bash 跑完 trap handler 會**繼續執行後面的指令**，不會終止 shell——所以只寫 `trap 'rm -rf "$WORK"' EXIT INT TERM` 的話，Ctrl-C 會刪掉語料然後讓剩下的量測繼續跑，而且下一節的變異驗證把原始碼備份放在 `$WORK` 裡，那個 handler 會在還原之前把備份刪掉、把變異過的 `lib.rs` 留在樹上。這行為在本機驗過：handler 印完之後 `STILL RUNNING AFTER SIGNAL` 照樣印出來。
 
 不限制掃描深度是刻意的。憑證目前都在頂層，但**深度上限只在「憑證永遠不會被放進子目錄」成立時才安全**，而那不是這份 runbook 能保證的事。多走幾秒的 metadata 換掉一個假設。
 
@@ -270,10 +275,18 @@ sample <pid> 25 1 -file "$WORK/sample.txt"
 
 ```bash
 cp src/lib.rs "$WORK/lib.rs.bak"          # 先備份，不靠 git checkout
+restore() { cp "$WORK/lib.rs.bak" src/lib.rs; }
+# 變異期間，中斷必須先還原再清理——清理會刪掉 $WORK，備份就在裡面。
+trap 'restore; cleanup; exit 130' INT
+trap 'restore; cleanup; exit 143' TERM
+
 # …套用變異…
 cargo test --release
-cp "$WORK/lib.rs.bak" src/lib.rs          # 還原
+restore
 grep -c MUT src/lib.rs                     # 確認還原乾淨
+
+trap 'cleanup; exit 130' INT               # 還原完畢，恢復原本的 handler
+trap 'cleanup; exit 143' TERM
 ```
 
 判定紀律：
@@ -431,6 +444,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 複製整份 profile 當語料＝把憑證一起複製；剝除與事後刪除都要寫進步驟 | 本輪就有兩份活的 codex token 被這份 recipe 放進 benchmark 工作區 |
 | **描述一個安全步驟不等於執行它** | 第一次「修正」只加了一段承諾會剝除憑證的註解，沒有任何指令；審查第二輪才抓到，憑證整段期間都還在 |
 | 刪除類的守衛要有「刪完再掃一次」的驗證步驟 | 只呼叫 `find -delete` 是意圖，重掃一次得到 0 才是保證 |
+| `trap` 的 handler 跑完會**繼續**執行，不會終止 shell；`INT`／`TERM` 要自己 `exit` | 加上 trap 的那一版讓 Ctrl-C 會刪掉語料後繼續量測，並在還原前刪掉變異驗證的原始碼備份 |
+| 修正引入的新機制本身也要當成新程式碼審 | trap 是為了修「語料不留過夜」而加的，它自己帶進兩個更嚴重的缺陷 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
