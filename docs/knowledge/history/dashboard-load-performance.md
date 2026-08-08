@@ -79,10 +79,14 @@ WORK=$(mktemp -d)            # 不可預測、絕對路徑
 chmod 700 "$WORK"
 # 中斷、失敗、正常結束都要清掉。整套量測必須在同一個 shell session 內跑完。
 cleanup() { rm -rf "$WORK"; }
+# 訊號 handler 裡的 exit 會**再觸發一次** EXIT handler。清理是冪等的所以無害，
+# 但下一節的變異 handler 不是——那裡第二次執行會找不到已刪掉的備份而印出假警告。
+# 兩處統一先 `trap - EXIT` 再 exit，形狀一致，抄過去不會抄到壞的那個。
+on_signal() { cleanup; trap - EXIT; exit "$1"; }
 trap cleanup EXIT
-trap 'cleanup; exit 129' HUP      # 129 = 128 + SIGHUP（終端斷線）
-trap 'cleanup; exit 130' INT      # 130 = 128 + SIGINT
-trap 'cleanup; exit 143' TERM     # 143 = 128 + SIGTERM
+trap 'on_signal 129' HUP          # 129 = 128 + SIGHUP（終端斷線）
+trap 'on_signal 130' INT          # 130 = 128 + SIGINT
+trap 'on_signal 143' TERM         # 143 = 128 + SIGTERM
 
 # 憑證檔名與清單位置都不進公開文件（見 AGENTS.md「Public repository」）。
 # 由操作者指向自己的私有覆蓋層，一行一個 glob；沒設就拒絕開始——沒有清單時
@@ -361,20 +365,23 @@ keep_or_clean() {
 # 變異期間，**每一條**離開路徑都必須先還原再清理——清理會刪掉 $WORK，備份就
 # 在裡面。只保護 INT/TERM 不夠：終端斷線或任何其他原因造成的離開會走 EXIT，
 # 那條路徑一樣會在還原之前刪掉備份，把變異過的 lib.rs 留在樹上。
+mut_signal() { keep_or_clean; trap - EXIT; exit "$1"; }
 trap keep_or_clean EXIT
-trap 'keep_or_clean; exit 129' HUP
-trap 'keep_or_clean; exit 130' INT
-trap 'keep_or_clean; exit 143' TERM
+trap 'mut_signal 129' HUP
+trap 'mut_signal 130' INT
+trap 'mut_signal 143' TERM
 
 # …套用變異…
-cargo test --release
-restore || { echo "REFUSE: 還原失敗，備份不刪"; exit 1; }
+cargo test --release; st=$?                # 先接住狀態：restore 會覆蓋 $?，
+                                           # 而下面的判定紀律要看的就是這個值
+restore || { trap - EXIT; echo "REFUSE: 還原失敗，備份不刪"; exit 1; }
 grep -c MUT src/lib.rs                     # 確認還原乾淨
+echo "mutation test status=$st"            # 判定看這個，不是最後一道指令的狀態
 
 trap cleanup EXIT                          # 還原完畢，恢復原本的 handler
-trap 'cleanup; exit 129' HUP
-trap 'cleanup; exit 130' INT
-trap 'cleanup; exit 143' TERM
+trap 'on_signal 129' HUP
+trap 'on_signal 130' INT
+trap 'on_signal 143' TERM
 ```
 
 判定紀律：
@@ -544,6 +551,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 守衛的**範圍**和**判準**都要量過：範圍太窄會漏，判準太寬會變成永遠拒絕 | 按兩個 root 圈範圍已被自己的量測證明不足；「任何外部 symlink 都拒絕」在本機會命中約 60 條 |
 | symlink 要防的是**祖先**不只是檔案本身 | 憑證目錄整個被搬走時，`find` 不會走進去，glob 零命中、重掃零殘留、回報成功 |
 | containment 檢查要解析**整條鏈**，不能信任未解析的最後一段 | 一條指向 clone 內部的連結，其目標可以再指向外面 |
+| 訊號 handler 裡的 `exit` 會再觸發一次 `EXIT` handler | 第二次執行找不到已刪掉的備份，於是每次成功的訊號復原都印出「還原失敗」的假警告 |
+| 要判定的那個狀態要**當場接住**，別讓後面的指令覆蓋 `$?` | 變異驗證的判定紀律要求看 exit code，而 recipe 自己在 `cargo test` 之後就把它蓋掉了 |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
