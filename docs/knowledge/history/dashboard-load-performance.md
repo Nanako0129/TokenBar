@@ -94,16 +94,20 @@ trap 'on_signal 143' TERM         # 143 = 128 + SIGTERM
 : "${CRED_GLOBS:?先指向一份憑證 glob 清單（一行一個），內容不進 repo}"
 
 strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
+  # 每個讀清單的迴圈都用 `read -r g || [ -n "$g" ]`：清單若沒有結尾換行，
+  # `read` 會把最後一行放進 $g 卻回傳失敗，單純的 `while read` 會整條跳過。
+  # 三個迴圈共用這個條件，所以一條沒換行的單行清單會同時讓「刪除」與「重掃
+  # 驗證」都靜靜地零命中，然後回報成功。實測：plain=0、guarded=1。
   [ -s "$CRED_GLOBS" ] || { echo "REFUSE: 憑證清單不存在"; return 1; }
   local left=0
-  while IFS= read -r g; do
+  while IFS= read -r g || [ -n "$g" ]; do
     [ -n "$g" ] || continue
     # -type f 會漏掉「憑證被搬走、原地留一條 symlink」的情況：cp -R 保留那條
     # 連結，clone 裡看起來沒有憑證，實際上一讀就讀到活的那份。
     find "$1" \( -type f -o -type l \) -name "$g" -delete || return 1
   done < "$CRED_GLOBS"
   # 刪完再掃一次。這一步才是保證，前一步只是意圖。
-  while IFS= read -r g; do
+  while IFS= read -r g || [ -n "$g" ]; do
     [ -n "$g" ] || continue
     left=$(( left + $(find "$1" \( -type f -o -type l \) -name "$g" | wc -l) ))
   done < "$CRED_GLOBS"
@@ -116,7 +120,7 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
   local via
   via=$(find "$1" -type l | while IFS= read -r l; do
     [ -d "$l" ] || continue
-    while IFS= read -r g; do
+    while IFS= read -r g || [ -n "$g" ]; do
       [ -n "$g" ] || continue
       [ -n "$(find -L "$l" -name "$g" -print -quit 2>/dev/null)" ] && { echo "  $l"; break; }
     done < "$CRED_GLOBS"
@@ -248,8 +252,11 @@ done
 # clone 內部的無害，指向外部的必須先處理。
 # 掃整份 corpus，不只那兩個 root——本文後面量到掃描器讀的東西比那兩個 root
 # 定義多，所以按 root 圈範圍的守衛，範圍必定不足。
+# 而且 corpus 不是唯一的輸入：`TOKSCALE_CONFIG_DIR` 同時提供 `PathRoot::Config`
+# 的 scanner roots（見前面「隔離語料」一節），所以 config clone 要一起檢查。
 WORK_P=$(cd "$WORK" && pwd -P)
-external=$(find "$WORK/corpus" -type l | while IFS= read -r l; do
+assert_frozen() {   # $1 = 要檢查的根目錄
+external=$(find "$1" -type l | while IFS= read -r l; do
   # 整條鏈都要解析。只解析父目錄、信任未解析的最後一段是不夠的：一條指向
   # $WORK 內部的連結，其目標本身可以再指向外面，看起來「內部」但讀下去是活的。
   tgt=$(realpath "$l" 2>/dev/null) || tgt=""
@@ -259,7 +266,10 @@ external=$(find "$WORK/corpus" -type l | while IFS= read -r l; do
   case "$l" in *.jsonl) echo "  $l -> $tgt"; continue;; esac
   [ -d "$tgt" ] && [ -n "$(find "$tgt" -name '*.jsonl' -print -quit 2>/dev/null)" ] && echo "  $l -> $tgt"
 done)
-[ -z "$external" ] || { printf 'REFUSE: 以下 symlink 通往語料之外的 *.jsonl，凍結不成立：\n%s\n' "$external"; exit 1; }
+[ -z "$external" ] || { printf 'REFUSE: 以下 symlink 通往語料之外的 *.jsonl，凍結不成立：\n%s\n' "$external"; return 1; }
+}
+assert_frozen "$WORK/corpus"   || exit 1
+assert_frozen "$WORK/tokscale" || exit 1
 
 # 這兩個目錄裡有活的 provider OAuth token，整份複製會一起帶進來。用上面那個
 # 同一個函式剝除並驗證；失敗就中止，不要帶著憑證繼續量測。
@@ -553,6 +563,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | containment 檢查要解析**整條鏈**，不能信任未解析的最後一段 | 一條指向 clone 內部的連結，其目標可以再指向外面 |
 | 訊號 handler 裡的 `exit` 會再觸發一次 `EXIT` handler | 第二次執行找不到已刪掉的備份，於是每次成功的訊號復原都印出「還原失敗」的假警告 |
 | 要判定的那個狀態要**當場接住**，別讓後面的指令覆蓋 `$?` | 變異驗證的判定紀律要求看 exit code，而 recipe 自己在 `cargo test` 之後就把它蓋掉了 |
+| `while read` 會吃掉沒有結尾換行的最後一行 | 一條單行、沒換行的憑證清單會讓刪除與驗證同時零命中並回報成功；用 `read -r g \|\| [ -n "$g" ]` |
+| 輸入不只一個來源時，守衛要套在**每一個**來源上 | 凍結檢查只套 corpus，而 config clone 同樣提供 scanner roots |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
