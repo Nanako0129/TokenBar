@@ -106,6 +106,10 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
     # 連結，clone 裡看起來沒有憑證，實際上一讀就讀到活的那份。
     # -name 只比 basename，所以帶 / 的樣式（`.codex/auth.json`）永遠不會命中；
     # 刪除與驗證共用同一個 predicate，兩邊會一起靜靜地零命中然後回報成功。
+    # 樣式一律是 clone-relative。絕對路徑接在 $1 後面會變成 `$1//Users/...`，
+    # 永遠不命中——而刪除與驗證共用它，於是兩邊一起零命中並回報成功。與其猜
+    # 怎麼正規化，不如把契約講明並拒絕。
+    case "$g" in /*) echo "REFUSE: 憑證樣式必須是 clone-relative：$g"; return 1;; esac
     case "$g" in */*) pred=-path; pat="$1/$g";; *) pred=-name; pat="$g";; esac
     find "$1" \( -type f -o -type l \) "$pred" "$pat" -delete || return 1
   done < "$CRED_GLOBS"
@@ -280,14 +284,25 @@ done)
 # 在那個目錄裡放一個新的 jsonl。所以指向外部的連結一律**具現化**成快照，而不是
 # 分類。這裡本機量到的外部目標總共 11.4 MB，相對於 7.9 GB 的語料可以忽略。
 materialize_external() {   # $1 = 根目錄
+  fail="$WORK/.materialize-failed"; rm -f "$fail"
   find "$1" -type l | while IFS= read -r l; do
-    tgt=$(realpath "$l" 2>/dev/null) || { rm -f "$l"; continue; }   # 斷鏈不是資料
+    tgt=$(realpath "$l" 2>/dev/null) || { rm -f "$l" || : > "$fail"; continue; }
     case "$tgt" in "$WORK_P"/*) continue;; esac
-    rm -f "$l" && cp -RL "$tgt" "$l"
+    # 先複製到暫存名字，成功才換掉連結。順序反過來的話——先 rm 再 cp——一次
+    # 中途失敗會留下「連結沒了、目錄只複製到一半」的狀態，而後面的凍結斷言
+    # 看不到任何外部連結，就會把一份被靜靜截斷的語料當成通過。
+    tmp="$l.materializing.$$"
+    if cp -RL "$tgt" "$tmp" 2>/dev/null; then
+      rm -f "$l" && mv "$tmp" "$l" || : > "$fail"
+    else
+      rm -rf "$tmp"; : > "$fail"        # 連結原封不動留著，讓斷言抓得到
+    fi
   done
+  # 迴圈在管線的 subshell 裡，狀態傳不出來；用檔案系統上的標記跨過那道邊界。
+  [ ! -e "$fail" ] || { echo "REFUSE: 具現化失敗，語料可能不完整"; return 1; }
 }
-materialize_external "$WORK/corpus"
-materialize_external "$WORK/tokscale"
+materialize_external "$WORK/corpus"   || exit 1
+materialize_external "$WORK/tokscale" || exit 1
 
 # 具現化之後**必須**重跑凍結檢查。上面的迴圈在管線的 subshell 裡，它的失敗傳不
 # 出來；真正的保證是「跑完之後一條外部連結都不剩」，跟憑證剝除完要重掃一次同理。
@@ -604,6 +619,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 「現在無害」不等於「量測期間無害」：無法判定的輸入要拒絕而不是跳過 | 斷掉的 `*.jsonl` 連結在檢查時給不出資料，但它的生產者可以在兩個 arm 之間把目標建出來 |
 | 同一個理由也打死「一次性內容檢查」：外部連結要具現化，不是分類 | 「這個目錄現在沒有 `*.jsonl`」跟「斷鏈現在給不出資料」是同一種一次性判斷 |
 | `-name` 只比 basename，帶 `/` 的樣式永遠不命中 | 一條 `.codex/auth.json` 會讓刪除與驗證一起零命中並回報成功 |
+| 契約要講明並拒絕違反者，不要猜怎麼正規化 | 絕對路徑樣式接在根目錄後面變成 `$1//Users/...`，一樣是靜靜零命中 |
+| 破壞性的取代要「先建好再換掉」，不是「先刪掉再建」 | 中途失敗會留下沒有外部連結、但內容被截斷的語料，而守衛正好只檢查外部連結 |
 | 「必須相等」要寫成比較，不能寫成散文再用 `&&` 串起來 | 每個 arm 的狀態是 binary 的結束碼；三個 digest 全不同也照樣整串成功，而且基準不穩時還會繼續跑 NEW |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
