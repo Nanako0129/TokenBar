@@ -317,23 +317,36 @@ $WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
 三個 arm 共用 `$WORK/tokscale`，所以**每個 arm 都要自己清掉 message cache**：
 
 ```bash
+# stdout 只吐 digest，人看的那一行走 stderr——這樣呼叫端可以直接比對數值。
 digest_arm() {   # $1 = 標籤  $2 = binary
   C="$WORK/tokscale/cache/source-message-cache-v2"
   # 清除失敗就中止這個 arm。本文下面記過 `rm` 會以 `Directory not empty` 失敗，
   # 而且那在實際量測裡發生過兩次；帶著殘留快取跑出來的相等是假的。
-  rm -rf "$C" || { echo "DISCARD 快取清除失敗"; return 1; }
-  [ -e "$C" ] && { echo "DISCARD 快取清除後仍存在"; return 1; }
-  printf '%-8s ' "$1"
+  rm -rf "$C" || { echo "DISCARD 快取清除失敗" >&2; return 1; }
+  [ -e "$C" ] && { echo "DISCARD 快取清除後仍存在" >&2; return 1; }
   out=$(env -i HOME="$WORK/corpus" PATH=/usr/bin:/bin \
             TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
             TOKSCALE_PRICING_CACHE_ONLY=1 RAYON_NUM_THREADS=2 \
             "$2" "$WORK/corpus" 2>&1); st=$?
-  [ $st -eq 0 ] || { echo "DISCARD status=$st"; printf '%s\n' "$out" | tail -3; return 1; }
-  printf '%s\n' "$out" | tail -1
+  [ $st -eq 0 ] || { printf '%-8s DISCARD status=%s\n' "$1" "$st" >&2
+                     printf '%s\n' "$out" | tail -3 >&2; return 1; }
+  line=$(printf '%s\n' "$out" | tail -1)
+  printf '%-8s %s\n' "$1" "$line" >&2
+  d=$(printf '%s\n' "$line" | sed -n 's/.*digest=\([0-9][0-9]*\).*/\1/p')
+  [ -n "$d" ] || { echo "DISCARD 輸出裡沒有 digest" >&2; return 1; }
+  printf '%s\n' "$d"
 }
 
-digest_arm OLD-a "$OLD_BIN" && digest_arm OLD-b "$OLD_BIN" && digest_arm NEW "$NEW_BIN"
+A=$(digest_arm OLD-a "$OLD_BIN") || exit 1
+B=$(digest_arm OLD-b "$OLD_BIN") || exit 1
+# 基準不穩就到此為止：NEW 跑出什麼都沒有意義，連跑都不必跑。
+[ "$A" = "$B" ] || { echo "REFUSE: OLD-a=$A != OLD-b=$B，oracle 不穩定"; exit 1; }
+N=$(digest_arm NEW "$NEW_BIN") || exit 1
+[ "$N" = "$A" ] || { echo "MISMATCH: NEW=$N OLD=$A"; exit 1; }
+echo "PASS digest=$A"
 ```
+
+**每個 arm 的結束狀態是那支 binary 的，不是「digest 相等」。** 三支都正常結束但吐出三個不同的數值時，`&&` 串起來仍然整串成功——一個把「三個數值必須相同」寫成散文、卻用 `&&` 串起來執行的程序，等於沒有比對。所以要把數值接出來自己比。
 
 **不清的話這個對拍證明不了它被引用來證明的東西。** `OLD-a` 會把 cache 填滿，`NEW` 接著就可能重播舊引擎寫進去的條目，而不是走它自己的 miss 解析與排序路徑——那正是要驗的東西。digest 仍然會相等，只是相等的原因變成「兩邊讀的是同一份快取」。
 
@@ -565,6 +578,7 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 要判定的那個狀態要**當場接住**，別讓後面的指令覆蓋 `$?` | 變異驗證的判定紀律要求看 exit code，而 recipe 自己在 `cargo test` 之後就把它蓋掉了 |
 | `while read` 會吃掉沒有結尾換行的最後一行 | 一條單行、沒換行的憑證清單會讓刪除與驗證同時零命中並回報成功；用 `read -r g \|\| [ -n "$g" ]` |
 | 輸入不只一個來源時，守衛要套在**每一個**來源上 | 凍結檢查只套 corpus，而 config clone 同樣提供 scanner roots |
+| 「必須相等」要寫成比較，不能寫成散文再用 `&&` 串起來 | 每個 arm 的狀態是 binary 的結束碼；三個 digest 全不同也照樣整串成功，而且基準不穩時還會繼續跑 NEW |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
