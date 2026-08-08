@@ -191,8 +191,11 @@ run() { rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
         printf '%-8s %s\n' "$1" "$(printf '%s\n' "$out" | tail -1)"; }
 
 for i in 1 2 3 4 5 6 7; do
-  if [ $((i % 2)) -eq 1 ]; then run "NEW-$i" "$NEW_BIN"; run "OLD-$i" "$OLD_BIN"
-  else                          run "OLD-$i" "$OLD_BIN"; run "NEW-$i" "$NEW_BIN"; fi
+  if [ $((i % 2)) -eq 1 ]; then a=NEW A=$NEW_BIN; b=OLD B=$OLD_BIN
+  else                          a=OLD A=$OLD_BIN; b=NEW B=$NEW_BIN; fi
+  # 配對的意義就是抵銷漂移，所以**任一 arm 失敗，整對都不採計**——
+  # 留下落單的那次觀測會直接偏移比較結果。
+  run "$a-$i" "$A" && run "$b-$i" "$B" || echo "PAIR-$i DISCARDED（兩個 arm 都不採計）"
 done
 ```
 
@@ -255,6 +258,25 @@ $WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
 
 **排除的只有 volatile：**`generated_at`、`processing_time_ms`。
 
+三個 arm 共用 `$WORK/tokscale`，所以**每個 arm 都要自己清掉 message cache**：
+
+```bash
+digest_arm() {   # $1 = 標籤  $2 = binary
+  rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
+  printf '%-8s ' "$1"
+  out=$(env -i HOME="$WORK/corpus" PATH=/usr/bin:/bin \
+            TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
+            TOKSCALE_PRICING_CACHE_ONLY=1 RAYON_NUM_THREADS=2 \
+            "$2" "$WORK/corpus" 2>&1); st=$?
+  [ $st -eq 0 ] || { echo "DISCARD status=$st"; printf '%s\n' "$out" | tail -3; return 1; }
+  printf '%s\n' "$out" | tail -1
+}
+
+digest_arm OLD-a "$OLD_BIN" && digest_arm OLD-b "$OLD_BIN" && digest_arm NEW "$NEW_BIN"
+```
+
+**不清的話這個對拍證明不了它被引用來證明的東西。** `OLD-a` 會把 cache 填滿，`NEW` 接著就可能重播舊引擎寫進去的條目，而不是走它自己的 miss 解析與排序路徑——那正是要驗的東西。digest 仍然會相等，只是相等的原因變成「兩邊讀的是同一份快取」。
+
 執行順序**必須**是：
 
 ```
@@ -280,19 +302,27 @@ sample <pid> 25 1 -file "$WORK/sample.txt"
 ### 七、變異驗證
 
 ```bash
-cp src/lib.rs "$WORK/lib.rs.bak"          # 先備份，不靠 git checkout
-restore() { cp "$WORK/lib.rs.bak" src/lib.rs; }
+cp src/lib.rs "$WORK/lib.rs.bak" || { echo "REFUSE: 備份失敗"; exit 1; }
+# 還原要驗證，而且失敗時**不能**讓 cleanup 把備份刪掉——那是唯一的副本。
+restore() {
+  cp "$WORK/lib.rs.bak" src/lib.rs || return 1
+  cmp -s "$WORK/lib.rs.bak" src/lib.rs || return 1
+}
+keep_or_clean() {
+  if restore; then cleanup
+  else echo "還原失敗：備份保留在 $WORK/lib.rs.bak，src/lib.rs 仍是變異狀態"; fi
+}
 # 變異期間，**每一條**離開路徑都必須先還原再清理——清理會刪掉 $WORK，備份就
 # 在裡面。只保護 INT/TERM 不夠：終端斷線或任何其他原因造成的離開會走 EXIT，
 # 那條路徑一樣會在還原之前刪掉備份，把變異過的 lib.rs 留在樹上。
-trap 'restore; cleanup' EXIT
-trap 'restore; cleanup; exit 129' HUP
-trap 'restore; cleanup; exit 130' INT
-trap 'restore; cleanup; exit 143' TERM
+trap keep_or_clean EXIT
+trap 'keep_or_clean; exit 129' HUP
+trap 'keep_or_clean; exit 130' INT
+trap 'keep_or_clean; exit 143' TERM
 
 # …套用變異…
 cargo test --release
-restore
+restore || { echo "REFUSE: 還原失敗，備份不刪"; exit 1; }
 grep -c MUT src/lib.rs                     # 確認還原乾淨
 
 trap cleanup EXIT                          # 還原完畢，恢復原本的 handler
@@ -460,6 +490,9 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 修正引入的新機制本身也要當成新程式碼審 | trap 是為了修「語料不留過夜」而加的，它自己帶進兩個更嚴重的缺陷 |
 | 保護「每一條離開路徑」，不是列舉想得到的訊號 | 只擋 `INT`／`TERM` 之後，終端斷線走 `EXIT` 依然會刪掉備份、留下變異過的原始碼 |
 | 準備步驟失敗要中止，不能靠後續步驟自己失敗 | 少複製一個語料來源不會讓執行報錯，只會讓那條 parser lane 從對拍裡無聲消失 |
+| 對拍的每個 arm 都要從**同一個**初始狀態開始，共用快取會讓相等變成假的 | 不清 message cache 的話 `NEW` 會重播 `OLD-a` 寫進去的條目，相等的原因變成「讀的是同一份快取」 |
+| 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
+| 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
