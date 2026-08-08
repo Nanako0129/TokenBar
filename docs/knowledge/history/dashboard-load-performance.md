@@ -77,18 +77,36 @@ graph 報表帶 volatile 的 `generated_at` 與 `processing_time_ms`，每日 cl
 ```bash
 WORK=$(mktemp -d)            # 不可預測、絕對路徑
 chmod 700 "$WORK"
+# 中斷、失敗、正常結束都要清掉。整套量測必須在同一個 shell session 內跑完。
+trap 'rm -rf "$WORK"' EXIT INT TERM
+
+# 憑證檔名不列在公開文件裡（見 AGENTS.md「Public repository」）。清單放
+# .agent-local/，一行一個 glob。清單不存在就拒絕開始——沒有清單時「什麼都
+# 沒刪」和「沒有東西該刪」長得一模一樣。
+CRED_GLOBS="$HOME/.agent-local/benchmark-credential-globs"
+
+strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
+  [ -s "$CRED_GLOBS" ] || { echo "REFUSE: 憑證清單不存在"; return 1; }
+  local left=0
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    find "$1" -type f -name "$g" -delete || return 1
+  done < "$CRED_GLOBS"
+  # 刪完再掃一次。這一步才是保證，前一步只是意圖。
+  while IFS= read -r g; do
+    [ -n "$g" ] || continue
+    left=$(( left + $(find "$1" -type f -name "$g" | wc -l) ))
+  done < "$CRED_GLOBS"
+  [ "$left" -eq 0 ] || { echo "REFUSE: clone 內仍有 $left 個憑證檔"; return 1; }
+}
 
 # APFS copy-on-write clone：92 MB 的快取複製幾乎零時間、零額外磁碟，
 # 未寫入前與原檔共用區塊。-R 遞迴，-c 走 clonefile(2)。
 cp -Rc ~/.config/tokscale "$WORK/tokscale"
-
-# benchmark clone 永遠不得攜帶正式 provider 憑證。整份 profile clone 會把
-# 設定目錄裡的憑證檔一起帶進來，所以複製完的第一件事就是剝除它們。
-# 確切檔名不列在公開文件裡（見 AGENTS.md「Public repository」），清單放
-# .agent-local/；下面是機制，執行時以該清單為準並在使用前確認 clone 內確實
-# 一個都不剩。
-find "$WORK/tokscale" -maxdepth 1 -type f -name '*credential*' -delete
+strip_credentials "$WORK/tokscale" || exit 1
 ```
+
+不限制掃描深度是刻意的。憑證目前都在頂層，但**深度上限只在「憑證永遠不會被放進子目錄」成立時才安全**，而那不是這份 runbook 能保證的事。多走幾秒的 metadata 換掉一個假設。
 
 `cp -R`（不加 `-c`）會真的複製 92 MB；`-c` 才是 clone。大語料（凍結 `~/.claude` 與 `~/.codex` 約 7.9 GB）時差別是「瞬間」與「數十秒＋佔滿磁碟」。
 
@@ -187,13 +205,19 @@ mkdir -p "$WORK/corpus" && chmod 700 "$WORK/corpus"
 cp -Rc ~/.claude "$WORK/corpus/.claude"
 cp -Rc ~/.codex  "$WORK/corpus/.codex"
 
-# 這兩個目錄裡有活的 provider 憑證，整份複製會一起帶進來。複製完的下一件事
-# 就是把 clone 內的憑證檔剝掉——確切清單放 .agent-local/，不列在公開文件裡
-# （見 AGENTS.md「Public repository」）。量測結束後整個 $WORK 一併刪除，
-# 語料不留過夜。
+# 這兩個目錄裡有活的 provider OAuth token，整份複製會一起帶進來。用上面那個
+# 同一個函式剝除並驗證；失敗就中止，不要帶著憑證繼續量測。
+strip_credentials "$WORK/corpus" || exit 1
+
 # 之後所有執行都傳 "$WORK/corpus" 當 HOME
 # （目錄別取名 home：文件 gate 會把 "/home/" 當成 Unix 根路徑擋下）
 ```
+
+$WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
+
+> 這一段被外部審查抓過兩次，第二次抓的是**我第一次的「修正」只寫了註解沒寫指令**——一段描述剝除步驟的散文，讀起來像已經做了，實際上什麼都沒執行。憑證仍然留在工作區。
+>
+> 描述一個安全步驟不等於執行它。這條在教訓表裡單獨佔一列。
 
 > **不要改成「只複製掃描器讀的那兩個目錄」。** 這條捷徑看起來更安全——憑證從構造上就進不來——但**實測會改變結果**。只複製 `~/.claude/projects` 與 `~/.codex/sessions`，訊息數從 171,984 掉到 171,983，digest 也隨之改變（那次量測用的是已作廢的第三版 digest，兩個絕對值不必重現；重點是**它們不相等**）。掃描器實際讀的東西比那兩個 root 定義多，差一則訊息就足以讓 digest 失去對照價值。
 >
@@ -405,6 +429,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 名單的預設方向要選「漏掉會大聲失敗」的那一邊 | 排除清單漏一項 → `OLD-a != OLD-b` 當場停住；包含清單漏一項 → 安靜少看一塊 |
 | 破壞性步驟的守衛要拿 fixture 證明它**會拒絕**，不能只看它沒擋路 | 圍堵檢查同時有「永遠拒絕」與「穿過 symlink 父目錄刪到正式快取」兩個缺陷，兩個都是外部審查抓的 |
 | 複製整份 profile 當語料＝把憑證一起複製；剝除與事後刪除都要寫進步驟 | 本輪就有兩份活的 codex token 被這份 recipe 放進 benchmark 工作區 |
+| **描述一個安全步驟不等於執行它** | 第一次「修正」只加了一段承諾會剝除憑證的註解，沒有任何指令；審查第二輪才抓到，憑證整段期間都還在 |
+| 刪除類的守衛要有「刪完再掃一次」的驗證步驟 | 只呼叫 `find -delete` 是意圖，重掃一次得到 0 才是保證 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
 | 跨平台 fixture 不要預測路徑拼法，去問會做查詢的那一方 | 快取 key 用 `TempDir::join` 種下，Windows 上與 scanner 的拼法不符，每一個本該命中的檔案都靜默退化成重新解析；連兩次紅燈才改成經 `scanner_spelling` 取得拼法 |
 | 一個失敗有多種成因時，讓測試自己講是哪一種 | 「發生了 fresh parse」同時代表 key 查不到與 fingerprint 不符，分辨它們燒掉兩次 CI；補上分項斷言後下一次紅燈會自己指認 |
