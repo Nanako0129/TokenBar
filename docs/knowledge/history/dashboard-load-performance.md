@@ -177,7 +177,11 @@ env HOME="$HOME" \
 ### 四、配對交錯迴圈
 
 ```bash
-run() { rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
+run() { C="$WORK/tokscale/cache/source-message-cache-v2"
+        # 計時容得下污染但容不下隱形：清除失敗時這一次**不是純冷**，標記出來，
+        # 統計時同時給含入與排除兩種算法。正確性對拍沒有這個選項，見 digest_arm。
+        rm -rf "$C" 2>/dev/null
+        [ -e "$C" ] && printf 'CONTAMINATED '
         # 用命令替換而不是管線：管線的結束狀態是 tail 的（幾乎永遠 0），
         # 被殺掉或 panic 的量測會被當成完成的樣本記錄下來。
         out=$(env HOME="$HOME" TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
@@ -262,7 +266,11 @@ $WORK 的 `trap` 已經在第一步裝好，中斷也會把語料一起帶走。
 
 ```bash
 digest_arm() {   # $1 = 標籤  $2 = binary
-  rm -rf "$WORK/tokscale/cache/source-message-cache-v2"
+  C="$WORK/tokscale/cache/source-message-cache-v2"
+  # 清除失敗就中止這個 arm。本文下面記過 `rm` 會以 `Directory not empty` 失敗，
+  # 而且那在實際量測裡發生過兩次；帶著殘留快取跑出來的相等是假的。
+  rm -rf "$C" || { echo "DISCARD 快取清除失敗"; return 1; }
+  [ -e "$C" ] && { echo "DISCARD 快取清除後仍存在"; return 1; }
   printf '%-8s ' "$1"
   out=$(env -i HOME="$WORK/corpus" PATH=/usr/bin:/bin \
             TOKSCALE_CONFIG_DIR="$WORK/tokscale" \
@@ -491,6 +499,7 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 保護「每一條離開路徑」，不是列舉想得到的訊號 | 只擋 `INT`／`TERM` 之後，終端斷線走 `EXIT` 依然會刪掉備份、留下變異過的原始碼 |
 | 準備步驟失敗要中止，不能靠後續步驟自己失敗 | 少複製一個語料來源不會讓執行報錯，只會讓那條 parser lane 從對拍裡無聲消失 |
 | 對拍的每個 arm 都要從**同一個**初始狀態開始，共用快取會讓相等變成假的 | 不清 message cache 的話 `NEW` 會重播 `OLD-a` 寫進去的條目，相等的原因變成「讀的是同一份快取」 |
+| 「清乾淨」這個前提本身會失敗，而且本文記錄過它真的失敗過兩次 | `rm -rf` 遇上 `Directory not empty` 不會中止；正確性 arm 必須中止，計時 arm 至少要標記為污染 |
 | 配對量測裡任一 arm 失敗就整對作廢 | 只讓失敗那次不列印，留下的落單觀測會偏移比較 |
 | 還原失敗時不要刪掉唯一的副本 | trap 原本無條件 `cleanup`，還原一失敗就同時失去備份與乾淨的原始碼 |
 | 「顯然更安全」的替代做法一樣要跑過才能寫進 runbook | 只複製兩個掃描器 root 的版本掉了一則訊息、換掉了 digest |
