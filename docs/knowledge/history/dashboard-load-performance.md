@@ -109,7 +109,8 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
   [ -s "$CRED_GLOBS" ] || { echo "REFUSE: 憑證清單不存在"; return 1; }
   local left=0
   while IFS= read -r g || [ -n "$g" ]; do
-    [ -n "$g" ] || continue
+    g=${g%$'\r'}                       # CRLF 清單會在樣式尾巴留一個 CR，
+    [ -n "$g" ] || continue             # 於是刪除與驗證一起零命中並回報成功
     # -type f 會漏掉「憑證被搬走、原地留一條 symlink」的情況：cp -R 保留那條
     # 連結，clone 裡看起來沒有憑證，實際上一讀就讀到活的那份。
     # -name 只比 basename，所以帶 / 的樣式（`<子目錄>/<檔名>`）永遠不會命中；
@@ -123,6 +124,7 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
   done < "$CRED_GLOBS"
   # 刪完再掃一次。這一步才是保證，前一步只是意圖。
   while IFS= read -r g || [ -n "$g" ]; do
+    g=${g%$'\r'}
     [ -n "$g" ] || continue
     case "$g" in */*) pred=-path; pat="$1/$g";; *) pred=-name; pat="$g";; esac
     left=$(( left + $(find "$1" \( -type f -o -type l \) "$pred" "$pat" | wc -l) ))
@@ -138,6 +140,7 @@ strip_credentials() {   # $1 = 要清理的根目錄；失敗回非零
     [ -d "$l" ] || continue
     while IFS= read -r g || [ -n "$g" ]; do
       [ -n "$g" ] || continue
+      g=${g%$'\r'}
       case "$g" in */*) gp=$(basename "$g");; *) gp="$g";; esac
       [ -n "$(find -L "$l" -name "$gp" -print -quit 2>/dev/null)" ] && { echo "  $l"; break; }
     done < "$CRED_GLOBS"
@@ -292,6 +295,7 @@ done)
 # 在那個目錄裡放一個新的 jsonl。所以指向外部的連結一律**具現化**成快照，而不是
 # 分類。動手前量過：外部目標的總量相對於整份語料可以忽略，所以具現化不是
 # 昂貴的選項——但這個比例要自己在自己的機器上量，別照抄結論。
+MAT_MAX_KB=${MAT_MAX_KB:-102400}     # 單一外部目標的上限，預設 100 MB
 materialize_external() {   # $1 = 根目錄
   fail="$WORK/.materialize-failed"; rm -f "$fail"
   find "$1" -type l | while IFS= read -r l; do
@@ -300,6 +304,18 @@ materialize_external() {   # $1 = 根目錄
     # 先複製到暫存名字，成功才換掉連結。順序反過來的話——先 rm 再 cp——一次
     # 中途失敗會留下「連結沒了、目錄只複製到一半」的狀態，而後面的凍結斷言
     # 看不到任何外部連結，就會把一份被靜靜截斷的語料當成通過。
+    # 具現化前先判型與設上限。無條件 `cp -RL` 會跟著巢狀連結走進任意的樹：
+    # 可能複製大量無關的私有資料、在裝置檔或 FIFO 上卡住、或塞爆磁碟——而這
+    # 一切都發生在凍結斷言之前。特殊檔一律拒絕，目錄超過上限就交給操作者決定。
+    if [ -f "$tgt" ]; then :
+    elif [ -d "$tgt" ]; then
+      sz=$(du -sk "$tgt" 2>/dev/null | cut -f1); sz=${sz:-0}
+      [ "$sz" -le "$MAT_MAX_KB" ] || {
+        echo "REFUSE: $l 的目標超過 ${MAT_MAX_KB}k（${sz}k），請自行決定要排除還是提高上限" >&2
+        : > "$fail"; continue; }
+    else
+      echo "REFUSE: $l 的目標不是一般檔案或目錄" >&2; : > "$fail"; continue
+    fi
     tmp="$l.materializing.$$"
     if cp -RL "$tgt" "$tmp" 2>/dev/null; then
       rm -f "$l" && mv "$tmp" "$l" || : > "$fail"
@@ -312,6 +328,12 @@ materialize_external() {   # $1 = 根目錄
 }
 materialize_external "$WORK/corpus"   || exit 1
 materialize_external "$WORK/tokscale" || exit 1
+
+# 具現化會把外部檔案帶進 clone 內的**新路徑**，所以憑證剝除必須在它之後再跑
+# 一次；也因為這樣，憑證樣式建議用 basename 形式，帶路徑的樣式只認得原本的
+# 位置，認不得具現化之後的位置。
+strip_credentials "$WORK/corpus"   || exit 1
+strip_credentials "$WORK/tokscale" || exit 1
 
 # 具現化之後**必須**重跑凍結檢查。上面的迴圈在管線的 subshell 裡，它的失敗傳不
 # 出來；真正的保證是「跑完之後一條外部連結都不剩」，跟憑證剝除完要重掃一次同理。
@@ -629,6 +651,8 @@ RSS 沒有上升是 hit-marker 設計的直接證據：分批本身會增加保�
 | 同一個理由也打死「一次性內容檢查」：外部連結要具現化，不是分類 | 「這個目錄現在沒有 `*.jsonl`」跟「斷鏈現在給不出資料」是同一種一次性判斷 |
 | `-name` 只比 basename，帶 `/` 的樣式永遠不命中 | 一條 `<子目錄>/<檔名>` 形式的樣式會讓刪除與驗證一起零命中並回報成功 |
 | 契約要講明並拒絕違反者，不要猜怎麼正規化 | 絕對路徑樣式接在根目錄後面變成 `$1//abs/path`，一樣是靜靜零命中 |
+| 「具現化」不是無害的複製：要判型、設上限，並在之後重跑憑證剝除 | 無條件 `cp -RL` 會跟著巢狀連結複製任意私有資料、卡在裝置檔上，或把憑證帶到樣式認不得的新路徑 |
+| 文字型設定會帶 CRLF，`read -r` 只吃掉 `\n` | 尾巴留下的 CR 讓刪除與驗證一起零命中並回報成功 |
 | 清理本身也要驗證，而且失敗要大聲說 | `rm -rf` 可能因權限或不可變旗標部分失敗，而每一條離開路徑都會安靜地留下憑證副本 |
 | 教學用的例子也算公開資訊：示範語法不需要真實的憑證路徑 | 移除檔名之後，又用一個真實路徑當 `-path` 的例子放了回去 |
 | 量測結論可以寫，機器清單不行 | 「外部連結有幾條、長什麼樣」是本機盤點；可重用的是「這類連結存在，所以一律拒絕不可行，動手前自己量」 |
