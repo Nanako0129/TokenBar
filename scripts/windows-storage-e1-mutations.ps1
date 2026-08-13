@@ -159,7 +159,17 @@ $Cases = @(
         Tests = @('agent_storage_windows::tests::quarantine_source_and_path_validation_rejects_without_touching_targets')
         Edit = {
             param($Text)
-            $Pattern = '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
+            $Pattern = 'fn quarantine_secure_file_candidate_with(' + $LineEnding +
+                '    directory: &File,' + $LineEnding +
+                '    directory_path: &Path,' + $LineEnding +
+                '    source_path: &Path,' + $LineEnding +
+                '    candidate_path: &Path,' + $LineEnding +
+                '    link: impl FnOnce(&Path, &Path) -> io::Result<()>,' + $LineEnding +
+                '    mut unlink: impl FnMut(&Path) -> io::Result<()>,' + $LineEnding +
+                '    flush: impl FnOnce(&File) -> io::Result<()>,' + $LineEnding +
+                ') -> io::Result<()> {' + $LineEnding +
+                '    validate_replace_paths(directory_path, source_path, candidate_path)?;' + $LineEnding + $LineEnding +
+                '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
                 '    let directory_identity = storage_identity(directory_handle, StorageObjectKind::Directory)?;' + $LineEnding +
                 '    verify_storage_handle(directory_handle)?;' + $LineEnding +
                 '    verify_path_identity(' + $LineEnding +
@@ -167,7 +177,17 @@ $Cases = @(
                 '        StorageObjectKind::Directory,' + $LineEnding +
                 '        directory_identity,' + $LineEnding +
                 '    )?;'
-            $Replacement = '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
+            $Replacement = 'fn quarantine_secure_file_candidate_with(' + $LineEnding +
+                '    directory: &File,' + $LineEnding +
+                '    directory_path: &Path,' + $LineEnding +
+                '    source_path: &Path,' + $LineEnding +
+                '    candidate_path: &Path,' + $LineEnding +
+                '    link: impl FnOnce(&Path, &Path) -> io::Result<()>,' + $LineEnding +
+                '    mut unlink: impl FnMut(&Path) -> io::Result<()>,' + $LineEnding +
+                '    flush: impl FnOnce(&File) -> io::Result<()>,' + $LineEnding +
+                ') -> io::Result<()> {' + $LineEnding +
+                '    validate_replace_paths(directory_path, source_path, candidate_path)?;' + $LineEnding + $LineEnding +
+                '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
                 '    let directory_identity = storage_identity(directory_handle, StorageObjectKind::Directory)?;' + $LineEnding +
                 '    verify_storage_handle(directory_handle)?;'
             Replace-Once $Text $Pattern $Replacement 'M-QUARANTINE-DIR-PATH'
