@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Continue'
 $Source = Join-Path $PSScriptRoot 'crates/tb_core_ffi/src/agent_storage_windows.rs'
 $Original = [System.IO.File]::ReadAllText($Source)
+$LineEnding = if ($Original.Contains("`r`n")) { "`r`n" } else { "`n" }
 Set-Location $PSScriptRoot
 
 function Replace-Once([string]$Text, [string]$Old, [string]$New, [string]$Label) {
@@ -24,7 +25,10 @@ $Cases = @(
         Tests = @('agent_storage_windows::tests::acl_descriptor_and_handle_mutations_fail_closed')
         Edit = {
             param($Text)
-            Replace-Once $Text "if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE_VALUE`n            || ace.flags != NO_INHERITANCE as u8`n            || ace.mask != FILE_ALL_ACCESS" 'if false' 'M-ACL'
+            $Pattern = 'if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE_VALUE' + $LineEnding +
+                '            || ace.flags != NO_INHERITANCE as u8' + $LineEnding +
+                '            || ace.mask != FILE_ALL_ACCESS'
+            Replace-Once $Text $Pattern 'if false' 'M-ACL'
         }
     },
     @{
@@ -55,7 +59,10 @@ $Cases = @(
         Tests = @('agent_storage_windows::tests::quarantine_fault_phases_preserve_commit_boundaries')
         Edit = {
             param($Text)
-            Replace-Once $Text "    let candidate = open_secure_file_with_identity(candidate_path, expected)?;`n    verify_secure_file_path(source, source_path)?;`n    drop(candidate);" '    verify_secure_file_path(source, source_path)?;' 'M-ROLLBACK'
+            $Pattern = '    let candidate = open_secure_file_with_identity(candidate_path, expected)?;' + $LineEnding +
+                '    verify_secure_file_path(source, source_path)?;' + $LineEnding +
+                '    drop(candidate);'
+            Replace-Once $Text $Pattern '    verify_secure_file_path(source, source_path)?;' 'M-ROLLBACK'
         }
     },
     @{
