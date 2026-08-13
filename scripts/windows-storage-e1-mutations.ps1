@@ -32,6 +32,22 @@ $Cases = @(
         }
     },
     @{
+        Label = 'M-FOREIGN-NARROW'
+        Tests = @('agent_storage_windows::tests::acl_descriptor_and_handle_mutations_fail_closed')
+        Edit = {
+            param($Text)
+            $Pattern = '        } else {' + $LineEnding +
+                '            // This rejects every broad or foreign SID, including Users,' + $LineEnding +
+                '            // Authenticated Users, and Everyone, for both allow and deny ACEs.' + $LineEnding +
+                '            return Err(security_verification_failed());' + $LineEnding +
+                '        }'
+            $Replacement = '        } else if ace.mask != FILE_READ_DATA {' + $LineEnding +
+                '            return Err(security_verification_failed());' + $LineEnding +
+                '        }'
+            Replace-Once $Text $Pattern $Replacement 'M-FOREIGN-NARROW'
+        }
+    },
+    @{
         Label = 'M-SHARE'
         Tests = @(
             'agent_storage_windows::tests::secure_lock_preserves_one_identity_and_blocks_delete_until_handles_drop',

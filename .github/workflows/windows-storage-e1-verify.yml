@@ -8,8 +8,8 @@ permissions:
   contents: read
 
 env:
-  CANDIDATE_SHA: f2a645460f74383716546e99d774c0408ee910f9
-  CANDIDATE_STORAGE_BLOB: 426daeb27d4107b0d5ddbe9dc107c505cd2540ea
+  CANDIDATE_SHA: 6356e8202a4f65f3c39a83b6c38a99c5ae8a313c
+  CANDIDATE_STORAGE_BLOB: 4f2f53093f224063cf91924ca0d6094cd357c74b
   CANDIDATE_VENDOR_SHA: 5b5f500d3a8abe66ab5fa44b18f4fc1aaee53947
   RUST_TOOLCHAIN: 1.97.1
 
@@ -82,7 +82,7 @@ jobs:
         shell: pwsh
         run: Copy-Item harness/scripts/windows-storage-e1-mutations.ps1 candidate/windows-storage-e1-mutations.ps1
 
-      - name: Five production mutations
+      - name: Six production mutations
         if: matrix.label == 'x64'
         shell: pwsh
         run: ./windows-storage-e1-mutations.ps1
