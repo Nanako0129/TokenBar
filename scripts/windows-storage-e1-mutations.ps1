@@ -117,6 +117,25 @@ $Cases = @(
         }
     },
     @{
+        Label = 'M-REPLACE-PATH'
+        Tests = @('agent_storage_windows::tests::replace_validation_type_reparse_and_path_boundaries_preserve_objects')
+        Edit = {
+            param($Text)
+            $Pattern = '        Err(error) => return Err(error),' + $LineEnding +
+                '    };' + $LineEnding +
+                '    if destination_identity == Some(staged_identity) {'
+            $Replacement = '        Err(error) => {' + $LineEnding +
+                '            let displaced = staged_path.with_extension("mutant-displaced");' + $LineEnding +
+                '            std::fs::rename(staged_path, &displaced)?;' + $LineEnding +
+                '            std::fs::copy(destination_path, staged_path)?;' + $LineEnding +
+                '            return Err(error);' + $LineEnding +
+                '        }' + $LineEnding +
+                '    };' + $LineEnding +
+                '    if destination_identity == Some(staged_identity) {'
+            Replace-Once $Text $Pattern $Replacement 'M-REPLACE-PATH'
+        }
+    },
+    @{
         Label = 'M-ROLLBACK'
         Tests = @('agent_storage_windows::tests::quarantine_fault_phases_preserve_commit_boundaries')
         Edit = {
