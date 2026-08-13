@@ -153,6 +153,82 @@ $Cases = @(
             param($Text)
             Replace-Once $Text '        "Windows storage security verification failed",' '        "Windows storage security verification failed: raw-secret-sentinel",' 'M-PRIVACY'
         }
+    },
+    @{
+        Label = 'M-QUARANTINE-DIR-PATH'
+        Tests = @('agent_storage_windows::tests::quarantine_source_and_path_validation_rejects_without_touching_targets')
+        Edit = {
+            param($Text)
+            $Pattern = '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
+                '    let directory_identity = storage_identity(directory_handle, StorageObjectKind::Directory)?;' + $LineEnding +
+                '    verify_storage_handle(directory_handle)?;' + $LineEnding +
+                '    verify_path_identity(' + $LineEnding +
+                '        directory_path,' + $LineEnding +
+                '        StorageObjectKind::Directory,' + $LineEnding +
+                '        directory_identity,' + $LineEnding +
+                '    )?;'
+            $Replacement = '    let directory_handle = directory.as_raw_handle() as HANDLE;' + $LineEnding +
+                '    let directory_identity = storage_identity(directory_handle, StorageObjectKind::Directory)?;' + $LineEnding +
+                '    verify_storage_handle(directory_handle)?;'
+            Replace-Once $Text $Pattern $Replacement 'M-QUARANTINE-DIR-PATH'
+        }
+    },
+    @{
+        Label = 'M-QUARANTINE-SOURCE-PATH'
+        Tests = @('agent_storage_windows::tests::quarantine_source_and_path_validation_rejects_without_touching_targets')
+        Edit = {
+            param($Text)
+            $Pattern = '    let source = open_existing_secure_file(source_path, false)?;'
+            $Replacement = '    let source = match open_existing_secure_file(source_path, false) {' + $LineEnding +
+                '        Ok(source) => source,' + $LineEnding +
+                '        Err(error) => {' + $LineEnding +
+                '            let displaced = source_path.with_extension("mutant-displaced");' + $LineEnding +
+                '            let was_directory = std::fs::metadata(source_path).map(|m| m.is_dir()).unwrap_or(false);' + $LineEnding +
+                '            std::fs::rename(source_path, &displaced)?;' + $LineEnding +
+                '            if was_directory {' + $LineEnding +
+                '                std::fs::create_dir(source_path)?;' + $LineEnding +
+                '                for entry in std::fs::read_dir(&displaced)? {' + $LineEnding +
+                '                    let entry = entry?;' + $LineEnding +
+                '                    if entry.file_type()?.is_file() {' + $LineEnding +
+                '                        std::fs::copy(entry.path(), source_path.join(entry.file_name()))?;' + $LineEnding +
+                '                    }' + $LineEnding +
+                '                }' + $LineEnding +
+                '            } else {' + $LineEnding +
+                '                std::fs::copy(&displaced, source_path)?;' + $LineEnding +
+                '            }' + $LineEnding +
+                '            return Err(error);' + $LineEnding +
+                '        }' + $LineEnding +
+                '    };'
+            Replace-Once $Text $Pattern $Replacement 'M-QUARANTINE-SOURCE-PATH'
+        }
+    },
+    @{
+        Label = 'M-FINAL-TARGET-PATH'
+        Tests = @('agent_storage_windows::tests::final_file_symlink_and_directory_junction_fail_without_touching_targets')
+        Edit = {
+            param($Text)
+            $Pattern = '    let file = open_windows_path(path, access, disposition, kind.open_flags())?;' + $LineEnding +
+                '    let identity = storage_identity(file.as_raw_handle() as HANDLE, kind)?;'
+            $Replacement = '    let file = open_windows_path(path, access, disposition, kind.open_flags())?;' + $LineEnding +
+                '    let identity = match storage_identity(file.as_raw_handle() as HANDLE, kind) {' + $LineEnding +
+                '        Ok(identity) => identity,' + $LineEnding +
+                '        Err(error) => {' + $LineEnding +
+                '            if let Ok(target) = std::fs::read_link(path) {' + $LineEnding +
+                '                let target = if target.is_absolute() {' + $LineEnding +
+                '                    target' + $LineEnding +
+                '                } else {' + $LineEnding +
+                '                    path.parent().unwrap_or_else(|| Path::new("")).join(target)' + $LineEnding +
+                '                };' + $LineEnding +
+                '                let displaced = target.with_extension("mutant-displaced");' + $LineEnding +
+                '                if std::fs::rename(&target, &displaced).is_ok() {' + $LineEnding +
+                '                    let _ = std::fs::copy(&displaced, &target);' + $LineEnding +
+                '                }' + $LineEnding +
+                '            }' + $LineEnding +
+                '            return Err(error);' + $LineEnding +
+                '        }' + $LineEnding +
+                '    };'
+            Replace-Once $Text $Pattern $Replacement 'M-FINAL-TARGET-PATH'
+        }
     }
 )
 
