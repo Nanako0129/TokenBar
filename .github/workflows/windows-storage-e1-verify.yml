@@ -1,7 +1,8 @@
 name: Windows storage E1 verification
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [verify/windows-storage-e1-ci]
 
 permissions:
   contents: read
