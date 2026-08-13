@@ -51,7 +51,19 @@ $Cases = @(
         Edit = {
             param($Text)
             $Text = Replace-Once $Text 'if installed_identity != staged_identity {' 'if false && installed_identity != staged_identity {' 'M-IDENTITY/install'
-            Replace-Once $Text '    verify_path_identity(path, StorageObjectKind::RegularFile, identity)' '    Ok(())' 'M-IDENTITY/path'
+            $Pattern = 'pub(crate) fn verify_secure_file_path(file: &File, path: &Path) -> io::Result<()> {' + $LineEnding +
+                '    let handle = file.as_raw_handle() as HANDLE;' + $LineEnding +
+                '    let identity = storage_identity(handle, StorageObjectKind::RegularFile)?;' + $LineEnding +
+                '    verify_storage_handle(handle)?;' + $LineEnding +
+                '    verify_path_identity(path, StorageObjectKind::RegularFile, identity)' + $LineEnding +
+                '}'
+            $Replacement = 'pub(crate) fn verify_secure_file_path(file: &File, path: &Path) -> io::Result<()> {' + $LineEnding +
+                '    let handle = file.as_raw_handle() as HANDLE;' + $LineEnding +
+                '    let _identity = storage_identity(handle, StorageObjectKind::RegularFile)?;' + $LineEnding +
+                '    verify_storage_handle(handle)?;' + $LineEnding +
+                '    Ok(())' + $LineEnding +
+                '}'
+            Replace-Once $Text $Pattern $Replacement 'M-IDENTITY/path'
         }
     },
     @{
@@ -79,6 +91,11 @@ $Survived = $false
 try {
     Write-Output ('HEAD=' + (git rev-parse HEAD))
     Write-Output ('BASE_BLOB=' + (git hash-object $Source))
+    foreach ($Case in $Cases) {
+        $Mutated = & $Case.Edit $Original
+        if ($Mutated -eq $Original) { throw "preflight made no change: $($Case.Label)" }
+        Write-Output "MUTATION_PREFLIGHT_OK label=$($Case.Label)"
+    }
     foreach ($Case in $Cases) {
         foreach ($Test in $Case.Tests) {
             if ((Run-Test $Test) -ne 0) { throw "baseline failed: $Test" }
