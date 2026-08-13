@@ -1,0 +1,94 @@
+name: Windows storage E1 verification
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: f2a645460f74383716546e99d774c0408ee910f9
+  CANDIDATE_STORAGE_BLOB: 426daeb27d4107b0d5ddbe9dc107c505cd2540ea
+  CANDIDATE_VENDOR_SHA: 5b5f500d3a8abe66ab5fa44b18f4fc1aaee53947
+  RUST_TOOLCHAIN: 1.97.1
+
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: windows-latest
+          - label: arm64
+            runner: windows-11-arm
+    name: Windows ${{ matrix.label }} runtime
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout verification harness
+        uses: actions/checkout@v6
+        with:
+          path: harness
+
+      - name: Checkout exact candidate
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          submodules: recursive
+
+      - name: Install pinned Rust toolchain
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component clippy
+          rustup override set $env:RUST_TOOLCHAIN
+        working-directory: candidate
+
+      - name: Verify architecture and candidate identity
+        shell: pwsh
+        run: |
+          "ARCH=$([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)"
+          "HEAD=$(git rev-parse HEAD)"
+          "TREE=$(git rev-parse 'HEAD^{tree}')"
+          "STORAGE_BLOB=$(git hash-object crates/tb_core_ffi/src/agent_storage_windows.rs)"
+          "VENDOR=$(git -C vendor/tokscale-core rev-parse HEAD)"
+          if ((git rev-parse HEAD) -ne $env:CANDIDATE_SHA) { throw 'candidate SHA mismatch' }
+          if ((git hash-object crates/tb_core_ffi/src/agent_storage_windows.rs) -ne $env:CANDIDATE_STORAGE_BLOB) { throw 'storage blob mismatch' }
+          if ((git -C vendor/tokscale-core rev-parse HEAD) -ne $env:CANDIDATE_VENDOR_SHA) { throw 'vendor SHA mismatch' }
+          if ((git status --porcelain=v1 --untracked-files=all) -ne '') { throw 'candidate checkout is dirty' }
+        working-directory: candidate
+
+      - name: Full Rust workspace tests
+        run: cargo test --workspace --release --locked
+        working-directory: candidate
+
+      - name: Focused Windows storage tests
+        run: cargo test --workspace --release --locked agent_storage_windows
+        working-directory: candidate
+
+      - name: Workspace Clippy
+        run: cargo clippy --workspace --all-targets
+        working-directory: candidate
+
+      - name: Copy mutation runner
+        if: matrix.label == 'x64'
+        shell: pwsh
+        run: Copy-Item harness/scripts/windows-storage-e1-mutations.ps1 candidate/windows-storage-e1-mutations.ps1
+
+      - name: Five production mutations
+        if: matrix.label == 'x64'
+        shell: pwsh
+        run: ./windows-storage-e1-mutations.ps1
+        working-directory: candidate
+
+      - name: Confirm exact restore
+        if: always() && matrix.label == 'x64'
+        shell: pwsh
+        run: |
+          Remove-Item windows-storage-e1-mutations.ps1 -ErrorAction SilentlyContinue
+          if ((git hash-object crates/tb_core_ffi/src/agent_storage_windows.rs) -ne $env:CANDIDATE_STORAGE_BLOB) { throw 'mutation runner changed candidate bytes' }
+          if ((git status --porcelain=v1 --untracked-files=all) -ne '') {
+            git status --porcelain=v1 --untracked-files=all
+            throw 'mutation runner left candidate dirty'
+          }
+        working-directory: candidate
