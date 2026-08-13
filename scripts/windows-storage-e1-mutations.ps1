@@ -36,15 +36,27 @@ $Cases = @(
         Tests = @('agent_storage_windows::tests::acl_descriptor_and_handle_mutations_fail_closed')
         Edit = {
             param($Text)
+            $Pattern = 'for ace in &snapshot.aces {' + $LineEnding +
+                '        if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE_VALUE' + $LineEnding +
+                '            || ace.flags != NO_INHERITANCE as u8' + $LineEnding +
+                '            || ace.mask != FILE_ALL_ACCESS'
+            $Replacement = 'for ace in &snapshot.aces {' + $LineEnding +
+                '        let foreign_narrow = ace.sid != current_user' + $LineEnding +
+                '            && (same_principal || ace.sid != local_system)' + $LineEnding +
+                '            && ace.mask == FILE_READ_DATA;' + $LineEnding +
+                '        if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE_VALUE' + $LineEnding +
+                '            || ace.flags != NO_INHERITANCE as u8' + $LineEnding +
+                '            || (ace.mask != FILE_ALL_ACCESS && !foreign_narrow)'
+            $Text = Replace-Once $Text $Pattern $Replacement 'M-FOREIGN-NARROW/mask'
             $Pattern = '        } else {' + $LineEnding +
                 '            // This rejects every broad or foreign SID, including Users,' + $LineEnding +
                 '            // Authenticated Users, and Everyone, for both allow and deny ACEs.' + $LineEnding +
                 '            return Err(security_verification_failed());' + $LineEnding +
                 '        }'
-            $Replacement = '        } else if ace.mask != FILE_READ_DATA {' + $LineEnding +
+            $Replacement = '        } else if !foreign_narrow {' + $LineEnding +
                 '            return Err(security_verification_failed());' + $LineEnding +
                 '        }'
-            Replace-Once $Text $Pattern $Replacement 'M-FOREIGN-NARROW'
+            Replace-Once $Text $Pattern $Replacement 'M-FOREIGN-NARROW/principal'
         }
     },
     @{
