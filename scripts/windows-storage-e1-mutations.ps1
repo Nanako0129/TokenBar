@@ -36,6 +36,28 @@ $Cases = @(
         Tests = @('agent_storage_windows::tests::acl_descriptor_and_handle_mutations_fail_closed')
         Edit = {
             param($Text)
+            $Pattern = '    if snapshot.aces.len() != expected_count {' + $LineEnding +
+                '        return Err(security_verification_failed());' + $LineEnding +
+                '    }' + $LineEnding + $LineEnding +
+                '    let mut current_seen = false;'
+            $Replacement = '    let foreign_narrow_count = snapshot' + $LineEnding +
+                '        .aces' + $LineEnding +
+                '        .iter()' + $LineEnding +
+                '        .filter(|ace| {' + $LineEnding +
+                '            ace.sid != current_user' + $LineEnding +
+                '                && (same_principal || ace.sid != local_system)' + $LineEnding +
+                '                && ace.ace_type == ACCESS_ALLOWED_ACE_TYPE_VALUE' + $LineEnding +
+                '                && ace.flags == NO_INHERITANCE as u8' + $LineEnding +
+                '                && ace.mask == FILE_READ_DATA' + $LineEnding +
+                '        })' + $LineEnding +
+                '        .count();' + $LineEnding +
+                '    if foreign_narrow_count > 1' + $LineEnding +
+                '        || snapshot.aces.len() != expected_count + foreign_narrow_count' + $LineEnding +
+                '    {' + $LineEnding +
+                '        return Err(security_verification_failed());' + $LineEnding +
+                '    }' + $LineEnding + $LineEnding +
+                '    let mut current_seen = false;'
+            $Text = Replace-Once $Text $Pattern $Replacement 'M-FOREIGN-NARROW/count'
             $Pattern = 'for ace in &snapshot.aces {' + $LineEnding +
                 '        if ace.ace_type != ACCESS_ALLOWED_ACE_TYPE_VALUE' + $LineEnding +
                 '            || ace.flags != NO_INHERITANCE as u8' + $LineEnding +
