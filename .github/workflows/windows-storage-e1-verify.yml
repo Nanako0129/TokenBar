@@ -56,7 +56,13 @@ jobs:
           if ((git rev-parse HEAD) -ne $env:CANDIDATE_SHA) { throw 'candidate SHA mismatch' }
           if ((git hash-object crates/tb_core_ffi/src/agent_storage_windows.rs) -ne $env:CANDIDATE_STORAGE_BLOB) { throw 'storage blob mismatch' }
           if ((git -C vendor/tokscale-core rev-parse HEAD) -ne $env:CANDIDATE_VENDOR_SHA) { throw 'vendor SHA mismatch' }
-          if ((git status --porcelain=v1 --untracked-files=all) -ne '') { throw 'candidate checkout is dirty' }
+          $dirty = @(git status --porcelain=v1 --untracked-files=all)
+          $vendorDirty = @(git -C vendor/tokscale-core status --porcelain=v1 --untracked-files=all)
+          "SUPERPROJECT_STATUS_COUNT=$($dirty.Count)"
+          $dirty | ForEach-Object { "SUPERPROJECT_STATUS=$_" }
+          "VENDOR_STATUS_COUNT=$($vendorDirty.Count)"
+          $vendorDirty | ForEach-Object { "VENDOR_STATUS=$_" }
+          if ($dirty.Count -ne 0 -or $vendorDirty.Count -ne 0) { throw 'candidate checkout is dirty' }
         working-directory: candidate
 
       - name: Full Rust workspace tests
@@ -88,8 +94,11 @@ jobs:
         run: |
           Remove-Item windows-storage-e1-mutations.ps1 -ErrorAction SilentlyContinue
           if ((git hash-object crates/tb_core_ffi/src/agent_storage_windows.rs) -ne $env:CANDIDATE_STORAGE_BLOB) { throw 'mutation runner changed candidate bytes' }
-          if ((git status --porcelain=v1 --untracked-files=all) -ne '') {
-            git status --porcelain=v1 --untracked-files=all
-            throw 'mutation runner left candidate dirty'
-          }
+          $dirty = @(git status --porcelain=v1 --untracked-files=all)
+          $vendorDirty = @(git -C vendor/tokscale-core status --porcelain=v1 --untracked-files=all)
+          "FINAL_STATUS_COUNT=$($dirty.Count)"
+          $dirty | ForEach-Object { "FINAL_STATUS=$_" }
+          "FINAL_VENDOR_STATUS_COUNT=$($vendorDirty.Count)"
+          $vendorDirty | ForEach-Object { "FINAL_VENDOR_STATUS=$_" }
+          if ($dirty.Count -ne 0 -or $vendorDirty.Count -ne 0) { throw 'mutation runner left candidate dirty' }
         working-directory: candidate
