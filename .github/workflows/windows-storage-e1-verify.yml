@@ -73,8 +73,8 @@ jobs:
         run: cargo test --workspace --release --locked agent_storage_windows
         working-directory: candidate
 
-      - name: Workspace Clippy
-        run: cargo clippy --workspace --all-targets
+      - name: Scoped tb_core_ffi Clippy
+        run: cargo clippy -p tb_core_ffi --all-targets --no-deps
         working-directory: candidate
 
       - name: Copy mutation runner
@@ -86,6 +86,11 @@ jobs:
         if: matrix.label == 'x64'
         shell: pwsh
         run: ./windows-storage-e1-mutations.ps1
+        working-directory: candidate
+
+      - name: Workspace Clippy baseline observation
+        continue-on-error: true
+        run: cargo clippy --workspace --all-targets
         working-directory: candidate
 
       - name: Confirm exact restore

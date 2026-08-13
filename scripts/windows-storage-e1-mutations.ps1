@@ -13,8 +13,9 @@ function Replace-Once([string]$Text, [string]$Old, [string]$New, [string]$Label)
 }
 
 function Run-Test([string]$Name) {
-    & cargo test -p tb_core_ffi --release --locked $Name -- --exact --nocapture
-    return $LASTEXITCODE
+    & cargo test -p tb_core_ffi --release --locked $Name -- --exact --nocapture 2>&1 | Out-Host
+    $Code = $LASTEXITCODE
+    return $Code
 }
 
 $Cases = @(
