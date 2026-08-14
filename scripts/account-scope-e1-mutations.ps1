@@ -88,33 +88,15 @@ function Get-Sha256Text([string]$Text) {
     return (Get-Sha256Bytes ($Utf8NoBom.GetBytes($Text)))
 }
 
-function Find-UniqueByteMarker([byte[]]$Bytes, [byte[]]$Marker) {
-    $MatchIndex = -1
-    $MatchCount = 0
-    for ($Index = 0; $Index -le $Bytes.Length - $Marker.Length; $Index++) {
-        $Same = $true
-        for ($MarkerIndex = 0; $MarkerIndex -lt $Marker.Length; $MarkerIndex++) {
-            if ($Bytes[$Index + $MarkerIndex] -ne $Marker[$MarkerIndex]) {
-                $Same = $false
-                break
-            }
-        }
-        if ($Same) {
-            $MatchIndex = $Index
-            $MatchCount++
-        }
-    }
-    if ($MatchCount -ne 1) { throw 'Production marker is not unique' }
-    return $MatchIndex
-}
-
 function Get-ProductionPrefixHash([string]$Source) {
-    $Bytes = [System.IO.File]::ReadAllBytes($Source)
-    $Marker = [System.Text.Encoding]::UTF8.GetBytes("#[cfg(test)]`npub(crate) mod test_support {")
-    $MatchIndex = Find-UniqueByteMarker $Bytes $Marker
-    $Prefix = [byte[]]::new($MatchIndex)
-    [System.Array]::Copy($Bytes, 0, $Prefix, 0, $MatchIndex)
-    return (Get-Sha256Bytes $Prefix)
+    $Text = [System.IO.File]::ReadAllText($Source)
+    $Normalized = $Text.Replace("`r`n", "`n")
+    $Marker = "#[cfg(test)]`npub(crate) mod test_support {"
+    $MatchIndex = $Normalized.IndexOf($Marker, [System.StringComparison]::Ordinal)
+    if ($MatchIndex -lt 0 -or $Normalized.IndexOf($Marker, $MatchIndex + $Marker.Length, [System.StringComparison]::Ordinal) -ge 0) {
+        throw 'Production marker is not unique'
+    }
+    return (Get-Sha256Bytes ($Utf8NoBom.GetBytes($Normalized.Substring(0, $MatchIndex))))
 }
 
 function Get-UniqueSuffix([string]$Text, [string]$Marker) {
@@ -143,8 +125,8 @@ function Restore-ExactSources {
 
 function Get-WorkingBlobs {
     return [pscustomobject]@{
-        Account = (Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_account_scope.rs'))
-        Storage = (Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
+        Account = (Invoke-GitValue -Arguments @('hash-object', '--path=crates/tb_core_ffi/src/agent_account_scope.rs', 'crates/tb_core_ffi/src/agent_account_scope.rs'))
+        Storage = (Invoke-GitValue -Arguments @('hash-object', '--path=crates/tb_core_ffi/src/agent_storage_windows.rs', 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
     }
 }
 
@@ -455,7 +437,7 @@ function Assert-InitialIdentity {
     $StorageObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
     $VerificationObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'docs/knowledge/verification.md'))
     $Blobs = Get-WorkingBlobs
-    $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', 'docs/knowledge/verification.md')
+    $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', '--path=docs/knowledge/verification.md', 'docs/knowledge/verification.md')
     $VendorGitlink = Invoke-GitValue -Arguments @('rev-parse', 'HEAD:vendor/tokscale-core')
     $VendorHead = Invoke-GitValue -Arguments @('-C', 'vendor/tokscale-core', 'rev-parse', 'HEAD')
     $Prefix = Get-ProductionPrefixHash $AccountSource
@@ -484,7 +466,7 @@ function Assert-FinalIdentity {
     $Tree = Invoke-GitValue -Arguments @('rev-parse', 'HEAD^{tree}')
     $StorageObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
     $Blobs = Get-WorkingBlobs
-    $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', 'docs/knowledge/verification.md')
+    $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', '--path=docs/knowledge/verification.md', 'docs/knowledge/verification.md')
     $VendorHead = Invoke-GitValue -Arguments @('-C', 'vendor/tokscale-core', 'rev-parse', 'HEAD')
     $Prefix = Get-ProductionPrefixHash $AccountSource
     $Status = @(Get-SuperprojectStatus)
