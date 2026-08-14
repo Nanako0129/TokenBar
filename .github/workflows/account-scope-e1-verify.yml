@@ -1,0 +1,361 @@
+name: Account scope E1 verification
+
+on:
+  push:
+    branches: [verify/account-scope-e1-ci]
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 899ee5d6c4acb081ae5e019799e333e18d0dc398
+  CANDIDATE_TREE: 7396c24eff8ac46783d44c085117ac9a785d545c
+  CANDIDATE_ACCOUNT_BLOB: d634acbd65507aa2b0fea7ac8ae332cb2f2e0361
+  CANDIDATE_VERIFICATION_BLOB: b77980fcd54bdcc390f538b1182eb5a7f417124a
+  CANDIDATE_VENDOR_SHA: 731a2dcc2589cbeaf82150933331b5b2b6b590ff
+  CANDIDATE_PRODUCTION_PREFIX_SHA256: 07dafa9660e82808b9263dfb9da7915c7eeb851e5ec49d542e13b0bb0da9e47b
+  RUST_TOOLCHAIN: 1.97.1
+  ANTHROPIC_API_KEY: ''
+  CLAUDE_API_KEY: ''
+  CLAUDE_CODE_OAUTH_TOKEN: ''
+  OPENAI_API_KEY: ''
+  CODEX_API_KEY: ''
+  GOOGLE_API_KEY: ''
+  GEMINI_API_KEY: ''
+  GOOGLE_APPLICATION_CREDENTIALS: ''
+  GROK_API_KEY: ''
+  XAI_API_KEY: ''
+  ANTIGRAVITY_OAUTH_CLIENT_ID: ''
+  ANTIGRAVITY_OAUTH_CLIENT_SECRET: ''
+  AWS_ACCESS_KEY_ID: ''
+  AWS_SECRET_ACCESS_KEY: ''
+  AWS_SESSION_TOKEN: ''
+  AWS_WEB_IDENTITY_TOKEN_FILE: ''
+  AZURE_OPENAI_API_KEY: ''
+  AZURE_OPENAI_ENDPOINT: ''
+  DEEPSEEK_API_KEY: ''
+  OPENROUTER_API_KEY: ''
+  MOONSHOT_API_KEY: ''
+  MINIMAX_API_KEY: ''
+  ZHIPUAI_API_KEY: ''
+  DASHSCOPE_API_KEY: ''
+  MISTRAL_API_KEY: ''
+  COHERE_API_KEY: ''
+  TOGETHER_API_KEY: ''
+  PERPLEXITY_API_KEY: ''
+  TOKENBAR_CLAUDE_OAUTH_SCOPES: ''
+  TOKCAT_CLAUDE_OAUTH_SCOPES: ''
+  CODEXBAR_CLAUDE_OAUTH_SCOPES: ''
+
+jobs:
+  runtime:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: x64
+            runner: windows-latest
+            os_arch: X64
+            rust_host: x86_64-pc-windows-msvc
+          - label: ARM64-native
+            runner: windows-11-arm
+            os_arch: ARM64
+            rust_host: aarch64-pc-windows-msvc
+    name: Windows ${{ matrix.label }} account-scope E1
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Checkout verification harness - ${{ matrix.label }}
+        uses: actions/checkout@v6
+        with:
+          path: harness
+          persist-credentials: false
+
+      - name: Checkout exact implementation candidate - ${{ matrix.label }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          path: candidate
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Install pinned native Rust toolchain - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & rustup toolchain install $env:RUST_TOOLCHAIN --profile minimal --component clippy --component rustfmt *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain installation failed' }
+          & rustup override set $env:RUST_TOOLCHAIN *> $null
+          if ($LASTEXITCODE -ne 0) { throw 'Rust toolchain override failed' }
+
+      - name: Verify exact candidate identity and native architecture - ${{ matrix.label }}
+        id: identity
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          function Invoke-GitValue([string[]]$Arguments) {
+              $Lines = @(& git @Arguments 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $Lines.Count -ne 1) { throw 'Git identity query failed' }
+              return ("$($Lines[0])").Trim()
+          }
+
+          function Get-ProductionPrefixHash([string]$Source) {
+              $Bytes = [System.IO.File]::ReadAllBytes($Source)
+              $Marker = [System.Text.Encoding]::UTF8.GetBytes("#[cfg(test)]`npub(crate) mod test_support {")
+              $MatchIndex = -1
+              $MatchCount = 0
+              for ($Index = 0; $Index -le $Bytes.Length - $Marker.Length; $Index++) {
+                  $Same = $true
+                  for ($MarkerIndex = 0; $MarkerIndex -lt $Marker.Length; $MarkerIndex++) {
+                      if ($Bytes[$Index + $MarkerIndex] -ne $Marker[$MarkerIndex]) {
+                          $Same = $false
+                          break
+                      }
+                  }
+                  if ($Same) {
+                      $MatchIndex = $Index
+                      $MatchCount++
+                  }
+              }
+              if ($MatchCount -ne 1) { throw 'Production marker is not unique' }
+              $Prefix = [byte[]]::new($MatchIndex)
+              [System.Array]::Copy($Bytes, 0, $Prefix, 0, $MatchIndex)
+              $Hasher = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                  return [System.Convert]::ToHexString($Hasher.ComputeHash($Prefix)).ToLowerInvariant()
+              } finally {
+                  $Hasher.Dispose()
+              }
+          }
+
+          $Architecture = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToUpperInvariant()
+          if ($Architecture -cne '${{ matrix.os_arch }}') { throw 'OS architecture mismatch' }
+
+          $RustVerbose = @(& rustc -vV 2>$null)
+          if ($LASTEXITCODE -ne 0) { throw 'rustc identity query failed' }
+          $RustHostLines = @($RustVerbose | Where-Object { $_ -match '^host:\s+' })
+          if ($RustHostLines.Count -ne 1) { throw 'rustc host is unavailable' }
+          $RustHost = ($RustHostLines[0] -replace '^host:\s+', '').Trim()
+          if ($RustHost -cne '${{ matrix.rust_host }}') { throw 'Rust host mismatch' }
+
+          $Head = Invoke-GitValue -Arguments @('rev-parse', 'HEAD')
+          $Tree = Invoke-GitValue -Arguments @('rev-parse', 'HEAD^{tree}')
+          $AccountObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'crates/tb_core_ffi/src/agent_account_scope.rs'))
+          $StorageObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
+          $VerificationObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'docs/knowledge/verification.md'))
+          $AccountBlob = Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_account_scope.rs')
+          $StorageBlob = Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_storage_windows.rs')
+          $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', 'docs/knowledge/verification.md')
+          $VendorGitlink = Invoke-GitValue -Arguments @('rev-parse', 'HEAD:vendor/tokscale-core')
+          $VendorHead = Invoke-GitValue -Arguments @('-C', 'vendor/tokscale-core', 'rev-parse', 'HEAD')
+          $ProductionPrefix = Get-ProductionPrefixHash 'crates/tb_core_ffi/src/agent_account_scope.rs'
+
+          if ($Head -cne $env:CANDIDATE_SHA) { throw 'Candidate commit mismatch' }
+          if ($Tree -cne $env:CANDIDATE_TREE) { throw 'Candidate tree mismatch' }
+          if ($AccountObject -cne $env:CANDIDATE_ACCOUNT_BLOB -or $AccountBlob -cne $env:CANDIDATE_ACCOUNT_BLOB) { throw 'Account source blob mismatch' }
+          if ($VerificationObject -cne $env:CANDIDATE_VERIFICATION_BLOB -or $VerificationBlob -cne $env:CANDIDATE_VERIFICATION_BLOB) { throw 'Verification document blob mismatch' }
+          if ($StorageBlob -cne $StorageObject) { throw 'Storage source blob mismatch' }
+          if ($VendorGitlink -cne $env:CANDIDATE_VENDOR_SHA -or $VendorHead -cne $env:CANDIDATE_VENDOR_SHA) { throw 'Vendor pin mismatch' }
+          if ($ProductionPrefix -cne $env:CANDIDATE_PRODUCTION_PREFIX_SHA256) { throw 'Production prefix mismatch' }
+
+          $Dirty = @(& git status --porcelain=v1 --untracked-files=all 2>$null)
+          if ($LASTEXITCODE -ne 0) { throw 'Superproject status query failed' }
+          $VendorDirty = @(& git -C vendor/tokscale-core status --porcelain=v1 --untracked-files=all 2>$null)
+          if ($LASTEXITCODE -ne 0) { throw 'Vendor status query failed' }
+          if ($Dirty.Count -ne 0 -or $VendorDirty.Count -ne 0) { throw 'Candidate checkout is dirty' }
+
+          "CANDIDATE_STORAGE_BLOB=$StorageObject" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+          "ARCH=$Architecture"
+          "RUST_HOST=$RustHost"
+          "CANDIDATE_HEAD=$Head"
+          "CANDIDATE_TREE=$Tree"
+          "ACCOUNT_BLOB=$AccountBlob"
+          "STORAGE_BLOB=$StorageBlob"
+          "VERIFICATION_BLOB=$VerificationBlob"
+          "VENDOR_SHA=$VendorHead"
+          "PRODUCTION_PREFIX_SHA256=$ProductionPrefix"
+          "SUPERPROJECT_STATUS_COUNT=$($Dirty.Count)"
+          "VENDOR_STATUS_COUNT=$($VendorDirty.Count)"
+
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value @(
+              "### Windows ${{ matrix.label }} account-scope E1",
+              "- OS architecture: ``$Architecture``",
+              "- Rust host: ``$RustHost``",
+              "- exact candidate commit: ``$Head``",
+              "- candidate tree: ``$Tree``",
+              "- account source blob: ``$AccountBlob``",
+              "- storage source blob (dynamically pinned from candidate): ``$StorageBlob``",
+              "- verification document blob: ``$VerificationBlob``",
+              "- vendor pin: ``$VendorHead``",
+              "- harness checkout is separate and is not the implementation candidate",
+              "- workspace fmt is a baseline observation only and is never reported as PASS"
+          )
+
+      - name: Copy account-scope mutation runner - ${{ matrix.label }}
+        shell: pwsh
+        run: Copy-Item -LiteralPath harness/scripts/account-scope-e1-mutations.ps1 -Destination candidate/account-scope-e1-mutations.ps1
+
+      - name: Run six fixed-owner production mutations - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: ./account-scope-e1-mutations.ps1
+
+      - name: Touched account-scope rustfmt check - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & rustfmt --edition 2021 --check crates/tb_core_ffi/src/agent_account_scope.rs *> $null
+          $Code = $LASTEXITCODE
+          "TOUCHED_RUSTFMT_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Workspace rustfmt baseline observation, not a PASS gate - ${{ matrix.label }}
+        id: workspace_fmt
+        continue-on-error: true
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo fmt --all -- --check *> $null
+          $Code = $LASTEXITCODE
+          "WORKSPACE_FMT_BASELINE_EXIT=$Code"
+          exit $Code
+
+      - name: Record workspace fmt baseline observation - ${{ matrix.label }}
+        if: always()
+        shell: pwsh
+        run: |
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value "- workspace fmt baseline observation outcome: ``${{ steps.workspace_fmt.outcome }}`` (observation only; not PASS)"
+
+      - name: Focused account-scope runtime tests - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo test -p tb_core_ffi --release --locked agent_account_scope::tests -- --test-threads=1 *> $null
+          $Code = $LASTEXITCODE
+          "ACCOUNT_SCOPE_TEST_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Complete tb_core_ffi release tests - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo test -p tb_core_ffi --release --locked *> $null
+          $Code = $LASTEXITCODE
+          "TB_CORE_FFI_TEST_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Complete Rust workspace release tests - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo test --workspace --release --locked *> $null
+          $Code = $LASTEXITCODE
+          "WORKSPACE_TEST_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Focused low-level Windows storage tests - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo test -p tb_core_ffi --release --locked agent_storage_windows *> $null
+          $Code = $LASTEXITCODE
+          "WINDOWS_STORAGE_TEST_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Workspace all-targets Clippy - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo clippy --workspace --all-targets *> $null
+          $Code = $LASTEXITCODE
+          "WORKSPACE_CLIPPY_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Release tb_core_ffi build - ${{ matrix.label }}
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          & cargo build --release --locked -p tb_core_ffi *> $null
+          $Code = $LASTEXITCODE
+          "TB_CORE_FFI_BUILD_EXIT=$Code"
+          if ($Code -ne 0) { exit $Code }
+
+      - name: Confirm final exact candidate restore - ${{ matrix.label }}
+        if: always()
+        shell: pwsh
+        working-directory: candidate
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+
+          function Invoke-GitValue([string[]]$Arguments) {
+              $Lines = @(& git @Arguments 2>$null)
+              if ($LASTEXITCODE -ne 0 -or $Lines.Count -ne 1) { throw 'Git identity query failed' }
+              return ("$($Lines[0])").Trim()
+          }
+
+          function Get-ProductionPrefixHash([string]$Source) {
+              $Bytes = [System.IO.File]::ReadAllBytes($Source)
+              $Marker = [System.Text.Encoding]::UTF8.GetBytes("#[cfg(test)]`npub(crate) mod test_support {")
+              $MatchIndex = -1
+              $MatchCount = 0
+              for ($Index = 0; $Index -le $Bytes.Length - $Marker.Length; $Index++) {
+                  $Same = $true
+                  for ($MarkerIndex = 0; $MarkerIndex -lt $Marker.Length; $MarkerIndex++) {
+                      if ($Bytes[$Index + $MarkerIndex] -ne $Marker[$MarkerIndex]) {
+                          $Same = $false
+                          break
+                      }
+                  }
+                  if ($Same) {
+                      $MatchIndex = $Index
+                      $MatchCount++
+                  }
+              }
+              if ($MatchCount -ne 1) { throw 'Production marker is not unique' }
+              $Prefix = [byte[]]::new($MatchIndex)
+              [System.Array]::Copy($Bytes, 0, $Prefix, 0, $MatchIndex)
+              $Hasher = [System.Security.Cryptography.SHA256]::Create()
+              try {
+                  return [System.Convert]::ToHexString($Hasher.ComputeHash($Prefix)).ToLowerInvariant()
+              } finally {
+                  $Hasher.Dispose()
+              }
+          }
+
+          Remove-Item -LiteralPath account-scope-e1-mutations.ps1 -Force -ErrorAction SilentlyContinue
+
+          $Head = Invoke-GitValue -Arguments @('rev-parse', 'HEAD')
+          $Tree = Invoke-GitValue -Arguments @('rev-parse', 'HEAD^{tree}')
+          $StorageObject = Invoke-GitValue -Arguments @('rev-parse', ('{0}:{1}' -f $env:CANDIDATE_SHA, 'crates/tb_core_ffi/src/agent_storage_windows.rs'))
+          $AccountBlob = Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_account_scope.rs')
+          $StorageBlob = Invoke-GitValue -Arguments @('hash-object', 'crates/tb_core_ffi/src/agent_storage_windows.rs')
+          $VerificationBlob = Invoke-GitValue -Arguments @('hash-object', 'docs/knowledge/verification.md')
+          $VendorHead = Invoke-GitValue -Arguments @('-C', 'vendor/tokscale-core', 'rev-parse', 'HEAD')
+          $ProductionPrefix = Get-ProductionPrefixHash 'crates/tb_core_ffi/src/agent_account_scope.rs'
+          $Dirty = @(& git status --porcelain=v1 --untracked-files=all 2>$null)
+          if ($LASTEXITCODE -ne 0) { throw 'Superproject status query failed' }
+          $VendorDirty = @(& git -C vendor/tokscale-core status --porcelain=v1 --untracked-files=all 2>$null)
+          if ($LASTEXITCODE -ne 0) { throw 'Vendor status query failed' }
+
+          "FINAL_HEAD=$Head"
+          "FINAL_TREE=$Tree"
+          "FINAL_ACCOUNT_BLOB=$AccountBlob"
+          "FINAL_STORAGE_BLOB=$StorageBlob"
+          "FINAL_VERIFICATION_BLOB=$VerificationBlob"
+          "FINAL_VENDOR_SHA=$VendorHead"
+          "FINAL_PRODUCTION_PREFIX_SHA256=$ProductionPrefix"
+          "FINAL_STATUS_COUNT=$($Dirty.Count)"
+          "FINAL_VENDOR_STATUS_COUNT=$($VendorDirty.Count)"
+
+          if ($Head -cne $env:CANDIDATE_SHA -or $Tree -cne $env:CANDIDATE_TREE) { throw 'Final candidate identity mismatch' }
+          if ($AccountBlob -cne $env:CANDIDATE_ACCOUNT_BLOB) { throw 'Final account source mismatch' }
+          if ($StorageBlob -cne $StorageObject) { throw 'Final storage source mismatch' }
+          if ($VerificationBlob -cne $env:CANDIDATE_VERIFICATION_BLOB) { throw 'Final verification document mismatch' }
+          if ($VendorHead -cne $env:CANDIDATE_VENDOR_SHA) { throw 'Final vendor pin mismatch' }
+          if ($ProductionPrefix -cne $env:CANDIDATE_PRODUCTION_PREFIX_SHA256) { throw 'Final production prefix mismatch' }
+          if ($Dirty.Count -ne 0 -or $VendorDirty.Count -ne 0) { throw 'Final candidate checkout is dirty' }
