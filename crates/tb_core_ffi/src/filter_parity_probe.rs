@@ -421,6 +421,8 @@ mod tests {
             agents_status: ProbeStatus,
             hourly_token_delta: i64,
             hourly_cost_delta: f64,
+            agents_token_delta: i64,
+            agents_cost_delta: f64,
         }
         let rows = [
             Row {
@@ -431,6 +433,8 @@ mod tests {
                 agents_status: ProbeStatus::Match,
                 hourly_token_delta: 0,
                 hourly_cost_delta: 0.0,
+                agents_token_delta: 0,
+                agents_cost_delta: 0.0,
             },
             Row {
                 name: "hourly-only integer mismatch",
@@ -440,6 +444,8 @@ mod tests {
                 agents_status: ProbeStatus::Match,
                 hourly_token_delta: 1,
                 hourly_cost_delta: 0.0,
+                agents_token_delta: 0,
+                agents_cost_delta: 0.0,
             },
             Row {
                 name: "price-only delta stays diagnostic, not a mismatch",
@@ -449,6 +455,8 @@ mod tests {
                 agents_status: ProbeStatus::Match,
                 hourly_token_delta: 0,
                 hourly_cost_delta: 0.5,
+                agents_token_delta: 0,
+                agents_cost_delta: 1.0,
             },
         ];
         for row in rows {
@@ -462,6 +470,9 @@ mod tests {
             let delta = result.hourly.delta.unwrap();
             assert_eq!(delta.total_tokens, row.hourly_token_delta, "{}", row.name);
             assert_eq!(delta.total_cost, row.hourly_cost_delta, "{}", row.name);
+            let agents_delta = result.agents.delta.unwrap();
+            assert_eq!(agents_delta.total_tokens, row.agents_token_delta, "{}", row.name);
+            assert_eq!(agents_delta.total_cost, row.agents_cost_delta, "{}", row.name);
         }
     }
 

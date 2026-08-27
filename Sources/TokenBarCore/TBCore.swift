@@ -718,6 +718,9 @@ public enum TBCore {
                     "filter parity \(row.status) smoke label",
                     payload.hourly.smokeSummary == row.smoke)
                 check(
+                    "filter parity \(row.status) combined smoke summary",
+                    payload.smokeSummary == "hourly=\(row.smoke); agents=\(row.smoke)")
+                check(
                     "filter parity \(row.status) nullable aggregates decode",
                     row.hasAggregates
                         ? payload.hourly.unfiltered != nil
@@ -726,6 +729,7 @@ public enum TBCore {
             } catch {
                 check("filter parity \(row.status) decodes its lower-camel status", false)
                 check("filter parity \(row.status) smoke label", false)
+                check("filter parity \(row.status) combined smoke summary", false)
                 check("filter parity \(row.status) nullable aggregates decode", false)
             }
         }
