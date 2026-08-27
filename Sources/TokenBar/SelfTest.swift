@@ -6745,184 +6745,77 @@ enum SelfTest {
         expect(AppView.effective(.overview, hiddenRaw: "overview") == .overview,
             "overview is never subject to the hidden-lens fallback")
 
-        // Filtered stats derive their range from the SELECTED clients (issue
-        // #36 Fix, round 5): a hidden client active AFTER the visible client's
-        // last day must not reset/shorten the visible streak. Fixture: "vis"
-        // active 07-01..07-03, hidden "hid" active 07-05 → meta.dateRange
-        // spans 07-01..07-05. Without the fix, streaks for {vis} walk to 07-05
-        // and current resets to 0 on the empty 07-04/07-05 tail; with the fix
-        // the range is 07-01..07-03 so current == longest == 3.
-        func daily(_ client: String, _ date: String, _ cost: Double) -> String {
-            """
-            {"date":"\(date)","totals":{"tokens":10,"cost":\(cost),"messages":1},"intensity":1,
-             "tokenBreakdown":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
-             "clients":[{"client":"\(client)","modelId":"m","providerId":"p","cost":\(cost),"messages":1,
-              "tokens":{"input":10,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
-            """
+        // Filtered activity, DayBars windows, tooltip placement, and chart geometry.
+        // Hidden later activity cannot extend selected streaks or shift token/cost
+        // bars; a message-only day stays activity but does not move the metric window.
+        func activityDay(_ client: String, _ date: String, tokens: Int64 = 10, cost: Double = 1) -> String {
+            "{\"date\":\"\(date)\",\"totals\":{\"tokens\":\(tokens),\"cost\":\(cost),\"messages\":1},\"intensity\":\(tokens > 0 ? 1 : 0),\"tokenBreakdown\":{\"input\":\(tokens),\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"reasoning\":0},\"clients\":[{\"client\":\"\(client)\",\"modelId\":\"m\",\"providerId\":\"p\",\"cost\":\(cost),\"messages\":1,\"tokens\":{\"input\":\(tokens),\"output\":0,\"cacheRead\":0,\"cacheWrite\":0,\"reasoning\":0}}]}"
         }
-        func messageOnlyDaily(_ client: String, _ date: String) -> String {
-            """
-            {"date":"\(date)","totals":{"tokens":0,"cost":0,"messages":1},"intensity":0,
-             "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
-             "clients":[{"client":"\(client)","modelId":"m","providerId":"p","cost":0,"messages":1,
-              "tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
-            """
+        func activityPayload(end: String, days: [String]) -> UsagePayload {
+            try! JSONDecoder().decode(UsagePayload.self, from: Data("{\"meta\":{\"generatedAt\":\"now\",\"version\":\"1\",\"dateRange\":{\"start\":\"2026-07-01\",\"end\":\"\(end)\"}},\"summary\":{\"totalTokens\":0,\"totalCost\":0,\"totalDays\":0,\"activeDays\":0,\"averagePerDay\":0,\"maxCostInSingleDay\":0,\"clients\":[\"vis\",\"hid\"],\"models\":[]},\"years\":[],\"contributions\":[\(days.joined(separator: ","))]}".utf8))
         }
-        func rangeStatsPayload(end: String, days: [String]) -> UsagePayload {
-            let json = """
-            {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-07-01","end":"\(end)"}},
-             "summary":{"totalTokens":0,"totalCost":0,"totalDays":0,"activeDays":0,"averagePerDay":0,
-                        "maxCostInSingleDay":0,"clients":["vis","hid"],"models":[]},
-             "years":[],
-             "contributions":[\(days.joined(separator: ","))]}
-            """
-            return try! JSONDecoder().decode(UsagePayload.self, from: Data(json.utf8))
+        let visDays = (1...3).map { activityDay("vis", String(format: "2026-07-%02d", $0)) }
+        let withHidden = activityPayload(end: "2026-07-05", days: visDays + [activityDay("hid", "2026-07-05")])
+        let noHidden = activityPayload(end: "2026-07-03", days: visDays)
+        let messageTail = activityPayload(end: "2026-07-31", days: [
+            activityDay("vis", "2026-07-01"), activityDay("vis", "2026-07-31", tokens: 0, cost: 0)])
+        struct ActivityCase { let name: String; let payload: UsagePayload; let end: String; let current: Int; let longest: Int; let average: Double? }
+        for c in [
+            ActivityCase(name: "hidden later activity does not extend selected streak/range/average", payload: withHidden, end: "2026-07-03", current: 3, longest: 3, average: 1),
+            ActivityCase(name: "a trailing message-only day remains current activity", payload: messageTail, end: "2026-07-31", current: 1, longest: 1, average: nil),
+        ] {
+            let stats = UsageStats(payload: c.payload, selectedClients: ["vis"])
+            expect(stats.dateRange.end == c.end && stats.streaks.current == c.current && stats.streaks.longest == c.longest && (c.average.map { stats.averagePerDay == $0 } ?? true), c.name)
         }
-        // With the hidden client extending the range to 07-05.
-        let withHidden = rangeStatsPayload(end: "2026-07-05", days: [
-            daily("vis", "2026-07-01", 1), daily("vis", "2026-07-02", 1),
-            daily("vis", "2026-07-03", 1), daily("hid", "2026-07-05", 1),
-        ])
         let visFiltered = UsageStats(payload: withHidden, selectedClients: ["vis"])
-        expect(visFiltered.streaks.current == 3 && visFiltered.streaks.longest == 3,
-            "filtered streak ignores a hidden client's later activity")
-        expect(visFiltered.dateRange.end == "2026-07-03",
-            "filtered range ends at the selected clients' last active day")
-        expect(visFiltered.averagePerDay == 1,
-            "filtered averagePerDay divides by selected active days, not the hidden-extended span")
-        // Equivalence: same numbers as a payload where the hidden client never
-        // existed (range naturally 07-01..07-03, {vis} is all present).
-        let noHidden = rangeStatsPayload(end: "2026-07-03", days: [
-            daily("vis", "2026-07-01", 1), daily("vis", "2026-07-02", 1),
-            daily("vis", "2026-07-03", 1),
-        ])
         let visAlone = UsageStats(payload: noHidden, selectedClients: ["vis"])
-        expect(visFiltered.streaks.current == visAlone.streaks.current
-            && visFiltered.streaks.longest == visAlone.streaks.longest
-            && visFiltered.dateRange.end == visAlone.dateRange.end,
-            "filtered stats equal a payload without the hidden client")
+        expect(visFiltered.streaks.current == visAlone.streaks.current && visFiltered.streaks.longest == visAlone.streaks.longest && visFiltered.dateRange.end == visAlone.dateRange.end, "filtered stats equal a payload without the hidden client")
 
-        let messageTailPayload = rangeStatsPayload(end: "2026-07-31", days: [
-            daily("vis", "2026-07-01", 1), messageOnlyDaily("vis", "2026-07-31"),
-        ])
-        let messageTailStats = UsageStats(payload: messageTailPayload, selectedClients: ["vis"])
-        expect(
-            messageTailStats.dateRange.end == "2026-07-31"
-                && messageTailStats.streaks.current == 1,
-            "a trailing message-only day remains current activity instead of resetting the streak")
-
-        // DayBars trailing window anchors to the passed range end, not the
-        // unfiltered payload range (issue #36 Fix, round 6): the caller passes
-        // the selection-derived stats.dateRange.end, so a hidden client active
-        // AFTER the visible client can't shift the window past the visible
-        // activity. Fixture: vis active 07-03, hidden active 07-05.
-        let chartPayload = rangeStatsPayload(end: "2026-07-05", days: [
-            daily("vis", "2026-07-03", 1), daily("hid", "2026-07-05", 1),
-        ])
+        let chartPayload = activityPayload(end: "2026-07-05", days: [activityDay("vis", "2026-07-03"), activityDay("hid", "2026-07-05")])
         let chartColors = ModelColorMap(report: nil)
-        let visBars = DayBars.build(
-            payload: chartPayload, clientIds: ["vis"], stackBy: .agent,
-            colors: chartColors, rangeEnd: "2026-07-03", endFallback: "2026-07-09")
-        expect(visBars.count == DayBars.window && visBars.last?.date == "2026-07-03",
-            "chart window anchors to the filtered range end")
-        expect((visBars.last?.totalTokens ?? 0) > 0,
-            "visible client's last active day is the last (in-window) bar")
-        // DayBars derives its token/cost anchor from the selected series, so a
-        // later non-metric range end cannot shift visible usage out of view.
-        let shiftedBars = DayBars.build(
-            payload: chartPayload, clientIds: ["vis"], stackBy: .agent,
-            colors: chartColors, rangeEnd: "2026-07-05", endFallback: "2026-07-09")
-        expect(shiftedBars.last?.date == "2026-07-03" && (shiftedBars.last?.totalTokens ?? 0) > 0,
-            "chart derives its range end from selected token/cost activity")
-        let messageTailBars = DayBars.build(
-            payload: messageTailPayload, clientIds: ["vis"], stackBy: .agent,
-            colors: chartColors, rangeEnd: messageTailStats.dateRange.end,
-            endFallback: "2026-07-31")
-        expect(
-            messageTailBars.last?.date == "2026-07-01"
-                && (messageTailBars.last?.totalTokens ?? 0) > 0,
-            "a later message-only day does not shift the token/cost chart window")
+        struct DayBarCase { let name: String; let payload: UsagePayload; let rangeEnd: String; let fallback: String; let last: String; let hasTokens: Bool }
+        for c in [
+            DayBarCase(name: "hidden later activity does not push selected usage out of the window", payload: chartPayload, rangeEnd: "2026-07-05", fallback: "2026-07-09", last: "2026-07-03", hasTokens: true),
+            DayBarCase(name: "a later message-only day does not shift the token/cost window", payload: messageTail, rangeEnd: "2026-07-31", fallback: "2026-07-31", last: "2026-07-01", hasTokens: true),
+            DayBarCase(name: "empty series uses endFallback when rangeEnd is empty", payload: activityPayload(end: "2026-07-09", days: []), rangeEnd: "", fallback: "2026-07-09", last: "2026-07-09", hasTokens: false),
+        ] {
+            let bars = DayBars.build(payload: c.payload, clientIds: ["vis"], stackBy: .agent, colors: chartColors, rangeEnd: c.rangeEnd, endFallback: c.fallback)
+            expect(bars.count == DayBars.window && bars.last?.date == c.last && ((bars.last?.totalTokens ?? 0) > 0) == c.hasTokens, c.name)
+        }
 
-        // Tooltip placement stays inside the visible ScrollView viewport, not
-        // merely inside the source card. Region-dodge (container 0.45) prefers
-        // above/below by cursor Y; viewport only clamps / rescues.
         let viewport = CGRect(x: 100, y: 200, width: 400, height: 300)
         let chartFrame = CGRect(x: 120, y: 250, width: 360, height: 150)
-        let tooltipSize = CGSize(width: 210, height: 120)
-        let belowPlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 30), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: viewport)
-        expect(belowPlacement?.height == 42,
-            "upper-half anchor places tooltip below the cursor")
-        let abovePlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 140), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: viewport)
-        expect(abovePlacement?.height == 8,
-            "lower-half anchor places tooltip above the cursor")
-        // Lower-half region even when the viewport still has room below —
-        // the old "prefer below if fits" path felt like sticky follow.
-        let regionDodge = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 100), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: viewport)
-        expect(regionDodge?.height == -32,
-            "lower-half still dodges above when the viewport has room below")
-        let constrainedPlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 110), tooltipSize: CGSize(width: 210, height: 260),
-            containerFrame: chartFrame, viewport: viewport)
-        expect(constrainedPlacement?.height == -46,
-            "tooltip clamps to the side with more visible space")
-        let edgePlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 2, y: 30), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: viewport)
-        expect(edgePlacement?.width == 0,
-            "tooltip clamps a near-edge anchor horizontally")
-        let tallPlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 30), tooltipSize: CGSize(width: 210, height: 400),
-            containerFrame: chartFrame, viewport: viewport)
-        expect(tallPlacement?.height == -46,
-            "viewport-taller tooltip pins to the visible top inset")
-        // Pre-resize viewport that no longer covers the card must not clamp.
-        let staleViewport = CGRect(x: 100, y: 0, width: 400, height: 80)
-        let stalePlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 30), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: staleViewport)
-        let containerOnly = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 30), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: nil)
-        expect(stalePlacement?.height == containerOnly?.height,
-            "stale non-intersecting viewport falls back to container-only")
-        // Pre-resize short viewport that still overlaps the card but leaves
-        // the hover anchor below it (grow handoff) must also fall back.
-        let partialStale = CGRect(x: 100, y: 200, width: 400, height: 80)
-        // chartFrame y=250..400; partialStale y=200..280 intersects the card
-        // but anchor at local y=100 → global y=350 is outside partialStale.
-        let partialPlacement = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 100), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: partialStale)
-        let partialContainerOnly = PopoverTooltipPlacement.offset(
-            anchor: CGPoint(x: 180, y: 100), tooltipSize: tooltipSize,
-            containerFrame: chartFrame, viewport: nil)
-        expect(partialPlacement?.height == partialContainerOnly?.height,
-            "partial-overlap stale viewport that misses the anchor falls back")
+        let tip = CGSize(width: 210, height: 120)
+        struct TooltipCase { let name: String; let anchor: CGPoint; let size: CGSize; let viewport: CGRect?; let width: CGFloat?; let height: CGFloat?; let matchNil: Bool }
+        for c in [
+            TooltipCase(name: "upper-half places below the cursor", anchor: CGPoint(x: 180, y: 30), size: tip, viewport: viewport, width: nil, height: 42, matchNil: false),
+            TooltipCase(name: "lower-half places above the cursor", anchor: CGPoint(x: 180, y: 140), size: tip, viewport: viewport, width: nil, height: 8, matchNil: false),
+            TooltipCase(name: "lower-half dodges above even with room below", anchor: CGPoint(x: 180, y: 100), size: tip, viewport: viewport, width: nil, height: -32, matchNil: false),
+            TooltipCase(name: "clamps to the side with more visible space", anchor: CGPoint(x: 180, y: 110), size: CGSize(width: 210, height: 260), viewport: viewport, width: nil, height: -46, matchNil: false),
+            TooltipCase(name: "clamps a near-edge anchor horizontally", anchor: CGPoint(x: 2, y: 30), size: tip, viewport: viewport, width: 0, height: nil, matchNil: false),
+            TooltipCase(name: "viewport-taller tooltip pins to the visible top inset", anchor: CGPoint(x: 180, y: 30), size: CGSize(width: 210, height: 400), viewport: viewport, width: nil, height: -46, matchNil: false),
+            TooltipCase(name: "stale non-intersecting viewport falls back to container-only", anchor: CGPoint(x: 180, y: 30), size: tip, viewport: CGRect(x: 100, y: 0, width: 400, height: 80), width: nil, height: nil, matchNil: true),
+            TooltipCase(name: "partial-overlap stale viewport that misses the anchor falls back", anchor: CGPoint(x: 180, y: 100), size: tip, viewport: CGRect(x: 100, y: 200, width: 400, height: 80), width: nil, height: nil, matchNil: true),
+        ] {
+            let got = PopoverTooltipPlacement.offset(anchor: c.anchor, tooltipSize: c.size, containerFrame: chartFrame, viewport: c.viewport)
+            let nilViewport = c.matchNil ? PopoverTooltipPlacement.offset(anchor: c.anchor, tooltipSize: c.size, containerFrame: chartFrame, viewport: nil) : nil
+            expect((c.width.map { got?.width == $0 } ?? true) && (c.height.map { got?.height == $0 } ?? true) && (!c.matchNil || got?.height == nilViewport?.height), "tooltip: \(c.name)")
+        }
 
         let chartWidth: CGFloat = 360
         let barGap = UsageChartGeometry.gap
         let barWidth = (chartWidth - barGap * 2) / 3
-        let firstFrame = UsageChartGeometry.barFrame(index: 0, barWidth: barWidth)
-        let secondFrame = UsageChartGeometry.barFrame(index: 1, barWidth: barWidth)
-        let lastFrame = UsageChartGeometry.barFrame(index: 2, barWidth: barWidth)
-        expect(firstFrame.minX == 0 && secondFrame.minX - firstFrame.maxX == barGap,
-            "chart bar frames start at zero and leave draw gaps")
-        expect(abs(lastFrame.maxX - chartWidth) < 0.0001,
-            "last chart bar frame reaches the trailing edge")
-        // Production hover uses floor(x / stride); gap pixels attach left.
-        let gapX = firstFrame.maxX + barGap / 2
-        expect(UsageChartGeometry.barIndex(atX: gapX, barWidth: barWidth, count: 3) == 0,
-            "gap pixels floor-attach to the left bar")
-        expect(UsageChartGeometry.barIndex(atX: secondFrame.minX, barWidth: barWidth, count: 3) == 1,
-            "bar starts hit their own index")
-        expect(UsageChartGeometry.barIndex(atX: lastFrame.maxX + barGap + 1, barWidth: barWidth, count: 3) == nil,
-            "past the last stride is out of range")
+        let frames = (0..<3).map { UsageChartGeometry.barFrame(index: $0, barWidth: barWidth) }
+        expect(frames[0].minX == 0 && frames[1].minX - frames[0].maxX == barGap && abs(frames[2].maxX - chartWidth) < 0.0001, "chart bar frames fill the width with documented gaps")
+        for c in [
+            (name: "in-bar hits that bar", x: frames[1].midX, expected: Optional(1)),
+            (name: "gap pixels floor-attach to the left bar", x: frames[0].maxX + barGap / 2, expected: Optional(0)),
+            (name: "leading edge hits its own index", x: frames[1].minX, expected: Optional(1)),
+            (name: "trailing edge stays on that bar", x: frames[1].maxX, expected: Optional(1)),
+            (name: "past the last stride is out of range", x: frames[2].maxX + barGap + 1, expected: nil),
+        ] as [(name: String, x: CGFloat, expected: Int?)] {
+            expect(UsageChartGeometry.barIndex(atX: c.x, barWidth: barWidth, count: 3) == c.expected, c.name)
+        }
 
         let modelWidths = ModelBarGeometry.widths(
             values: [1_000_000, 1, 1, 1, 1], totalWidth: 120)
