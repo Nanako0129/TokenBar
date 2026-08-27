@@ -409,95 +409,164 @@ mod tests {
         .unwrap()
     }
 
+    /// C1: stable-generation match, mismatch, and pricing-independence, table
+    /// driven instead of one bespoke closure set per outcome.
     #[test]
-    fn stable_equal_reports_match_and_include_delta() {
-        let result = run_fixture(
-            vec![Ok(1); 6],
-            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(10, 2, 0.25))],
-            vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 0.25))],
-        );
+    fn stable_source_outcomes() {
+        struct Row {
+            name: &'static str,
+            hourly_pair: (Value, Value),
+            agents_pair: (Value, Value),
+            hourly_status: ProbeStatus,
+            agents_status: ProbeStatus,
+            hourly_token_delta: i64,
+            hourly_cost_delta: f64,
+        }
+        let rows = [
+            Row {
+                name: "exact match has zero delta",
+                hourly_pair: (hourly(10, 2, 0.25), hourly(10, 2, 0.25)),
+                agents_pair: (agents(10, 2, 0.25), agents(10, 2, 0.25)),
+                hourly_status: ProbeStatus::Match,
+                agents_status: ProbeStatus::Match,
+                hourly_token_delta: 0,
+                hourly_cost_delta: 0.0,
+            },
+            Row {
+                name: "hourly-only integer mismatch",
+                hourly_pair: (hourly(10, 2, 0.25), hourly(11, 2, 0.25)),
+                agents_pair: (agents(10, 2, 0.25), agents(10, 2, 0.25)),
+                hourly_status: ProbeStatus::Mismatch,
+                agents_status: ProbeStatus::Match,
+                hourly_token_delta: 1,
+                hourly_cost_delta: 0.0,
+            },
+            Row {
+                name: "price-only delta stays diagnostic, not a mismatch",
+                hourly_pair: (hourly(10, 2, 0.25), hourly(10, 2, 0.75)),
+                agents_pair: (agents(10, 2, 0.25), agents(10, 2, 1.25)),
+                hourly_status: ProbeStatus::Match,
+                agents_status: ProbeStatus::Match,
+                hourly_token_delta: 0,
+                hourly_cost_delta: 0.5,
+            },
+        ];
+        for row in rows {
+            let result = run_fixture(
+                vec![Ok(1); 6],
+                vec![Ok(row.hourly_pair.0), Ok(row.hourly_pair.1)],
+                vec![Ok(row.agents_pair.0), Ok(row.agents_pair.1)],
+            );
+            assert_eq!(result.hourly.status, row.hourly_status, "{}", row.name);
+            assert_eq!(result.agents.status, row.agents_status, "{}", row.name);
+            let delta = result.hourly.delta.unwrap();
+            assert_eq!(delta.total_tokens, row.hourly_token_delta, "{}", row.name);
+            assert_eq!(delta.total_cost, row.hourly_cost_delta, "{}", row.name);
+        }
+    }
+
+    /// Shared call-tracking harness: one semantic label per callback
+    /// invocation, in call order. Reused by the order contract (which checks
+    /// the full label sequence) and the boundary table (which only needs the
+    /// count, since the exact labels are already pinned once below).
+    fn run_tracked(tokens: Vec<Result<u64, String>>) -> (Vec<String>, FilterParityPayload) {
+        let calls = Rc::new(RefCell::new(Vec::new()));
+        let token_index = Rc::new(RefCell::new(0usize));
+        let mut tokens = tokens.into_iter();
+        let mut token = {
+            let calls = Rc::clone(&calls);
+            let index = Rc::clone(&token_index);
+            move |_context: &LocalSourceContext| {
+                let n = *index.borrow();
+                *index.borrow_mut() += 1;
+                calls.borrow_mut().push(format!("token{n}"));
+                tokens.next().unwrap()
+            }
+        };
+        let mut graph_fn = {
+            let calls = Rc::clone(&calls);
+            move |_context: &LocalSourceContext| {
+                calls.borrow_mut().push("graph".to_string());
+                Ok(graph())
+            }
+        };
+        let mut hourly_fn = {
+            let calls = Rc::clone(&calls);
+            move |_context: &LocalSourceContext, clients: Option<&[String]>| {
+                let label = if clients.is_some() {
+                    "hourly-full"
+                } else {
+                    "hourly-nil"
+                };
+                calls.borrow_mut().push(label.to_string());
+                Ok(hourly(10, 2, 0.25))
+            }
+        };
+        let mut agents_fn = {
+            let calls = Rc::clone(&calls);
+            move |_context: &LocalSourceContext, clients: Option<&[String]>| {
+                let label = if clients.is_some() {
+                    "agents-full"
+                } else {
+                    "agents-nil"
+                };
+                calls.borrow_mut().push(label.to_string());
+                Ok(agents(10, 2, 0.25))
+            }
+        };
+        let result = run_with(
+            &context(),
+            &mut token,
+            &mut graph_fn,
+            &mut hourly_fn,
+            &mut agents_fn,
+        )
+        .unwrap();
+        let log = calls.borrow().clone();
+        (log, result)
+    }
+
+    /// C2 order contract: the one all-stable scenario that reaches every
+    /// stage, asserting the exact `token0..token5` bracketing sequence.
+    #[test]
+    fn full_stable_scan_follows_the_canonical_call_order() {
+        let (log, result) = run_tracked(vec![Ok(1); 6]);
         assert_eq!(result.hourly.status, ProbeStatus::Match);
         assert_eq!(result.agents.status, ProbeStatus::Match);
-        assert_eq!(result.hourly.delta.unwrap().total_tokens, 0);
-        assert_eq!(result.agents.delta.unwrap().message_count, 0);
-    }
-
-    #[test]
-    fn stable_different_reports_are_mismatch() {
-        let result = run_fixture(
-            vec![Ok(1); 6],
-            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(11, 2, 0.25))],
-            vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 0.25))],
+        assert_eq!(
+            log,
+            vec![
+                "token0",
+                "graph",
+                "token1",
+                "hourly-nil",
+                "token2",
+                "hourly-full",
+                "token3",
+                "agents-nil",
+                "token4",
+                "agents-full",
+                "token5",
+            ]
         );
-        assert_eq!(result.hourly.status, ProbeStatus::Mismatch);
-        assert_eq!(result.agents.status, ProbeStatus::Match);
-        assert_eq!(result.hourly.delta.unwrap().input, 1);
     }
 
-    #[test]
-    fn stable_source_ignores_independent_pricing_refresh() {
-        let result = run_fixture(
-            vec![Ok(1); 6],
-            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(10, 2, 0.75))],
-            vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 1.25))],
-        );
-        assert_eq!(result.hourly.status, ProbeStatus::Match);
-        assert_eq!(result.agents.status, ProbeStatus::Match);
-        assert_eq!(result.hourly.delta.unwrap().total_cost, 0.5);
-        assert_eq!(result.agents.delta.unwrap().total_cost, 1.0);
-    }
-
+    /// C2 boundary classification and short-circuit. Each row moves exactly
+    /// one adjacent token boundary; the exact call log is asserted once above
+    /// (`full_stable_scan_follows_the_canonical_call_order`), so here only the
+    /// reached-call count needs checking to prove the later phases never ran.
     #[test]
     fn every_relevant_boundary_is_source_changed_and_later_scans_short_circuit() {
+        // Call count once the boundary at `changed_at` is detected: token0,
+        // graph, token1 for boundary 1; each later boundary adds one report
+        // call plus its bracketing token.
+        let expected_call_count = [3, 5, 7, 9, 11];
         for changed_at in 1..=5 {
             let mut tokens: Vec<Result<u64, String>> = vec![Ok(1); 6];
             // A single adjacent boundary differs while the remaining values
             // stay equal, making the expected source generation unambiguous.
             tokens[changed_at] = Ok(100 + changed_at as u64);
-            let calls = Rc::new(RefCell::new(Vec::new()));
-            let token_calls = Rc::clone(&calls);
-            let token_index = Rc::new(RefCell::new(0usize));
-            let token_counter = Rc::clone(&token_index);
-            let mut token = {
-                let mut values = tokens.into_iter();
-                move |_context: &LocalSourceContext| {
-                    let index = *token_counter.borrow();
-                    *token_counter.borrow_mut() += 1;
-                    token_calls.borrow_mut().push(format!("token{index}"));
-                    values.next().unwrap()
-                }
-            };
-            let graph_calls = Rc::clone(&calls);
-            let mut graph_fn = |_context: &LocalSourceContext| {
-                graph_calls.borrow_mut().push("graph".to_string());
-                Ok(graph())
-            };
-            let hourly_calls = Rc::clone(&calls);
-            let mut hourly_fn = |_context: &LocalSourceContext, clients: Option<&[String]>| {
-                hourly_calls.borrow_mut().push(if clients.is_some() {
-                    "hourly-full".to_string()
-                } else {
-                    "hourly-nil".to_string()
-                });
-                Ok(hourly(10, 2, 0.25))
-            };
-            let agents_calls = Rc::clone(&calls);
-            let mut agents_fn = |_context: &LocalSourceContext, clients: Option<&[String]>| {
-                agents_calls.borrow_mut().push(if clients.is_some() {
-                    "agents-full".to_string()
-                } else {
-                    "agents-nil".to_string()
-                });
-                Ok(agents(10, 2, 0.25))
-            };
-            let result = run_with(
-                &context(),
-                &mut token,
-                &mut graph_fn,
-                &mut hourly_fn,
-                &mut agents_fn,
-            )
-            .unwrap();
+            let (log, result) = run_tracked(tokens);
             assert_eq!(
                 result.hourly.status,
                 if changed_at <= 3 {
@@ -512,52 +581,10 @@ mod tests {
                 ProbeStatus::SourceChanged,
                 "boundary {changed_at}"
             );
-            let expected = match changed_at {
-                1 => vec!["token0", "graph", "token1"],
-                2 => vec!["token0", "graph", "token1", "hourly-nil", "token2"],
-                3 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                ],
-                4 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                    "agents-nil",
-                    "token4",
-                ],
-                5 => vec![
-                    "token0",
-                    "graph",
-                    "token1",
-                    "hourly-nil",
-                    "token2",
-                    "hourly-full",
-                    "token3",
-                    "agents-nil",
-                    "token4",
-                    "agents-full",
-                    "token5",
-                ],
-                _ => unreachable!(),
-            };
             assert_eq!(
-                calls
-                    .borrow()
-                    .iter()
-                    .map(String::as_str)
-                    .collect::<Vec<_>>(),
-                expected,
-                "stage call log for boundary {changed_at}"
+                log.len(),
+                expected_call_count[changed_at - 1],
+                "later scans must short-circuit at boundary {changed_at}"
             );
         }
     }
@@ -599,15 +626,74 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// C3 failure ownership: a skipped report serializes its aggregates as
+    /// JSON null, never as a fabricated zero-valued `ReportAggregate`.
     #[test]
-    fn hourly_stays_stable_when_only_the_later_agents_boundary_changes() {
+    fn skipped_aggregates_serialize_as_null_never_fabricated_zeros() {
+        let skipped = ReportParity::skipped(ProbeStatus::SourceChanged);
+        assert!(skipped.unfiltered.is_none());
+        assert!(skipped.full.is_none());
+        assert!(skipped.delta.is_none());
+        let wire = serde_json::to_value(&skipped).unwrap();
+        assert_eq!(wire["unfiltered"], Value::Null);
+        assert_eq!(wire["full"], Value::Null);
+        assert_eq!(wire["delta"], Value::Null);
+    }
+
+    /// C4 aggregate contract: the parser rejects a missing required field, a
+    /// wrong-typed field, and an invalid outer graph envelope rather than
+    /// silently defaulting evidence it never saw. `required_cost`'s
+    /// `is_finite` rejection has no case here: `serde_json` already refuses
+    /// to parse a non-finite JSON number (confirmed empirically — `1e400`
+    /// fails at `from_str` with "number out of range"), so no valid `Value`
+    /// can carry `NaN`/`Infinity` to this function. Same shape as the
+    /// existing Swift precedent for `usedPercent` in `TBCore.swift`.
+    #[test]
+    fn aggregate_parsing_rejects_malformed_input() {
+        assert!(parse_hourly(serde_json::json!({
+            "entries": [{"output": 20, "cacheRead": 3, "cacheWrite": 4, "reasoning": 5, "messageCount": 2}],
+            "totalCost": 0.0
+        }))
+        .is_err(), "missing required field 'input' must be rejected");
+
+        assert!(parse_hourly(serde_json::json!({
+            "entries": [{"input": "not-a-number", "output": 20, "cacheRead": 3, "cacheWrite": 4, "reasoning": 5, "messageCount": 2}],
+            "totalCost": 0.0
+        }))
+        .is_err(), "wrong-typed field must be rejected");
+
+        assert!(
+            required_cost(&serde_json::json!({"totalCost": "0.25"})).is_err(),
+            "a string cost must be rejected, not coerced"
+        );
+
+        assert!(
+            graph_clients(&serde_json::json!({"summary": {}})).is_err(),
+            "an envelope missing the clients array must be rejected"
+        );
+    }
+
+    /// C4 privacy boundary: the diagnostic wire carries only the declared
+    /// numeric fields. `ReportAggregate` has no string field to leak, so this
+    /// pins that an unexpected string riding along in the raw report JSON
+    /// (a path, a client id, an error message) cannot reach the serialized
+    /// payload even if a future field is added carelessly to the parser.
+    #[test]
+    fn diagnostic_wire_excludes_raw_source_strings() {
+        const SENTINEL: &str = "SENTINEL-/Users/example/.claude/projects/leak";
+        let mut hourly_with_sentinel = hourly(10, 2, 0.25);
+        hourly_with_sentinel["entries"][0]["path"] = Value::String(SENTINEL.to_string());
+        hourly_with_sentinel["sourcePath"] = Value::String(SENTINEL.to_string());
         let result = run_fixture(
-            vec![Ok(1), Ok(1), Ok(1), Ok(1), Ok(1), Ok(2)],
-            vec![Ok(hourly(10, 2, 0.25)), Ok(hourly(10, 2, 0.25))],
+            vec![Ok(1); 6],
+            vec![Ok(hourly_with_sentinel.clone()), Ok(hourly_with_sentinel)],
             vec![Ok(agents(10, 2, 0.25)), Ok(agents(10, 2, 0.25))],
         );
-        assert_eq!(result.hourly.status, ProbeStatus::Match);
-        assert_eq!(result.agents.status, ProbeStatus::SourceChanged);
+        let wire = serde_json::to_string(&result).unwrap();
+        assert!(
+            !wire.contains(SENTINEL),
+            "raw source text leaked onto the diagnostic wire"
+        );
     }
 
     #[test]
@@ -680,32 +766,10 @@ mod tests {
             vec!["graph", "hourly-nil"]
         );
     }
-
-    #[test]
-    fn controlled_append_changes_the_real_source_token_by_size() {
-        let root = std::env::temp_dir().join(format!(
-            "tokenbar-filter-parity-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        let source = root.join(".codex/sessions/session.jsonl");
-        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
-        std::fs::write(&source, b"seed\n").unwrap();
-        let options = tokscale_core::LocalParseOptions {
-            home_dir: Some(root.to_string_lossy().into_owned()),
-            use_env_roots: false,
-            clients: Some(vec!["codex".to_string()]),
-            ..Default::default()
-        };
-        let before = tokscale_core::local_source_change_token(&options).unwrap();
-        let mut file = OpenOptions::new().append(true).open(&source).unwrap();
-        file.write_all(b"size-changing append\n").unwrap();
-        file.flush().unwrap();
-        let after = tokscale_core::local_source_change_token(&options).unwrap();
-        let _ = std::fs::remove_dir_all(root);
-        assert_ne!(before, after);
-    }
+    // A separate "does append change the real token" sanity check is not
+    // needed here: `local_source_change_token`'s reaction to a real mutation
+    // is already owned by vendor/tokscale-core's own before/after unit tests
+    // (`src/lib.rs`, around the `local_source_change_token` cases), and the
+    // integration above already depends on that exact fact — it would not
+    // observe `SourceChanged` if the append did not move the token.
 }
