@@ -4183,27 +4183,6 @@ mod tests {
             .collect()
     }
 
-    /// `count` completed cycles ending at `anchor - duration`, `anchor - 2 *
-    /// duration`, ... — the "materialize a few hundred/thousand retained
-    /// samples" loop that the global-sample-cap eviction tests each rebuilt
-    /// by hand.
-    fn many_completed_cycles(
-        anchor: i64,
-        duration_seconds: i64,
-        count: usize,
-        end: f64,
-    ) -> Vec<QuotaSample> {
-        (1..=count)
-            .flat_map(|offset| {
-                complete_cycle(
-                    anchor - offset as i64 * duration_seconds,
-                    duration_seconds,
-                    end,
-                )
-            })
-            .collect()
-    }
-
     fn seeded_series(
         provider_id: &str,
         account_scope: &str,
@@ -7601,7 +7580,15 @@ mod tests {
         series.samples.extend(completed);
         series.samples.sort_by(sample_order);
         let newer_last_activity = series.last_activity_at;
-        write_store(&path, vec![series]);
+        fs::write(
+            &path,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![series],
+            })
+            .unwrap(),
+        )
+        .unwrap();
 
         let stale_now = completed_reset - duration / 20;
         let results = record_observations_at_path_and_evaluate(
@@ -8138,7 +8125,11 @@ mod tests {
             last_seen_at: now,
             consecutive_count: 1,
         });
-        write_store(&path, vec![series]);
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
 
         let results = record_observations_at_path_and_evaluate(
             std::slice::from_ref(&key),
@@ -8454,21 +8445,24 @@ mod tests {
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("stale-rollover-{label}"));
             let stale_key = test_key("provider", format!("stale-{label}"), "window.v1");
-            let mut series = vec![rollover_only_series(
-                stale_key.clone(),
-                idle,
-                future_reset,
-                candidate,
-            )];
-            series.extend((0..MAX_SERIES - 1).map(|index| {
-                batch_series(
+            let mut store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![rollover_only_series(
+                    stale_key.clone(),
+                    idle,
+                    future_reset,
+                    candidate,
+                )],
+            };
+            for index in 0..MAX_SERIES - 1 {
+                store.series.push(batch_series(
                     test_key("provider", format!("active-{index:04}"), "window.v1"),
                     now,
                     Some(now + DAY),
-                )
-            }));
-            series.sort_by(series_order);
-            write_store(&path, series);
+                ));
+            }
+            store.series.sort_by(series_order);
+            fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
 
             let new_key = test_key("provider", format!("new-{label}"), "window.v1");
             let results = record_observations_at_path_and_evaluate(
@@ -8496,15 +8490,16 @@ mod tests {
         let future_reset = now + 90 * DAY;
         let (directory, path) = temp_path("rollover-boundary-55d");
         let key = test_key("provider", "boundary-55d", "window.v1");
-        write_store(
-            &path,
-            vec![rollover_only_series(
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![rollover_only_series(
                 key.clone(),
                 now - 55 * DAY,
                 future_reset,
                 false,
             )],
-        );
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
         record_observations_at_path_and_evaluate(&[], &[], now, &path).unwrap();
         let retained = read_store(&path);
         assert_eq!(retained.series.len(), 1);
@@ -8514,15 +8509,16 @@ mod tests {
         for (label, candidate) in [("watching", false), ("candidate", true)] {
             let (directory, path) = temp_path(&format!("rollover-boundary-{label}"));
             let key = test_key("provider", format!("boundary-{label}"), "window.v1");
-            write_store(
-                &path,
-                vec![rollover_only_series(
+            let stale_store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![rollover_only_series(
                     key.clone(),
                     now - 57 * DAY,
                     future_reset,
                     candidate,
                 )],
-            );
+            };
+            fs::write(&path, serde_json::to_vec_pretty(&stale_store).unwrap()).unwrap();
             record_observations_at_path_and_evaluate(std::slice::from_ref(&key), &[], now, &path)
                 .unwrap();
             let protected = read_store(&path);
@@ -8582,11 +8578,14 @@ mod tests {
         let active_keys = (0..MAX_SERIES - 2)
             .map(|index| test_key("provider", format!("active-{index:04}"), "window.v1"))
             .collect::<Vec<_>>();
-        let base = active_keys
-            .iter()
-            .cloned()
-            .map(|key| batch_series(key, now, Some(now + DAY)))
-            .collect::<Vec<_>>();
+        let base = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: active_keys
+                .iter()
+                .cloned()
+                .map(|key| batch_series(key, now, Some(now + DAY)))
+                .collect(),
+        };
         let new_a = test_key("provider", "new-a", "window.v1");
         let new_b = test_key("provider", "new-b", "window.v1");
         let new_c = test_key("provider", "new-c", "window.v1");
@@ -8611,7 +8610,7 @@ mod tests {
         let mut persisted_keys = Vec::new();
         for (label, observations) in cases {
             let (directory, path) = temp_path(label);
-            write_store(&path, base.clone());
+            fs::write(&path, serde_json::to_vec_pretty(&base).unwrap()).unwrap();
             let results =
                 record_observations_at_path_and_evaluate(&active_keys, &observations, now, &path)
                     .unwrap();
@@ -9067,14 +9066,34 @@ mod tests {
         let now = 9_000_000_000;
         let duration = DAY;
         let cycle_count = MAX_SAMPLES / MAX_SAMPLES_PER_CYCLE + 1;
-        let mut samples = many_completed_cycles(now, duration, cycle_count, 80.0);
+        let mut samples = Vec::with_capacity(cycle_count * MAX_SAMPLES_PER_CYCLE + 8);
+        for offset in 1..=cycle_count {
+            samples.extend(complete_cycle(
+                now - offset as i64 * duration,
+                duration,
+                80.0,
+            ));
+        }
         let current_reset = now + duration;
         let current = complete_cycle(current_reset, duration, 40.0);
         samples.extend(current.clone());
-        let key = test_key("provider", "scope", "window.v1");
+        let series = SeriesState {
+            provider_id: "provider".into(),
+            account_scope: "scope".into(),
+            window_key: "window.v1".into(),
+            active_reset_at: Some(current_reset),
+            last_activity_at: now,
+            rollover: Some(ObservedState::Watching {
+                reset_at: current_reset,
+                first_seen_at: now,
+                last_seen_at: now,
+                consecutive_count: 1,
+            }),
+            samples,
+        };
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
-            series: vec![active_series(&key, current_reset, now, samples)],
+            series: vec![series],
         };
         evict_old_completed_samples(&mut store, now).unwrap();
         let retained = &store.series[0];
@@ -9093,14 +9112,24 @@ mod tests {
         let now = 12_000_000_000_i64;
         let duration = DAY;
         let cycles_per_series = MAX_SAMPLES / (2 * 8) + 1;
-        let make_series = |provider_id: &str| SeriesState {
-            provider_id: provider_id.into(),
-            account_scope: "scope".into(),
-            window_key: "window.v1".into(),
-            active_reset_at: None,
-            last_activity_at: now,
-            rollover: None,
-            samples: many_completed_cycles(now, duration, cycles_per_series, 80.0),
+        let make_series = |provider_id: &str| {
+            let mut samples = Vec::with_capacity(cycles_per_series * 8);
+            for offset in 1..=cycles_per_series {
+                samples.extend(complete_cycle(
+                    now - offset as i64 * duration,
+                    duration,
+                    80.0,
+                ));
+            }
+            SeriesState {
+                provider_id: provider_id.into(),
+                account_scope: "scope".into(),
+                window_key: "window.v1".into(),
+                active_reset_at: None,
+                last_activity_at: now,
+                rollover: None,
+                samples,
+            }
         };
         let mut store = Store {
             schema_version: HISTORY_SCHEMA_VERSION,
