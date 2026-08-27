@@ -9510,8 +9510,8 @@ mod tests {
                 load_codex_credentials_from(path)
                     .unwrap()
                     .refresh_token
-                    .as_deref()
-                    == Some("codex-new-refresh")
+                    .unwrap_or_default()
+                    .into_bytes()
             },
             |boundary| {
                 matches!(
@@ -10555,7 +10555,11 @@ mod tests {
                         .map(|_| ())
                 })
             },
-            |path| stored_claude_refresh_token(path).as_deref() == Some("claude-new-refresh"),
+            |path| {
+                stored_claude_refresh_token(path)
+                    .unwrap_or_default()
+                    .into_bytes()
+            },
             |boundary| boundary == RefreshCheckpoint::CredentialsPersisted,
             |boundary| {
                 matches!(

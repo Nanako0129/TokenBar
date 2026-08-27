@@ -1938,7 +1938,7 @@ pub(crate) mod test_support {
     pub(crate) async fn assert_refresh_crash_boundaries<
         Setup,
         Run,
-        StoredIsNew,
+        StoredMarker,
         PersistedAt,
         MetadataChangedAt,
     >(
@@ -1948,7 +1948,7 @@ pub(crate) mod test_support {
         new_marker: &[u8],
         setup: Setup,
         run: Run,
-        stored_is_new: StoredIsNew,
+        stored_marker: StoredMarker,
         persisted_at: PersistedAt,
         metadata_changed_at: MetadataChangedAt,
     ) where
@@ -1958,7 +1958,7 @@ pub(crate) mod test_support {
             &'a Path,
             Option<RefreshCheckpoint>,
         ) -> BoxedRefreshResult<'a>,
-        StoredIsNew: Fn(&Path) -> bool,
+        StoredMarker: Fn(&Path) -> Vec<u8>,
         PersistedAt: Fn(RefreshCheckpoint) -> bool,
         MetadataChangedAt: Fn(RefreshCheckpoint) -> bool,
     {
@@ -1971,11 +1971,13 @@ pub(crate) mod test_support {
             let (scope, path, old_scope, before, location) = setup(&format!("{tag_prefix}-crash"));
             let failure = run(&scope, &path, Some(boundary)).await.unwrap_err();
             assert_injected_crash(&failure);
-            assert_eq!(
-                stored_is_new(&path),
-                persisted_at(boundary),
-                "credential persistence at {boundary:?}"
-            );
+            let stored = stored_marker(&path);
+            let expected: &[u8] = if persisted_at(boundary) {
+                new_marker
+            } else {
+                old_marker
+            };
+            assert_eq!(stored, expected, "credential persistence at {boundary:?}");
             if metadata_changed_at(boundary) {
                 assert_ne!(
                     scope.metadata_bytes(),
