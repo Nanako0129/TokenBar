@@ -4,7 +4,7 @@ id: kb-release
 kind: canonical
 scope: repository
 read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, or post-release notes
-last_verified: 2026-08-09
+last_verified: 2026-08-28
 sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "public release history"]
 ---
 
@@ -101,7 +101,7 @@ The bridge population is shrinking and the beta cask is not the normal installat
 
 The current tap name is intentionally retained until a second app justifies a tap migration. A future migration must move all casks, delete their old copies in the same old-tap commit, retain the old public repository, and provide an app-level migration path because users who rely on Sparkle may not run Homebrew often enough to see a tap warning.
 
-The install-count workflow writes a single JSON file to an orphan branch rather than adding a noisy commit to `main`. Its count filters release assets by installable archive extensions and intentionally excludes update metadata downloads.
+The install-count workflow writes a single JSON file to an orphan branch rather than adding a noisy commit to `main`. Its count paginates the GitHub Releases API (default page size is 30), filters assets by installable archive extensions, and intentionally excludes update metadata downloads.
 
 ## Landing deployment
 

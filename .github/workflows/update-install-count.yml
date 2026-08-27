@@ -27,8 +27,11 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          COUNT=$(gh api repos/Nanako0129/TokenBar/releases \
-            --jq '[.[].assets[] | select(.name | test("\\.(tar\\.gz|dmg|zip|pkg)$")) | .download_count] | add // 0')
+          # Paginate: GitHub's default page is 30 releases. Sum outside jq so a
+          # per-page `--jq` cannot emit multiple numbers into the badge JSON.
+          COUNT=$(gh api --paginate repos/Nanako0129/TokenBar/releases \
+            --jq '[.[].assets[] | select(.name | test("\\.(tar\\.gz|dmg|zip|pkg)$")) | .download_count] | add // 0' \
+            | awk '{s+=$1} END {print s+0}')
           JSON="{\"schemaVersion\":1,\"label\":\"installs\",\"message\":\"${COUNT}\",\"color\":\"brightgreen\"}"
 
           # Build the orphan branch in an isolated repo so the workspace tree is
