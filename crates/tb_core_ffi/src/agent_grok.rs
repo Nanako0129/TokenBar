@@ -2164,9 +2164,17 @@ mod tests {
         ));
     }
 
-    use crate::agent_account_scope::test_support::{
-        assert_refresh_crash_boundaries, assert_transient_used_lock_reloaded_binding, checkpoint_at,
-    };
+    fn checkpoint_at(
+        target: Option<RefreshCheckpoint>,
+    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), ProviderFetchFailure> {
+        move |checkpoint| {
+            if Some(checkpoint) == target {
+                Err(ProviderFetchFailure::terminal("injected crash"))
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     #[tokio::test]
     async fn whitespace_refresh_evidence_never_binds_across_access_tokens() {
@@ -2730,25 +2738,50 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_crash_boundaries_and_scope_gate_use_production_sequence() {
-        assert_refresh_crash_boundaries(
-            "grok",
-            "grok-auth-json",
-            b"grok-old-refresh",
-            b"grok-new-refresh",
-            setup_refresh,
-            |scope, path, crash| {
-                Box::pin(async move { run_refresh(scope, path, crash).await.map(|_| ()) })
-            },
-            |path| stored_refresh_token(path) == "grok-new-refresh",
-            |boundary| boundary == RefreshCheckpoint::CredentialsPersisted,
-            |boundary| {
-                matches!(
-                    boundary,
-                    RefreshCheckpoint::MetadataHandled | RefreshCheckpoint::CredentialsPersisted
-                )
-            },
-        )
-        .await;
+        for boundary in [
+            RefreshCheckpoint::Reloaded,
+            RefreshCheckpoint::NetworkReturned,
+            RefreshCheckpoint::MetadataHandled,
+            RefreshCheckpoint::CredentialsPersisted,
+        ] {
+            let (scope, path, old_scope, before, location) = setup_refresh("grok-crash");
+            let failure = run_refresh(&scope, &path, Some(boundary))
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display } if display == "injected crash"
+            ));
+            assert_eq!(
+                stored_refresh_token(&path),
+                if boundary == RefreshCheckpoint::CredentialsPersisted {
+                    "grok-new-refresh"
+                } else {
+                    "grok-old-refresh"
+                }
+            );
+            if matches!(
+                boundary,
+                RefreshCheckpoint::Reloaded | RefreshCheckpoint::NetworkReturned
+            ) {
+                assert_eq!(scope.metadata_bytes(), before);
+            } else {
+                assert_ne!(scope.metadata_bytes(), before);
+                assert_eq!(
+                    scope
+                        .resolve_current("grok-auth-json", &location, b"grok-old-refresh")
+                        .unwrap(),
+                    old_scope
+                );
+                assert_eq!(
+                    scope
+                        .resolve_current("grok-auth-json", &location, b"grok-new-refresh")
+                        .unwrap(),
+                    old_scope
+                );
+            }
+            scope.cleanup();
+        }
 
         let (scope, path, old_scope, before, location) = setup_refresh("grok-metadata-fail");
         scope.fail_metadata_save();
@@ -2847,7 +2880,12 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_transient_used_lock_reloaded_binding(failure, expected);
+        match failure {
+            ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
+        }
         scope.cleanup();
     }
 }
