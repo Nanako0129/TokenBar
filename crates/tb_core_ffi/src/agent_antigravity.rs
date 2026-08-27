@@ -3102,8 +3102,7 @@ mod tests {
     }
 
     use crate::agent_account_scope::test_support::{
-        assert_concurrent_target_untouched, assert_refresh_crash_boundaries,
-        assert_transient_used_lock_reloaded_binding, checkpoint_at,
+        assert_refresh_crash_boundaries, assert_transient_used_lock_reloaded_binding, checkpoint_at,
     };
 
     async fn test_refresh_response(
@@ -3203,19 +3202,16 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_concurrent_target_untouched(
-            &failure,
-            &scope,
-            &before,
-            &path,
-            Some(B_BYTES),
-            "antigravity-new",
-        );
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+        let stored_bytes = std::fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, B_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("antigravity-new"));
         let stored = load_remote_credentials(&path).unwrap();
         assert_eq!(stored["access_token"], "account-b-access");
         assert_eq!(stored["refresh_token"], "account-b-refresh");
         assert_eq!(stored["id_token"], "account-b-id");
         assert_eq!(stored["sibling"]["writer"], "b");
+        assert_eq!(scope.metadata_bytes(), before);
         scope.cleanup();
     }
 
@@ -3343,14 +3339,15 @@ mod tests {
             .await
             .unwrap_err();
 
-            assert_concurrent_target_untouched(
-                &failure,
-                &scope,
-                &before,
-                &path,
-                current_bytes,
-                "antigravity-new",
-            );
+            assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
+            assert_eq!(scope.metadata_bytes(), before);
+            if let Some(expected) = current_bytes {
+                let stored = std::fs::read(&path).unwrap();
+                assert_eq!(stored, expected);
+                assert!(!String::from_utf8_lossy(&stored).contains("antigravity-new"));
+            } else {
+                assert!(!path.exists());
+            }
             scope.cleanup();
         }
     }

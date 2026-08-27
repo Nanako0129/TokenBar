@@ -1779,9 +1779,7 @@ async fn fetch_claude_accounts() -> Vec<AgentUsageSnapshot> {
 /// work is entirely network wait.
 const MAX_ACCOUNT_FETCHES_IN_FLIGHT: usize = 4;
 
-async fn join_local_ordered<T: 'static>(
-    futures: Vec<Pin<Box<dyn Future<Output = T>>>>,
-) -> Vec<T> {
+async fn join_local_ordered<T: 'static>(futures: Vec<Pin<Box<dyn Future<Output = T>>>>) -> Vec<T> {
     tokio::task::LocalSet::new()
         .run_until(async move {
             let mut slots: Vec<Option<T>> = (0..futures.len()).map(|_| None).collect();
@@ -1790,11 +1788,15 @@ async fn join_local_ordered<T: 'static>(
             let mut queued = 0usize;
             loop {
                 while queued < MAX_ACCOUNT_FETCHES_IN_FLIGHT {
-                    let Some((index, future)) = pending.next() else { break };
+                    let Some((index, future)) = pending.next() else {
+                        break;
+                    };
                     tasks.spawn_local(async move { (index, future.await) });
                     queued += 1;
                 }
-                let Some(joined) = tasks.join_next().await else { break };
+                let Some(joined) = tasks.join_next().await else {
+                    break;
+                };
                 queued -= 1;
                 // A panicking fetch drops that one result rather than taking
                 // the whole publication down. Every real provider failure
@@ -2193,12 +2195,12 @@ where
             history_scope: claude_history_scope_with(None, resolve),
         };
     };
-    let history_scope = if credentials.scope_slot.semantic_source == CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE
-    {
-        claude_history_scope_with(Some(dir), resolve)
-    } else {
-        Err(AccountScopeError::NoTrustedEvidence)
-    };
+    let history_scope =
+        if credentials.scope_slot.semantic_source == CLAUDE_CONFIG_DIR_KEYCHAIN_SOURCE {
+            claude_history_scope_with(Some(dir), resolve)
+        } else {
+            Err(AccountScopeError::NoTrustedEvidence)
+        };
     ClaudeAccountIdentity {
         account_key: Some(dir.to_string()),
         history_scope,
@@ -3892,10 +3894,11 @@ fn reload_claude_credentials(original: &ClaudeCredentials) -> Result<ClaudeCrede
             let account = claude_keychain_account().ok_or_else(|| {
                 "Claude Keychain account could not be captured during refresh.".to_string()
             })?;
-            let raw =
-                load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(&account))?.ok_or_else(|| {
-                    "Claude Keychain credentials disappeared during refresh.".to_string()
-                })?;
+            let raw = load_claude_credentials_from_keychain_item(
+                CLAUDE_KEYCHAIN_SERVICE,
+                Some(&account),
+            )?
+            .ok_or_else(|| "Claude Keychain credentials disappeared during refresh.".to_string())?;
             let mut credentials =
                 parse_claude_credentials_data(&raw, ClaudeCredentialSource::Keychain)?;
             credentials.keychain_account = Some(account);
@@ -4204,8 +4207,11 @@ fn validate_claude_keychain_target(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
-                .map_err(|_| ())
+            load_claude_credentials_from_keychain_item(
+                CLAUDE_KEYCHAIN_SERVICE,
+                Some(captured_account),
+            )
+            .map_err(|_| ())
         },
     )
     .map(|_| ())
@@ -4234,8 +4240,11 @@ fn save_claude_credentials_to_keychain(
         credentials,
         || Ok(claude_keychain_account()),
         |captured_account| {
-            load_claude_credentials_from_keychain_item(CLAUDE_KEYCHAIN_SERVICE, Some(captured_account))
-                .map_err(|_| ())
+            load_claude_credentials_from_keychain_item(
+                CLAUDE_KEYCHAIN_SERVICE,
+                Some(captured_account),
+            )
+            .map_err(|_| ())
         },
     )?;
 
@@ -5500,10 +5509,7 @@ mod tests {
                     peak.set(peak.get().max(live.get()));
                     // Later entries finish FIRST, so input order and completion
                     // order disagree for every pair.
-                    tokio::time::sleep(Duration::from_millis(
-                        ((total - index) * 10) as u64,
-                    ))
-                    .await;
+                    tokio::time::sleep(Duration::from_millis(((total - index) * 10) as u64)).await;
                     live.set(live.get() - 1);
                     index
                 }));
@@ -5980,16 +5986,21 @@ mod tests {
 
         assert_eq!(
             payload.quota_curve_series(),
-            ["session.v1", "weekly.v1", "sonnet.weekly.v1", "weekly_scoped.fable.v1"]
-                .map(|window_key| (
-                    None,
-                    SeriesKey::new(
-                        "claude",
-                        &HistoryScope::for_test(trusted.as_str()),
-                        window_key
-                    )
-                ))
-                .to_vec()
+            [
+                "session.v1",
+                "weekly.v1",
+                "sonnet.weekly.v1",
+                "weekly_scoped.fable.v1"
+            ]
+            .map(|window_key| (
+                None,
+                SeriesKey::new(
+                    "claude",
+                    &HistoryScope::for_test(trusted.as_str()),
+                    window_key
+                )
+            ))
+            .to_vec()
         );
         scope.cleanup();
     }
@@ -6388,15 +6399,24 @@ mod tests {
             },
             Err(failure) => ProviderFetchOutcome::Failure(failure),
         };
-        let snapshot =
-            apply_provider_outcome_with(&cache, "copilot", None, "oauth", response_at, outcome, |_| {})
-                .unwrap();
+        let snapshot = apply_provider_outcome_with(
+            &cache,
+            "copilot",
+            None,
+            "oauth",
+            response_at,
+            outcome,
+            |_| {},
+        )
+        .unwrap();
 
         assert!(snapshot.error.is_none());
         assert_eq!(snapshot.windows.len(), 1);
         assert!((snapshot.windows[0].remaining_percent - 60.0).abs() < 0.01);
         assert!(snapshot.windows[0].resets_at.is_none());
-        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)].snapshot.clone();
+        let cached = lock_last_good(&cache).entries[&account_slot("copilot", None)]
+            .snapshot
+            .clone();
         assert_eq!(cached.updated_at, snapshot.updated_at);
         assert_eq!(cached.windows.len(), 1);
         assert!(cached.error.is_none());
@@ -6599,7 +6619,9 @@ mod tests {
             )
             .unwrap();
             assert!(result.windows.is_empty());
-            assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
+            assert!(!lock_last_good(&cache)
+                .entries
+                .contains_key(&account_slot("codex", None)));
         }
 
         let cache = Mutex::new(ProviderLastGoodCache::default());
@@ -6625,7 +6647,9 @@ mod tests {
             |_| panic!("absent must not enrich"),
         )
         .is_none());
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("codex", None)));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("codex", None)));
         scope.cleanup();
     }
 
@@ -6669,7 +6693,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(anonymous.windows.len(), 1);
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6699,7 +6725,9 @@ mod tests {
         )
         .unwrap();
         assert!(live_empty.windows.is_empty());
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
 
         apply_provider_outcome_with(
             &cache,
@@ -6733,7 +6761,9 @@ mod tests {
         .unwrap();
         assert!(invalid.windows.is_empty());
         assert_eq!(enrich_calls.get(), 0);
-        assert!(!lock_last_good(&cache).entries.contains_key(&account_slot("antigravity", None)));
+        assert!(!lock_last_good(&cache)
+            .entries
+            .contains_key(&account_slot("antigravity", None)));
         scope.cleanup();
     }
 
@@ -9117,8 +9147,7 @@ mod tests {
     }
 
     use crate::agent_account_scope::test_support::{
-        assert_concurrent_target_untouched, assert_refresh_crash_boundaries,
-        assert_transient_used_lock_reloaded_binding, checkpoint_at,
+        assert_refresh_crash_boundaries, assert_transient_used_lock_reloaded_binding, checkpoint_at,
     };
 
     async fn codex_test_response(
@@ -9211,15 +9240,12 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_concurrent_target_untouched(
-            &failure,
-            &scope,
-            &metadata_before,
-            &path,
-            Some(B_BYTES),
-            "codex-new",
-        );
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert!(recording.transfers().is_empty());
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        let stored_bytes = fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, B_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("codex-new"));
         let stored = load_codex_credentials_from(&path).unwrap();
         assert_eq!(stored.access_token, "account-b-access");
         assert_eq!(stored.refresh_token.as_deref(), Some("account-b-refresh"));
@@ -9317,16 +9343,13 @@ mod tests {
         .await
         .unwrap_err();
 
-        assert_concurrent_target_untouched(
-            &failure,
-            &scope,
-            &metadata_before,
-            &path,
-            Some(LOGGED_OUT_BYTES),
-            "codex-new",
-        );
+        assert!(matches!(failure, ProviderFetchFailure::Terminal { .. }));
         assert!(recording.transfers().is_empty());
-        let stored: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        let stored_bytes = fs::read(&path).unwrap();
+        assert_eq!(stored_bytes, LOGGED_OUT_BYTES);
+        assert!(!String::from_utf8_lossy(&stored_bytes).contains("codex-new"));
+        let stored: Value = serde_json::from_slice(&stored_bytes).unwrap();
         assert!(stored.get("tokens").is_none());
         scope.cleanup();
     }
@@ -11637,10 +11660,14 @@ mod tests {
         // Clearing one account must not evict the other.
         lock_last_good(&cache).clear(&second);
         assert!(
-            lock_last_good(&cache).clean_for(&primary, &binding).is_some(),
+            lock_last_good(&cache)
+                .clean_for(&primary, &binding)
+                .is_some(),
             "clearing the second account evicted the primary"
         );
-        assert!(lock_last_good(&cache).clean_for(&second, &binding).is_none());
+        assert!(lock_last_good(&cache)
+            .clean_for(&second, &binding)
+            .is_none());
         scope.cleanup();
     }
 
@@ -11762,7 +11789,9 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .filter(|entry| entry["providerId"] == "claude" && entry["accountScope"] == account_scope)
+            .filter(|entry| {
+                entry["providerId"] == "claude" && entry["accountScope"] == account_scope
+            })
             .cloned()
             .collect()
     }
@@ -11782,15 +11811,17 @@ mod tests {
             scope.resolve_history(provider, authoritative)
         };
 
-        let primary =
-            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let primary = claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
         let extra = claude_account_identity_with(
             Some(G_TEST_CONFIG_DIR),
             &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
             resolve,
         );
 
-        assert_eq!(primary.account_key, None, "the primary publishes no accountKey");
+        assert_eq!(
+            primary.account_key, None,
+            "the primary publishes no accountKey"
+        );
         assert_eq!(extra.account_key.as_deref(), Some(G_TEST_CONFIG_DIR));
 
         let primary_scope = primary
@@ -11831,8 +11862,7 @@ mod tests {
             .resolve_current("fixture", "g3-account", b"g3-marker")
             .unwrap();
 
-        let primary =
-            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let primary = claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
         let extra = claude_account_identity_with(
             Some(G_TEST_CONFIG_DIR),
             &claude_config_dir_test_credentials(G_TEST_CONFIG_DIR),
@@ -11852,7 +11882,8 @@ mod tests {
                 &history_path,
             )
         });
-        let after_primary: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
+        let after_primary: Value =
+            serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
         let primary_series_before = claude_series_for(&after_primary, &primary_scope);
         assert_eq!(
             primary_series_before.len(),
@@ -11862,14 +11893,18 @@ mod tests {
 
         let mut extra_snapshot =
             claude_identity_test_snapshot(&extra, account_scope.clone(), 77.0, now + 600);
-        enrich_snapshot_with(&mut extra_snapshot, now + 600, |active, observations, at| {
-            crate::agent_quota_history::record_observations_at_path_and_evaluate(
-                active,
-                observations,
-                at,
-                &history_path,
-            )
-        });
+        enrich_snapshot_with(
+            &mut extra_snapshot,
+            now + 600,
+            |active, observations, at| {
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    observations,
+                    at,
+                    &history_path,
+                )
+            },
+        );
         let after_extra: Value = serde_json::from_slice(&fs::read(&history_path).unwrap()).unwrap();
 
         assert_eq!(
@@ -11915,8 +11950,7 @@ mod tests {
             .unwrap();
 
         let now = 1_800_000_000_i64;
-        let primary =
-            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let primary = claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
         let mut primary_snapshot =
             claude_identity_test_snapshot(&primary, account_scope.clone(), 20.0, now);
         enrich_snapshot_with(&mut primary_snapshot, now, |active, observations, at| {
@@ -11947,15 +11981,19 @@ mod tests {
         let writes = std::cell::Cell::new(0);
         let mut extra_snapshot =
             claude_identity_test_snapshot(&extra, account_scope, 77.0, now + 600);
-        enrich_snapshot_with(&mut extra_snapshot, now + 600, |active, observations, at| {
-            writes.set(writes.get() + 1);
-            crate::agent_quota_history::record_observations_at_path_and_evaluate(
-                active,
-                observations,
-                at,
-                &history_path,
-            )
-        });
+        enrich_snapshot_with(
+            &mut extra_snapshot,
+            now + 600,
+            |active, observations, at| {
+                writes.set(writes.get() + 1);
+                crate::agent_quota_history::record_observations_at_path_and_evaluate(
+                    active,
+                    observations,
+                    at,
+                    &history_path,
+                )
+            },
+        );
         assert_eq!(writes.get(), 0, "it opened a history transaction anyway");
         assert_eq!(
             fs::read(&history_path).unwrap(),
@@ -11991,8 +12029,7 @@ mod tests {
             .unwrap();
 
         let now = 1_800_000_000_i64;
-        let primary =
-            claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
+        let primary = claude_account_identity_with(None, &claude_test_login_credentials(), resolve);
         let mut primary_snapshot =
             claude_identity_test_snapshot(&primary, account_scope.clone(), 20.0, now);
         enrich_snapshot_with(&mut primary_snapshot, now, |active, observations, at| {
@@ -12041,7 +12078,11 @@ mod tests {
                     &history_path,
                 )
             });
-            assert_eq!(writes.get(), 0, "{semantic_source} opened a history transaction");
+            assert_eq!(
+                writes.get(),
+                0,
+                "{semantic_source} opened a history transaction"
+            );
         }
 
         assert_eq!(
@@ -12075,11 +12116,22 @@ mod tests {
         let reads = std::cell::Cell::new(0);
         let loaded = load_claude_config_dir_credentials_with(G_TEST_CONFIG_DIR, |dir| {
             reads.set(reads.get() + 1);
-            assert_eq!(dir, Some(G_TEST_CONFIG_DIR), "it read another account's item");
+            assert_eq!(
+                dir,
+                Some(G_TEST_CONFIG_DIR),
+                "it read another account's item"
+            );
             Ok(None)
         });
-        assert!(loaded.is_err(), "a missing item must not fall back to the primary's credential");
-        assert_eq!(reads.get(), 1, "one configured account costs exactly one read");
+        assert!(
+            loaded.is_err(),
+            "a missing item must not fall back to the primary's credential"
+        );
+        assert_eq!(
+            reads.get(),
+            1,
+            "one configured account costs exactly one read"
+        );
         // ...and there are no configured directories until the setter is called.
         assert!(crate::claude_config_dirs::snapshot().is_empty());
 
@@ -12196,14 +12248,18 @@ mod tests {
             recovered.account_key, None,
             "the recovered card is not the primary's"
         );
-        assert!(recovered.error.is_some(), "a failed round must still report the failure");
+        assert!(
+            recovered.error.is_some(),
+            "a failed round must still report the failure"
+        );
 
         // The extra account kept its own entry through all three rounds.
-        assert!(
-            lock_last_good(&cache)
-                .clean_for(&account_slot("claude", Some(G_TEST_CONFIG_DIR)), &extra_binding)
-                .is_some()
-        );
+        assert!(lock_last_good(&cache)
+            .clean_for(
+                &account_slot("claude", Some(G_TEST_CONFIG_DIR)),
+                &extra_binding
+            )
+            .is_some());
         scope.cleanup();
     }
 
