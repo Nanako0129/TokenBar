@@ -3366,7 +3366,7 @@ mod tests {
             |scope, path, crash| {
                 Box::pin(async move { run_refresh(scope, path, crash).await.map(|_| ()) })
             },
-            |path| stored_refresh_token(path).into_bytes(),
+            |path| stored_refresh_token(path) == "antigravity-new-refresh",
             |boundary| boundary == RefreshCheckpoint::CredentialsPersisted,
             |boundary| {
                 matches!(
