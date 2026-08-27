@@ -24,6 +24,9 @@ jobs:
       # from scratch and force-pushed every run, so it always holds exactly one
       # commit. Shields reads it via the raw URL for the `badges` ref.
       - name: Compute and publish download count
+        # Explicit bash: ubuntu-latest's default is `bash -e` without pipefail,
+        # which would let awk publish 0 or a partial total after `gh api` fails.
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
