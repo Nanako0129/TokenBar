@@ -1870,6 +1870,156 @@ pub(crate) mod test_support {
             )
         }
     }
+
+    /// Shared refresh-transaction test vocabulary, reused by every provider's
+    /// refresh tests (Codex/Claude in `agent_usage.rs`, `agent_antigravity.rs`,
+    /// `agent_grok.rs`). Consolidated under issue #166 so the checkpoint-crash
+    /// matrix and its terminal/transient failure shapes are defined once instead
+    /// of once per provider.
+    ///
+    /// Injects a terminal "injected crash" failure at a chosen `RefreshCheckpoint`
+    /// and lets every other checkpoint pass through untouched.
+    pub(crate) fn checkpoint_at(
+        target: Option<RefreshCheckpoint>,
+    ) -> impl FnMut(RefreshCheckpoint) -> Result<(), crate::agent_usage::ProviderFetchFailure> {
+        move |checkpoint| {
+            if Some(checkpoint) == target {
+                Err(crate::agent_usage::ProviderFetchFailure::terminal(
+                    "injected crash",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    /// A refresh attempt that failed with the marker `checkpoint_at` injects
+    /// must surface as a terminal failure carrying that exact display text,
+    /// never a transient one a caller might retry into a half-applied state.
+    pub(crate) fn assert_injected_crash(failure: &crate::agent_usage::ProviderFetchFailure) {
+        assert!(
+            matches!(
+                failure,
+                crate::agent_usage::ProviderFetchFailure::Terminal { display }
+                    if display == "injected crash"
+            ),
+            "checkpoint crash must surface as a terminal \"injected crash\" failure"
+        );
+    }
+
+    /// A transport failure during the refresh request must carry the binding
+    /// resolved from the lock-reloaded credential, never the caller's outer
+    /// (possibly stale) binding, and must remain transient rather than
+    /// collapsing into a terminal one just because the network call failed.
+    pub(crate) fn assert_transient_used_lock_reloaded_binding(
+        failure: crate::agent_usage::ProviderFetchFailure,
+        expected: crate::agent_usage::ProviderCacheBinding,
+    ) {
+        match failure {
+            crate::agent_usage::ProviderFetchFailure::Transient {
+                attempt_binding, ..
+            } => assert_eq!(attempt_binding, Some(expected)),
+            crate::agent_usage::ProviderFetchFailure::Terminal { .. } => {
+                panic!("timeout must remain transient")
+            }
+        }
+    }
+
+    /// The four-checkpoint durable-state matrix (issue #166 section 5), run
+    /// once per provider through that provider's real refresh transaction.
+    ///
+    /// A failure injected at a given `RefreshCheckpoint` must always surface as
+    /// `assert_injected_crash`, and the durable state left behind must match
+    /// exactly the combination the provider declares through `persisted_at`
+    /// (whether the credential document was durably swapped for the new one)
+    /// and `metadata_changed_at` (whether account-scope lineage metadata was
+    /// durably written) for that checkpoint. Providers legitimately disagree on
+    /// these predicates — Codex persists the credential document before its
+    /// lineage/metadata write, while Claude, Antigravity, and Grok persist
+    /// metadata first — so callers supply the two predicates rather than this
+    /// helper assuming one production ordering.
+    type BoxedRefreshResult<'a> = std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<(), crate::agent_usage::ProviderFetchFailure>>
+                + 'a,
+        >,
+    >;
+
+    // ponytail: this is a test-only conformance-matrix runner whose whole job is
+    // taking one small callback per provider-specific seam (setup, run, stored-
+    // marker read, two ordering predicates) plus the fixture constants those
+    // callbacks need; splitting it into a builder/struct would be an unrequested
+    // abstraction for a single call site per provider.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) async fn assert_refresh_crash_boundaries<
+        Setup,
+        Run,
+        StoredIsNew,
+        PersistedAt,
+        MetadataChangedAt,
+    >(
+        tag_prefix: &str,
+        semantic_source: &str,
+        old_marker: &[u8],
+        new_marker: &[u8],
+        setup: Setup,
+        run: Run,
+        stored_is_new: StoredIsNew,
+        persisted_at: PersistedAt,
+        metadata_changed_at: MetadataChangedAt,
+    ) where
+        Setup: Fn(&str) -> (TestRefreshScope, PathBuf, AccountScope, Vec<u8>, String),
+        Run: for<'a> Fn(
+            &'a TestRefreshScope,
+            &'a Path,
+            Option<RefreshCheckpoint>,
+        ) -> BoxedRefreshResult<'a>,
+        StoredIsNew: Fn(&Path) -> bool,
+        PersistedAt: Fn(RefreshCheckpoint) -> bool,
+        MetadataChangedAt: Fn(RefreshCheckpoint) -> bool,
+    {
+        for boundary in [
+            RefreshCheckpoint::Reloaded,
+            RefreshCheckpoint::NetworkReturned,
+            RefreshCheckpoint::MetadataHandled,
+            RefreshCheckpoint::CredentialsPersisted,
+        ] {
+            let (scope, path, old_scope, before, location) = setup(&format!("{tag_prefix}-crash"));
+            let failure = run(&scope, &path, Some(boundary)).await.unwrap_err();
+            assert_injected_crash(&failure);
+            assert_eq!(
+                stored_is_new(&path),
+                persisted_at(boundary),
+                "credential persistence at {boundary:?}"
+            );
+            if metadata_changed_at(boundary) {
+                assert_ne!(
+                    scope.metadata_bytes(),
+                    before,
+                    "lineage metadata at {boundary:?}"
+                );
+                assert_eq!(
+                    scope
+                        .resolve_current(semantic_source, &location, old_marker)
+                        .unwrap(),
+                    old_scope
+                );
+                assert_eq!(
+                    scope
+                        .resolve_current(semantic_source, &location, new_marker)
+                        .unwrap(),
+                    old_scope
+                );
+            } else {
+                assert_eq!(
+                    scope.metadata_bytes(),
+                    before,
+                    "lineage metadata at {boundary:?}"
+                );
+            }
+            scope.cleanup();
+        }
+    }
 }
 
 #[cfg(test)]
