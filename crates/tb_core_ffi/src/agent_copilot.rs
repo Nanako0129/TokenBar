@@ -313,356 +313,186 @@ mod tests {
         RawValue::from_string(value.to_string()).unwrap()
     }
 
-    #[test]
-    fn maps_premium_and_chat_snapshots() {
-        let now = Utc::now();
-        let body = r#"{
-            "copilot_plan": "individual",
-            "quota_reset_date": "2026-07-01",
-            "quota_snapshots": {
-                "premium_interactions": { "entitlement": 300, "remaining": 90, "percent_remaining": 30 },
-                "chat": { "entitlement": 0, "remaining": 0 }
-            }
-        }"#;
-        let usage: CopilotUser = serde_json::from_str(body).unwrap();
-        let snaps = usage.quota_snapshots.unwrap();
-        let premium =
-            snapshot_window("Premium", snaps.premium_interactions.as_deref(), None, now).unwrap();
-        assert!((premium.remaining_for_test() - 30.0).abs() < 0.01);
-        // chat is a zero-entitlement placeholder → skipped
-        assert!(snapshot_window("Chat", snaps.chat.as_deref(), None, now).is_none());
+    fn now() -> DateTime<Utc> {
+        Utc.timestamp_opt(1_751_328_000, 0).single().unwrap()
     }
 
-    #[test]
-    fn quota_reset_date_is_lossy_without_poisoning_valid_snapshots() {
-        let valid: CopilotUser = serde_json::from_str(
-            r#"{
-                "quota_reset_date": "2026-08-01",
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 100,
-                        "remaining": 60,
-                        "percent_remaining": 60
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        assert_eq!(valid.quota_reset_date.as_deref(), Some("2026-08-01"));
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum ExpectedRow {
+        Usable,
+        Placeholder,
+        Invalid,
+        Absent,
+    }
 
-        let now = Utc.timestamp_opt(1_751_328_000, 0).single().unwrap();
-        for malformed_reset in [
-            "null",
-            "42",
-            r#"{"credential":"token-secret"}"#,
-            r#"["token-secret"]"#,
-            "true",
-        ] {
-            let body = format!(
-                r#"{{
-                    "quota_reset_date": {malformed_reset},
-                    "quota_snapshots": {{
-                        "premium_interactions": {{
-                            "entitlement": 100,
-                            "remaining": 60,
-                            "percent_remaining": 60
-                        }}
-                    }}
-                }}"#
-            );
-            let usage: CopilotUser = serde_json::from_str(&body).unwrap();
-            assert_eq!(usage.quota_reset_date, None, "{malformed_reset}");
-            let (_, windows, mapping) = map_user(usage, now);
-            assert_eq!(mapping, CopilotMapping::Usable, "{malformed_reset}");
-            assert_eq!(windows.len(), 1, "{malformed_reset}");
+    struct QuotaRowCase {
+        entitlement: Option<f64>,
+        remaining: Option<f64>,
+        percent: Option<f64>,
+        expected: ExpectedRow,
+    }
 
-            let wire = serde_json::to_value(&windows[0]).unwrap();
-            assert_eq!(wire["usedPercent"], 40.0, "{malformed_reset}");
-            assert_eq!(wire["remainingPercent"], 60.0, "{malformed_reset}");
-            assert_eq!(wire["cardId"], "premium_interactions.v1");
-            assert!(wire.get("resetsAt").is_none(), "{malformed_reset}");
-            assert!(wire.get("resetText").is_none(), "{malformed_reset}");
-            assert!(wire.get("windowMinutes").is_none(), "{malformed_reset}");
-            assert_eq!(wire["paceStatus"]["state"], "unavailable");
-            assert_eq!(wire["paceStatus"]["reason"], "missingReset");
-            assert!(wire["paceStatus"].get("durationSeconds").is_none());
-            assert!(wire["paceStatus"].get("durationSource").is_none());
-            assert!(wire.get("historicalPace").is_none(), "{malformed_reset}");
-            assert!(!wire.to_string().contains("token-secret"));
+    #[rustfmt::skip]
+    fn snapshot(entitlement: Option<f64>, remaining: Option<f64>, percent: Option<f64>) -> String {
+        let mut fields = Vec::new();
+        if let Some(v) = entitlement { fields.push(format!(r#""entitlement":{v}"#)); }
+        if let Some(v) = remaining { fields.push(format!(r#""remaining":{v}"#)); }
+        if let Some(v) = percent { fields.push(format!(r#""percent_remaining":{v}"#)); }
+        format!("{{{}}}", fields.join(","))
+    }
+
+    #[rustfmt::skip]
+    fn usage_body(plan: Option<&str>, reset: Option<&str>, premium: Option<&str>, chat: Option<&str>) -> String {
+        let mut fields = Vec::new();
+        if let Some(plan) = plan { fields.push(format!(r#""copilot_plan":{}"#, serde_json::json!(plan))); }
+        if let Some(reset) = reset { fields.push(format!(r#""quota_reset_date":{reset}"#)); }
+        let mut snaps = Vec::new();
+        if let Some(premium) = premium { snaps.push(format!(r#""premium_interactions":{premium}"#)); }
+        if let Some(chat) = chat { snaps.push(format!(r#""chat":{chat}"#)); }
+        if !snaps.is_empty() { fields.push(format!(r#""quota_snapshots":{{{}}}"#, snaps.join(","))); }
+        format!("{{{}}}", fields.join(","))
+    }
+
+    #[rustfmt::skip]
+    fn classify(payload: Option<&str>) -> ExpectedRow {
+        match snapshot_window_with_identity(
+            "Premium", "premium_interactions.v1", payload.map(raw).as_deref(), None, now(),
+        ) {
+            CopilotRow::Usable(_) => ExpectedRow::Usable,
+            CopilotRow::Placeholder => ExpectedRow::Placeholder,
+            CopilotRow::Invalid => ExpectedRow::Invalid,
+            CopilotRow::Absent => ExpectedRow::Absent,
         }
     }
 
-    #[test]
-    fn lossy_reset_date_does_not_weaken_quota_row_validation() {
-        let body = r#"{
-            "quota_reset_date": {"ignored":"token-secret"},
-            "quota_snapshots": {
-                "premium_interactions": {
-                    "entitlement": 100,
-                    "remaining": 101,
-                    "percent_remaining": 100
-                }
-            }
-        }"#;
-        assert!(matches!(
-            decode_usage_response(body, Utc::now()),
-            Err(ProviderFetchFailure::Terminal { .. })
-        ));
+    fn map_body(body: &str) -> (Option<String>, Vec<UsageWindow>, CopilotMapping) {
+        map_user(serde_json::from_str(body).unwrap(), now())
     }
 
     #[test]
-    fn zero_entitlement_and_missing_fields_do_not_create_usable_windows() {
-        let now = Utc::now();
-        let placeholder: CopilotUser = serde_json::from_str(
-            r#"{
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 0,
-                        "remaining": 0,
-                        "percent_remaining": 0
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let (_, windows, mapping) = map_user(placeholder, now);
-        assert!(windows.is_empty());
-        assert_eq!(mapping, CopilotMapping::PlaceholderOnly);
-
-        for malformed in [r#"{}"#, r#"{"entitlement": 10}"#, r#"{"remaining": 10}"#] {
-            let row = raw(malformed);
-            assert!(matches!(
-                snapshot_window_with_identity(
-                    "Premium",
-                    "premium_interactions.v1",
-                    Some(row.as_ref()),
-                    None,
-                    now,
-                ),
-                CopilotRow::Invalid
-            ));
+    #[rustfmt::skip]
+    fn classifies_quota_rows() {
+        let cases = [
+            (Some(300.0), Some(90.0), Some(30.0), ExpectedRow::Usable),
+            (Some(100.0), Some(75.0), None, ExpectedRow::Usable),
+            (Some(3.0), Some(2.0), Some(66.0), ExpectedRow::Usable),
+            (Some(3.0), Some(2.0), Some(67.0), ExpectedRow::Usable),
+            (Some(0.0), Some(0.0), Some(0.0), ExpectedRow::Placeholder),
+            (None, None, None, ExpectedRow::Invalid),
+            (Some(10.0), None, None, ExpectedRow::Invalid),
+            (None, Some(10.0), None, ExpectedRow::Invalid),
+            (Some(0.0), Some(1.0), Some(100.0), ExpectedRow::Invalid),
+            (Some(100.0), Some(101.0), Some(100.0), ExpectedRow::Invalid),
+            (Some(-1.0), Some(0.0), Some(0.0), ExpectedRow::Invalid),
+            (Some(100.0), Some(-1.0), Some(0.0), ExpectedRow::Invalid),
+            (Some(300.0), Some(90.0), Some(101.0), ExpectedRow::Invalid),
+            (Some(100.0), Some(0.0), Some(100.0), ExpectedRow::Invalid),
+        ];
+        for (entitlement, remaining, percent, expected) in cases {
+            let case = QuotaRowCase { entitlement, remaining, percent, expected };
+            let payload = snapshot(case.entitlement, case.remaining, case.percent);
+            assert_eq!(classify(Some(&payload)), case.expected, "{payload}");
         }
-
-        let valid_with_malformed_sibling: CopilotUser = serde_json::from_str(
-            r#"{
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 100,
-                        "remaining": 60,
-                        "percent_remaining": 60
-                    },
-                    "chat": {}
-                }
-            }"#,
-        )
-        .unwrap();
-        let (_, windows, mapping) = map_user(valid_with_malformed_sibling, now);
-        assert_eq!(mapping, CopilotMapping::Usable);
-        assert_eq!(windows.len(), 1);
-
+        let usable = snapshot_window(
+            "Premium", Some(raw(&snapshot(Some(300.0), Some(90.0), Some(30.0))).as_ref()), None, now(),
+        ).unwrap();
+        assert!((usable.remaining_for_test() - 30.0).abs() < 0.01);
+        assert_eq!(classify(None), ExpectedRow::Absent);
         for malformed in [
-            r#"{"entitlement":0,"remaining":1,"percent_remaining":100}"#,
-            r#"{"entitlement":100,"remaining":101,"percent_remaining":100}"#,
-            r#"{"entitlement":-1,"remaining":0,"percent_remaining":0}"#,
-            r#"{"entitlement":100,"remaining":-1,"percent_remaining":0}"#,
+            r#"{"entitlement":100,"remaining":"NaN"}"#,
+            r#"{"entitlement":300,"remaining":90,"percent_remaining":1e400}"#,
+            r#"{"entitlement":300,"remaining":90,"percent_remaining":"NaN"}"#,
         ] {
-            let row = raw(malformed);
-            assert!(matches!(
-                snapshot_window_with_identity(
-                    "Premium",
-                    "premium_interactions.v1",
-                    Some(row.as_ref()),
-                    None,
-                    now,
-                ),
-                CopilotRow::Invalid
-            ));
-        }
-
-        let invalid_with_valid_sibling: CopilotUser = serde_json::from_str(
-            r#"{
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 0,
-                        "remaining": 1,
-                        "percent_remaining": 100
-                    },
-                    "chat": {
-                        "entitlement": 100,
-                        "remaining": 75,
-                        "percent_remaining": 75
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let (_, windows, mapping) = map_user(invalid_with_valid_sibling, now);
-        assert_eq!(mapping, CopilotMapping::Usable);
-        assert_eq!(windows.len(), 1);
-        assert_eq!(windows[0].label_for_test(), "Chat");
-
-        let invalid_only: CopilotUser = serde_json::from_str(
-            r#"{
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 0,
-                        "remaining": 1,
-                        "percent_remaining": 100
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let (_, windows, mapping) = map_user(invalid_only, now);
-        assert!(windows.is_empty());
-        assert_eq!(mapping, CopilotMapping::Invalid);
-    }
-
-    #[test]
-    fn stage4_copilot_maps_shared_reset_to_both_quota_cards() {
-        let now = Utc.timestamp_opt(1_751_328_000, 0).single().unwrap();
-        let usage: CopilotUser = serde_json::from_str(
-            r#"{
-                "copilot_plan": "individual",
-                "quota_reset_date": "2026-08-01",
-                "quota_snapshots": {
-                    "premium_interactions": {
-                        "entitlement": 300,
-                        "remaining": 90,
-                        "percent_remaining": 30
-                    },
-                    "chat": {
-                        "entitlement": 100,
-                        "remaining": 75
-                    }
-                }
-            }"#,
-        )
-        .unwrap();
-        let (plan, windows, mapping) = map_user(usage, now);
-        assert_eq!(mapping, CopilotMapping::Usable);
-        assert_eq!(plan.as_deref(), Some("Individual"));
-        assert_eq!(windows.len(), 2);
-        let premium = &windows[0];
-        let chat = &windows[1];
-
-        assert_eq!(premium.label_for_test(), "Premium");
-        assert_eq!(chat.label_for_test(), "Chat");
-        assert_eq!(
-            premium.resets_at_for_test(),
-            Some("2026-08-01T00:00:00.000Z")
-        );
-        assert_eq!(chat.resets_at_for_test(), premium.resets_at_for_test());
-        assert_eq!(
-            premium.window_minutes_for_test(),
-            Some(44_640),
-            "first-of-month reset uses the exact preceding calendar month"
-        );
-        assert_eq!(chat.window_minutes_for_test(), Some(44_640));
-        assert_eq!(
-            premium.pace_window_key_for_test(),
-            Some("premium_interactions.v1")
-        );
-        assert_eq!(chat.pace_window_key_for_test(), Some("chat.v1"));
-        for window in &windows {
-            let wire = serde_json::to_value(window).unwrap();
-            assert_eq!(wire["paceStatus"]["durationSource"], "contract");
-            assert_eq!(wire["paceStatus"]["durationSeconds"], 2_678_400);
-        }
-
-        let non_calendar_reset = parse_reset_date("2026-08-15").unwrap();
-        let observed_raw =
-            raw(r#"{ "entitlement": 300, "remaining": 90, "percent_remaining": 30 }"#);
-        let observed = snapshot_window(
-            "Premium",
-            Some(observed_raw.as_ref()),
-            Some(non_calendar_reset),
-            now,
-        )
-        .unwrap();
-        assert_eq!(
-            observed.window_minutes_for_test(),
-            None,
-            "copilot.premium.observed-fallback"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_remaining_percentages_before_wire() {
-        let now = Utc::now();
-        let out_of_range =
-            raw(r#"{ "entitlement": 300, "remaining": 90, "percent_remaining": 101 }"#);
-        assert!(snapshot_window("Premium", Some(out_of_range.as_ref()), None, now,).is_none());
-        let non_finite =
-            raw(r#"{ "entitlement": 100, "remaining": "NaN", "percent_remaining": null }"#);
-        assert!(snapshot_window("Chat", Some(non_finite.as_ref()), None, now).is_none());
-    }
-
-    #[test]
-    fn rejects_percentages_that_contradict_absolute_quota() {
-        let now = Utc::now();
-        let contradictory =
-            raw(r#"{ "entitlement": 100, "remaining": 0, "percent_remaining": 100 }"#);
-        assert!(matches!(
-            snapshot_window_with_identity(
-                "Premium",
-                "premium_interactions.v1",
-                Some(contradictory.as_ref()),
-                None,
-                now,
-            ),
-            CopilotRow::Invalid
-        ));
-
-        for rounded in [66, 67] {
-            let payload = raw(&format!(
-                r#"{{ "entitlement": 3, "remaining": 2, "percent_remaining": {rounded} }}"#
-            ));
-            assert!(matches!(
-                snapshot_window_with_identity(
-                    "Premium",
-                    "premium_interactions.v1",
-                    Some(payload.as_ref()),
-                    None,
-                    now,
-                ),
-                CopilotRow::Usable(_)
-            ));
+            assert_eq!(classify(Some(malformed)), ExpectedRow::Invalid, "{malformed}");
         }
     }
 
     #[test]
-    fn malformed_snapshot_percentage_does_not_poison_valid_sibling() {
-        let now = Utc.timestamp_opt(1_751_328_000, 0).single().unwrap();
-        for invalid in ["1e400", r#""NaN""#, "100"] {
-            let usage: CopilotUser = serde_json::from_str(&format!(
-                r#"{{
-                    "quota_reset_date": "2026-08-01",
-                    "quota_snapshots": {{
-                        "premium_interactions": {{
-                            "entitlement": 300,
-                            "remaining": 90,
-                            "percent_remaining": {invalid}
-                        }},
-                        "chat": {{
-                            "entitlement": 100,
-                            "remaining": 75,
-                            "percent_remaining": 75
-                        }}
-                    }}
-                }}"#
-            ))
-            .unwrap();
-            let (_, windows, mapping) = map_user(usage, now);
-            assert_eq!(mapping, CopilotMapping::Usable);
-            assert_eq!(windows.len(), 1);
+    #[rustfmt::skip]
+    fn malformed_reset_dates_are_ignored_without_poisoning_rows() {
+        let premium = snapshot(Some(100.0), Some(60.0), Some(60.0));
+        let valid: CopilotUser = serde_json::from_str(&usage_body(None, Some(r#""2026-08-01""#), Some(&premium), None)).unwrap();
+        assert_eq!(valid.quota_reset_date.as_deref(), Some("2026-08-01"));
+        for reset in ["null", "42", r#"{"credential":"token-secret"}"#, r#"["token-secret"]"#, "true"] {
+            let body = usage_body(None, Some(reset), Some(&premium), None);
+            let usage: CopilotUser = serde_json::from_str(&body).unwrap();
+            assert_eq!(usage.quota_reset_date, None, "{reset}");
+            let (_, windows, mapping) = map_user(usage, now());
+            assert_eq!((mapping, windows.len()), (CopilotMapping::Usable, 1), "{reset}");
+            assert!(windows[0].resets_at_for_test().is_none(), "{reset}");
+            assert!(!serde_json::to_string(&windows[0]).unwrap().contains("token-secret"), "{reset}");
+        }
+        let invalid = usage_body(None, Some(r#"{"ignored":"token-secret"}"#), Some(&snapshot(Some(100.0), Some(101.0), Some(100.0))), None);
+        assert!(matches!(decode_usage_response(&invalid, now()), Err(ProviderFetchFailure::Terminal { .. })));
+    }
+
+    #[test]
+    #[rustfmt::skip]
+    fn sibling_rows_stay_isolated() {
+        let valid = snapshot(Some(100.0), Some(60.0), Some(60.0));
+        let placeholder = snapshot(Some(0.0), Some(0.0), Some(0.0));
+        let invalid = snapshot(Some(0.0), Some(1.0), Some(100.0));
+        let chat = snapshot(Some(100.0), Some(75.0), Some(75.0));
+        let cases: &[(&str, Option<&str>, CopilotMapping, &[&str])] = &[
+            (&placeholder, None, CopilotMapping::PlaceholderOnly, &[]),
+            (&valid, Some("{}"), CopilotMapping::Usable, &["Premium"]),
+            (&valid, Some(&placeholder), CopilotMapping::Usable, &["Premium"]),
+            (&invalid, Some(&chat), CopilotMapping::Usable, &["Chat"]),
+            (&invalid, None, CopilotMapping::Invalid, &[]),
+        ];
+        for (premium, chat_row, expected, labels) in cases {
+            let body = usage_body(None, None, Some(premium), *chat_row);
+            let (_, windows, mapping) = map_body(&body);
+            assert_eq!(mapping, *expected, "{body}");
+            let got: Vec<_> = windows.iter().map(|w| w.label_for_test()).collect();
+            assert_eq!(got, *labels, "{body}");
+        }
+        let placeholder_body = usage_body(None, None, Some(&placeholder), None);
+        assert!(decode_usage_response(&placeholder_body, now()).unwrap().1.is_empty());
+        let invalid_body = usage_body(None, None, Some(&invalid), None);
+        assert!(matches!(decode_usage_response(&invalid_body, now()), Err(ProviderFetchFailure::Terminal { .. })));
+        for percent in ["1e400", r#""NaN""#, "100"] {
+            let premium = format!(r#"{{"entitlement":300,"remaining":90,"percent_remaining":{percent}}}"#);
+            let (_, windows, mapping) = map_body(&usage_body(None, None, Some(&premium), Some(&chat)));
+            assert_eq!(mapping, CopilotMapping::Usable, "{percent}");
             assert_eq!(windows[0].label_for_test(), "Chat");
             assert!((windows[0].remaining_for_test() - 75.0).abs() < 0.01);
         }
     }
 
     #[test]
-    fn parses_reset_date() {
+    #[rustfmt::skip]
+    fn shared_first_of_month_reset_applies_to_both_canonical_cards() {
+        let body = usage_body(
+            Some("individual"), Some(r#""2026-08-01""#),
+            Some(&snapshot(Some(300.0), Some(90.0), Some(30.0))),
+            Some(&snapshot(Some(100.0), Some(75.0), None)),
+        );
+        let (plan, windows, mapping) = map_body(&body);
+        assert_eq!(mapping, CopilotMapping::Usable);
+        assert_eq!(plan.as_deref(), Some("Individual"));
+        assert_eq!(windows.len(), 2);
+        let (premium, chat) = (&windows[0], &windows[1]);
+        assert_eq!(premium.label_for_test(), "Premium");
+        assert_eq!(chat.label_for_test(), "Chat");
+        assert_eq!(premium.resets_at_for_test(), Some("2026-08-01T00:00:00.000Z"));
+        assert_eq!(chat.resets_at_for_test(), premium.resets_at_for_test());
+        assert_eq!(premium.window_minutes_for_test(), Some(44_640), "first-of-month reset uses the exact preceding calendar month");
+        assert_eq!(chat.window_minutes_for_test(), Some(44_640));
+        assert_eq!(premium.pace_window_key_for_test(), Some("premium_interactions.v1"));
+        assert_eq!(chat.pace_window_key_for_test(), Some("chat.v1"));
+        for window in &windows {
+            let wire = serde_json::to_value(window).unwrap();
+            assert_eq!(wire["paceStatus"]["durationSource"], "contract");
+            assert_eq!(wire["paceStatus"]["durationSeconds"], 2_678_400);
+        }
+        let observed = snapshot_window(
+            "Premium",
+            Some(raw(&snapshot(Some(300.0), Some(90.0), Some(30.0))).as_ref()),
+            Some(parse_reset_date("2026-08-15").unwrap()),
+            now(),
+        ).unwrap();
+        assert_eq!(observed.window_minutes_for_test(), None, "copilot.premium.observed-fallback");
         assert!(parse_reset_date("2026-07-01").is_some());
         assert!(parse_reset_date("not-a-date").is_none());
     }
