@@ -7335,6 +7335,11 @@ enum SelfTest {
                 && !currentLabelCols.contains(currentSeptCell.col),
             "the current year clips at today: cutoff, renderable cells, last renderable column, and month "
                 + "labels all stop there, not at the end of the year or `grid.cols`")
+        expect(
+            ContributionHeatmap.cutoffDate(year: "2026", today: cutoffToday)
+                != ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-30")
+                && ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-30") == "2026-07-30",
+            "consecutive calendar days in the current year produce distinct cutoffs, so a popover left open across midnight re-scrolls")
         let pastGrid = buildGrid(year: "2025", perDayMap: [:])
         let pastCutoff = ContributionHeatmap.cutoffDate(year: "2025", today: cutoffToday)
         let futureGrid = buildGrid(year: "2027", perDayMap: [:])
@@ -7374,6 +7379,9 @@ enum SelfTest {
             HeatmapHitCase(name: "a horizontal gap point is a dead zone", point: CGPoint(x: hitCellRect.maxX + 1, y: hitCellRect.minY + 1), expected: nil),
             HeatmapHitCase(name: "a vertical gap point is a dead zone", point: CGPoint(x: hitCellRect.minX + 1, y: hitCellRect.maxY + 1), expected: nil),
             HeatmapHitCase(name: "past the last renderable column is out of bounds", point: CGPoint(x: HeatmapLayout.rect(col: hitVisibleCols, row: 0).minX + 1, y: HeatmapLayout.gridTop + 1), expected: nil),
+            HeatmapHitCase(name: "leading cell edge is inside the cell", point: CGPoint(x: hitCellRect.minX, y: hitCellRect.minY), expected: hitCol * 7 + hitRow),
+            HeatmapHitCase(name: "trailing cell edge is the gap, not the cell", point: CGPoint(x: hitCellRect.maxX, y: hitCellRect.minY + 1), expected: nil),
+            HeatmapHitCase(name: "next cell leading edge resolves to the next column", point: CGPoint(x: HeatmapLayout.rect(col: hitCol + 1, row: hitRow).minX, y: hitCellRect.minY), expected: (hitCol + 1) * 7 + hitRow),
         ] {
             expect(
                 ContributionHeatmap.cellAt(c.point, grid: currentGrid, visibleCols: hitVisibleCols) == c.expected,
