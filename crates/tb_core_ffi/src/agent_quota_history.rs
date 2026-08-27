@@ -9978,12 +9978,16 @@ mod tests {
         // product contract the work-bound below is not a substitute for.
         assert_eq!(results[0].as_ref().unwrap().2, RETENTION_MAX_CYCLES);
         let counters = fit_work_counters();
-        assert!(counters.lobo_folds <= 2 * RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT);
-        assert!(counters.loco_folds <= 2 * RETENTION_MAX_CYCLES);
-        assert!(
-            counters.target_sample_reads <= 2 * (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT
+        assert_eq!(
+            counters.target_sample_reads,
+            (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT
         );
-        assert!(counters.target_profiles_built <= 2 * RETENTION_MAX_CYCLES);
+        assert_eq!(counters.target_profiles_built, RETENTION_MAX_CYCLES);
+        assert_eq!(
+            counters.lobo_folds,
+            RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT
+        );
+        assert_eq!(counters.loco_folds, RETENTION_MAX_CYCLES);
         assert_eq!(counters.non_target_sample_reads, 0);
         assert_eq!(counters.non_target_profiles_built, 0);
         fs::remove_dir_all(completed_directory).unwrap();
