@@ -1877,8 +1877,7 @@ pub(crate) mod test_support {
     /// matrix and its terminal/transient failure shapes are defined once instead
     /// of once per provider.
     ///
-    /// Injects a terminal "injected crash" failure at a chosen `RefreshCheckpoint`
-    /// and lets every other checkpoint pass through untouched.
+    /// Injects a terminal "injected crash" failure at one `RefreshCheckpoint`.
     pub(crate) fn checkpoint_at(
         target: Option<RefreshCheckpoint>,
     ) -> impl FnMut(RefreshCheckpoint) -> Result<(), crate::agent_usage::ProviderFetchFailure> {
@@ -1893,9 +1892,7 @@ pub(crate) mod test_support {
         }
     }
 
-    /// A refresh attempt that failed with the marker `checkpoint_at` injects
-    /// must surface as a terminal failure carrying that exact display text,
-    /// never a transient one a caller might retry into a half-applied state.
+    /// `checkpoint_at`'s injected failure must be terminal, not transient.
     pub(crate) fn assert_injected_crash(failure: &crate::agent_usage::ProviderFetchFailure) {
         assert!(
             matches!(
@@ -1907,10 +1904,8 @@ pub(crate) mod test_support {
         );
     }
 
-    /// A transport failure during the refresh request must carry the binding
-    /// resolved from the lock-reloaded credential, never the caller's outer
-    /// (possibly stale) binding, and must remain transient rather than
-    /// collapsing into a terminal one just because the network call failed.
+    /// A transport failure must carry the lock-reloaded binding, not the
+    /// outer one, and must stay transient rather than become terminal.
     pub(crate) fn assert_transient_used_lock_reloaded_binding(
         failure: crate::agent_usage::ProviderFetchFailure,
         expected: crate::agent_usage::ProviderCacheBinding,
@@ -1925,19 +1920,6 @@ pub(crate) mod test_support {
         }
     }
 
-    /// The four-checkpoint durable-state matrix (issue #166 section 5), run
-    /// once per provider through that provider's real refresh transaction.
-    ///
-    /// A failure injected at a given `RefreshCheckpoint` must always surface as
-    /// `assert_injected_crash`, and the durable state left behind must match
-    /// exactly the combination the provider declares through `persisted_at`
-    /// (whether the credential document was durably swapped for the new one)
-    /// and `metadata_changed_at` (whether account-scope lineage metadata was
-    /// durably written) for that checkpoint. Providers legitimately disagree on
-    /// these predicates — Codex persists the credential document before its
-    /// lineage/metadata write, while Claude, Antigravity, and Grok persist
-    /// metadata first — so callers supply the two predicates rather than this
-    /// helper assuming one production ordering.
     type BoxedRefreshResult<'a> = std::pin::Pin<
         Box<
             dyn std::future::Future<Output = Result<(), crate::agent_usage::ProviderFetchFailure>>
@@ -1945,11 +1927,13 @@ pub(crate) mod test_support {
         >,
     >;
 
-    // ponytail: this is a test-only conformance-matrix runner whose whole job is
-    // taking one small callback per provider-specific seam (setup, run, stored-
-    // marker read, two ordering predicates) plus the fixture constants those
-    // callbacks need; splitting it into a builder/struct would be an unrequested
-    // abstraction for a single call site per provider.
+    /// The four-checkpoint durable-state matrix, run through a provider's real
+    /// refresh transaction. `persisted_at`/`metadata_changed_at` are supplied
+    /// by the caller rather than assumed, because Codex genuinely persists the
+    /// credential document before its metadata write while Claude, Antigravity,
+    /// and Grok persist metadata first.
+    // ponytail: many small callbacks, not a builder/struct, for a single call
+    // site per provider.
     #[allow(clippy::too_many_arguments)]
     pub(crate) async fn assert_refresh_crash_boundaries<
         Setup,
@@ -2018,6 +2002,43 @@ pub(crate) mod test_support {
                 );
             }
             scope.cleanup();
+        }
+    }
+
+    /// A failed refresh must be terminal (unlike `assert_injected_crash`,
+    /// this doesn't pin the exact display text).
+    pub(crate) fn assert_terminal(failure: &crate::agent_usage::ProviderFetchFailure) {
+        assert!(
+            matches!(
+                failure,
+                crate::agent_usage::ProviderFetchFailure::Terminal { .. }
+            ),
+            "expected a terminal failure, got {failure:?}"
+        );
+    }
+
+    /// A refresh rejected because the durable target changed underneath it
+    /// concurrently must leave the concurrent writer's bytes untouched and
+    /// transfer no lineage metadata. `concurrent_bytes` is `None` for a
+    /// concurrent logout that removed the file; `new_value_needle` must not
+    /// appear anywhere in what's left on disk.
+    pub(crate) fn assert_concurrent_target_untouched(
+        failure: &crate::agent_usage::ProviderFetchFailure,
+        scope: &TestRefreshScope,
+        metadata_before: &[u8],
+        path: &Path,
+        concurrent_bytes: Option<&[u8]>,
+        new_value_needle: &str,
+    ) {
+        assert_terminal(failure);
+        assert_eq!(scope.metadata_bytes(), metadata_before);
+        match concurrent_bytes {
+            Some(expected) => {
+                let stored_bytes = fs::read(path).unwrap();
+                assert_eq!(stored_bytes, expected);
+                assert!(!String::from_utf8_lossy(&stored_bytes).contains(new_value_needle));
+            }
+            None => assert!(!path.exists()),
         }
     }
 }
