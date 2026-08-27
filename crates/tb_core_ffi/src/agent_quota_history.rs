@@ -9549,6 +9549,35 @@ mod tests {
         .is_none());
     }
 
+    /// C1 — no-look-ahead: a sample timestamped after the evaluation clock,
+    /// with a value that would materially change the result if consulted,
+    /// must not affect a decision made at that clock.
+    #[test]
+    fn partial_projection_ignores_samples_after_now() {
+        let duration = DAY;
+        let reset_at = 44_000_000_000_i64 + duration;
+        let key = test_key("fixture", "no-lookahead", "window.v1");
+        let visible = current_series(&key, reset_at, duration, &SMOOTH_PHASES_WIDE, 80.0);
+        let now = reset_at - duration + (0.80 * duration as f64) as i64;
+        let normalized = normalize_reset(reset_at, duration);
+        let baseline =
+            evaluate_partial_projection(&visible, normalized, reset_at, duration, 70.0, now)
+                .expect("baseline sees only samples visible at `now`");
+
+        let mut with_future = visible;
+        with_future.samples.push(quota_sample(
+            reset_at,
+            duration,
+            0.99,
+            1.0, // adversarial: would drag pace down hard if it leaked
+            SampleOrigin::LiveV3,
+        ));
+        let leaked =
+            evaluate_partial_projection(&with_future, normalized, reset_at, duration, 70.0, now)
+                .expect("future sample present but must not be consulted");
+        assert_eq!(baseline, leaked);
+    }
+
     #[test]
     fn partial_current_transaction_can_be_available_without_complete_cycles() {
         let (directory, path) = temp_path("partial-fit");
