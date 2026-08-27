@@ -7254,455 +7254,227 @@ enum SelfTest {
             expect(passed, "filter parity: \(label)")
         }
 
-        // MARK: - FLAT-HEATMAP (append-only section; do not reorder/edit above)
+        // MARK: - FLAT-HEATMAP (contract suite; decision table in issue #157)
+        //
+        // Six contracts, one table/grid each, replacing the append-only
+        // per-round matrices: metric (C1), date/cutoff (C2), hit testing (C3),
+        // scroll/hover lifecycle (C4), layout/ring bounds (C5), chart-view (C6).
 
-        // A1/A2: the heatmap grid must read the exact same, already-filtered
-        // `stats.perDayMap` UsageChartCard hands ContributionGraph3D — same
-        // pipeline, same values, and NOT the unfiltered payload total.
-        let heatJSON = """
-        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-01-01","end":"2026-01-01"}},
-         "summary":{"totalTokens":0,"totalCost":0,"totalDays":1,"activeDays":1,"averagePerDay":0,
-                    "maxCostInSingleDay":0,"clients":["a","b"],"models":[]},
-         "years":[],
-         "contributions":[
-           {"date":"2026-01-01","totals":{"tokens":0,"cost":0,"messages":0},"intensity":1,
-            "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},
-            "clients":[
-              {"client":"a","modelId":"m","providerId":"p","cost":2,"messages":1,
-               "tokens":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}},
-              {"client":"b","modelId":"m","providerId":"p","cost":3,"messages":1,
-               "tokens":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}
-         ]}
-        """
-        let heatPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(heatJSON.utf8))
-        let heatStatsA = UsageStats(payload: heatPayload, selectedClients: ["a"])
-        let heatGridA = buildGrid(year: "2026", perDayMap: heatStatsA.perDayMap)
-        let heatCellA = heatGridA.cells.first { $0.date == "2026-01-01" }
-        expect(
-            heatCellA?.tokens == 100 && heatCellA?.cost == 2,
-            "heatmap grid cell matches the filtered UsageStats value for the selected client")
-        expect(
-            (heatCellA?.tokens ?? 0) != 150 && (heatCellA?.cost ?? 0) != 5,
-            "heatmap grid cell for one client is not the two-client total")
-
-        // `maxValue` gained a `cutoff` parameter in round 4 (FIX 3); this
-        // constant preserves every existing A3/A4 fixture's original
-        // semantics (nothing excluded) rather than weakening what they test.
-        let noCutoffFilter = "9999-12-31"
-
-        // A3 (invariant 3): a `tokens == 0, cost > 0` day must count as "has
-        // data" under the Price metric. This is reachable (UsageStats.swift
-        // 105-110) and `cell.active` (Grid.swift:49) is tokens-only — using
-        // it here would wrongly blank this day out.
-        let costOnlyGrid = buildGrid(
-            year: "2026",
-            perDayMap: ["2026-05-05": PerDay(date: "2026-05-05", tokens: 0, cost: 5, intensity: 1)])
-        let costOnlyCell = costOnlyGrid.cells.first { $0.date == "2026-05-05" }!
-        expect(costOnlyCell.active == false, "sanity: a cost-only day is not `active` (tokens-only flag)")
-        expect(
-            ContributionHeatmap.hasData(costOnlyCell, metric: .cost) == true,
-            "Price metric treats cost>0 as data even when active==false")
-        expect(
-            ContributionHeatmap.hasData(costOnlyCell, metric: .tokens) == false,
-            "Tokens metric still has no data on a cost-only day")
-        let costOnlyMax = ContributionHeatmap.maxValue(costOnlyGrid, metric: .cost, cutoff: noCutoffFilter)
-        expect(
-            HeatmapLayout.level(
-                value: ContributionHeatmap.value(costOnlyCell, metric: .cost), max: costOnlyMax) >= 1,
-            "cost-only day renders at a non-zero heatmap intensity level")
-
-        // A4 (invariant 4): Tokens and Price take their intensity denominator
-        // independently — the day with the most tokens need not be the day
-        // with the highest cost, and each metric's own top day must still
-        // reach the top intensity level under its own max.
-        let dualMetricGrid = buildGrid(
+        // C1 — metric semantics: independent tokens/cost maxima, a future day
+        // excluded from both, a cost>0/tokens==0 day is data under Price only.
+        let metricGrid = buildGrid(
             year: "2026",
             perDayMap: [
                 "2026-03-01": PerDay(date: "2026-03-01", tokens: 1000, cost: 1, intensity: 1),
                 "2026-03-08": PerDay(date: "2026-03-08", tokens: 10, cost: 100, intensity: 1),
-            ])
-        let dayHighTokens = dualMetricGrid.cells.first { $0.date == "2026-03-01" }!
-        let dayHighCost = dualMetricGrid.cells.first { $0.date == "2026-03-08" }!
-        let dualMaxTokens = ContributionHeatmap.maxValue(dualMetricGrid, metric: .tokens, cutoff: noCutoffFilter)
-        let dualMaxCost = ContributionHeatmap.maxValue(dualMetricGrid, metric: .cost, cutoff: noCutoffFilter)
-        expect(
-            dualMaxTokens == 1000 && dualMaxCost == 100,
-            "tokens and cost maxima are computed independently, from different days")
-        expect(
-            HeatmapLayout.level(
-                value: ContributionHeatmap.value(dayHighTokens, metric: .tokens), max: dualMaxTokens) == 4
-                && HeatmapLayout.level(
-                    value: ContributionHeatmap.value(dayHighCost, metric: .cost), max: dualMaxCost) == 4,
-            "each metric's own top day reaches the highest intensity level")
-        expect(
-            HeatmapLayout.level(
-                value: ContributionHeatmap.value(dayHighCost, metric: .tokens), max: dualMaxTokens) < 4,
-            "the cost-max day is not also the tokens-max day (cost wrongly reusing maxTokens would fail this)")
-
-        // Five-level threshold boundaries (invariant 9): >=0.75/0.5/0.25/>0/else.
-        expect(
-            HeatmapLayout.level(value: 75, max: 100) == 4
-                && HeatmapLayout.level(value: 50, max: 100) == 3
-                && HeatmapLayout.level(value: 25, max: 100) == 2
-                && HeatmapLayout.level(value: 1, max: 100) == 1
-                && HeatmapLayout.level(value: 0, max: 100) == 0
-                && HeatmapLayout.level(value: 10, max: 0) == 0,
-            "five-level intensity thresholds match >=0.75/0.5/0.25/>0/else")
-
-        // A5/A6: calendar boundaries across years, including a leap day.
-        // `buildGrid` clamps to `max(53, …)`, so every real year lands on 53
-        // or 54 columns; 2028 is the nearest 54-column year to today.
-        expect(buildGrid(year: "2026", perDayMap: [:]).cols == 53, "2026 uses the standard 53 columns")
-        expect(buildGrid(year: "2028", perDayMap: [:]).cols == 54, "2028 needs a 54th column")
-        let leapGrid = buildGrid(
-            year: "2028",
-            perDayMap: ["2028-02-29": PerDay(date: "2028-02-29", tokens: 1, cost: 0, intensity: 1)])
-        let leapCell = leapGrid.cells.first { $0.date == "2028-02-29" }
-        expect(
-            leapCell?.inYear == true && leapCell?.active == true,
-            "2028-02-29 is a valid in-year, active cell (pure ISODay stepping, no Calendar)")
-
-        // A7 (invariant 7): `chartViewRaw` fallback is exhaustive, not an
-        // ad hoc `!is3D && !isHeatmap` chain — any unknown value, not just
-        // the ones tested here, falls back to Bars.
-        expect(ChartView(raw: "2d") == .bars, "legacy '2d' still maps to Bars (no migration needed)")
-        expect(ChartView(raw: "3d") == .threeD, "legacy '3d' still maps to 3D")
-        expect(ChartView(raw: "heat") == .heatmap, "new 'heat' value maps to Heatmap")
-        expect(ChartView(raw: "garbage") == .bars, "an unknown chartViewRaw falls back to Bars, not a crash")
-
-        // MARK: - FLAT-HEATMAP round 2 (append-only; do not reorder/edit above)
-
-        // Item 3(a): future-day cutoff. Current year clips to today; any
-        // other (necessarily past) year still runs through Dec 31.
-        expect(
-            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29") == "2026-07-29",
-            "the selected year matching today's year cuts off at today")
-        expect(
-            ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29") == "2025-12-31",
-            "a past selected year still runs through Dec 31, not today's date")
-
-        let cutoffCurrent = ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29")
-        let currentYearGrid = buildGrid(year: "2026", perDayMap: [:])
-        let renderableCurrent = currentYearGrid.cells
-            .filter { ContributionHeatmap.isRenderable($0, cutoff: cutoffCurrent) }
-            .map(\.date)
-        expect(
-            renderableCurrent.max() == "2026-07-29" && !renderableCurrent.contains("2026-07-30"),
-            "the current year renders through today and no further (a `<` vs `<=` slip would fail this)")
-
-        let cutoffPast = ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29")
-        let pastYearGrid = buildGrid(year: "2025", perDayMap: [:])
-        let renderablePast = pastYearGrid.cells
-            .filter { ContributionHeatmap.isRenderable($0, cutoff: cutoffPast) }
-            .map(\.date)
-        expect(
-            renderablePast.max() == "2025-12-31",
-            "a past year still renders all the way to Dec 31 (forgetting the year check would clip it to today's date)")
-
-        // Item 1: the tooltip's anchor must be derived from the scrolling
-        // content's *current* on-screen origin, not pinned to the cell's
-        // position within that content alone — that pin is exactly the old
-        // clipping bug (tooltip position never accounted for scroll, so it
-        // rendered inside the ScrollView's own clipped content layer). This
-        // is the pure-logic slice of the fix; the actual on-screen clip
-        // behavior needs a human looking at the popover (A9-equivalent).
-        expect(
-            ContributionHeatmap.tooltipAnchor(cellCenter: CGPoint(x: 50, y: 20), contentOrigin: .zero)
-                == CGPoint(x: 50, y: 20),
-            "an unscrolled, unmoved content anchors directly on the cell's own center")
-        expect(
-            ContributionHeatmap.tooltipAnchor(
-                cellCenter: CGPoint(x: 50, y: 20), contentOrigin: CGPoint(x: -300, y: 0))
-                == CGPoint(x: -250, y: 20),
-            "scrolling the content 300pt left shifts the anchor by the same 300pt — proving the tooltip "
-                + "tracks the outer container, not a position frozen inside the scrolled/clipped content")
-
-        // MARK: - FLAT-HEATMAP round 3 (append-only; do not reorder/edit above)
-
-        // Layout width (and hit-testing) must derive from the last
-        // RENDERABLE column, not `grid.cols` — round 2 correctly stopped
-        // drawing/hovering future days but left `grid.cols` driving the
-        // layout width, so the blank cutoff-past columns still ate width and
-        // `scrollTo(.trailing)` landed on empty space instead of today.
-        let r3Today = "2026-07-29"
-        let r3CurrentYearGrid = buildGrid(year: "2026", perDayMap: [:])
-        let r3TodayCell = r3CurrentYearGrid.cells.first { $0.date == r3Today }!
-        // September, not August: July 29 (a Wednesday) and Aug 1 fall in the
-        // same Sunday-Saturday week/column, which would make the "later
-        // column" assertion below vacuously true regardless of the fix.
-        let r3SeptemberCell = r3CurrentYearGrid.cells.first { $0.date == "2026-09-01" }!
-        let r3LastColCurrent = ContributionHeatmap.lastRenderableCol(r3CurrentYearGrid, cutoff: r3Today)
-        expect(
-            r3LastColCurrent == r3TodayCell.col,
-            "the current year's last renderable column is today's column, not the last column of the year")
-        expect(
-            r3LastColCurrent < r3SeptemberCell.col,
-            "a column after today contributes no width (using grid.cols here would fail this)")
-
-        // Note: a mutated `cutoffDate` that always returns `today` regardless
-        // of year (the round-2 mutation target) does NOT fail this specific
-        // assertion — a past year's dates all lexicographically precede a
-        // current-year "today" string, so that particular bug still yields
-        // full width here by coincidence; it's caught instead by round 2's
-        // own "past selected year still runs through Dec 31" test above. This
-        // assertion's real mutation target is a wrong past-year end date
-        // (e.g. `"\(year)-01-01"` instead of `"\(year)-12-31"`), which does
-        // narrow the width and does fail here.
-        let r3PastCutoff = ContributionHeatmap.cutoffDate(year: "2025", today: r3Today)
-        let r3PastYearGrid = buildGrid(year: "2025", perDayMap: [:])
-        let r3LastColPast = ContributionHeatmap.lastRenderableCol(r3PastYearGrid, cutoff: r3PastCutoff)
-        expect(
-            r3LastColPast == r3PastYearGrid.cols - 1,
-            "a past year still spans the full grid width (a wrong past-year cutoff end date would narrow it)")
-
-        // Month labels must stop at the same cutoff as the cells — calling
-        // the real `monthLabelCols(grid:cutoff:)`, not a hand-rebuilt copy of
-        // its filter, so dropping the cutoff filter inside it would be caught.
-        let r3JulyFirstCell = r3CurrentYearGrid.cells.first { $0.date == "2026-07-01" }!
-        let r3MonthLabelCols = ContributionHeatmap.monthLabelCols(grid: r3CurrentYearGrid, cutoff: r3Today)
-            .map(\.col)
-        expect(
-            r3MonthLabelCols.contains(r3JulyFirstCell.col),
-            "July's label (on or before the cutoff) is still present")
-        expect(
-            !r3MonthLabelCols.contains(r3SeptemberCell.col),
-            "September's label (after the cutoff) is dropped (mutation: skipping the isRenderable filter "
-                + "inside monthLabelCols would fail this)")
-
-        // MARK: - FLAT-HEATMAP round 4 (Codex P2 fixes; append-only)
-
-        // FIX 1: the re-scroll-to-trailing trigger is `cutoff`, which changes
-        // on both a year-filter change and a day rollover — this is the pure,
-        // testable half of the fix. The actual SwiftUI `onChange(of:
-        // cutoff)` → `proxy.scrollTo` wiring firing at the right time needs a
-        // human watching the popover switch years while on the Heatmap tab;
-        // there's no headless SwiftUI view-update harness here to automate
-        // that half.
-        expect(
-            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29")
-                != ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29"),
-            "cutoff changes across a year-filter switch (the re-scroll trigger fires)")
-        expect(
-            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29")
-                != ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-30"),
-            "cutoff also changes across a day rollover while the popover stays open")
-
-        // FIX 2: a horizontal wheel-redirect already parked at an edge must
-        // report "not consumed" so the dashboard's vertical ScrollView still
-        // sees the wheel tick — the pre-fix code clamped and unconditionally
-        // reported the event as handled even when the clamped origin was
-        // identical to the one it started with.
-        let r4RightEdge = HorizontalWheelScroll.clampedScroll(originX: 500, step: -20, maxX: 500)
-        expect(
-            r4RightEdge.newOriginX == 500 && r4RightEdge.moved == false,
-            "already at the trailing edge: origin doesn't move, so the event is not consumed "
-                + "(mutation: always returning moved=true would fail this)")
-        let r4LeftEdge = HorizontalWheelScroll.clampedScroll(originX: 0, step: 20, maxX: 500)
-        expect(
-            r4LeftEdge.newOriginX == 0 && r4LeftEdge.moved == false,
-            "already at the leading edge: origin doesn't move, so the event is not consumed")
-        let r4MidScroll = HorizontalWheelScroll.clampedScroll(originX: 100, step: 20, maxX: 500)
-        expect(
-            r4MidScroll.newOriginX == 80 && r4MidScroll.moved == true,
-            "a scroll that actually changes the origin IS consumed")
-
-        // FIX 3: a hidden future cell (clock skew, an imported session dated
-        // past today) must not sit in either metric's intensity denominator
-        // — the same `isRenderable` cutoff that keeps it from being drawn or
-        // hoverable must also keep it out of `maxValue`.
-        let r4FutureShockGrid = buildGrid(
-            year: "2026",
-            perDayMap: [
-                "2026-07-10": PerDay(date: "2026-07-10", tokens: 100, cost: 5, intensity: 1),
+                "2026-05-05": PerDay(date: "2026-05-05", tokens: 0, cost: 5, intensity: 1),
                 "2026-08-15": PerDay(date: "2026-08-15", tokens: 999_999, cost: 9999, intensity: 1),
             ])
-        let r4Cutoff = "2026-07-29"
-        let r4VisibleCell = r4FutureShockGrid.cells.first { $0.date == "2026-07-10" }!
-        let r4TokensMax = ContributionHeatmap.maxValue(r4FutureShockGrid, metric: .tokens, cutoff: r4Cutoff)
-        let r4CostMax = ContributionHeatmap.maxValue(r4FutureShockGrid, metric: .cost, cutoff: r4Cutoff)
+        let metricCutoff = "2026-07-29"
+        let tokenMaxDay = metricGrid.cells.first { $0.date == "2026-03-01" }!
+        let costMaxDay = metricGrid.cells.first { $0.date == "2026-03-08" }!
+        let costOnlyDay = metricGrid.cells.first { $0.date == "2026-05-05" }!
+        let maxTok = ContributionHeatmap.maxValue(metricGrid, metric: .tokens, cutoff: metricCutoff)
+        let maxCost = ContributionHeatmap.maxValue(metricGrid, metric: .cost, cutoff: metricCutoff)
         expect(
-            r4TokensMax == 100 && r4CostMax == 5,
-            "a hidden future day's huge values don't enter either metric's intensity denominator")
+            maxTok == 1000 && maxCost == 100
+                && ContributionHeatmap.hasData(costOnlyDay, metric: .cost)
+                && !ContributionHeatmap.hasData(costOnlyDay, metric: .tokens),
+            "tokens/cost maxima are independent, exclude the future day past cutoff, and a cost-only day "
+                + "is data under Price but not Tokens (never `cell.active`, which is tokens-only)")
         expect(
-            HeatmapLayout.level(
-                value: ContributionHeatmap.value(r4VisibleCell, metric: .tokens), max: r4TokensMax) == 4
-                && HeatmapLayout.level(
-                    value: ContributionHeatmap.value(r4VisibleCell, metric: .cost), max: r4CostMax) == 4,
-            "the only visible day still renders at full intensity (mutation: reverting the tokens branch "
-                + "to `grid.maxTokens` or the cost branch to an unfiltered reduce would crush this)")
-
-        // MARK: - FLAT-HEATMAP round 5 (Codex P2 fix + audit; append-only)
-
-        // FIX: a FUTURE selected year (reachable if clock skew or an
-        // imported session put activity there, so it shows up in the year
-        // picker) must render nothing, not the whole year — the old two-way
-        // `year == currentYear ? today : "\(year)-12-31"` treated every
-        // non-current year as past.
+            HeatmapLayout.level(value: ContributionHeatmap.value(tokenMaxDay, metric: .tokens), max: maxTok) == 4
+                && HeatmapLayout.level(value: ContributionHeatmap.value(costMaxDay, metric: .cost), max: maxCost) == 4
+                && HeatmapLayout.level(value: ContributionHeatmap.value(costMaxDay, metric: .tokens), max: maxTok) < 4,
+            "each metric's top day hits full intensity under its own max; the cost-max day isn't the tokens-max day")
         expect(
-            ContributionHeatmap.cutoffDate(year: "2026", today: "2026-07-29") == "2026-07-29",
-            "the current year still cuts off at today")
+            HeatmapLayout.level(value: 75, max: 100) == 4 && HeatmapLayout.level(value: 50, max: 100) == 3
+                && HeatmapLayout.level(value: 25, max: 100) == 2 && HeatmapLayout.level(value: 1, max: 100) == 1
+                && HeatmapLayout.level(value: 0, max: 100) == 0 && HeatmapLayout.level(value: 10, max: 0) == 0,
+            "five-level intensity thresholds match >=0.75/0.5/0.25/>0/else")
+        // The grid must read the same, already client-filtered `stats.perDayMap`
+        // UsageChartCard hands ContributionGraph3D, not the unfiltered total.
+        let heatJSON = """
+        {"meta":{"generatedAt":"now","version":"1","dateRange":{"start":"2026-01-01","end":"2026-01-01"}},
+         "summary":{"totalTokens":0,"totalCost":0,"totalDays":1,"activeDays":1,"averagePerDay":0,
+         "maxCostInSingleDay":0,"clients":["a","b"],"models":[]},"years":[],"contributions":[
+         {"date":"2026-01-01","totals":{"tokens":0,"cost":0,"messages":0},"intensity":1,
+         "tokenBreakdown":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0},"clients":[
+         {"client":"a","modelId":"m","providerId":"p","cost":2,"messages":1,
+          "tokens":{"input":100,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}},
+         {"client":"b","modelId":"m","providerId":"p","cost":3,"messages":1,
+          "tokens":{"input":50,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0}}]}]}
+        """
+        let heatPayload = try! JSONDecoder().decode(UsagePayload.self, from: Data(heatJSON.utf8))
+        let heatStats = UsageStats(payload: heatPayload, selectedClients: ["a"])
+        let heatCellA = buildGrid(year: "2026", perDayMap: heatStats.perDayMap).cells.first { $0.date == "2026-01-01" }
         expect(
-            ContributionHeatmap.cutoffDate(year: "2025", today: "2026-07-29") == "2025-12-31",
-            "a past year still cuts off at its own Dec 31")
+            heatCellA?.tokens == 100 && heatCellA?.cost == 2
+                && (heatCellA?.tokens ?? 0) != 150 && (heatCellA?.cost ?? 0) != 5,
+            "heatmap cell matches the filtered UsageStats value for the selected client, not the two-client total")
+        // C2 — date/cutoff semantics: one grid per year-class proving
+        // `cutoffDate`, renderable cells, the last renderable column (layout
+        // width/month labels derive from this, not `grid.cols` — round 3), and
+        // content width all agree.
+        let cutoffToday = "2026-07-29"
+        let currentGrid = buildGrid(year: "2026", perDayMap: [:])
+        let currentCutoff = ContributionHeatmap.cutoffDate(year: "2026", today: cutoffToday)
+        let currentTodayCell = currentGrid.cells.first { $0.date == cutoffToday }!
+        // September, not August: July 29 and Aug 1 share a Sun-Sat column,
+        // which would make the "later column" half vacuously true regardless.
+        let currentSeptCell = currentGrid.cells.first { $0.date == "2026-09-01" }!
+        let currentRenderable = currentGrid.cells
+            .filter { ContributionHeatmap.isRenderable($0, cutoff: currentCutoff) }.map(\.date)
+        let currentLastCol = ContributionHeatmap.lastRenderableCol(currentGrid, cutoff: currentCutoff)
+        let currentLabelCols = ContributionHeatmap.monthLabelCols(grid: currentGrid, cutoff: currentCutoff).map(\.col)
         expect(
-            ContributionHeatmap.cutoffDate(year: "2027", today: "2026-07-29") == "2026-07-29",
-            "a future year cuts off at today too (mutation: the old `year == currentYear ? today : "
-                + "\"\\(year)-12-31\"` two-way branch would return \"2027-12-31\" here and fail this)")
-
-        let r5FutureYearGrid = buildGrid(year: "2027", perDayMap: [:])
-        let r5FutureCutoff = ContributionHeatmap.cutoffDate(year: "2027", today: "2026-07-29")
+            currentCutoff == cutoffToday
+                && currentRenderable.max() == cutoffToday && !currentRenderable.contains("2026-07-30")
+                && currentLastCol == currentTodayCell.col && currentLastCol < currentSeptCell.col
+                && currentLabelCols.contains(currentGrid.cells.first { $0.date == "2026-07-01" }!.col)
+                && !currentLabelCols.contains(currentSeptCell.col),
+            "the current year clips at today: cutoff, renderable cells, last renderable column, and month "
+                + "labels all stop there, not at the end of the year or `grid.cols`")
+        let pastGrid = buildGrid(year: "2025", perDayMap: [:])
+        let pastCutoff = ContributionHeatmap.cutoffDate(year: "2025", today: cutoffToday)
+        let futureGrid = buildGrid(year: "2027", perDayMap: [:])
+        let futureCutoff = ContributionHeatmap.cutoffDate(year: "2027", today: cutoffToday)
+        let pastRenderableMax = pastGrid.cells.filter { ContributionHeatmap.isRenderable($0, cutoff: pastCutoff) }.map(\.date).max()
         expect(
-            ContributionHeatmap.lastRenderableCol(r5FutureYearGrid, cutoff: r5FutureCutoff) == -1,
-            "a future year has zero renderable columns")
-
-        // Zero renderable columns (the future-year case just established, or
-        // any grid where nothing passes the cutoff) must not produce a
-        // negative canvas width.
+            pastCutoff == "2025-12-31" && pastRenderableMax == "2025-12-31"
+                && ContributionHeatmap.lastRenderableCol(pastGrid, cutoff: pastCutoff) == pastGrid.cols - 1,
+            "a past year cuts off at, renders through, and spans the full grid width to its own Dec 31")
         expect(
-            ContributionHeatmap.contentWidth(visibleCols: 0, monthLabelCols: []) == 0,
-            "zero visible columns is zero width, not a negative width from `0 * step - gap` "
-                + "(mutation: dropping the `visibleCols > 0` guard would fail this)")
+            futureCutoff == cutoffToday
+                && ContributionHeatmap.lastRenderableCol(futureGrid, cutoff: futureCutoff) == -1
+                && ContributionHeatmap.contentWidth(visibleCols: 0, monthLabelCols: []) == 0
+                && ContributionHeatmap.contentWidth(visibleCols: 3, monthLabelCols: []) > 0,
+            "a future year clips at today too (not its own Dec 31), so it has zero renderable columns and "
+                + "zero width — never negative width from `0 * step - gap`")
+        // Calendar boundaries: `buildGrid` clamps to `max(53, …)`, and a leap
+        // day steps correctly through pure ISODay arithmetic (no Calendar).
+        let leapCell = buildGrid(
+            year: "2028", perDayMap: ["2028-02-29": PerDay(date: "2028-02-29", tokens: 1, cost: 0, intensity: 1)])
+            .cells.first { $0.date == "2028-02-29" }
         expect(
-            ContributionHeatmap.contentWidth(visibleCols: 3, monthLabelCols: []) > 0,
-            "sanity: a normal, nonzero column count still produces a positive width")
-
-        // MARK: - FLAT-HEATMAP round 6 (Codex round 3 P2 fixes + audit; append-only)
-
-        // FIX 1: `ChartView.next` owns the ⌘G cycle order. The regression
-        // this guards was specifically that Heatmap couldn't be distinguished
-        // from 3D by the old handler, so it's the heatmap→threeD step (not
-        // just "the cycle eventually returns") that matters most here.
-        expect(ChartView.bars.next == .heatmap, "cycle: Bars -> Heatmap")
-        expect(
-            ChartView.heatmap.next == .threeD,
-            "cycle: Heatmap -> 3D, not back to Bars — this is exactly the regression: the old handler's "
-                + "binary `chartViewRaw == \"2d\" ? \"3d\" : \"2d\"` treated Heatmap the same as \"any "
-                + "non-2d value\" and always landed on 3D, then only ever toggled Bars<->3D afterward, so "
-                + "a keyboard user starting on Heatmap could never cycle back to it")
-        expect(ChartView.threeD.next == .bars, "cycle: 3D -> Bars, closing the loop")
-        expect(
-            ChartView.bars.next.next.next == .bars,
-            "three ⌘G presses from any state return to that same state")
-
-        // FIX 2: contentWidth gains the trailing margin ONLY when the LAST
-        // renderable column itself has a month label.
-        let r6BaseWidth = ContributionHeatmap.contentWidth(visibleCols: 5, monthLabelCols: [])
-        let r6TrailingLabelWidth = ContributionHeatmap.contentWidth(
-            visibleCols: 5, monthLabelCols: [(col: 4, label: "Sep")])
-        expect(
-            r6TrailingLabelWidth == r6BaseWidth + HeatmapLayout.lastColumnLabelMargin,
-            "a label landing in the last renderable column adds exactly the named margin")
-        let r6MidLabelWidth = ContributionHeatmap.contentWidth(
-            visibleCols: 5, monthLabelCols: [(col: 2, label: "Jul")])
-        expect(
-            r6MidLabelWidth == r6BaseWidth,
-            "a label on a column that ISN'T the last one adds no margin (mutation: adding the margin "
-                + "whenever monthLabelCols is merely non-empty, instead of checking the last column "
-                + "specifically, would fail this)")
-
-        // FIX 3: gap coordinates are dead zones (unlike the bar chart's
-        // intentional gap-attaches-to-the-left-bar rule); horizontal and
-        // vertical boundaries both tested at the cell's last valid pixel and
-        // the gap's first pixel.
-        let r6Cell = HeatmapLayout.cell
-        let r6Step = HeatmapLayout.step
-        expect(
-            ContributionHeatmap.withinCell(offset: 0, step: r6Step, cell: r6Cell),
-            "the first pixel of a cell is inside it")
-        expect(
-            ContributionHeatmap.withinCell(offset: r6Cell - 0.1, step: r6Step, cell: r6Cell),
-            "the last valid pixel just before the gap is still inside the cell")
-        expect(
-            !ContributionHeatmap.withinCell(offset: r6Cell, step: r6Step, cell: r6Cell),
-            "the first pixel of the gap is rejected (mutation: dropping the `< cell` check, i.e. always "
-                + "returning true, would fail this)")
-        expect(
-            !ContributionHeatmap.withinCell(offset: r6Step - 0.1, step: r6Step, cell: r6Cell),
-            "the last pixel of the gap, right before the next cell, is still rejected")
-        expect(
-            ContributionHeatmap.withinCell(offset: r6Step, step: r6Step, cell: r6Cell),
-            "the first pixel of the NEXT cell is inside it again")
-        expect(
-            ContributionHeatmap.withinCell(offset: r6Step + r6Cell - 0.1, step: r6Step, cell: r6Cell),
-            "the second cell's last valid pixel is inside it")
-        expect(
-            !ContributionHeatmap.withinCell(offset: r6Step + r6Cell, step: r6Step, cell: r6Cell),
-            "the second cell's gap is rejected too")
-
-        // MARK: - FLAT-HEATMAP round 7 (Codex round 4 P2 fix + audit; append-only)
-
-        // FIX: `shouldClearHoverOnOriginChange` is the pure half of "clear
-        // hover when the content actually scrolled, not on every incidental
-        // re-layout". The `onGeometryChange` → `hoverIndex = nil` wiring
-        // itself firing at the right moment during a live scroll has no
-        // headless SwiftUI harness here and is manual-verification-only.
-        expect(
-            !ContributionHeatmap.shouldClearHoverOnOriginChange(
-                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 20)),
-            "an unchanged origin never clears the hover (mutation: always returning true here would "
-                + "make hover impossible to establish at all, since the geometry modifier's initial call "
-                + "would immediately clear it)")
-        expect(
-            ContributionHeatmap.shouldClearHoverOnOriginChange(
-                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 40, y: 20)),
-            "a changed origin (e.g. a redirected wheel scroll) clears the hover (mutation: always "
-                + "returning false would leave a stale tooltip pinned through a scroll — the original bug)")
-        expect(
-            ContributionHeatmap.shouldClearHoverOnOriginChange(
-                old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 5)),
-            "a vertical-only origin change also clears the hover")
-
-        // MARK: - FLAT-HEATMAP round 8 (perf regression fix; append-only)
-
-        // The scroll-perf fix: measuring `contentOrigin` in a coordinate
-        // space anchored to the OUTER container (instead of `.global`)
-        // means a shared ancestor translation — the dashboard's own
-        // vertical ScrollView scrolling — cancels out, because both the
-        // content's and the container's `.global` positions shift by the
-        // SAME delta. This models that arithmetic directly: two `.global`
-        // snapshots of content/container before an ancestor scroll, and two
-        // after a 150pt vertical shift applied to BOTH.
-        let r8ContentGlobalBefore = CGPoint(x: 40, y: 320)
-        let r8ContainerGlobalBefore = CGPoint(x: 20, y: 300)
-        let r8AncestorScrollDelta: CGFloat = 150
-        let r8ContentGlobalAfter = CGPoint(
-            x: r8ContentGlobalBefore.x, y: r8ContentGlobalBefore.y - r8AncestorScrollDelta)
-        let r8ContainerGlobalAfter = CGPoint(
-            x: r8ContainerGlobalBefore.x, y: r8ContainerGlobalBefore.y - r8AncestorScrollDelta)
-        expect(
-            r8ContentGlobalBefore != r8ContentGlobalAfter,
-            "sanity: the raw `.global` position genuinely changes during the ancestor scroll — this is "
-                + "exactly why tracking `.global` fired `onGeometryChange`'s action, and therefore wrote "
-                + "state, on every single frame of a scroll this view had no other stake in")
+            buildGrid(year: "2026", perDayMap: [:]).cols == 53 && buildGrid(year: "2028", perDayMap: [:]).cols == 54
+                && leapCell?.inYear == true && leapCell?.active == true,
+            "2026 uses 53 columns, 2028 needs a 54th, and Feb 29 is a valid in-year active cell")
+        // C3 — hit testing: `cellAt` is production's own point -> `grid.cells`
+        // index resolver (static so SelfTest calls it directly, not a copy of
+        // its coordinate math). One class each: in a cell, a horizontal gap, a
+        // vertical gap, out of bounds — the last anchored to `cutoff`-derived
+        // `visibleCols`, doubling as proof hit testing honors that cutoff too.
+        struct HeatmapHitCase { let name: String; let point: CGPoint; let expected: Int? }
+        let hitVisibleCols = currentLastCol + 1
+        let hitCol = 2, hitRow = 3
+        let hitCellRect = HeatmapLayout.rect(col: hitCol, row: hitRow)
+        for c in [
+            HeatmapHitCase(name: "inside a cell resolves to that cell", point: CGPoint(x: hitCellRect.minX + 1, y: hitCellRect.minY + 1), expected: hitCol * 7 + hitRow),
+            HeatmapHitCase(name: "a horizontal gap point is a dead zone", point: CGPoint(x: hitCellRect.maxX + 1, y: hitCellRect.minY + 1), expected: nil),
+            HeatmapHitCase(name: "a vertical gap point is a dead zone", point: CGPoint(x: hitCellRect.minX + 1, y: hitCellRect.maxY + 1), expected: nil),
+            HeatmapHitCase(name: "past the last renderable column is out of bounds", point: CGPoint(x: HeatmapLayout.rect(col: hitVisibleCols, row: 0).minX + 1, y: HeatmapLayout.gridTop + 1), expected: nil),
+        ] {
+            expect(
+                ContributionHeatmap.cellAt(c.point, grid: currentGrid, visibleCols: hitVisibleCols) == c.expected,
+                "hit test: \(c.name)")
+        }
+        // C4 — scroll/hover lifecycle. `shouldClearHoverOnOriginChange`: an
+        // unchanged origin never clears (else hover could never be
+        // established, since every geometry pass would zero it); a real move
+        // does.
+        struct HeatmapOriginCase { let name: String; let old: CGPoint; let new: CGPoint; let clears: Bool }
+        for c in [
+            HeatmapOriginCase(name: "unchanged origin", old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 20), clears: false),
+            HeatmapOriginCase(name: "horizontal move", old: CGPoint(x: 10, y: 20), new: CGPoint(x: 40, y: 20), clears: true),
+            HeatmapOriginCase(name: "vertical move", old: CGPoint(x: 10, y: 20), new: CGPoint(x: 10, y: 5), clears: true),
+        ] {
+            expect(
+                ContributionHeatmap.shouldClearHoverOnOriginChange(old: c.old, new: c.new) == c.clears,
+                "hover lifecycle: \(c.name)")
+        }
+        // Round 8 (perf): `contentOrigin` is measured anchored to the OUTER
+        // container, not `.global` — a shared ancestor's vertical scroll
+        // shifts content's and container's `.global` by the SAME delta and
+        // cancels out; a genuine horizontal scroll of this content does not.
         func relative(content: CGPoint, container: CGPoint) -> CGPoint {
             CGPoint(x: content.x - container.x, y: content.y - container.y)
         }
-        let r8RelativeBefore = relative(content: r8ContentGlobalBefore, container: r8ContainerGlobalBefore)
-        let r8RelativeAfter = relative(content: r8ContentGlobalAfter, container: r8ContainerGlobalAfter)
+        let contentGlobal = CGPoint(x: 40, y: 320)
+        let containerGlobal = CGPoint(x: 20, y: 300)
+        let ancestorShift: CGFloat = 150
+        let relBefore = relative(content: contentGlobal, container: containerGlobal)
+        let relAfterAncestor = relative(
+            content: CGPoint(x: contentGlobal.x, y: contentGlobal.y - ancestorShift),
+            container: CGPoint(x: containerGlobal.x, y: containerGlobal.y - ancestorShift))
+        let relAfterHScroll = relative(content: CGPoint(x: contentGlobal.x - 60, y: contentGlobal.y), container: containerGlobal)
         expect(
-            r8RelativeBefore == r8RelativeAfter,
-            "content's position relative to its container is invariant under a shared ancestor "
-                + "translation — this is exactly the value a coordinate space anchored to the container "
-                + "reports directly, instead of two independent `.global` values that must be subtracted")
+            relBefore == relAfterAncestor
+                && !ContributionHeatmap.shouldClearHoverOnOriginChange(old: relBefore, new: relAfterAncestor)
+                && relBefore != relAfterHScroll
+                && ContributionHeatmap.shouldClearHoverOnOriginChange(old: relBefore, new: relAfterHScroll),
+            "a shared ancestor translation leaves the container-relative origin unchanged and does not "
+                + "clear hover, while a genuine horizontal content scroll changes it and does clear "
+                + "(mutation: using only one side's global delta would fail the first half)")
+        // The tooltip anchors on the outer container's origin, not a position
+        // frozen inside the scrolled/clipped content.
         expect(
-            !ContributionHeatmap.shouldClearHoverOnOriginChange(old: r8RelativeBefore, new: r8RelativeAfter),
-            "so a pure vertical ancestor scroll correctly does NOT clear the hover or write state "
-                + "(mutation: if the container-relative value were computed wrong — e.g. only the "
-                + "content's delta and not the container's — this would go red)")
-
-        // Contrast: a genuine HORIZONTAL scroll of this grid's own content
-        // (the container does not move) must still change the relative
-        // origin, so hover keeps clearing correctly for the case that
-        // actually matters (round 7's fix).
-        let r8HScrolledContentGlobal = CGPoint(x: r8ContentGlobalBefore.x - 60, y: r8ContentGlobalBefore.y)
-        let r8HScrolledRelative = relative(content: r8HScrolledContentGlobal, container: r8ContainerGlobalBefore)
+            ContributionHeatmap.tooltipAnchor(cellCenter: CGPoint(x: 50, y: 20), contentOrigin: .zero)
+                == CGPoint(x: 50, y: 20)
+                && ContributionHeatmap.tooltipAnchor(cellCenter: CGPoint(x: 50, y: 20), contentOrigin: CGPoint(x: -300, y: 0))
+                == CGPoint(x: -250, y: 20),
+            "the tooltip anchor tracks the content's origin in the outer container's coordinate space")
+        // FIX 2: a horizontal wheel-redirect already parked at an edge reports
+        // "not consumed" so the dashboard's own vertical ScrollView sees it.
+        struct HeatmapWheelCase { let name: String; let originX: CGFloat; let step: CGFloat; let newX: CGFloat; let moved: Bool }
+        for c in [
+            HeatmapWheelCase(name: "trailing edge, further trailing", originX: 500, step: -20, newX: 500, moved: false),
+            HeatmapWheelCase(name: "leading edge, further leading", originX: 0, step: 20, newX: 0, moved: false),
+            HeatmapWheelCase(name: "a step that actually moves the origin", originX: 100, step: 20, newX: 80, moved: true),
+        ] {
+            let r = HorizontalWheelScroll.clampedScroll(originX: c.originX, step: c.step, maxX: 500)
+            expect(r.newOriginX == c.newX && r.moved == c.moved, "wheel edge: \(c.name)")
+        }
+        // C5 — layout/ring bounds. The hover ring reaches `hoverRingReach`
+        // beyond its cell on every side; `gridLeading`/`gridTop`/
+        // `contentWidth`/`contentHeight` reserve exactly that room, so a ring
+        // on any edge cell is never clipped. `ringGridHeight` mirrors
+        // `ContributionHeatmap`'s private `gridHeight`, built only from
+        // `HeatmapLayout`'s public constants.
+        let ringVisibleCols = 6
+        let ringContentWidth = ContributionHeatmap.contentWidth(visibleCols: ringVisibleCols, monthLabelCols: [])
+        let ringContentHeight = HeatmapLayout.gridTop + 7 * HeatmapLayout.step - HeatmapLayout.gap + HeatmapLayout.hoverRingReach
+        struct HeatmapRingCase { let name: String; let col: Int; let row: Int }
+        for c in [
+            HeatmapRingCase(name: "leading column", col: 0, row: 3),
+            HeatmapRingCase(name: "trailing column", col: ringVisibleCols - 1, row: 3),
+            HeatmapRingCase(name: "top row", col: 3, row: 0),
+            HeatmapRingCase(name: "bottom row", col: 3, row: 6),
+        ] {
+            let rect = HeatmapLayout.rect(col: c.col, row: c.row)
+            let reach = HeatmapLayout.hoverRingReach
+            expect(
+                rect.minX - reach >= 0 && rect.maxX + reach <= ringContentWidth
+                    && rect.minY - reach >= 0 && rect.maxY + reach <= ringContentHeight,
+                "ring bounds: \(c.name) fits within the content frame")
+        }
+        // FIX 2: contentWidth gains the trailing margin ONLY when the LAST
+        // renderable column itself has a month label.
+        let ringBaseWidth = ContributionHeatmap.contentWidth(visibleCols: 5, monthLabelCols: [])
         expect(
-            r8HScrolledRelative != r8RelativeBefore,
-            "a genuine horizontal content scroll DOES change the container-relative origin")
+            ContributionHeatmap.contentWidth(visibleCols: 5, monthLabelCols: [(col: 4, label: "Sep")])
+                == ringBaseWidth + HeatmapLayout.lastColumnLabelMargin
+                && ContributionHeatmap.contentWidth(visibleCols: 5, monthLabelCols: [(col: 2, label: "Jul")]) == ringBaseWidth,
+            "a month label on the last renderable column adds the named trailing margin; any other column adds none")
+        // C6 — chart-view integration. Legacy persisted values still decode,
+        // and the cmd-G cycle closes: Bars -> Heatmap -> 3D -> Bars.
         expect(
-            ContributionHeatmap.shouldClearHoverOnOriginChange(old: r8RelativeBefore, new: r8HScrolledRelative),
-            "...and therefore still clears the hover, same as before this round's fix")
-
+            ChartView(raw: "2d") == .bars && ChartView(raw: "3d") == .threeD && ChartView(raw: "heat") == .heatmap
+                && ChartView(raw: "garbage") == .bars
+                && ChartView.bars.next == .heatmap && ChartView.heatmap.next == .threeD
+                && ChartView.threeD.next == .bars && ChartView.bars.next.next.next == .bars,
+            "legacy '2d'/'3d' decode unchanged, 'heat' maps to Heatmap, an unknown value falls back to "
+                + "Bars, and cmd-G cycles Bars -> Heatmap -> 3D -> Bars, three presses returning to start")
         // MARK: - Tray frame aspect (append-only section)
 
         // `anim-parrot` art is 48x36. `loadFrames` used to assign 18x18
