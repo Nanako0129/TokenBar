@@ -3665,10 +3665,7 @@ fn rollback_quarantine_link(path: &Path, source: &File) {
 mod tests {
 
     /// Mechanical bridge for fixtures that only need a distinct scope identity.
-    ///
-    /// `pub(super)` so the sibling `bench` module (the moved-out ignored
-    /// reference benchmark) can reuse it without duplicating the helper.
-    pub(super) fn test_key(
+    fn test_key(
         provider_id: impl Into<String>,
         history_scope: impl AsRef<str>,
         window_key: impl Into<String>,
@@ -3710,8 +3707,7 @@ mod tests {
         FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, READ_CONTROL, WRITE_DAC,
     };
 
-    /// `pub(super)` — see `test_key`.
-    pub(super) const HOUR: i64 = 3_600;
+    const HOUR: i64 = 3_600;
     const DAY: i64 = 86_400;
 
     #[cfg(target_os = "windows")]
@@ -4146,8 +4142,7 @@ mod tests {
         serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
     }
 
-    /// `pub(super)` — see `test_key`.
-    pub(super) fn quota_sample(
+    fn quota_sample(
         reset_at: i64,
         duration_seconds: i64,
         phase: f64,
@@ -9270,26 +9265,6 @@ mod tests {
         fs::remove_dir_all(directory).unwrap();
     }
 
-    // ---- Canonical modeling fixtures --------------------------------------
-    //
-    // The fit/retention/projection tests below build model evidence from
-    // these shared constructors instead of hand-assembling stores. Fixture
-    // generation stays independent of the production fitter: nothing here
-    // calls `fit_completed_cycles`/`fit_partial_current`/`calculate_target`
-    // to derive its own expected values.
-
-    /// Canonical smooth six-point phase set (the shortest shape the fit
-    /// quality gate accepts — `MIN_COMPLETE_BUCKETS`).
-    const SMOOTH_PHASES: [f64; 6] = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
-    /// Canonical smooth eight-point phase set, used where a fixture needs to
-    /// walk further into the cycle (e.g. exercising the exhausted/eta path).
-    const SMOOTH_PHASES_WIDE: [f64; 8] = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
-    /// Near-full-cycle phase set used by the completed-cycle fixtures.
-    const COMPLETED_PHASES: [f64; 8] = [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99];
-
-    /// A perfectly linear cycle: `used_percent = beta * phase` at every
-    /// point. The canonical "smooth" fixture — always passes the fit
-    /// quality gate.
     fn line_fit_points(beta: f64, phases: &[f64]) -> Vec<FitPoint> {
         phases
             .iter()
@@ -9302,27 +9277,6 @@ mod tests {
             .collect()
     }
 
-    /// A linear cycle with one blown-out tail point. The canonical "jagged"
-    /// fixture — fails the fit quality gate on its own, but a fitter that
-    /// ignores the outlier would still see the linear body.
-    fn jagged_fit_points(phases: &[f64]) -> Vec<FitPoint> {
-        phases
-            .iter()
-            .enumerate()
-            .map(|(index, phase)| FitPoint {
-                phase: *phase,
-                bucket: index,
-                used_percent: if index == phases.len() - 1 {
-                    100.0
-                } else {
-                    80.0 * phase
-                },
-            })
-            .collect()
-    }
-
-    /// A `SeriesState` with one active partial cycle, sampled at `points`
-    /// along `beta * phase`.
     fn current_series(
         key: &SeriesKey,
         reset_at: i64,
@@ -9342,80 +9296,40 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        let first_seen_at = samples
-            .iter()
-            .map(|sample| sample.sampled_at)
-            .min()
-            .unwrap_or(reset_at);
-        let last_seen_at = samples
-            .iter()
-            .map(|sample| sample.sampled_at)
-            .max()
-            .unwrap_or(reset_at);
         SeriesState {
             provider_id: key.provider_id.clone(),
             account_scope: key.account_scope.clone(),
             window_key: key.window_key.clone(),
             active_reset_at: Some(reset_at),
-            last_activity_at: last_seen_at,
+            last_activity_at: samples
+                .iter()
+                .map(|sample| sample.sampled_at)
+                .max()
+                .unwrap_or(reset_at),
             rollover: Some(ObservedState::Watching {
                 reset_at,
-                first_seen_at,
-                last_seen_at,
+                first_seen_at: samples
+                    .iter()
+                    .map(|sample| sample.sampled_at)
+                    .min()
+                    .unwrap_or(reset_at),
+                last_seen_at: samples
+                    .iter()
+                    .map(|sample| sample.sampled_at)
+                    .max()
+                    .unwrap_or(reset_at),
                 consecutive_count: 1,
             }),
             samples,
         }
     }
-
-    /// A `SeriesState` actively watching `reset_at` as observed at `now`,
-    /// holding `samples` verbatim. Shared shape for the transaction-level
-    /// fixtures below that seed a store file and evaluate through
-    /// `record_observations_at_path_and_evaluate`/`calculate_target`.
-    fn active_series(
-        key: &SeriesKey,
-        reset_at: i64,
-        now: i64,
-        samples: Vec<QuotaSample>,
-    ) -> SeriesState {
-        SeriesState {
-            provider_id: key.provider_id.clone(),
-            account_scope: key.account_scope.clone(),
-            window_key: key.window_key.clone(),
-            active_reset_at: Some(reset_at),
-            last_activity_at: now,
-            rollover: Some(ObservedState::Watching {
-                reset_at,
-                first_seen_at: now,
-                last_seen_at: now,
-                consecutive_count: 1,
-            }),
-            samples,
-        }
-    }
-
-    /// Writes a schema-current store containing exactly `series` to `path`.
-    fn write_store(path: &Path, series: Vec<SeriesState>) {
-        fs::write(
-            path,
-            serde_json::to_vec_pretty(&Store {
-                schema_version: HISTORY_SCHEMA_VERSION,
-                series,
-            })
-            .unwrap(),
-        )
-        .unwrap();
-    }
-
-    // ---- C1/C2: no-look-ahead + fit-quality gating -------------------------
 
     #[test]
     fn fit_kernel_rejects_leakage_and_shares_inclusive_quality_policy() {
-        let smooth = line_fit_points(80.0, &SMOOTH_PHASES);
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
+        let smooth = line_fit_points(80.0, &phases);
         let partial = fit_partial_current(&smooth).expect("smooth prefix fit");
         assert!(partial.walk_forward_rmse <= EXPECTED_FIT_RMSE_PP);
-        // Quality gate is inclusive at the documented threshold and closed
-        // just past it — the boundary the fail-closed contract depends on.
         assert!(fit_quality(EXPECTED_FIT_RMSE_PP).is_some());
         assert!(fit_quality(EXPECTED_FIT_RMSE_PP + EPSILON).is_some());
         assert!(fit_quality(EXPECTED_FIT_RMSE_PP + 2.0 * EPSILON).is_none());
@@ -9424,8 +9338,6 @@ mod tests {
         invalid[0].used_percent = 0.0;
         assert!(fit_partial_current(&invalid).is_none());
 
-        // A future jump grafted onto an otherwise-smooth prefix must not
-        // leak into a fit that only claims to see the earlier points.
         let mut future_jump = smooth.clone();
         for point in future_jump.iter_mut().skip(3) {
             point.used_percent += 30.0;
@@ -9476,7 +9388,13 @@ mod tests {
             .expect("jittered completed projection");
         assert!((baseline.expected_percent - jittered.expected_percent).abs() > 1e-6);
 
-        let partial = current_series(&key, reset_at, duration, &SMOOTH_PHASES, 80.0);
+        let partial = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
         let baseline = evaluate_partial_projection(
             &partial,
             normalize_reset(reset_at, duration),
@@ -9555,8 +9473,9 @@ mod tests {
         let duration = DAY;
         let reset_at = 20_000_100 + duration;
         let key = test_key("fixture", "partial-scope", "window.v1");
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
         let mut final_result = None;
-        for phase in SMOOTH_PHASES_WIDE {
+        for phase in phases {
             let now = reset_at - duration + (phase * duration as f64) as i64;
             let results = record_observations_at_path_and_evaluate(
                 std::slice::from_ref(&key),
@@ -9588,7 +9507,13 @@ mod tests {
         let reset_at = normalized_reset + 60;
         let now = normalized_reset;
         let key = test_key("fixture", "cleanup-transaction", "window.v1");
-        let mut malformed = current_series(&key, reset_at, duration, &SMOOTH_PHASES, 80.0);
+        let mut malformed = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
         malformed.samples.push(quota_sample(
             reset_at,
             2 * duration,
@@ -9596,11 +9521,33 @@ mod tests {
             60.0,
             SampleOrigin::LiveV3,
         ));
-        let control = current_series(&key, reset_at, duration, &SMOOTH_PHASES, 80.0);
+        let control = current_series(
+            &key,
+            reset_at,
+            duration,
+            &[0.10, 0.20, 0.30, 0.40, 0.50, 0.60],
+            80.0,
+        );
         let malformed_directory = temp_path("duration-cleanup-transaction");
         let control_directory = temp_path("duration-cleanup-control");
-        write_store(&malformed_directory.1, vec![malformed]);
-        write_store(&control_directory.1, vec![control]);
+        fs::write(
+            &malformed_directory.1,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![malformed],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            &control_directory.1,
+            serde_json::to_vec_pretty(&Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![control],
+            })
+            .unwrap(),
+        )
+        .unwrap();
         let malformed_result = record_observations_at_path_and_evaluate(
             std::slice::from_ref(&key),
             &[observation(key.clone(), reset_at, 48.0, duration)],
@@ -9638,8 +9585,9 @@ mod tests {
         let duration = DAY;
         let reset_at = 21_000_000 + duration;
         let key = test_key("fixture", "partial-leak", "window.v1");
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
         let mut result = None;
-        for (index, phase) in SMOOTH_PHASES.into_iter().enumerate() {
+        for (index, phase) in phases.into_iter().enumerate() {
             let now = reset_at - duration + (phase * duration as f64) as i64;
             let used = if index < 3 {
                 phase * 80.0
@@ -9694,9 +9642,10 @@ mod tests {
         let duration = DAY;
         let current_reset = 42_000_000_000_i64 + duration;
         let now = current_reset - duration * 4 / 10;
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60];
         let key = test_key("fixture", "stale-isolation", "window.v1");
         let make_samples = |reset_at: i64, jagged: bool| {
-            SMOOTH_PHASES
+            phases
                 .iter()
                 .enumerate()
                 .map(|(index, phase)| {
@@ -9717,10 +9666,24 @@ mod tests {
             let stale_reset = current_reset - 2 * duration;
             let mut samples = make_samples(stale_reset, stale_jagged);
             samples.extend(make_samples(current_reset, current_jagged));
-            write_store(
-                &path,
-                vec![active_series(&key, current_reset, now, samples)],
-            );
+            let store = Store {
+                schema_version: HISTORY_SCHEMA_VERSION,
+                series: vec![SeriesState {
+                    provider_id: key.provider_id.clone(),
+                    account_scope: key.account_scope.clone(),
+                    window_key: key.window_key.clone(),
+                    active_reset_at: Some(current_reset),
+                    last_activity_at: now,
+                    rollover: Some(ObservedState::Watching {
+                        reset_at: current_reset,
+                        first_seen_at: now,
+                        last_seen_at: now,
+                        consecutive_count: 1,
+                    }),
+                    samples,
+                }],
+            };
+            fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
             let results = record_observations_at_path_and_evaluate(
                 std::slice::from_ref(&key),
                 &[observation(key.clone(), current_reset, 48.0, duration)],
@@ -9746,8 +9709,6 @@ mod tests {
         }
     }
 
-    // ---- C5: retention semantics -------------------------------------------
-
     #[test]
     fn mixed_duration_complete_group_is_retained_but_not_fit_eligible() {
         let duration = DAY;
@@ -9760,8 +9721,8 @@ mod tests {
                 quota_sample(
                     reset_at,
                     duration,
-                    COMPLETED_PHASES[index],
-                    80.0 * COMPLETED_PHASES[index],
+                    [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99][index],
+                    80.0 * [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99][index],
                     SampleOrigin::LiveV3,
                 )
             })
@@ -9786,11 +9747,10 @@ mod tests {
         assert!(historical_cycles(&series, now + duration, now).is_empty());
     }
 
-    // ---- C3/C4: model quality + projection semantics -----------------------
-
     #[test]
     fn completed_fit_holdouts_cover_smooth_jagged_and_loco_conflict_cases() {
-        let smooth = line_fit_points(80.0, &COMPLETED_PHASES);
+        let phases = [0.01, 0.10, 0.25, 0.40, 0.60, 0.75, 0.90, 0.99];
+        let smooth = line_fit_points(80.0, &phases);
         let single = fit_completed_cycles(&[FitCycleInput {
             recency_weight: 1.0,
             points: smooth.clone(),
@@ -9799,10 +9759,22 @@ mod tests {
         assert!(single.overall_rmse <= EXPECTED_FIT_RMSE_PP);
         assert!(fit_quality(single.overall_rmse).is_some());
 
-        let jagged = jagged_fit_points(&COMPLETED_PHASES);
+        let jagged = phases
+            .iter()
+            .enumerate()
+            .map(|(index, phase)| FitPoint {
+                phase: *phase,
+                bucket: index,
+                used_percent: if index == phases.len() - 1 {
+                    100.0
+                } else {
+                    80.0 * phase
+                },
+            })
+            .collect::<Vec<_>>();
         let jagged_fit = fit_completed_cycles(&[FitCycleInput {
             recency_weight: 1.0,
-            points: jagged,
+            points: jagged.clone(),
         }])
         .expect("single jagged fit");
         assert!(interpolate_curve(&jagged_fit.historical_curve, 0.99) > 95.0);
@@ -9825,11 +9797,11 @@ mod tests {
         let conflict = fit_completed_cycles(&[
             FitCycleInput {
                 recency_weight: 9.0,
-                points: line_fit_points(40.0, &COMPLETED_PHASES),
+                points: line_fit_points(40.0, &phases),
             },
             FitCycleInput {
                 recency_weight: 1.0,
-                points: line_fit_points(100.0, &COMPLETED_PHASES),
+                points: line_fit_points(100.0, &phases),
             },
         ])
         .expect("two conflicting cycles");
@@ -9845,9 +9817,10 @@ mod tests {
 
     #[test]
     fn partial_projection_covers_beta_actual_and_crossing_boundaries() {
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
         for beta in [80.0, 100.0, 120.0] {
-            let fit = fit_partial_current(&line_fit_points(beta, &SMOOTH_PHASES_WIDE))
-                .expect("linear partial fit");
+            let fit =
+                fit_partial_current(&line_fit_points(beta, &phases)).expect("linear partial fit");
             assert!((fit.beta - beta).abs() < 1e-9, "beta={beta}");
             assert!(fit.walk_forward_rmse <= EXPECTED_FIT_RMSE_PP, "beta={beta}");
         }
@@ -9855,7 +9828,7 @@ mod tests {
         let duration = DAY;
         let reset_at = 43_000_000_000_i64 + duration;
         let key = test_key("fixture", "partial-boundaries", "window.v1");
-        let series = current_series(&key, reset_at, duration, &SMOOTH_PHASES_WIDE, 80.0);
+        let series = current_series(&key, reset_at, duration, &phases, 80.0);
         let now = reset_at - duration + (0.80 * duration as f64) as i64;
         let normalized = normalize_reset(reset_at, duration);
         let low = evaluate_partial_projection(&series, normalized, reset_at, duration, 20.0, now)
@@ -9880,24 +9853,13 @@ mod tests {
         assert_eq!(exhausted.run_out_probability, Some(1.0));
     }
 
-    // ---- Complexity guard ---------------------------------------------------
-    //
-    // Replaces exact `walk_forward_fits`/`lobo_folds`/`loco_folds` call-count
-    // pinning with structural upper bounds: `K * cycles * samples_per_cycle`.
-    // A refactor that preserves the intended complexity class stays under
-    // the bound; an accidental quadratic/cubic expansion (e.g. re-fitting
-    // every retained cycle once per retained cycle) blows past it. The exact
-    // zero-leakage assertions (`non_target_*`) stay exact — they are a
-    // correctness contract (no work performed on series the caller did not
-    // ask about), not a performance counter.
     #[test]
-    fn complexity_guard_bounds_fit_work_at_maximum_retention() {
-        // Partial-only: one active cycle, no completed history.
-        let (partial_directory, partial_path) = temp_path("complexity-partial");
+    fn partial_work_counter_is_bounded_at_forty_five_walk_forward_fits() {
+        let (directory, path) = temp_path("partial-fit-counter");
         let duration = 5 * HOUR;
         let reset_at = 23_000_000 + duration;
         let now = reset_at - 60;
-        let key = test_key("fixture", "complexity-partial", "window.v1");
+        let key = test_key("fixture", "counter-partial", "window.v1");
         let samples = (0..PHASE_BUCKET_COUNT)
             .map(|bucket| {
                 let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
@@ -9910,89 +9872,47 @@ mod tests {
                 )
             })
             .collect::<Vec<_>>();
-        write_store(
-            &partial_path,
-            vec![active_series(&key, reset_at, now, samples)],
-        );
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: key.provider_id.clone(),
+                account_scope: key.account_scope.clone(),
+                window_key: key.window_key.clone(),
+                active_reset_at: Some(reset_at),
+                last_activity_at: now,
+                rollover: Some(ObservedState::Watching {
+                    reset_at,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    consecutive_count: 1,
+                }),
+                samples,
+            }],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
         reset_fit_work_counters();
         let results = record_observations_at_path_and_evaluate(
             std::slice::from_ref(&key),
             &[observation(key.clone(), reset_at, 79.0, duration)],
             now,
-            &partial_path,
+            &path,
         )
         .unwrap();
         assert!(results[0].as_ref().unwrap().1.is_some());
         let counters = fit_work_counters();
-        // Leave-one-bucket-out walk-forward CV over one cycle's samples:
-        // bounded by the bucket count, never by cycles * bucket count.
-        assert!(counters.walk_forward_fits <= PHASE_BUCKET_COUNT);
+        assert_eq!(counters.walk_forward_fits, 45);
         assert_eq!(counters.target_sample_reads, PHASE_BUCKET_COUNT);
         assert_eq!(counters.target_profiles_built, 0);
         assert_eq!(counters.non_target_sample_reads, 0);
         assert_eq!(counters.non_target_profiles_built, 0);
-        fs::remove_dir_all(partial_directory).unwrap();
-
-        // Completed: retained history at the maximum supported cycle count.
-        let (completed_directory, completed_path) = temp_path("complexity-completed");
-        let current_reset = 24_000_000_000_i64 + duration;
-        let now = current_reset - 60;
-        let key = test_key("fixture", "complexity-completed", "window.v1");
-        let mut samples = Vec::with_capacity((RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT);
-        for offset in 1..=RETENTION_MAX_CYCLES {
-            let reset = current_reset - offset as i64 * duration;
-            samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-                let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-                quota_sample(
-                    reset,
-                    duration,
-                    phase,
-                    (phase * 80.0).max(0.1),
-                    SampleOrigin::LiveV3,
-                )
-            }));
-        }
-        samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
-            let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
-            quota_sample(
-                current_reset,
-                duration,
-                phase,
-                (phase * 80.0).max(0.1),
-                SampleOrigin::LiveV3,
-            )
-        }));
-        write_store(
-            &completed_path,
-            vec![active_series(&key, current_reset, now, samples)],
-        );
-        reset_fit_work_counters();
-        let results = record_observations_at_path_and_evaluate(
-            std::slice::from_ref(&key),
-            &[observation(key.clone(), current_reset, 79.0, duration)],
-            now,
-            &completed_path,
-        )
-        .unwrap();
-        // Correctness: every retained cycle counted as complete. This is the
-        // product contract the work-bound below is not a substitute for.
-        assert_eq!(results[0].as_ref().unwrap().2, RETENTION_MAX_CYCLES);
-        let counters = fit_work_counters();
-        assert!(counters.lobo_folds <= 2 * RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT);
-        assert!(counters.loco_folds <= 2 * RETENTION_MAX_CYCLES);
-        assert!(
-            counters.target_sample_reads <= 2 * (RETENTION_MAX_CYCLES + 1) * PHASE_BUCKET_COUNT
-        );
-        assert!(counters.target_profiles_built <= 2 * RETENTION_MAX_CYCLES);
-        assert_eq!(counters.non_target_sample_reads, 0);
-        assert_eq!(counters.non_target_profiles_built, 0);
-        fs::remove_dir_all(completed_directory).unwrap();
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
     fn fit_and_projection_are_exactly_permutation_invariant() {
-        let first = line_fit_points(80.0, &SMOOTH_PHASES_WIDE);
-        let second = line_fit_points(90.0, &SMOOTH_PHASES_WIDE);
+        let phases = [0.10, 0.20, 0.30, 0.40, 0.50, 0.60, 0.70, 0.80];
+        let first = line_fit_points(80.0, &phases);
+        let second = line_fit_points(90.0, &phases);
         let ordered = fit_completed_cycles(&[
             FitCycleInput {
                 recency_weight: 1.0,
@@ -10028,7 +9948,7 @@ mod tests {
         let duration = DAY;
         let reset_at = 51_000_000_000_i64 + duration;
         let key = test_key("fixture", "permutation", "window.v1");
-        let mut first_series = current_series(&key, reset_at, duration, &SMOOTH_PHASES_WIDE, 80.0);
+        let mut first_series = current_series(&key, reset_at, duration, &phases, 80.0);
         let mut second_series = first_series.clone();
         second_series.samples.reverse();
         let now = reset_at - duration + (0.80 * duration as f64) as i64;
@@ -10164,6 +10084,77 @@ mod tests {
     }
 
     #[test]
+    fn completed_work_counter_hits_maximum_retention_bounds() {
+        let (directory, path) = temp_path("completed-fit-counter");
+        let duration = 5 * HOUR;
+        let current_reset = 24_000_000_000_i64 + duration;
+        let now = current_reset - 60;
+        let key = test_key("fixture", "counter-complete", "window.v1");
+        let mut samples = Vec::with_capacity(129 * PHASE_BUCKET_COUNT);
+        for offset in 1..=RETENTION_MAX_CYCLES {
+            let reset = current_reset - offset as i64 * duration;
+            samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
+                let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
+                quota_sample(
+                    reset,
+                    duration,
+                    phase,
+                    (phase * 80.0).max(0.1),
+                    SampleOrigin::LiveV3,
+                )
+            }));
+        }
+        samples.extend((0..PHASE_BUCKET_COUNT).map(|bucket| {
+            let phase = (bucket as f64 + 0.25) / PHASE_BUCKET_COUNT as f64;
+            quota_sample(
+                current_reset,
+                duration,
+                phase,
+                (phase * 80.0).max(0.1),
+                SampleOrigin::LiveV3,
+            )
+        }));
+        let store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: key.provider_id.clone(),
+                account_scope: key.account_scope.clone(),
+                window_key: key.window_key.clone(),
+                active_reset_at: Some(current_reset),
+                last_activity_at: now,
+                rollover: Some(ObservedState::Watching {
+                    reset_at: current_reset,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    consecutive_count: 1,
+                }),
+                samples,
+            }],
+        };
+        fs::write(&path, serde_json::to_vec_pretty(&store).unwrap()).unwrap();
+        reset_fit_work_counters();
+        let results = record_observations_at_path_and_evaluate(
+            std::slice::from_ref(&key),
+            &[observation(key.clone(), current_reset, 79.0, duration)],
+            now,
+            &path,
+        )
+        .unwrap();
+        assert_eq!(results[0].as_ref().unwrap().2, RETENTION_MAX_CYCLES);
+        let counters = fit_work_counters();
+        assert_eq!(
+            counters.lobo_folds,
+            RETENTION_MAX_CYCLES * PHASE_BUCKET_COUNT
+        );
+        assert_eq!(counters.loco_folds, RETENTION_MAX_CYCLES);
+        assert_eq!(counters.target_sample_reads, 129 * PHASE_BUCKET_COUNT);
+        assert_eq!(counters.target_profiles_built, RETENTION_MAX_CYCLES);
+        assert_eq!(counters.non_target_sample_reads, 0);
+        assert_eq!(counters.non_target_profiles_built, 0);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn mixed_duration_retention_keeps_slots_bounded_without_fit_work() {
         let duration = 5 * HOUR;
         let current_reset = (53_000_000_000_i64 + duration + 899).div_euclid(900) * 900;
@@ -10205,7 +10196,20 @@ mod tests {
                 samples.extend(make_cycle(current_reset - duration, true));
             }
             samples.extend(make_cycle(current_reset, false));
-            active_series(&key, current_reset, now, samples)
+            SeriesState {
+                provider_id: key.provider_id.clone(),
+                account_scope: key.account_scope.clone(),
+                window_key: key.window_key.clone(),
+                active_reset_at: Some(current_reset),
+                last_activity_at: now,
+                rollover: Some(ObservedState::Watching {
+                    reset_at: current_reset,
+                    first_seen_at: now,
+                    last_seen_at: now,
+                    consecutive_count: 1,
+                }),
+                samples,
+            }
         };
 
         let mut control_series = build_series(false, false);
@@ -10359,28 +10363,7 @@ mod tests {
             after_counters.series_key_comparisons
         );
     }
-}
 
-/// Non-gating reference benchmark for the fit/retention/projection
-/// evaluator, kept out of `mod tests` per issue #158 so it never gates
-/// `cargo test`. Reuses the same test-only fixtures as `mod tests` (their
-/// helpers are `pub(super)` for exactly this reason) rather than
-/// duplicating fixture construction.
-#[cfg(test)]
-mod bench {
-    use super::tests::{quota_sample, test_key, HOUR};
-    use super::*;
-
-    /// Non-gating reference benchmark, not a correctness test. Prints median
-    /// timings (partial fit, max-retention completed fit, a 10-key scan) as
-    /// `RUNS` samples; the `fit_work_counters` assertions inside pin the
-    /// reference workload's shape so a drifting fixture cannot silently
-    /// change what is being timed. Run explicitly and in release mode, since
-    /// debug-build timings are not representative:
-    ///
-    /// ```text
-    /// cargo test -p tb_core_ffi --release -- --ignored fit_quality_benchmark_reference --nocapture
-    /// ```
     #[test]
     #[ignore]
     fn fit_quality_benchmark_reference() {
