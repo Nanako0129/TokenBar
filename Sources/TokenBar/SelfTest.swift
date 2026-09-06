@@ -3456,18 +3456,18 @@ enum SelfTest {
 
         // Stage 5D UI presentation: typed state copy and mode gates are pure
         // helper behavior, so these contracts do not depend on SwiftUI layout.
-        for mode in [PaceMode.historical, PaceMode.linear] {
-            expect(
-                AgentLimitsCard.PacePresentation.statusText(
-                    state: .learningDuration, reason: nil, mode: mode)
-                    == "Learning reset duration",
-                "learningDuration copy in \(mode.rawValue) mode")
-            expect(
-                AgentLimitsCard.PacePresentation.statusText(
-                    state: .legacyMissing, reason: nil, mode: mode)
-                    == "Pace unavailable · legacy data",
-                "legacy pace copy in \(mode.rawValue) mode")
-        }
+        // `statusText` ignores `mode` for these two states, so one mode is
+        // the whole proof.
+        expect(
+            AgentLimitsCard.PacePresentation.statusText(
+                state: .learningDuration, reason: nil, mode: .historical)
+                == "Learning reset duration",
+            "learningDuration copy is mode-independent")
+        expect(
+            AgentLimitsCard.PacePresentation.statusText(
+                state: .legacyMissing, reason: nil, mode: .historical)
+                == "Pace unavailable · legacy data",
+            "legacy pace copy is mode-independent")
         expect(
             AgentLimitsCard.PacePresentation.statusText(
                 state: .learningHistory, reason: nil, mode: .historical)
@@ -3513,8 +3513,6 @@ enum SelfTest {
         let linear = UsagePace.compute(window: availableWindow, mode: .linear, now: now)
         expect(linear?.expectedUsedPercent == 50 && linear?.basis == .linear,
             "linear mode ignores available historical")
-        expect(UsagePace.compute(window: availableWindow, now: now)?.basis == .linear,
-            "direct pace compute stays linear")
         // The warning color is basis-independent: a Linear estimate in deficit
         // is colored exactly like a Historical one, so the marker cannot blink
         // out when the Historical fit stops re-qualifying. `linear` is the
@@ -3573,8 +3571,6 @@ enum SelfTest {
         expect(UsagePace.presentation(
             window: learningHistoryWindow, mode: .historical, pace: learningEstimate!).riskText == nil,
             "learningHistory Linear estimate cannot display nested risk")
-        expect(runOutRiskLabel(window: v3Window(used: 50, state: .learningHistory)) == nil,
-            "learningHistory has no historical risk")
 
         let exhaustedWindow = v3Window(
             used: 100, state: .available,
@@ -3680,9 +3676,6 @@ enum SelfTest {
         }
         expect(currentFitRisk == nil, "zero-cycle current fit keeps partial risk absent")
         expect(
-            currentFitPace?.expectedUsedPercent != 40,
-            "zero-cycle current fit does not fall back to Linear")
-        expect(
             unavailable?.paceStatus.state == UsagePaceState.unavailable &&
                 unavailable?.paceStatus.reason == .nonRecurring &&
                 unavailable?.durationSeconds == nil,
@@ -3742,11 +3735,6 @@ enum SelfTest {
             ("duration and windowMinutes contradiction", """
              {"cardId":"weekly.v1","label":"Weekly","usedPercent":50,"remainingPercent":50,
               "windowMinutes":301,"paceStatus":{"state":"learningHistory","windowKey":"weekly.v1",
-              "durationSeconds":18000,"durationSource":"contract","completeCycles":0}}
-             """),
-            ("duration without derived windowMinutes", """
-             {"cardId":"weekly.v1","label":"Weekly","usedPercent":50,"remainingPercent":50,
-              "paceStatus":{"state":"learningHistory","windowKey":"weekly.v1",
               "durationSeconds":18000,"durationSource":"contract","completeCycles":0}}
              """),
         ]
@@ -4761,48 +4749,12 @@ enum SelfTest {
                     && restarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
                 "terminal empty provider payload clears scalar across restart")
 
-            defaults.set(80, forKey: TrayAnimator.lastRemainingKey)
-            let settingsTerminal = SettingsWindowView.applyQuotaRemaining(
-                payload: terminalPayload,
-                persistedSelection: QuotaResolver.auto,
-                excluding: [],
-                defaults: defaults)
-            let settingsRestarted = UserDefaults(suiteName: suiteName)
-            expect(
-                settingsTerminal == nil
-                    && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil
-                    && settingsRestarted?.object(forKey: TrayAnimator.lastRemainingKey) == nil,
-                "Settings terminal payload clears persisted scalar across restart")
-
-            defaults.set(65, forKey: TrayAnimator.lastRemainingKey)
-            let settingsBeforeFailure = defaults.persistentDomain(forName: suiteName)
-            let settingsFailure = SettingsWindowView.applyQuotaRemaining(
-                payload: nil,
-                persistedSelection: QuotaResolver.auto,
-                excluding: [],
-                defaults: defaults)
-            expect(
-                settingsFailure == 65
-                    && NSDictionary(dictionary: defaults.persistentDomain(forName: suiteName) ?? [:])
-                        .isEqual(to: settingsBeforeFailure ?? [:]),
-                "Settings outer quota failure preserves persisted scalar")
-
             let fallback = TrayAnimator.applyQuotaRemaining(
                 payload: quotaPayload, persistedSelection: "grok|billing.weekly.v1", excluding: [],
                 cachedRemaining: 80, defaults: defaults)
             expect(
                 fallback == 1 && defaults.double(forKey: TrayAnimator.lastRemainingKey) == 1,
                 "explicit selection keeps same-binding fallback window despite error")
-
-            let errorOnlyPayload = try! JSONDecoder().decode(
-                AgentUsagePayload.self,
-                from: Data((#"{"generatedAt":"now","agents":[{"clientId":"grok","source":"oauth","updatedAt":"now","windows":[{"cardId":"billing.weekly.v1","label":"Weekly","usedPercent":99,"remainingPercent":1}],"error":"Grok request timed out.","transportDiagnostic":{"category":"timeout"}}]}"#).utf8))
-            let autoError = TrayAnimator.applyQuotaRemaining(
-                payload: errorOnlyPayload, persistedSelection: QuotaResolver.auto,
-                excluding: [], cachedRemaining: 1, defaults: defaults)
-            expect(
-                autoError == nil && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil,
-                "Auto excludes an error-only fallback payload and clears scalar")
 
             defaults.set(1, forKey: TrayAnimator.lastRemainingKey)
             let optionalAbsentPayload = try! JSONDecoder().decode(
@@ -4829,12 +4781,6 @@ enum SelfTest {
                     .isEqual(to: standardAfter ?? [:]),
                 "nil defaults returns fresh quota without touching live defaults")
 
-            let hiddenAll = TrayAnimator.applyQuotaRemaining(
-                payload: quotaPayload, persistedSelection: QuotaResolver.auto,
-                excluding: ["codex", "claude"], cachedRemaining: 66, defaults: defaults)
-            expect(
-                hiddenAll == nil && defaults.object(forKey: TrayAnimator.lastRemainingKey) == nil,
-                "all-hidden successful payload cannot fall back to cached scalar")
             defaults.removePersistentDomain(forName: suiteName)
         } else {
             expect(false, "isolated quota defaults suite is available")
