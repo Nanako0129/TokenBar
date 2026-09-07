@@ -195,10 +195,35 @@ def validate(root):
     if not vendor.exists(): errors.append(Issue('vendor/README.md',1,'consumer pin owner is missing'))
     if not vendor_doc.exists(): errors.append(Issue('docs/knowledge/vendor-tokscale.md',1,'vendor-tokscale.md is missing'))
     elif not any(t==vendor for t,_,_ in relative_links(root,vendor_doc,vendor_doc.read_text(encoding='utf-8')) if isinstance(t,Path)): errors.append(Issue(vendor_doc.relative_to(root),1,'vendor-tokscale.md must link to the consumer pin document'))
+    check_engine_pin(root,files,errors)
     ledger=next((p for p,d in meta.items() if d.get('kind')=='ledger'),None)
     if ledger: check_ledger(root,ledger,meta,errors)
     else: errors.append(Issue('docs/knowledge',1,'migration ledger document is missing'))
     return errors
+
+PIN_ROW = re.compile(r'\|\s*Reviewed pin\s*\|\s*`([0-9a-f]{40})`\s*\|')
+# The phrase must sit next to the SHA it introduces. A knowledge table row can
+# be thousands of characters long and legitimately cite several historical
+# engine revisions, so anchoring on the line would flag those as stale.
+PIN_CLAIM = re.compile(r'(?i)(?:reviewed\s+pin|現在\s*pin\s+reviewed)[^\n]{0,80}?`([0-9a-f]{40})`')
+
+def check_engine_pin(root,files,errors):
+    """The reviewed engine pin is restated across several documents; vendor/README.md owns it.
+
+    Only a SHA introduced by a reviewed-pin claim is checked. Links to a
+    historical ledger revision are legitimate and are left alone.
+    """
+    vendor_readme=root/'vendor'/'README.md'
+    if not vendor_readme.exists(): return
+    row=PIN_ROW.search(vendor_readme.read_text(encoding='utf-8'))
+    if not row:
+        errors.append(Issue('vendor/README.md',1,'reviewed pin row is missing or malformed'))
+        return
+    pin=row.group(1)
+    for p in files:
+        rel=p.relative_to(root); text=p.read_text(encoding='utf-8')
+        for m in PIN_CLAIM.finditer(text):
+            if m.group(1)!=pin: errors.append(Issue(rel,line_no(text,m.start()),f'stale reviewed pin {m.group(1)[:8]}; vendor/README.md records {pin[:8]}'))
 
 def check_adapter(root,p):
     text=p.read_text(encoding='utf-8'); rel=p.relative_to(root); out=scan_text(rel,text)
