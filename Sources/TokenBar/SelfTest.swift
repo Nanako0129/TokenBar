@@ -13675,17 +13675,14 @@ enum SelfTest {
         // open when that landed took a forced, cache-bypassing rescan for a
         // registry identical to the one already installed.
         ClaudeExtraRoots.resetAppliedForTesting()
-        let ceOK = try! JSONDecoder().decode(
-            ExtraScanPathsResult.self,
-            from: Data(#"{"registeredCount":1,"unreadable":[],"rejected":[]}"#.utf8))
         let ceFirst = ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved"])
-        expect(ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceOK),
+        expect(ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceResult),
                "CE-MOVED installing a registry that differs reports a change")
-        expect(!ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceOK),
+        expect(!ClaudeExtraRoots.recordAppliedAndReportChange(ceFirst, result: ceResult),
                "CE-MOVED and installing the SAME registry again reports none — which "
                    + "is the launch case, and the one that was paying for a rescan")
         expect(ClaudeExtraRoots.recordAppliedAndReportChange(
-                   ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved-2"]), result: ceOK),
+                   ClaudeExtraRoots.payloadJSON(["/tmp/tokenbar-moved-2"]), result: ceResult),
                "CE-MOVED a genuinely different registry still reports a change, so the "
                    + "gate is a comparison rather than a one-shot latch")
         expect(!ClaudeExtraRoots.recordAppliedAndReportChange(
@@ -13843,21 +13840,14 @@ enum SelfTest {
         // Basename rather than path: this heading is the part of the app that
         // ends up in screenshots and the value is a directory under the user's
         // home.
+        let m3kWork = AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
+        let m3kOther = AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other").accountLabel
         expect(
-            AccountIdentity(clientId: "claude", accountKey: nil).accountLabel == nil,
-            "M3-k the primary row acquired a qualifier it does not need")
-        expect(
-            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
-                == ".claude-work",
-            "M3-k an extra row is not labelled with its account")
-        expect(
-            AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel
-                != AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-other").accountLabel,
-            "M3-k two accounts produce the same label, so the rows stay indistinguishable")
-        expect(
-            !(AccountIdentity(clientId: "claude", accountKey: "/Users/someone/.claude-work").accountLabel?
-                .contains("/Users") ?? true),
-            "M3-k the label carries the home path into a heading that appears in screenshots")
+            AccountIdentity(clientId: "claude", accountKey: nil).accountLabel == nil
+                && m3kWork == ".claude-work" && m3kWork != m3kOther
+                && !(m3kWork?.contains("/Users") ?? true),
+            "M3-k the primary row stays unqualified, an extra row is labelled by its basename, "
+                + "two accounts differ, and no home path reaches the heading")
 
         // M3-l. And the Overview's one-line answer has to carry it too.
         //
@@ -13981,12 +13971,12 @@ enum SelfTest {
         // `accountKey` from the `BurnWarning` the fold builds) to watch this
         // go red.
         let m3nDuration: Int64 = 18_000
-        func m3nWindowJSON(clientId: String, accountKey: String?, used: Double) -> String {
-            let reset = burnNow.addingTimeInterval(Double(m3nDuration) * 0.5)
-            let iso = ISO8601DateFormatter().string(from: reset)
+        let m3nResetIso = ISO8601DateFormatter().string(
+            from: burnNow.addingTimeInterval(Double(m3nDuration) * 0.5))
+        func m3nWindowJSON(accountKey: String?, used: Double, resetIso iso: String) -> String {
             let account = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
             return """
-            {"clientId":"\(clientId)",\(account)"source":"oauth","updatedAt":"t","windows":[
+            {"clientId":"claude",\(account)"source":"oauth","updatedAt":"t","windows":[
              {"cardId":"session.v1","label":"Session","usedPercent":\(used),
               "remainingPercent":\(100 - used),"resetsAt":"\(iso)",
               "durationSeconds":\(m3nDuration),"windowMinutes":\(m3nDuration / 60),
@@ -13999,8 +13989,8 @@ enum SelfTest {
             AgentUsagePayload.self,
             from: Data("""
             {"generatedAt":"t","publicationGeneration":1,"agents":[
-              \(m3nWindowJSON(clientId: "claude", accountKey: m3ExtraKey, used: 90)),
-              \(m3nWindowJSON(clientId: "claude", accountKey: nil, used: 55))
+              \(m3nWindowJSON(accountKey: m3ExtraKey, used: 90, resetIso: m3nResetIso)),
+              \(m3nWindowJSON(accountKey: nil, used: 55, resetIso: m3nResetIso))
             ]}
             """.utf8))
         let m3nBurn = QuotaSummaryFold.build(
@@ -14382,25 +14372,12 @@ enum SelfTest {
         let m3fReset = m3fNow + 3_600
         let m3fResetIso = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: Double(m3fReset)))
-        func m3fAgentJSON(accountKey: String?, usedPercent: Int) -> String {
-            let window = """
-                {"cardId":"session.v1","label":"Session","usedPercent":\(usedPercent),
-                 "remainingPercent":\(100 - usedPercent),"resetsAt":"\(m3fResetIso)",
-                 "durationSeconds":18000,"windowMinutes":300,
-                 "paceStatus":{"state":"learningHistory","windowKey":"session.v1",
-                               "durationSeconds":18000,"durationSource":"provider","completeCycles":1}}
-                """
-            let accountField = accountKey.map { "\"accountKey\":\"\($0)\"," } ?? ""
-            return """
-                {"clientId":"claude",\(accountField)"source":"oauth","updatedAt":"now","windows":[\(window)]}
-                """
-        }
         let m3fPayload = try! JSONDecoder().decode(
             AgentUsagePayload.self,
             from: Data("""
                 {"generatedAt":"now","publicationGeneration":11,"agents":[
-                  \(m3fAgentJSON(accountKey: m3ExtraKey, usedPercent: 80)),
-                  \(m3fAgentJSON(accountKey: nil, usedPercent: 10))
+                  \(m3nWindowJSON(accountKey: m3ExtraKey, used: 80, resetIso: m3fResetIso)),
+                  \(m3nWindowJSON(accountKey: nil, used: 10, resetIso: m3fResetIso))
                 ]}
                 """.utf8))
         let m3fPrimaryCurve = windowCurve(
@@ -14507,29 +14484,11 @@ enum SelfTest {
         // alone passes when the model issues two scans for the primary and none
         // for the extra account, which is the shape a wrong selector produces.
         // Point `unionScan(for:)` at `Self.cardAccountKey` and this goes red.
+        // Two readings per cycle: the window opens at 0 and ends at the
+        // account's figure, which is the `runsCurve` shape with the first
+        // reading fixed.
         func m3qCurve(accountUsed: [Double]) -> QuotaCurve {
-            // Three completed cycles, each moving more than `minimumDelta` and
-            // sampled across most of the window, so all three are admitted.
-            var points: [String] = []
-            for (index, used) in accountUsed.enumerated() {
-                let reset = m3fNow - Int64(3 - index) * 18_000
-                for (offset, pct) in [(-17_000, 0.0), (-1_000, used)] {
-                    points.append("""
-                        {"sampledAt":\(reset + Int64(offset)),"usedPercent":\(pct),
-                         "resetAt":\(reset),"durationSeconds":18000,
-                         "durationSource":"provider","origin":"liveV3",
-                         "isActiveGroup":false}
-                        """)
-                }
-            }
-            let json = """
-                {"points":[\(points.joined(separator: ","))],
-                 "coverage":{"oldestSampledAt":\(m3fNow - 71_000),
-                             "newestSampledAt":\(m3fNow - 19_000),
-                             "sampleCount":\(points.count)},
-                 "activeResetAt":null,"generation":11}
-                """
-            return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+            runsCurve(cycles: accountUsed.map { [0, $0] })
         }
         let m3qAccounts: [String?]? = awaitMainActorValue {
             let src = WindowScanCountingSource(payload: m3fPayload)
