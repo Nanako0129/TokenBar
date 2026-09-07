@@ -4,7 +4,7 @@ id: kb-verification
 kind: canonical
 scope: repository
 read_when: changing runtime code, running a local build or UX acceptance, parser output, cache behavior, FFI contracts, or this knowledge tree
-last_verified: 2026-09-03
+last_verified: 2026-09-07
 sources: [".github/workflows/ci.yml", "Makefile", "Package.swift", "scripts/bundle.sh", "Sources/TokenBar/ClientTray.swift", "Sources/TokenBar/StatusItemController.swift", "Sources/TokenBar/MenuBarTextColor.swift", "Sources/TokenBar/Views/AgentIconView.swift", "Sources/TokenBar/Views/SettingsPanel.swift", "Sources/TokenBar/SelfTest.swift", "Sources/TokenBar/ClaudeExtraRoots.swift", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "crates/tb_core_ffi/src/extra_scan_paths.rs", "docs/knowledge/plans/provider-quota-pace.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "public TokenBar-Windows PR #7", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "AGENTS.md", "memory-derived hermetic verification practice", "memory-derived local build indexing incident"]
 ---
 

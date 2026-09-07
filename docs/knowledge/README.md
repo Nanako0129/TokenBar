@@ -4,7 +4,7 @@ id: kb-index
 kind: index
 scope: repository
 read_when: before any TokenBar task or handoff
-last_verified: 2026-07-29
+last_verified: 2026-09-07
 sources: ["README.md", "CONTRIBUTING.md", "AGENTS.md", "Makefile", "Package.swift", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/release.yml", ".github/workflows/update-install-count.yml"]
 ---
 

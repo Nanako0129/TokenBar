@@ -4,7 +4,7 @@ id: kb-current-state
 kind: canonical
 scope: repository
 read_when: starting work, triaging an issue, or deciding whether an upstream item is urgent
-last_verified: 2026-07-31
+last_verified: 2026-09-07
 sources: ["public GitHub main history", "public issue #45", "public issue #118", "public TokenBar-Windows PR #7", "public tokscale-core commit b31e394", "public tokscale-core PR #2 and commit fd2f916", "public tokscale-core PR #3 and commit 84e0d66", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20", "vendor/README.md", "docs/knowledge/history/README.md", "docs/knowledge/plans/tokscale-alignment.md", "docs/knowledge/plans/shared-rust-engine-extraction.md", "docs/knowledge/plans/codex-historical-pace-v2.md", "docs/knowledge/plans/provider-quota-pace.md"]
 ---
 

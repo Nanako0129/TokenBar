@@ -4,7 +4,7 @@ id: kb-vendor-tokscale
 kind: canonical
 scope: repository
 read_when: assessing upstream commits, changing shared-engine code or its consumer pin, or changing parser output
-last_verified: 2026-07-31
+last_verified: 2026-09-07
 sources: [".gitmodules", "vendor/README.md", "public tokscale-core UPSTREAM at b31e394", "public tokscale-core PR #2 and commit fd2f916", "public tokscale-core PR #3 and commit 84e0d66", "docs/knowledge/architecture.md", "docs/knowledge/verification.md", "public issue #45", "public issue #118", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20"]
 ---
 
