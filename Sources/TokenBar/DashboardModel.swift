@@ -1635,14 +1635,27 @@ private struct DashboardSnapshot {
             rebuildQuotaEquivalences()
             return
         }
-        guard let windowStart = WindowCardLoader.unionStart(
-            payload: agentUsage, clients: [client], nowMs: now)
-        else { return }
         // The history's oldest cycle CONTAINS the active window, so this widens
         // one scan rather than issuing a second. Measured 2026-08-16 on live
         // data: 5.4 days, 45,844 messages, 4.6s — an order of magnitude below
         // the 14.93-day union this replaced, and paid only on the Quota lens.
-        let from = min(windowStart, quotaCycles.last?.evidenceStartMs ?? windowStart)
+        //
+        // EITHER bound is a range on its own, which is why this is a `min` over
+        // whichever exist rather than a window start the cycles may widen. A
+        // window resolves only when the provider gave BOTH a reset and a
+        // duration, and a provider can stop giving one: Codex served `resetsAt`
+        // with no `limit_window_seconds` for all three of its windows (measured
+        // 2026-09-08), so `unionStart` returned nil, this function returned
+        // before scanning, and no scan covering that client's cycles was ever
+        // cached. `rebuildQuotaHistory` then refused to join — correctly, since
+        // another client's narrower scan would under-count — and every row of
+        // the history card sat on "Reading local usage…" permanently, for a
+        // card that needs the cycles and not the live window at all.
+        guard let from = [
+            WindowCardLoader.unionStart(
+                payload: agentUsage, clients: [client], nowMs: now),
+            quotaCycles.last?.evidenceStartMs,
+        ].compactMap({ $0 }).min() else { return }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.
