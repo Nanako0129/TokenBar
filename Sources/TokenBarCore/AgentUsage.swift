@@ -574,46 +574,75 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         return windows.filter { seen.insert($0.cardId).inserted }
     }
 
-    /// Appends each window's own period — `Session`, `Weekly`, or the span
-    /// itself — to a label that another window in the same card view also
-    /// carries. A label that appears once is returned untouched, so every
+    /// Appends a period to a label that another window in the same card view
+    /// also carries. A label that appears once is returned untouched, so every
     /// existing single-window presentation is unchanged.
     ///
-    /// A repeated label on a window with no duration evidence is left alone
-    /// rather than numbered: an ordinal says nothing about which window it
-    /// names, and duration is the only thing that actually distinguishes the
-    /// two rows a provider reports under one name.
+    /// Three sources of evidence, tried in order, because the FIRST one can be
+    /// withdrawn by the provider at exactly the moment the rows are otherwise
+    /// indistinguishable:
     ///
-    /// So is a group whose durations RENDER the same. Provider durations are
-    /// not whole hours or days by contract, and a qualifier that truncates
-    /// rebuilds the ambiguity it was added to remove — one hour and ninety
-    /// minutes would both read `1h`, which is worse than an unqualified pair
-    /// because it asserts a distinction the reader cannot use. The formatting
-    /// below carries the remainder for exactly that reason, and a group whose
-    /// qualifiers still coincide is left as the provider labelled it.
-    static func qualifyingRepeatedLabels(_ windows: [UsageWindow]) -> [UsageWindow] {
+    /// 1. `durationSeconds` — the window's own length, named in the app's
+    ///    vocabulary (`Session`, `Weekly`, or the span).
+    /// 2. `resetsAt` — the span until this row's own reset. A Codex window
+    ///    with no usage yet resolves to `unavailable(invalidEvidence)`, and
+    ///    `UsageWindow.unavailable` clears the duration AND `windowMinutes`,
+    ///    so a pair reported at 100% remaining — the state issue #286 was
+    ///    filed from — carries no length at all. The countdown is what the row
+    ///    already displays, and it is true by construction rather than a
+    ///    period inferred from one.
+    /// 3. Position in the card view — a deterministic ordinal. Reached only
+    ///    when a group has neither lengths nor resets that separate it, and
+    ///    present because #286 requires that unusable duration evidence still
+    ///    yields a unique name rather than the identical pair it reports.
+    ///
+    /// A tier is taken only when it names EVERY window of the group and names
+    /// them all differently; two windows of one period would otherwise be
+    /// handed a distinction that is not there.
+    static func qualifyingRepeatedLabels(
+        _ windows: [UsageWindow], now: Date = Date()
+    ) -> [UsageWindow] {
         var counts: [String: Int] = [:]
         for window in windows { counts[window.label, default: 0] += 1 }
         guard counts.values.contains(where: { $0 > 1 }) else { return windows }
 
-        // Per repeated label: the qualifiers its windows would take, so a
-        // collision among them can be seen before any of them is applied.
-        var qualifiers: [String: [String]] = [:]
-        for window in windows where counts[window.label, default: 0] > 1 {
-            guard let duration = window.durationSeconds, duration > 0 else { continue }
-            qualifiers[window.label, default: []].append(windowPeriod(duration))
+        func tier(_ candidate: (UsageWindow) -> String?) -> [String: [String]] {
+            var byLabel: [String: [String]] = [:]
+            for window in windows where counts[window.label, default: 0] > 1 {
+                guard let value = candidate(window) else {
+                    byLabel[window.label] = []
+                    continue
+                }
+                if byLabel[window.label]?.isEmpty == true { continue }
+                byLabel[window.label, default: []].append(value)
+            }
+            return byLabel.filter { label, values in
+                values.count == counts[label] && Set(values).count == values.count
+            }
         }
-        let ambiguous = Set(
-            qualifiers.filter { Set($0.value).count != $0.value.count }.keys)
 
+        let byLength = tier { window in
+            window.durationSeconds.flatMap { $0 > 0 ? windowPeriod($0) : nil }
+        }
+        let byReset = tier { window in
+            window.resetsAt
+                .flatMap(parseRFC3339)
+                .map { UsagePace.durationText($0.timeIntervalSince(now)) }
+        }
+
+        // The occurrence index within its own repeated-label group: the
+        // position each tier's candidates were collected at, and the ordinal
+        // the last tier falls back to.
+        var taken: [String: Int] = [:]
         return windows.map { window in
-            guard counts[window.label, default: 0] > 1,
-                  !ambiguous.contains(window.label),
-                  let duration = window.durationSeconds, duration > 0
-            else { return window }
+            guard counts[window.label, default: 0] > 1 else { return window }
+            let index = taken[window.label, default: 0]
+            taken[window.label] = index + 1
+            let qualifier = byLength[window.label]?[index]
+                ?? byReset[window.label]?[index]
+                ?? String(index + 1)
             var qualified = window
-            qualified.label = "%@ · %@".localized(
-                window.label.localized, windowPeriod(duration))
+            qualified.label = "%@ · %@".localized(window.label.localized, qualifier)
             return qualified
         }
     }
@@ -625,33 +654,16 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// deliberately keys on the length rather than on which slot carried it.
     /// A Spark allowance arrives in the same two shapes, so it reads with the
     /// same two words rather than in a second vocabulary of its own; both are
-    /// already translated. Any other length falls back to the span itself.
+    /// already translated. Any other length falls back to the span itself,
+    /// through the same formatter the reset countdown uses — deliberately not
+    /// a truncation to the largest unit, which would render one hour and
+    /// ninety minutes identically and rebuild the ambiguity being removed.
     private static func windowPeriod(_ seconds: Int64) -> String {
         switch seconds {
         case 18_000: return "Session".localized
         case 604_800: return "Weekly".localized
-        default: return compactWindowDuration(seconds)
+        default: return UsagePace.durationText(Double(seconds))
         }
-    }
-
-    /// `5h`, `7d`, `1h 30m` — the same templates, in the same order, that the
-    /// reset countdown renders a span with, so a window reads in one vocabulary
-    /// wherever it appears. Deliberately NOT a truncation to the largest unit:
-    /// see the note above.
-    private static func compactWindowDuration(_ seconds: Int64) -> String {
-        let minutes = max(seconds / 60, 0)
-        if minutes < 60 { return "%lldm".localized(max(1, minutes)) }
-        let hours = minutes / 60
-        if hours < 24 {
-            let rest = minutes % 60
-            return rest > 0
-                ? "%lldh %lldm".localized(hours, rest)
-                : "%lldh".localized(hours)
-        }
-        let rest = hours % 24
-        return rest > 0
-            ? "%lldd %lldh".localized(hours / 24, rest)
-            : "%lldd".localized(hours / 24)
     }
 }
 

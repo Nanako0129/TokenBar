@@ -5017,9 +5017,12 @@ enum SelfTest {
             AgentUsagePayload.self, from: Data(mixedJSON.utf8))
         expect(
             mixedPayload.agents[0].uniqueCardWindows.map(\.label)
-                == ["Codex Spark · Session", "Codex Spark"],
-            "a repeated label without duration evidence keeps the raw text, so the "
-                + "migration below is the case this guards rather than a vacuous one")
+                == ["Codex Spark · 1", "Codex Spark · 2"]
+                && mixedPayload.agents[0].rawCardWindows.map(\.label)
+                    == ["Codex Spark", "Codex Spark"],
+            "a group with one length and one durationless sibling has no tier that "
+                + "names both, so it falls to ordinals and the provider's own text "
+                + "survives only in the raw view the migration reads")
         expect(
             QuotaResolver.canonicalSelection(
                 payload: mixedPayload, selection: "codex|Codex Spark") == "codex|Codex Spark",
@@ -5060,10 +5063,49 @@ enum SelfTest {
         expect(
             sparkPair(18_000, 604_800) == ["Codex Spark · Session", "Codex Spark · Weekly"],
             "and the two lengths the engine already names take those same words")
+        // Two windows of one period have no period to be told apart by, so the
+        // length tier is refused and the reset tier is asked — these two carry
+        // no reset either, so the ordinal is what remains. #286 requires a
+        // unique name here, not the identical pair it was filed about.
         expect(
-            sparkPair(90, 119) == ["Codex Spark", "Codex Spark"],
-            "two durations that render identically leave the pair unqualified rather "
-                + "than asserting a distinction the name cannot carry")
+            sparkPair(90, 119) == ["Codex Spark · 1", "Codex Spark · 2"],
+            "windows whose lengths render identically still get unique names")
+
+        // The state the issue was filed from, and the one this account is in:
+        // Codex reports a window with no usage yet as
+        // `unavailable(invalidEvidence)`, and `UsageWindow.unavailable` clears
+        // the duration and `windowMinutes` with it, so BOTH rows arrive at
+        // 100% remaining with no length at all. The reset each row already
+        // displays is what separates them.
+        let resetOnly: [String] = {
+            let iso = ISO8601DateFormatter()
+            let soon = iso.string(from: Date().addingTimeInterval(5 * 3_600))
+            let later = iso.string(from: Date().addingTimeInterval(7 * 86_400))
+            let json = """
+            {"generatedAt":"now","agents":[
+              {"clientId":"codex","source":"fixture","updatedAt":"now",
+               "windows":[
+                 {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+                  "usedPercent":0,"remainingPercent":100,"resetsAt":"\(soon)",
+                  "paceStatus":{"state":"unavailable",
+                  "windowKey":"additional.deadbeef.primary.v1",
+                  "completeCycles":0,"reason":"invalidEvidence"}},
+                 {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+                  "usedPercent":0,"remainingPercent":100,"resetsAt":"\(later)",
+                  "paceStatus":{"state":"unavailable",
+                  "windowKey":"additional.deadbeef.secondary.v1",
+                  "completeCycles":0,"reason":"invalidEvidence"}}
+               ]}
+            ]}
+            """
+            return try! JSONDecoder()
+                .decode(AgentUsagePayload.self, from: Data(json.utf8))
+                .agents[0].uniqueCardWindows.map(\.label)
+        }()
+        expect(
+            resetOnly == ["Codex Spark · 5h", "Codex Spark · 7d"],
+            "a pair the provider left without any duration is named by the resets "
+                + "the rows already show")
 
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
