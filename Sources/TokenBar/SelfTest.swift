@@ -4990,6 +4990,44 @@ enum SelfTest {
                 .window.durationSeconds == 604_800,
             "each qualified option still resolves to its own window")
 
+        // Qualification must not break a tie the legacy-label migration exists
+        // to refuse. Only one of these two same-labelled windows has duration
+        // evidence — the sibling is still learning its own — so qualifying the
+        // card view leaves exactly one window carrying the raw text, and a
+        // persisted pre-v3 label that matched BOTH would migrate to whichever
+        // window happened to lack a duration. Ambiguity is a fact about what
+        // the provider sent, so the migration reads the raw labels.
+        let mixedJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":300,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.primary.v1",
+              "durationSeconds":18000,"durationSource":"provider","completeCycles":3}},
+             {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,
+              "paceStatus":{"state":"learningDuration",
+              "windowKey":"additional.deadbeef.secondary.v1",
+              "durationSource":"observed","completeCycles":0}}
+           ]}
+        ]}
+        """
+        let mixedPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(mixedJSON.utf8))
+        expect(
+            mixedPayload.agents[0].uniqueCardWindows.map(\.label)
+                == ["Codex Spark · 5h", "Codex Spark"],
+            "a repeated label without duration evidence keeps the raw text, so the "
+                + "migration below is the case this guards rather than a vacuous one")
+        expect(
+            QuotaResolver.canonicalSelection(
+                payload: mixedPayload, selection: "codex|Codex Spark") == "codex|Codex Spark",
+            "a persisted label that was ambiguous before qualification stays unmigrated")
+        expect(
+            QuotaResolver.resolve(payload: mixedPayload, selection: "codex|Codex Spark") == nil,
+            "and it stays explicit rather than following Auto to one of the two")
+
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
         // (codex|Weekly, 35%); an EXPLICIT pick of a hidden client is honored;

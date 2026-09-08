@@ -556,8 +556,22 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// keeps the wire label byte-for-byte for the cross-check harness, and no
     /// card ID, window key or persisted selection changes.
     public var uniqueCardWindows: [UsageWindow] {
+        Self.qualifyingRepeatedLabels(rawCardWindows)
+    }
+
+    /// The same card view with the provider's labels exactly as they arrived.
+    ///
+    /// For the pre-v3 label migration, and only for it. That migration accepts
+    /// a persisted label only when ONE window carries it, and qualification
+    /// can break a tie it is supposed to refuse: two windows sharing a label
+    /// where only one has duration evidence — a sibling still in
+    /// `learningDuration` — leave exactly one raw label behind, so a persisted
+    /// label that matched both before would now migrate to whichever window
+    /// happened to lack a duration. Ambiguity is a property of what the
+    /// provider sent, so it has to be read from what the provider sent.
+    public var rawCardWindows: [UsageWindow] {
         var seen = Set<String>()
-        return Self.qualifyingRepeatedLabels(windows.filter { seen.insert($0.cardId).inserted })
+        return windows.filter { seen.insert($0.cardId).inserted }
     }
 
     /// Appends each window's own duration to a label that another window in
