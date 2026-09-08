@@ -267,7 +267,11 @@ public struct PaceStatus: Decodable, Sendable, Equatable {
 
 public struct UsageWindow: Decodable, Sendable {
     public let cardId: String
-    public let label: String
+    /// The provider's own name for this allowance. Presentation only — never
+    /// an identity, and not unique on its own: see
+    /// `AgentUsageSnapshot.uniqueCardWindows`, the one place allowed to
+    /// qualify it, which is why the setter is file-private rather than `let`.
+    public fileprivate(set) var label: String
     public let usedPercent: Double
     public let remainingPercent: Double
     public let resetsAt: String?
@@ -537,9 +541,53 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// Order-preserving card view shared by quota resolvers and consumers.
     /// A duplicate card ID is fail-closed after the first occurrence; labels
     /// never repair or disambiguate a card collision.
+    ///
+    /// Repeated LABELS are the opposite case and are repaired here. Codex
+    /// reports its Spark allowance as one additional limit carrying both a
+    /// primary and a secondary window — 5 hours and 7 days — and the engine
+    /// names both of them `Codex Spark` because the label is the limit's, not
+    /// the window's. The two rows are different windows with different card
+    /// IDs, reset schedules and histories, so every surface that draws the
+    /// label alone offered two identical, indistinguishable choices (#286).
+    ///
+    /// The qualifier is appended HERE rather than at the six surfaces that
+    /// render a window name, and rather than in the engine: this is the one
+    /// view every one of them already goes through, the raw `windows` array
+    /// keeps the wire label byte-for-byte for the cross-check harness, and no
+    /// card ID, window key or persisted selection changes.
     public var uniqueCardWindows: [UsageWindow] {
         var seen = Set<String>()
-        return windows.filter { seen.insert($0.cardId).inserted }
+        return Self.qualifyingRepeatedLabels(windows.filter { seen.insert($0.cardId).inserted })
+    }
+
+    /// Appends each window's own duration to a label that another window in
+    /// the same card view also carries. A label that appears once is returned
+    /// untouched, so every existing single-window presentation is unchanged.
+    ///
+    /// A repeated label on a window with no duration evidence is left alone
+    /// rather than numbered: an ordinal says nothing about which window it
+    /// names, and duration is the only thing that actually distinguishes the
+    /// two rows a provider reports under one name.
+    static func qualifyingRepeatedLabels(_ windows: [UsageWindow]) -> [UsageWindow] {
+        var counts: [String: Int] = [:]
+        for window in windows { counts[window.label, default: 0] += 1 }
+        guard counts.values.contains(where: { $0 > 1 }) else { return windows }
+        return windows.map { window in
+            guard counts[window.label, default: 0] > 1,
+                  let duration = window.durationSeconds, duration > 0
+            else { return window }
+            var qualified = window
+            qualified.label = "%@ · %@".localized(
+                window.label.localized, compactWindowDuration(duration))
+            return qualified
+        }
+    }
+
+    /// `5h` / `7d`, in the same units the reset countdown already uses.
+    private static func compactWindowDuration(_ seconds: Int64) -> String {
+        if seconds % 86_400 == 0 { return "%lldd".localized(seconds / 86_400) }
+        if seconds >= 3_600 { return "%lldh".localized(seconds / 3_600) }
+        return "%lldm".localized(max(1, seconds / 60))
     }
 }
 

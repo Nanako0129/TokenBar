@@ -4945,6 +4945,51 @@ enum SelfTest {
                     == "dupe|Session",
             "exact cardId wins over same-named legacy label")
 
+        // Issue #286: Codex names both windows of one additional limit after
+        // the limit, so the 5-hour and the 7-day Spark allowance arrive with
+        // the same label and different card IDs. The card view qualifies a
+        // repeated label with the window's own duration; a label that appears
+        // once, and the identities themselves, are untouched.
+        let sparkJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":300,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.primary.v1",
+              "durationSeconds":18000,"durationSource":"provider","completeCycles":3}},
+             {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":10080,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.secondary.v1",
+              "durationSeconds":604800,"durationSource":"provider","completeCycles":2}},
+             {"cardId":"weekly.v1","label":"Weekly","usedPercent":40,"remainingPercent":60,
+              "windowMinutes":10080,
+              "paceStatus":{"state":"learningHistory","windowKey":"weekly.v1",
+              "durationSeconds":604800,"durationSource":"contract","completeCycles":5}}
+           ]}
+        ]}
+        """
+        let sparkPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(sparkJSON.utf8))
+        let sparkWindows = sparkPayload.agents[0].uniqueCardWindows
+        expect(
+            sparkWindows.map(\.label) == ["Codex Spark · 5h", "Codex Spark · 7d", "Weekly"],
+            "repeated window label is qualified by duration, a unique one is left alone")
+        expect(
+            sparkWindows.map(\.cardId) == [
+                "additional.deadbeef.primary.v1", "additional.deadbeef.secondary.v1", "weekly.v1",
+            ] && sparkWindows.compactMap(\.paceStatus.windowKey) == [
+                "additional.deadbeef.primary.v1", "additional.deadbeef.secondary.v1", "weekly.v1",
+            ] && sparkPayload.agents[0].windows.map(\.label)
+                == ["Codex Spark", "Codex Spark", "Weekly"],
+            "qualifying a label changes no identity and no wire value")
+        expect(
+            QuotaResolver.resolve(
+                payload: sparkPayload,
+                selection: "codex|additional.deadbeef.secondary.v1")?
+                .window.durationSeconds == 604_800,
+            "each qualified option still resolves to its own window")
+
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
         // (codex|Weekly, 35%); an EXPLICIT pick of a hidden client is honored;
