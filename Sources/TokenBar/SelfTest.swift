@@ -4241,6 +4241,42 @@ enum SelfTest {
             }
         }
 
+        // #286 reaches this picker too. A provider that repeats a WHITELISTED
+        // label — two windows both called `Weekly` — comes out of the card view
+        // as `Weekly · Session` and `Weekly · Weekly`, and the sanitiser used to
+        // accept any whitelisted PREFIX, collapsing both rows back to `Weekly`.
+        // An exact match keeps the bare word and sends a qualified one to the
+        // indexed fallback, which is distinct per row.
+        let repeatedSafeJSON = """
+        {"generatedAt":"t","publicationGeneration":7,"agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"t","windows":[
+            {"cardId":"a.v1","label":"Weekly","usedPercent":10,"remainingPercent":90,
+             "windowMinutes":300,
+             "paceStatus":{"state":"learningHistory","windowKey":"a.v1",
+             "durationSeconds":18000,"durationSource":"provider","completeCycles":1}},
+            {"cardId":"b.v1","label":"Weekly","usedPercent":20,"remainingPercent":80,
+             "windowMinutes":10080,
+             "paceStatus":{"state":"learningHistory","windowKey":"b.v1",
+             "durationSeconds":604800,"durationSource":"provider","completeCycles":1}}
+          ]}
+        ]}
+        """
+        let repeatedSafePayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(repeatedSafeJSON.utf8))
+        let repeatedSafeLabels = ClientTray.settingsRows(
+            presentClients: ["codex"], payload: repeatedSafePayload, enabled: Set(["codex"]),
+            selections: ["codex": "a.v1"], hidden: Set<String>(), orderRaw: "",
+            officialClients: officialClientIDs
+        ).first?.options.dropFirst().map(\.label) ?? []
+        expect(
+            repeatedSafePayload.agents[0].uniqueCardWindows.map(\.label)
+                == ["Weekly · Session", "Weekly · Weekly"],
+            "a repeated whitelisted label is qualified in the card view, so the "
+                + "picker below is asked the question this guards")
+        expect(
+            repeatedSafeLabels.count == 2 && Set(repeatedSafeLabels).count == 2,
+            "and the per-client window picker keeps the two rows distinguishable")
+
         for (phase, attempted, spinning, name) in [
             (DashboardModel.Phase.loading, false, true, "loading unsettled"),
             (.loading, true, true, "loading after quota"),
