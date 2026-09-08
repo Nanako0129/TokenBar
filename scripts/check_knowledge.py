@@ -266,13 +266,17 @@ def sha_exists_in_engine(root,sha):
     except (OSError,subprocess.SubprocessError): return None
     return out.returncode==0
 
+UNRESOLVED = object()  # asked and answered no, as distinct from cannot ask
 DELTA_CLAIM = re.compile(r'`([0-9a-f]{7,40})`\s*(?:→|->)\s*`([0-9a-f]{7,40})`\s*delta\s*(?:為|is)\s*([0-9,]+)\s*(?:個\s*)?engine\s*commit')
 
 def engine_rev_count(root,base,head):
-    """Commits in `base..head` inside the submodule, or None when unanswerable.
+    """Commits in `base..head` inside the submodule.
 
-    A shallow clone cannot count a range it does not hold, and returning a
-    number there would be worse than returning nothing.
+    Three outcomes, and collapsing them is how a guard passes while doing
+    nothing: an integer is the answer; None means the question cannot be asked
+    here (no checkout, or a shallow one that does not hold the range); and
+    UNRESOLVED means it was asked and the revisions are not in this engine,
+    which is a defect in the claim rather than a limit of the environment.
     """
     import subprocess
     engine=root/'vendor'/'tokscale-core'
@@ -281,7 +285,7 @@ def engine_rev_count(root,base,head):
         out=subprocess.run(['git','rev-list','--count',f'{base}..{head}'],cwd=engine,
                            capture_output=True,text=True,timeout=10)
     except (OSError,subprocess.SubprocessError): return None
-    if out.returncode!=0: return None
+    if out.returncode!=0: return UNRESOLVED
     return int(out.stdout.strip() or 0)
 
 def check_engine_delta(root,files,errors):
@@ -298,6 +302,10 @@ def check_engine_delta(root,files,errors):
             base,head,claimed=m.group(1),m.group(2),int(m.group(3).replace(',',''))
             actual=engine_rev_count(root,base,head)
             if actual is None or actual==claimed: continue
+            if actual is UNRESOLVED:
+                errors.append(Issue(rel,line_no(text,m.start()),
+                    f'delta endpoints do not resolve in the engine: {base}..{head}'))
+                continue
             errors.append(Issue(rel,line_no(text,m.start()),
                 f'delta count disagrees with the engine\n    claimed {claimed} for {base}..{head}\n    actual  {actual}'))
 
@@ -514,6 +522,18 @@ def self_test():
             self.assertEqual(engine_rev_count(r,base,head),3,'fixture must have a countable range')
             self.append_doc(r,f'\n\n本次 `{base[:7]}` → `{head[:7]}` delta 為 99 個 engine commit。\n')
             self.assertIn('delta count disagrees','\n'.join(map(str,validate(r))))
+        def test_unresolvable_delta_endpoints_are_reported(self):
+            """A typo in an endpoint must not silence the count check.
+
+            `git rev-list` exits non-zero for an unknown revision, which is an
+            answer, not an inability to ask -- collapsing the two lets anyone
+            disable the check by mistyping a SHA."""
+            import subprocess
+            r=self.root(); engine=r/'vendor'/'tokscale-core'; engine.mkdir(parents=True,exist_ok=True)
+            subprocess.run(['git','init','-q'],cwd=engine,capture_output=True,check=True)
+            subprocess.run(['git','-c','user.email=t@t','-c','user.name=t','commit','-q','--allow-empty','-m','c'],cwd=engine,capture_output=True,check=True)
+            self.append_doc(r,'\n\n本次 `deadbee` → `f00dfac` delta 為 3 個 engine commit。\n')
+            self.assertIn('do not resolve in the engine','\n'.join(map(str,validate(r))))
         def test_missing_reviewed_pin_row_is_reported(self):
             r=self.root(); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)')
             self.assertIn('reviewed pin row is missing','\n'.join(map(str,validate(r))))

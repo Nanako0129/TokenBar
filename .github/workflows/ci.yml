@@ -22,7 +22,14 @@ jobs:
       # and pass silently, which is how a stale delta count reached main three
       # advances running.
       - name: Unshallow the engine submodule
-        run: git -C vendor/tokscale-core fetch --unshallow --quiet || true
+        run: |
+          set -euo pipefail
+          if [ "$(git -C vendor/tokscale-core rev-parse --is-shallow-repository)" = "false" ]; then
+            echo "engine already complete"
+          else
+            git -C vendor/tokscale-core fetch --unshallow --quiet
+          fi
+          test "$(git -C vendor/tokscale-core rev-parse --is-shallow-repository)" = "false"
 
       - name: Validate knowledge contracts
         run: |
