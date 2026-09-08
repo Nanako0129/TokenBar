@@ -11641,6 +11641,57 @@ enum SelfTest {
         expect((scanCounts?.open ?? 0) >= 1,
                "SC1 an open agent tab does scan, so the bound above is not vacuous")
 
+        // SC2. The scan range used to be anchored on the live window, so a
+        // provider that reports a reset without a window length took the whole
+        // history down with it: `unionStart` returned nil, `refreshWindowUsage`
+        // returned before scanning, and no scan covering this client's cycles
+        // was ever cached — leaving every row of the history card on "Reading
+        // local usage…" permanently rather than for the length of a scan.
+        // Measured on live Codex data 2026-09-08: all three of its windows
+        // carried `resetsAt` with `durationSeconds` nil.
+        //
+        // The cycles are their own range, so both numbers are asserted: a scan
+        // that runs but produces no joined row would satisfy the count alone.
+        let hsReset = wNow - 7_200
+        let hsPayload: AgentUsagePayload = {
+            let json = """
+            {"generatedAt":"t","publicationGeneration":7,"agents":[
+              {"clientId":"codex","source":"oauth","updatedAt":"t","windows":[
+                {"cardId":"main.weekly.v1","label":"Weekly","usedPercent":0,
+                 "remainingPercent":100,"resetsAt":"\(wIso)",
+                 "paceStatus":{"state":"unavailable","windowKey":"main.weekly.v1",
+                               "completeCycles":0,"reason":"invalidEvidence"}}
+              ]}
+            ]}
+            """
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
+        }()
+        let durationlessScan: (scans: Int, rows: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: hsPayload)
+            src.curve = windowCurve(
+                resetAtSecs: hsReset, durationSecs: 18_000,
+                at: [(hsReset - 15_000, 4), (hsReset - 600, 40)], isActive: false)
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.windowUsageClient = "codex"
+            m.refreshWindowQuotaHalves()
+            src.scans = 0
+            await m.refreshWindowUsage()
+            return (scans: src.scans, rows: m.quotaHistory.count)
+        }
+        expect(durationlessScan?.scans == 1,
+               "SC2 a window with no provider duration still scans for its history")
+        expect(durationlessScan?.rows == 1,
+               "SC2 and the scan reaches the history rows rather than only running")
+
         // SS1. `windowCardClients` is assigned from `displayClients`, which
         // arrives with graph data, so it is briefly empty on every top-level
         // view change. Recomputing the strip summaries from an empty client set
