@@ -122,6 +122,14 @@ fn local_cost_estimate(
         cache_read: entry.cache_read,
         cache_write: entry.cache_write,
         reasoning: entry.reasoning,
+        // `ModelUsage` carries no 1h/5m split, so this estimate prices the
+        // whole cache write at the 5-minute rate. That is already true today
+        // and stays true once the engine bills the 1h portion at 2x; the gap
+        // is a few percent, and this estimate exists to catch a mispriced
+        // provider at a 50x threshold, so it does not move the comparison.
+        // Closing the gap means adding the bucket to `ModelUsage`, which is a
+        // public FFI-crossing type.
+        cache_write_1h: 0,
     };
     let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
     (estimate.is_finite() && estimate > 0.0).then_some(estimate)
