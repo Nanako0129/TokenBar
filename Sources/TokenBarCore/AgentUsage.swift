@@ -267,7 +267,11 @@ public struct PaceStatus: Decodable, Sendable, Equatable {
 
 public struct UsageWindow: Decodable, Sendable {
     public let cardId: String
-    public let label: String
+    /// The provider's own name for this allowance. Presentation only — never
+    /// an identity, and not unique on its own: see
+    /// `AgentUsageSnapshot.uniqueCardWindows`, the one place allowed to
+    /// qualify it, which is why the setter is file-private rather than `let`.
+    public fileprivate(set) var label: String
     public let usedPercent: Double
     public let remainingPercent: Double
     public let resetsAt: String?
@@ -537,9 +541,155 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// Order-preserving card view shared by quota resolvers and consumers.
     /// A duplicate card ID is fail-closed after the first occurrence; labels
     /// never repair or disambiguate a card collision.
+    ///
+    /// Repeated LABELS are the opposite case and are repaired here. Codex
+    /// reports its Spark allowance as one additional limit carrying both a
+    /// primary and a secondary window — 5 hours and 7 days — and the engine
+    /// names both of them `Codex Spark` because the label is the limit's, not
+    /// the window's. The two rows are different windows with different card
+    /// IDs, reset schedules and histories, so every surface that draws the
+    /// label alone offered two identical, indistinguishable choices (#286).
+    ///
+    /// The qualifier is appended HERE rather than at the six surfaces that
+    /// render a window name, and rather than in the engine: this is the one
+    /// view every one of them already goes through, the raw `windows` array
+    /// keeps the wire label byte-for-byte for the cross-check harness, and no
+    /// card ID, window key or persisted selection changes.
     public var uniqueCardWindows: [UsageWindow] {
+        Self.qualifyingRepeatedLabels(rawCardWindows)
+    }
+
+    /// The same card view with the provider's labels exactly as they arrived.
+    ///
+    /// For the pre-v3 label migration, and only for it. That migration accepts
+    /// a persisted label only when ONE window carries it, and qualification
+    /// can break a tie it is supposed to refuse: two windows sharing a label
+    /// where only one has duration evidence — a sibling still in
+    /// `learningDuration` — leave exactly one raw label behind, so a persisted
+    /// label that matched both before would now migrate to whichever window
+    /// happened to lack a duration. Ambiguity is a property of what the
+    /// provider sent, so it has to be read from what the provider sent.
+    public var rawCardWindows: [UsageWindow] {
         var seen = Set<String>()
         return windows.filter { seen.insert($0.cardId).inserted }
+    }
+
+    /// Appends a period to a label that another window in the same card view
+    /// also carries. A label that appears once is returned untouched, so every
+    /// existing single-window presentation is unchanged.
+    ///
+    /// Three sources of evidence, tried in order, because the FIRST one can be
+    /// withdrawn by the provider at exactly the moment the rows are otherwise
+    /// indistinguishable:
+    ///
+    /// 1. `durationSeconds` — the window's own length, named in the app's
+    ///    vocabulary (`Session`, `Weekly`, or the span).
+    /// 2. `resetsAt` — the span until this row's own reset. A Codex window
+    ///    with no usage yet resolves to `unavailable(invalidEvidence)`, and
+    ///    `UsageWindow.unavailable` clears the duration AND `windowMinutes`,
+    ///    so a pair reported at 100% remaining — the state issue #286 was
+    ///    filed from — carries no length at all. The countdown is what the row
+    ///    already displays, and it is true by construction rather than a
+    ///    period inferred from one.
+    /// 3. Position in the card view — a deterministic ordinal. Reached only
+    ///    when a group has neither lengths nor resets that separate it, and
+    ///    present because #286 requires that unusable duration evidence still
+    ///    yields a unique name rather than the identical pair it reports.
+    ///
+    /// A tier is taken only when it names EVERY window of the group and names
+    /// them all differently; two windows of one period would otherwise be
+    /// handed a distinction that is not there.
+    static func qualifyingRepeatedLabels(
+        _ windows: [UsageWindow], now: Date = Date()
+    ) -> [UsageWindow] {
+        var counts: [String: Int] = [:]
+        for window in windows { counts[window.label, default: 0] += 1 }
+        guard counts.values.contains(where: { $0 > 1 }) else { return windows }
+
+        // What a window that is NOT being qualified will render as. A generated
+        // name has to avoid these too: a snapshot holding two `Foo` windows and
+        // one already labelled `Foo · 1` would otherwise be given a second
+        // `Foo · 1`, and uniqueness inside the group says nothing about that.
+        let untouched = Set(
+            windows.filter { counts[$0.label, default: 0] == 1 }.map(\.label))
+
+        func compose(_ label: String, _ qualifier: String) -> String {
+            "%@ · %@".localized(label.localized, qualifier)
+        }
+
+        func tier(_ candidate: (UsageWindow) -> String?) -> [String: [String]] {
+            var byLabel: [String: [String]] = [:]
+            for window in windows where counts[window.label, default: 0] > 1 {
+                guard let value = candidate(window) else {
+                    byLabel[window.label] = []
+                    continue
+                }
+                if byLabel[window.label]?.isEmpty == true { continue }
+                byLabel[window.label, default: []].append(value)
+            }
+            return byLabel.filter { label, values in
+                values.count == counts[label] && Set(values).count == values.count
+                    && values.allSatisfy { !untouched.contains(compose(label, $0)) }
+            }
+        }
+
+        let byLength = tier { window in
+            window.durationSeconds.flatMap { $0 > 0 ? windowPeriod($0) : nil }
+        }
+        // The SAME span the countdown in the row prints, rounding included:
+        // `durationText` alone rounds to the nearest minute while the countdown
+        // takes minutes up, which put `4h 59m` in a name beside `Resets in 5h`
+        // in the same row for the first half of every minute.
+        let byReset = tier { window in
+            window.resetsAt
+                .flatMap(parseRFC3339)
+                .flatMap { UsagePace.spanText(until: $0, now: now) }
+        }
+
+        // The occurrence index within its own repeated-label group: the
+        // position each tier's candidates were collected at, and the seed for
+        // the ordinal the last tier falls back to. The ordinal walks forward
+        // past anything already on screen, so it is unique against the whole
+        // output rather than only against its own group.
+        var taken: [String: Int] = [:]
+        var used = untouched
+        return windows.map { window in
+            guard counts[window.label, default: 0] > 1 else { return window }
+            let index = taken[window.label, default: 0]
+            taken[window.label] = index + 1
+            var name = (byLength[window.label]?[index] ?? byReset[window.label]?[index])
+                .map { compose(window.label, $0) }
+            if name == nil || used.contains(name!) {
+                var ordinal = index + 1
+                while used.contains(compose(window.label, String(ordinal))) {
+                    ordinal += 1
+                }
+                name = compose(window.label, String(ordinal))
+            }
+            used.insert(name!)
+            var qualified = window
+            qualified.label = name!
+            return qualified
+        }
+    }
+
+    /// What kind of window this is, in the vocabulary the app already uses.
+    ///
+    /// The engine names Codex's MAIN rate limit from exactly these two lengths
+    /// — `18_000 => "Session"`, `604_800 => "Weekly"` in `codex_windows` — and
+    /// deliberately keys on the length rather than on which slot carried it.
+    /// A Spark allowance arrives in the same two shapes, so it reads with the
+    /// same two words rather than in a second vocabulary of its own; both are
+    /// already translated. Any other length falls back to the span itself,
+    /// through the same formatter the reset countdown uses — deliberately not
+    /// a truncation to the largest unit, which would render one hour and
+    /// ninety minutes identically and rebuild the ambiguity being removed.
+    private static func windowPeriod(_ seconds: Int64) -> String {
+        switch seconds {
+        case 18_000: return "Session".localized
+        case 604_800: return "Weekly".localized
+        default: return UsagePace.durationText(Double(seconds))
+        }
     }
 }
 

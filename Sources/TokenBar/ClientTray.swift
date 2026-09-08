@@ -475,12 +475,17 @@ enum ClientTray {
         "Session", "Weekly", "Monthly", "Daily", "Pro", "Flash", "Extra usage"
     ]
 
+    /// An exact match only. A whitelisted word FOLLOWED by anything is a
+    /// repeated label the card view had to qualify — `Weekly · Session` beside
+    /// `Weekly · Weekly` — and reducing both back to the bare word rebuilt the
+    /// ambiguity here that #286 removed everywhere else. The indexed fallback
+    /// below is already distinct per row, so a qualified label takes it.
+    ///
+    /// This is strictly more conservative than the prefix rule it replaces:
+    /// nothing that used to be rejected is now shown, and no provider label
+    /// today begins with one of these words followed by a separator.
     private static func safeWindowLabel(_ label: String, index: Int) -> String {
-        if let known = safeWindowLabels.first(where: {
-            label == $0 || label.hasPrefix("\($0) ·")
-        }) {
-            return known
-        }
+        if safeWindowLabels.contains(label) { return label }
         return "Quota window %lld".localized(index + 1)
     }
 
