@@ -4973,7 +4973,7 @@ enum SelfTest {
             AgentUsagePayload.self, from: Data(sparkJSON.utf8))
         let sparkWindows = sparkPayload.agents[0].uniqueCardWindows
         expect(
-            sparkWindows.map(\.label) == ["Codex Spark · 5h", "Codex Spark · 7d", "Weekly"],
+            sparkWindows.map(\.label) == ["Codex Spark · Session", "Codex Spark · Weekly", "Weekly"],
             "repeated window label is qualified by duration, a unique one is left alone")
         expect(
             sparkWindows.map(\.cardId) == [
@@ -5017,7 +5017,7 @@ enum SelfTest {
             AgentUsagePayload.self, from: Data(mixedJSON.utf8))
         expect(
             mixedPayload.agents[0].uniqueCardWindows.map(\.label)
-                == ["Codex Spark · 5h", "Codex Spark"],
+                == ["Codex Spark · Session", "Codex Spark"],
             "a repeated label without duration evidence keeps the raw text, so the "
                 + "migration below is the case this guards rather than a vacuous one")
         expect(
@@ -5058,8 +5058,8 @@ enum SelfTest {
             sparkPair(3_600, 5_400) == ["Codex Spark · 1h", "Codex Spark · 1h 30m"],
             "durations differing below the largest unit still produce different names")
         expect(
-            sparkPair(18_000, 604_800) == ["Codex Spark · 5h", "Codex Spark · 7d"],
-            "and a whole-unit duration keeps the shorter form")
+            sparkPair(18_000, 604_800) == ["Codex Spark · Session", "Codex Spark · Weekly"],
+            "and the two lengths the engine already names take those same words")
         expect(
             sparkPair(90, 119) == ["Codex Spark", "Codex Spark"],
             "two durations that render identically leave the pair unqualified rather "

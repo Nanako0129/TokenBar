@@ -574,9 +574,10 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         return windows.filter { seen.insert($0.cardId).inserted }
     }
 
-    /// Appends each window's own duration to a label that another window in
-    /// the same card view also carries. A label that appears once is returned
-    /// untouched, so every existing single-window presentation is unchanged.
+    /// Appends each window's own period — `Session`, `Weekly`, or the span
+    /// itself — to a label that another window in the same card view also
+    /// carries. A label that appears once is returned untouched, so every
+    /// existing single-window presentation is unchanged.
     ///
     /// A repeated label on a window with no duration evidence is left alone
     /// rather than numbered: an ordinal says nothing about which window it
@@ -600,7 +601,7 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         var qualifiers: [String: [String]] = [:]
         for window in windows where counts[window.label, default: 0] > 1 {
             guard let duration = window.durationSeconds, duration > 0 else { continue }
-            qualifiers[window.label, default: []].append(compactWindowDuration(duration))
+            qualifiers[window.label, default: []].append(windowPeriod(duration))
         }
         let ambiguous = Set(
             qualifiers.filter { Set($0.value).count != $0.value.count }.keys)
@@ -612,8 +613,24 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
             else { return window }
             var qualified = window
             qualified.label = "%@ · %@".localized(
-                window.label.localized, compactWindowDuration(duration))
+                window.label.localized, windowPeriod(duration))
             return qualified
+        }
+    }
+
+    /// What kind of window this is, in the vocabulary the app already uses.
+    ///
+    /// The engine names Codex's MAIN rate limit from exactly these two lengths
+    /// — `18_000 => "Session"`, `604_800 => "Weekly"` in `codex_windows` — and
+    /// deliberately keys on the length rather than on which slot carried it.
+    /// A Spark allowance arrives in the same two shapes, so it reads with the
+    /// same two words rather than in a second vocabulary of its own; both are
+    /// already translated. Any other length falls back to the span itself.
+    private static func windowPeriod(_ seconds: Int64) -> String {
+        switch seconds {
+        case 18_000: return "Session".localized
+        case 604_800: return "Weekly".localized
+        default: return compactWindowDuration(seconds)
         }
     }
 
