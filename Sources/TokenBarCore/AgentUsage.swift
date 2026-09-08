@@ -582,12 +582,32 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// rather than numbered: an ordinal says nothing about which window it
     /// names, and duration is the only thing that actually distinguishes the
     /// two rows a provider reports under one name.
+    ///
+    /// So is a group whose durations RENDER the same. Provider durations are
+    /// not whole hours or days by contract, and a qualifier that truncates
+    /// rebuilds the ambiguity it was added to remove — one hour and ninety
+    /// minutes would both read `1h`, which is worse than an unqualified pair
+    /// because it asserts a distinction the reader cannot use. The formatting
+    /// below carries the remainder for exactly that reason, and a group whose
+    /// qualifiers still coincide is left as the provider labelled it.
     static func qualifyingRepeatedLabels(_ windows: [UsageWindow]) -> [UsageWindow] {
         var counts: [String: Int] = [:]
         for window in windows { counts[window.label, default: 0] += 1 }
         guard counts.values.contains(where: { $0 > 1 }) else { return windows }
+
+        // Per repeated label: the qualifiers its windows would take, so a
+        // collision among them can be seen before any of them is applied.
+        var qualifiers: [String: [String]] = [:]
+        for window in windows where counts[window.label, default: 0] > 1 {
+            guard let duration = window.durationSeconds, duration > 0 else { continue }
+            qualifiers[window.label, default: []].append(compactWindowDuration(duration))
+        }
+        let ambiguous = Set(
+            qualifiers.filter { Set($0.value).count != $0.value.count }.keys)
+
         return windows.map { window in
             guard counts[window.label, default: 0] > 1,
+                  !ambiguous.contains(window.label),
                   let duration = window.durationSeconds, duration > 0
             else { return window }
             var qualified = window
@@ -597,11 +617,24 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         }
     }
 
-    /// `5h` / `7d`, in the same units the reset countdown already uses.
+    /// `5h`, `7d`, `1h 30m` — the same templates, in the same order, that the
+    /// reset countdown renders a span with, so a window reads in one vocabulary
+    /// wherever it appears. Deliberately NOT a truncation to the largest unit:
+    /// see the note above.
     private static func compactWindowDuration(_ seconds: Int64) -> String {
-        if seconds % 86_400 == 0 { return "%lldd".localized(seconds / 86_400) }
-        if seconds >= 3_600 { return "%lldh".localized(seconds / 3_600) }
-        return "%lldm".localized(max(1, seconds / 60))
+        let minutes = max(seconds / 60, 0)
+        if minutes < 60 { return "%lldm".localized(max(1, minutes)) }
+        let hours = minutes / 60
+        if hours < 24 {
+            let rest = minutes % 60
+            return rest > 0
+                ? "%lldh %lldm".localized(hours, rest)
+                : "%lldh".localized(hours)
+        }
+        let rest = hours % 24
+        return rest > 0
+            ? "%lldd %lldh".localized(hours / 24, rest)
+            : "%lldd".localized(hours / 24)
     }
 }
 

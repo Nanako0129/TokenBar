@@ -5028,6 +5028,43 @@ enum SelfTest {
             QuotaResolver.resolve(payload: mixedPayload, selection: "codex|Codex Spark") == nil,
             "and it stays explicit rather than following Auto to one of the two")
 
+        // The qualifier has to carry the remainder. Provider durations are not
+        // whole hours by contract, and truncating to the largest unit rebuilds
+        // the very ambiguity this change removes — one hour and ninety minutes
+        // would both read `1h`. When two durations render the same anyway, the
+        // pair is left as the provider labelled it rather than being given a
+        // distinction the reader cannot act on.
+        func sparkPair(_ first: Int64, _ second: Int64) -> [String] {
+            let json = """
+            {"generatedAt":"now","agents":[
+              {"clientId":"codex","source":"fixture","updatedAt":"now",
+               "windows":[
+                 {"cardId":"a.v1","label":"Codex Spark","usedPercent":0,
+                  "remainingPercent":100,"windowMinutes":\(first / 60),
+                  "paceStatus":{"state":"learningHistory","windowKey":"a.v1",
+                  "durationSeconds":\(first),"durationSource":"provider","completeCycles":1}},
+                 {"cardId":"b.v1","label":"Codex Spark","usedPercent":0,
+                  "remainingPercent":100,"windowMinutes":\(second / 60),
+                  "paceStatus":{"state":"learningHistory","windowKey":"b.v1",
+                  "durationSeconds":\(second),"durationSource":"provider","completeCycles":1}}
+               ]}
+            ]}
+            """
+            return try! JSONDecoder()
+                .decode(AgentUsagePayload.self, from: Data(json.utf8))
+                .agents[0].uniqueCardWindows.map(\.label)
+        }
+        expect(
+            sparkPair(3_600, 5_400) == ["Codex Spark · 1h", "Codex Spark · 1h 30m"],
+            "durations differing below the largest unit still produce different names")
+        expect(
+            sparkPair(18_000, 604_800) == ["Codex Spark · 5h", "Codex Spark · 7d"],
+            "and a whole-unit duration keeps the shorter form")
+        expect(
+            sparkPair(90, 119) == ["Codex Spark", "Codex Spark"],
+            "two durations that render identically leave the pair unqualified rather "
+                + "than asserting a distinction the name cannot carry")
+
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
         // (codex|Weekly, 35%); an EXPLICIT pick of a hidden client is honored;
