@@ -17,6 +17,13 @@ jobs:
         with:
           submodules: recursive
 
+      # The knowledge checks resolve engine SHAs and count commit ranges, which
+      # a depth-1 submodule cannot answer. Without this they return "cannot ask"
+      # and pass silently, which is how a stale delta count reached main three
+      # advances running.
+      - name: Unshallow the engine submodule
+        run: git -C vendor/tokscale-core fetch --unshallow --quiet || true
+
       - name: Validate knowledge contracts
         run: |
           python3 scripts/check_knowledge.py --self-test

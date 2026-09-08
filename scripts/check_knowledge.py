@@ -496,6 +496,24 @@ def self_test():
             r=self.append_doc(self.root(),'\n\n本次 `aaaaaaa` → `bbbbbbb` delta 為 999 個 engine commit。\n')
             with mock.patch(f'{__name__}.engine_rev_count',return_value=None):
                 self.assertEqual(validate(r),[])
+        def test_delta_count_is_derived_from_a_real_repository(self):
+            """Without mocking `engine_rev_count`, so a check that never runs fails here.
+
+            The mocked tests above prove the comparison; they cannot prove it is
+            reached. In a shallow checkout it is not, which is how a stale count
+            passed CI three advances running."""
+            import subprocess
+            r=self.root(); engine=r/'vendor'/'tokscale-core'; engine.mkdir(parents=True,exist_ok=True)
+            def git(*a): subprocess.run(['git',*a],cwd=engine,capture_output=True,check=True)
+            git('init','-q')
+            shas=[]
+            for i in range(4):
+                git('-c','user.email=t@t','-c','user.name=t','commit','-q','--allow-empty','-m',f'c{i}')
+                shas.append(subprocess.run(['git','rev-parse','HEAD'],cwd=engine,capture_output=True,text=True).stdout.strip())
+            base,head=shas[0],shas[3]
+            self.assertEqual(engine_rev_count(r,base,head),3,'fixture must have a countable range')
+            self.append_doc(r,f'\n\n本次 `{base[:7]}` → `{head[:7]}` delta 為 99 個 engine commit。\n')
+            self.assertIn('delta count disagrees','\n'.join(map(str,validate(r))))
         def test_missing_reviewed_pin_row_is_reported(self):
             r=self.root(); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)')
             self.assertIn('reviewed pin row is missing','\n'.join(map(str,validate(r))))
