@@ -196,6 +196,7 @@ def validate(root):
     if not vendor_doc.exists(): errors.append(Issue('docs/knowledge/vendor-tokscale.md',1,'vendor-tokscale.md is missing'))
     elif not any(t==vendor for t,_,_ in relative_links(root,vendor_doc,vendor_doc.read_text(encoding='utf-8')) if isinstance(t,Path)): errors.append(Issue(vendor_doc.relative_to(root),1,'vendor-tokscale.md must link to the consumer pin document'))
     check_engine_pin(root,files,errors)
+    check_engine_delta(root,files,errors)
     ledger=next((p for p,d in meta.items() if d.get('kind')=='ledger'),None)
     if ledger: check_ledger(root,ledger,meta,errors)
     else: errors.append(Issue('docs/knowledge',1,'migration ledger document is missing'))
@@ -264,6 +265,41 @@ def sha_exists_in_engine(root,sha):
                            capture_output=True,text=True,timeout=10)
     except (OSError,subprocess.SubprocessError): return None
     return out.returncode==0
+
+DELTA_CLAIM = re.compile(r'`([0-9a-f]{7,40})`\s*(?:→|->)\s*`([0-9a-f]{7,40})`\s*delta\s*(?:為|is)\s*([0-9,]+)\s*(?:個\s*)?engine\s*commit')
+
+def engine_rev_count(root,base,head):
+    """Commits in `base..head` inside the submodule, or None when unanswerable.
+
+    A shallow clone cannot count a range it does not hold, and returning a
+    number there would be worse than returning nothing.
+    """
+    import subprocess
+    engine=root/'vendor'/'tokscale-core'
+    if not (engine/'.git').exists() or engine_is_shallow(root): return None
+    try:
+        out=subprocess.run(['git','rev-list','--count',f'{base}..{head}'],cwd=engine,
+                           capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.SubprocessError): return None
+    if out.returncode!=0: return None
+    return int(out.stdout.strip() or 0)
+
+def check_engine_delta(root,files,errors):
+    """A delta claim names two revisions and a count; the count is derivable.
+
+    Three advances in a row shipped a stale one -- 52 survived into an advance
+    of 10, and 10 into an advance of 7 -- because the prose above it was
+    rewritten while the number under it was not. It is the one part of a
+    consequence paragraph a script can settle.
+    """
+    for p in files:
+        rel=p.relative_to(root); text=p.read_text(encoding='utf-8')
+        for m in DELTA_CLAIM.finditer(text):
+            base,head,claimed=m.group(1),m.group(2),int(m.group(3).replace(',',''))
+            actual=engine_rev_count(root,base,head)
+            if actual is None or actual==claimed: continue
+            errors.append(Issue(rel,line_no(text,m.start()),
+                f'delta count disagrees with the engine\n    claimed {claimed} for {base}..{head}\n    actual  {actual}'))
 
 def check_engine_pin(root,files,errors):
     """The reviewed engine pin is restated across several documents; vendor/README.md owns it.
@@ -444,6 +480,22 @@ def self_test():
             second=subprocess.run(['git','rev-parse','HEAD'],cwd=engine,capture_output=True,text=True).stdout.strip()
             self.assertNotEqual(first,second)
             self.assertEqual(gitlink_pin(r),second,'must track the submodule checkout, not a committed gitlink')
+        def test_delta_count_disagreeing_with_the_engine_is_reported(self):
+            import unittest.mock as mock
+            r=self.append_doc(self.root(),'\n\n本次 `aaaaaaa` → `bbbbbbb` delta 為 10 個 engine commit。\n')
+            with mock.patch(f'{__name__}.engine_rev_count',return_value=7):
+                self.assertIn('delta count disagrees','\n'.join(map(str,validate(r))))
+        def test_delta_count_matching_the_engine_passes(self):
+            import unittest.mock as mock
+            r=self.append_doc(self.root(),'\n\n本次 `aaaaaaa` → `bbbbbbb` delta 為 7 個 engine commit。\n')
+            with mock.patch(f'{__name__}.engine_rev_count',return_value=7):
+                self.assertEqual(validate(r),[])
+        def test_uncountable_delta_does_not_block(self):
+            """A shallow clone cannot count a range it does not hold; silence beats a wrong number."""
+            import unittest.mock as mock
+            r=self.append_doc(self.root(),'\n\n本次 `aaaaaaa` → `bbbbbbb` delta 為 999 個 engine commit。\n')
+            with mock.patch(f'{__name__}.engine_rev_count',return_value=None):
+                self.assertEqual(validate(r),[])
         def test_missing_reviewed_pin_row_is_reported(self):
             r=self.root(); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)')
             self.assertIn('reviewed pin row is missing','\n'.join(map(str,validate(r))))
