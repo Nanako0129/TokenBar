@@ -211,26 +211,54 @@ SHORT_SHA = re.compile(r'\b[0-9a-f]{7,40}\b')
 ENGINE_SHA = re.compile(r'https://github\.com/[^/]+/tokscale-core/(?:blob|commit|tree)/([0-9a-f]{40})')
 
 def gitlink_pin(root):
-    """The commit the submodule is actually pinned to, or None outside a Git checkout.
+    """The commit the submodule is pinned to right now, or None outside a checkout.
 
     `vendor/README.md` declares the pin, but a declaration is not the pin --
     the gitlink is. Comparing documents only to each other passes a tree where
     every document agrees on a SHA that was never checked out.
-    """
-    import subprocess
-    try:
-        out=subprocess.run(['git','ls-tree','HEAD','vendor/tokscale-core'],cwd=root,
-                           capture_output=True,text=True,timeout=10)
-    except (OSError,subprocess.SubprocessError): return None
-    if out.returncode!=0: return None
-    m=re.search(r'\b([0-9a-f]{40})\b',out.stdout)
-    return m.group(1) if m else None
 
-def sha_exists_in_engine(root,sha):
-    """Whether a SHA resolves in the submodule. None when it cannot be asked."""
+    Reads the submodule's own HEAD rather than `git ls-tree HEAD`, because a
+    pin advance edits the gitlink and the documents together and runs this
+    before committing. Reading the committed tree would reject every correct
+    advance and pass only after the fact, which is the wrong way round for a
+    pre-commit gate.
+    """
     import subprocess
     engine=root/'vendor'/'tokscale-core'
     if not (engine/'.git').exists(): return None
+    try:
+        out=subprocess.run(['git','rev-parse','HEAD'],cwd=engine,
+                           capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.SubprocessError): return None
+    if out.returncode!=0: return None
+    m=re.match(r'([0-9a-f]{40})',out.stdout.strip())
+    return m.group(1) if m else None
+
+def engine_is_shallow(root):
+    """Whether the submodule's object database is truncated.
+
+    CI checks out submodules at depth 1, so it holds the current pin and
+    nothing else. Absence there means "not fetched", not "not a commit", and
+    the two must not produce the same verdict.
+    """
+    import subprocess
+    engine=root/'vendor'/'tokscale-core'
+    try:
+        out=subprocess.run(['git','rev-parse','--is-shallow-repository'],cwd=engine,
+                           capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.SubprocessError): return True
+    return out.returncode!=0 or out.stdout.strip()!='false'
+
+def sha_exists_in_engine(root,sha):
+    """Whether a SHA resolves in the submodule.
+
+    None when the question cannot be answered here -- no checkout, or a shallow
+    one that would report every historical revision as missing.
+    """
+    import subprocess
+    engine=root/'vendor'/'tokscale-core'
+    if not (engine/'.git').exists(): return None
+    if engine_is_shallow(root): return None
     try:
         out=subprocess.run(['git','cat-file','-e',f'{sha}^{{commit}}'],cwd=engine,
                            capture_output=True,text=True,timeout=10)
@@ -394,6 +422,28 @@ def self_test():
         def test_link_label_disagreeing_with_its_target_is_reported(self):
             r=self.append_doc(self.root(),f'\n\n[`UPSTREAM.md` at `{FIXTURE_OLD_PIN[:7]}`](https://github.com/owner/tokscale-core/blob/{FIXTURE_PIN}/UPSTREAM.md)\n')
             self.assertIn('label does not match its target','\n'.join(map(str,validate(r))))
+        def test_shallow_engine_skips_sha_existence_but_keeps_pin_checks(self):
+            import unittest.mock as mock
+            r=self.append_doc(self.root(),f'\n\nNative reviewed pin is `{FIXTURE_OLD_PIN}`.\n')
+            with mock.patch(f'{__name__}.engine_is_shallow',return_value=True), \
+                 mock.patch(f'{__name__}.gitlink_pin',return_value=FIXTURE_PIN):
+                s='\n'.join(map(str,validate(r)))
+            self.assertIn('stale reviewed pin',s)
+            self.assertNotIn('does not exist',s)
+        def test_gitlink_follows_an_uncommitted_submodule_checkout(self):
+            """A pin advance moves the submodule and edits the documents, then runs
+            this before committing. Reading the committed tree would reject every
+            correct advance, so the value must follow the submodule's own HEAD."""
+            import subprocess
+            r=self.root(); engine=r/'vendor'/'tokscale-core'; engine.mkdir(parents=True,exist_ok=True)
+            def git(*a,cwd=engine): subprocess.run(['git',*a],cwd=cwd,capture_output=True,check=True)
+            git('init','-q'); git('-c','user.email=t@t','-c','user.name=t','commit','-q','--allow-empty','-m','one')
+            first=subprocess.run(['git','rev-parse','HEAD'],cwd=engine,capture_output=True,text=True).stdout.strip()
+            self.assertEqual(gitlink_pin(r),first)
+            git('-c','user.email=t@t','-c','user.name=t','commit','-q','--allow-empty','-m','two')
+            second=subprocess.run(['git','rev-parse','HEAD'],cwd=engine,capture_output=True,text=True).stdout.strip()
+            self.assertNotEqual(first,second)
+            self.assertEqual(gitlink_pin(r),second,'must track the submodule checkout, not a committed gitlink')
         def test_missing_reviewed_pin_row_is_reported(self):
             r=self.root(); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)')
             self.assertIn('reviewed pin row is missing','\n'.join(map(str,validate(r))))
