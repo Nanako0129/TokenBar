@@ -195,10 +195,95 @@ def validate(root):
     if not vendor.exists(): errors.append(Issue('vendor/README.md',1,'consumer pin owner is missing'))
     if not vendor_doc.exists(): errors.append(Issue('docs/knowledge/vendor-tokscale.md',1,'vendor-tokscale.md is missing'))
     elif not any(t==vendor for t,_,_ in relative_links(root,vendor_doc,vendor_doc.read_text(encoding='utf-8')) if isinstance(t,Path)): errors.append(Issue(vendor_doc.relative_to(root),1,'vendor-tokscale.md must link to the consumer pin document'))
+    check_engine_pin(root,files,errors)
     ledger=next((p for p,d in meta.items() if d.get('kind')=='ledger'),None)
     if ledger: check_ledger(root,ledger,meta,errors)
     else: errors.append(Issue('docs/knowledge',1,'migration ledger document is missing'))
     return errors
+
+PIN_ROW = re.compile(r'\|\s*Reviewed pin\s*\|\s*`([0-9a-f]{40})`\s*\|')
+# The phrase must sit next to the SHA it introduces. A knowledge table row can
+# be thousands of characters long and legitimately cite several historical
+# engine revisions, so anchoring on the line would flag those as stale.
+PIN_CLAIM = re.compile(r'(?i)(?:reviewed\s+pin|現在\s*pin\s+reviewed)[^\n]{0,80}?`([0-9a-f]{40})`')
+ENGINE_BLOB = re.compile(r'\[([^\]]*)\]\(https://github\.com/[^/]+/tokscale-core/blob/([0-9a-f]{40})/[^)]*\)')
+SHORT_SHA = re.compile(r'\b[0-9a-f]{7,40}\b')
+ENGINE_SHA = re.compile(r'https://github\.com/[^/]+/tokscale-core/(?:blob|commit|tree)/([0-9a-f]{40})')
+
+def gitlink_pin(root):
+    """The commit the submodule is actually pinned to, or None outside a Git checkout.
+
+    `vendor/README.md` declares the pin, but a declaration is not the pin --
+    the gitlink is. Comparing documents only to each other passes a tree where
+    every document agrees on a SHA that was never checked out.
+    """
+    import subprocess
+    try:
+        out=subprocess.run(['git','ls-tree','HEAD','vendor/tokscale-core'],cwd=root,
+                           capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.SubprocessError): return None
+    if out.returncode!=0: return None
+    m=re.search(r'\b([0-9a-f]{40})\b',out.stdout)
+    return m.group(1) if m else None
+
+def sha_exists_in_engine(root,sha):
+    """Whether a SHA resolves in the submodule. None when it cannot be asked."""
+    import subprocess
+    engine=root/'vendor'/'tokscale-core'
+    if not (engine/'.git').exists(): return None
+    try:
+        out=subprocess.run(['git','cat-file','-e',f'{sha}^{{commit}}'],cwd=engine,
+                           capture_output=True,text=True,timeout=10)
+    except (OSError,subprocess.SubprocessError): return None
+    return out.returncode==0
+
+def check_engine_pin(root,files,errors):
+    """The reviewed engine pin is restated across several documents; vendor/README.md owns it.
+
+    Two shapes carry it and both drift. A prose claim names the SHA directly;
+    a permalink into the engine embeds it in the URL. Historical revisions are
+    legitimately cited in both shapes, so a citation is exempt only when it
+    says which revision it means: a link whose text carries the matching short
+    SHA is deliberate, a bare link is a claim about the current pin.
+
+    The owner document is checked against the gitlink rather than trusted, and
+    every engine SHA is checked for existence -- a fabricated one agrees with
+    itself everywhere it is pasted.
+    """
+    vendor_readme=root/'vendor'/'README.md'
+    if not vendor_readme.exists(): return
+    row=PIN_ROW.search(vendor_readme.read_text(encoding='utf-8'))
+    if not row:
+        errors.append(Issue('vendor/README.md',1,'reviewed pin row is missing or malformed'))
+        return
+    pin=row.group(1)
+    gitlink=gitlink_pin(root)
+    if gitlink and gitlink!=pin:
+        errors.append(Issue('vendor/README.md',1,f'declared pin does not match the gitlink\n    declared {pin}\n    gitlink  {gitlink}'))
+    seen=set()
+    for p in files:
+        rel=p.relative_to(root); text=p.read_text(encoding='utf-8')
+        for m in PIN_CLAIM.finditer(text):
+            if m.group(1)!=pin: errors.append(Issue(rel,line_no(text,m.start()),f'stale reviewed pin\n    found  {m.group(1)}\n    pin    {pin}'))
+        for m in ENGINE_BLOB.finditer(text):
+            label,target=m.group(1),m.group(2)
+            marks=SHORT_SHA.findall(label)
+            if marks:
+                # A labelled link cites a specific revision. The label may name a
+                # historical one, but it must name the one the URL points at --
+                # a reader who copies the label audits whatever it says.
+                if not any(target.startswith(s) for s in marks):
+                    errors.append(Issue(rel,line_no(text,m.start()),f'engine link label does not match its target\n    label  {marks[0]}\n    target {target}'))
+                continue
+            if target!=pin: errors.append(Issue(rel,line_no(text,m.start()),f'stale engine link (label a revision explicitly to cite a historical one)\n    found  {target}\n    pin    {pin}'))
+        for m in ENGINE_SHA.finditer(text):
+            sha=m.group(1)
+            if sha in seen: continue
+            seen.add(sha)
+            if sha_exists_in_engine(root,sha) is False:
+                errors.append(Issue(rel,line_no(text,m.start()),f'engine commit does not exist: {sha}'))
+    if sha_exists_in_engine(root,pin) is False:
+        errors.append(Issue('vendor/README.md',1,f'declared pin does not exist in the engine: {pin}'))
 
 def check_adapter(root,p):
     text=p.read_text(encoding='utf-8'); rel=p.relative_to(root); out=scan_text(rel,text)
@@ -279,18 +364,59 @@ def check_ledger(root,path,meta,errors):
     if parsed_counts is not None and any(parsed_counts[k]!=kind_counts[k] for k in ('memory','plan','local')):
         errors.append(Issue(rel,1,'boundary_counts do not match ledger row kind counts'))
 
+FIXTURE_PIN='a1b2c3d4e5f60718293a4b5c6d7e8f9012345678'
+FIXTURE_OLD_PIN='0f1e2d3c4b5a69788796a5b4c3d2e1f098765432'
+
 def self_test():
     class T(unittest.TestCase):
         def root(self,bad=False,parent=None):
             r=Path(tempfile.mkdtemp())
             if parent: r=r/parent/'repo'; r.mkdir(parents=True)
-            (r/'AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'CLAUDE.md').write_text('See AGENTS.md'); (r/'vendor').mkdir(); (r/'landing').mkdir(); (r/'README.md').write_text('[Knowledge](docs/knowledge/README.md)'); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)'); (r/'vendor/AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'landing/AGENTS.md').write_text('See docs/knowledge/README.md'); k=r/'docs/knowledge'; k.mkdir(parents=True)
+            (r/'AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'CLAUDE.md').write_text('See AGENTS.md'); (r/'vendor').mkdir(); (r/'landing').mkdir(); (r/'README.md').write_text('[Knowledge](docs/knowledge/README.md)'); (r/'vendor/README.md').write_text(f'[Knowledge](../docs/knowledge/vendor-tokscale.md)\n\n| Field | Value |\n|---|---|\n| Reviewed pin | `{FIXTURE_PIN}` |\n'); (r/'vendor/AGENTS.md').write_text('See docs/knowledge/README.md'); (r/'landing/AGENTS.md').write_text('See docs/knowledge/README.md'); k=r/'docs/knowledge'; k.mkdir(parents=True)
             rows='\n'.join(f'| `SRC-{i:03d}` | {"local" if i==58 else "plan" if i==57 else "memory"} | topic-{i:03d} | active | public | migrated | doc-{i:03d} | checked |' for i in range(1,59))
             head='---\nid: ledger\nkind: ledger\nstatus: active\nscope: repository\nread_when: migration\nlast_verified: 2026-07-14\nsources: [internal]\nsource_total: 58\nboundary_counts: {memory: 56, plan: 1, local: 1}\n---\n# Ledger\n| source | kind | topic | status | privacy | treatment | destination | verification |\n| --- | --- | --- | --- | --- | --- | --- | --- |\n'
             (k/'ledger.md').write_text(head+rows+'\n\n| verification | result |\n| --- | --- |\n| no-gaps | pass |\n'); (k/'vendor-tokscale.md').write_text('---\nid: vendor\nkind: canonical\nstatus: active\nscope: repo\nread_when: vendor\nlast_verified: 2026-07-14\nsources: [internal]\n---\n# Vendor\n[vendor](../../vendor/README.md)'); (k/'README.md').write_text('---\nid: index\nkind: index\nstatus: active\nscope: repo\nread_when: lookup\nlast_verified: 2026-07-14\nsources: [internal]\n---\n# Index\n[vendor](vendor-tokscale.md)\n[ledger](ledger.md#ledger)')
             if bad: (k/'bad.md').write_text('---\nid: index\nkind: nope\nstatus: active\nscope: wrong\nread_when: lookup\nlast_verified: 2026-07-14\nsources: [internal]\n---\nsecret = sk-live-1 [missing](no.md)')
             return r
         def test_good(self): self.assertEqual(validate(self.root()),[])
+        def append_doc(self,r,extra):
+            d=r/'docs/knowledge/vendor-tokscale.md'; d.write_text(d.read_text()+extra); return r
+        def test_engine_pin_claim_matching_owner_passes(self):
+            self.assertEqual(validate(self.append_doc(self.root(),f'\n\nNative reviewed pin is `{FIXTURE_PIN}`.\n')),[])
+        def test_stale_engine_pin_claim_is_reported(self):
+            self.assertIn('stale reviewed pin','\n'.join(map(str,validate(self.append_doc(self.root(),f'\n\nNative reviewed pin is `{FIXTURE_OLD_PIN}`.\n')))))
+        def test_stale_engine_blob_link_is_reported(self):
+            self.assertIn('stale engine link','\n'.join(map(str,validate(self.append_doc(self.root(),f'\n\n[`UPSTREAM.md`](https://github.com/owner/tokscale-core/blob/{FIXTURE_OLD_PIN}/UPSTREAM.md)\n')))))
+        def test_engine_blob_link_labelled_with_its_revision_is_exempt(self):
+            self.assertEqual(validate(self.append_doc(self.root(),f'\n\n[`UPSTREAM.md` at `{FIXTURE_OLD_PIN[:7]}`](https://github.com/owner/tokscale-core/blob/{FIXTURE_OLD_PIN}/UPSTREAM.md)\n')),[])
+        def test_engine_blob_link_at_the_pin_passes_unlabelled(self):
+            self.assertEqual(validate(self.append_doc(self.root(),f'\n\n[`UPSTREAM.md`](https://github.com/owner/tokscale-core/blob/{FIXTURE_PIN}/UPSTREAM.md)\n')),[])
+        def test_link_label_disagreeing_with_its_target_is_reported(self):
+            r=self.append_doc(self.root(),f'\n\n[`UPSTREAM.md` at `{FIXTURE_OLD_PIN[:7]}`](https://github.com/owner/tokscale-core/blob/{FIXTURE_PIN}/UPSTREAM.md)\n')
+            self.assertIn('label does not match its target','\n'.join(map(str,validate(r))))
+        def test_missing_reviewed_pin_row_is_reported(self):
+            r=self.root(); (r/'vendor/README.md').write_text('[Knowledge](../docs/knowledge/vendor-tokscale.md)')
+            self.assertIn('reviewed pin row is missing','\n'.join(map(str,validate(r))))
+        def test_gitlink_disagreement_is_reported(self):
+            import unittest.mock as mock
+            r=self.root()
+            with mock.patch(f'{__name__}.gitlink_pin',return_value=FIXTURE_OLD_PIN):
+                self.assertIn('does not match the gitlink','\n'.join(map(str,validate(r))))
+        def test_gitlink_agreement_passes(self):
+            import unittest.mock as mock
+            r=self.root()
+            with mock.patch(f'{__name__}.gitlink_pin',return_value=FIXTURE_PIN):
+                self.assertEqual(validate(r),[])
+        def test_absent_gitlink_does_not_block(self):
+            import unittest.mock as mock
+            r=self.root()
+            with mock.patch(f'{__name__}.gitlink_pin',return_value=None):
+                self.assertEqual(validate(r),[])
+        def test_nonexistent_engine_sha_is_reported(self):
+            import unittest.mock as mock
+            r=self.append_doc(self.root(),f'\n\n[`UPSTREAM.md` at `{FIXTURE_OLD_PIN[:7]}`](https://github.com/owner/tokscale-core/blob/{FIXTURE_OLD_PIN}/UPSTREAM.md)\n')
+            with mock.patch(f'{__name__}.sha_exists_in_engine',side_effect=lambda root,sha: sha!=FIXTURE_OLD_PIN):
+                self.assertIn('does not exist','\n'.join(map(str,validate(r))))
         def test_bad(self):
             s='\n'.join(map(str,validate(self.root(True)))); self.assertIn('duplicate id',s); self.assertIn('missing link target',s); self.assertIn('secret value',s); self.assertIn('invalid scope',s)
         def test_ignored_overlay_is_ignored(self):

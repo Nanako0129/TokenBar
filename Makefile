@@ -6,6 +6,7 @@
 all: build
 
 check-docs:
+	python3 scripts/check_knowledge.py --self-test
 	python3 scripts/check_knowledge.py
 
 rust:

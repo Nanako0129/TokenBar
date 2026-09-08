@@ -18,7 +18,9 @@ jobs:
           submodules: recursive
 
       - name: Validate knowledge contracts
-        run: python3 scripts/check_knowledge.py
+        run: |
+          python3 scripts/check_knowledge.py --self-test
+          python3 scripts/check_knowledge.py
 
       - uses: dtolnay/rust-toolchain@stable
 
