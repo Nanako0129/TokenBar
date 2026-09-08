@@ -4573,6 +4573,17 @@ enum SelfTest {
                 && unknownTransport?.first?.status == nil
                 && unknownTransport?.first?.osCode == nil,
             "unknown transport tuples drop associated numerics")
+        // The OpenCode Go provider publishes diagnostics under clientId "opencode";
+        // it is on the allowlist, so its id is preserved rather than rewritten to
+        // "unknown" like an unsupported client.
+        let opencodeTransport = transportEntries(
+            transportBase.replacingOccurrences(of: "codex", with: "opencode")
+                + #","transportDiagnostic":{"category":"rateLimited","status":429,"osCode":-1}"#)
+        expect(
+            opencodeTransport?.first?.clientId == "opencode"
+                && opencodeTransport?.first?.category == "rateLimited"
+                && opencodeTransport?.first?.status == 429,
+            "opencode transport diagnostics keep their client id")
         let malformedTransportBodies = [
             transportBase + #","transportDiagnostic":"not-an-object""#,
             transportBase + #","transportDiagnostic":{"status":500}"#,
