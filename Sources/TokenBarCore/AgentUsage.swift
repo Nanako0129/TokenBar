@@ -624,10 +624,14 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         let byLength = tier { window in
             window.durationSeconds.flatMap { $0 > 0 ? windowPeriod($0) : nil }
         }
+        // The SAME span the countdown in the row prints, rounding included:
+        // `durationText` alone rounds to the nearest minute while the countdown
+        // takes minutes up, which put `4h 59m` in a name beside `Resets in 5h`
+        // in the same row for the first half of every minute.
         let byReset = tier { window in
             window.resetsAt
                 .flatMap(parseRFC3339)
-                .map { UsagePace.durationText($0.timeIntervalSince(now)) }
+                .flatMap { UsagePace.spanText(until: $0, now: now) }
         }
 
         // The occurrence index within its own repeated-label group: the

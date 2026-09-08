@@ -5107,6 +5107,36 @@ enum SelfTest {
             "a pair the provider left without any duration is named by the resets "
                 + "the rows already show")
 
+        // And named under the countdown's rounding, not its own. The countdown
+        // takes minutes UP while `durationText` alone rounds to the nearest, so
+        // a reset one second inside five hours put `4h 59m` in the name beside
+        // `Resets in 5h` in the same row, for the first half of every minute.
+        let roundingIso = ISO8601DateFormatter()
+        let nearlyFiveHours = Date().addingTimeInterval(5 * 3_600 - 1)
+        let roundingJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"a.v1","label":"Codex Spark","usedPercent":0,
+              "remainingPercent":100,"resetsAt":"\(roundingIso.string(from: nearlyFiveHours))",
+              "paceStatus":{"state":"unavailable","windowKey":"a.v1",
+              "completeCycles":0,"reason":"invalidEvidence"}},
+             {"cardId":"b.v1","label":"Codex Spark","usedPercent":0,
+              "remainingPercent":100,
+              "resetsAt":"\(roundingIso.string(from: Date().addingTimeInterval(7 * 86_400)))",
+              "paceStatus":{"state":"unavailable","windowKey":"b.v1",
+              "completeCycles":0,"reason":"invalidEvidence"}}
+           ]}
+        ]}
+        """
+        let roundingPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(roundingJSON.utf8))
+        let roundingWindow = roundingPayload.agents[0].uniqueCardWindows[0]
+        expect(
+            roundingWindow.label == "Codex Spark · 5h"
+                && UsagePace.resetText(for: roundingWindow.resetsAt ?? "") == "Resets in 5h",
+            "the qualifier and the countdown beside it round the same way")
+
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
         // (codex|Weekly, 35%); an EXPLICIT pick of a hidden client is honored;
