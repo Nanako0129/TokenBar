@@ -5107,6 +5107,27 @@ enum SelfTest {
             sparkPair(90, 119) == ["Codex Spark · 1", "Codex Spark · 2"],
             "windows whose lengths render identically still get unique names")
 
+        // A generated name must also avoid a label some OTHER window already
+        // carries. Two durationless `Foo` windows beside one already called
+        // `Foo · 1` used to produce `Foo · 1` twice: uniqueness inside the
+        // repeated group says nothing about the rest of the card view.
+        let collisionJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"a.v1","label":"Foo","usedPercent":0,"remainingPercent":100},
+             {"cardId":"b.v1","label":"Foo","usedPercent":0,"remainingPercent":100},
+             {"cardId":"c.v1","label":"Foo · 1","usedPercent":0,"remainingPercent":100}
+           ]}
+        ]}
+        """
+        let collisionLabels = try! JSONDecoder()
+            .decode(AgentUsagePayload.self, from: Data(collisionJSON.utf8))
+            .agents[0].uniqueCardWindows.map(\.label)
+        expect(
+            Set(collisionLabels).count == 3 && collisionLabels.contains("Foo · 1"),
+            "a generated name steps over a label another window already carries")
+
         // The state the issue was filed from, and the one this account is in:
         // Codex reports a window with no usage yet as
         // `unavailable(invalidEvidence)`, and `UsageWindow.unavailable` clears

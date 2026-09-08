@@ -606,6 +606,17 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         for window in windows { counts[window.label, default: 0] += 1 }
         guard counts.values.contains(where: { $0 > 1 }) else { return windows }
 
+        // What a window that is NOT being qualified will render as. A generated
+        // name has to avoid these too: a snapshot holding two `Foo` windows and
+        // one already labelled `Foo · 1` would otherwise be given a second
+        // `Foo · 1`, and uniqueness inside the group says nothing about that.
+        let untouched = Set(
+            windows.filter { counts[$0.label, default: 0] == 1 }.map(\.label))
+
+        func compose(_ label: String, _ qualifier: String) -> String {
+            "%@ · %@".localized(label.localized, qualifier)
+        }
+
         func tier(_ candidate: (UsageWindow) -> String?) -> [String: [String]] {
             var byLabel: [String: [String]] = [:]
             for window in windows where counts[window.label, default: 0] > 1 {
@@ -618,6 +629,7 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
             }
             return byLabel.filter { label, values in
                 values.count == counts[label] && Set(values).count == values.count
+                    && values.allSatisfy { !untouched.contains(compose(label, $0)) }
             }
         }
 
@@ -635,18 +647,28 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         }
 
         // The occurrence index within its own repeated-label group: the
-        // position each tier's candidates were collected at, and the ordinal
-        // the last tier falls back to.
+        // position each tier's candidates were collected at, and the seed for
+        // the ordinal the last tier falls back to. The ordinal walks forward
+        // past anything already on screen, so it is unique against the whole
+        // output rather than only against its own group.
         var taken: [String: Int] = [:]
+        var used = untouched
         return windows.map { window in
             guard counts[window.label, default: 0] > 1 else { return window }
             let index = taken[window.label, default: 0]
             taken[window.label] = index + 1
-            let qualifier = byLength[window.label]?[index]
-                ?? byReset[window.label]?[index]
-                ?? String(index + 1)
+            var name = (byLength[window.label]?[index] ?? byReset[window.label]?[index])
+                .map { compose(window.label, $0) }
+            if name == nil || used.contains(name!) {
+                var ordinal = index + 1
+                while used.contains(compose(window.label, String(ordinal))) {
+                    ordinal += 1
+                }
+                name = compose(window.label, String(ordinal))
+            }
+            used.insert(name!)
             var qualified = window
-            qualified.label = "%@ · %@".localized(window.label.localized, qualifier)
+            qualified.label = name!
             return qualified
         }
     }
