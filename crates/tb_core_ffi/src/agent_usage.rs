@@ -1462,13 +1462,38 @@ where
     }
 }
 
+/// Takes no `now`: it reads the clock itself, and the outcome it is handed is
+/// proof the response has already arrived.
+///
+/// Every caller used to capture `Utc::now()` on its first line and hold it
+/// across the request, so the timestamp the pace evidence was validated
+/// against was older than the response BY CONSTRUCTION — by the round-trip
+/// time. That is fatal for a window a provider reports as not yet started:
+/// Codex answers a window with no usage with `reset_at = <its now> +
+/// limit_window_seconds`, so the cycle's start IS the instant the response was
+/// built, and `valid_evidence`'s `cycle_started_at <= now` compares it against
+/// a clock reading from before the request. Measured on live data 2026-09-08:
+/// start `1788848567` against `now = 1788848566`, one second apart, which
+/// rejected the provider's duration and left `UsageWindow::unavailable` to
+/// clear `duration_seconds`, `duration_source` and `window_minutes` — no pace,
+/// no length, and a window Swift could no longer place at all (#296).
+///
+/// The comparison is at one-second granularity, so the old ordering failed
+/// only when the round trip crossed a second boundary; the same window was
+/// accepted minutes earlier and rejected later, which is why it read as the
+/// provider being inconsistent rather than as a bug here.
+///
+/// The parameter is gone rather than moved below the `await` at each caller,
+/// so a pre-request timestamp cannot be handed back in.
+/// `apply_provider_outcome_with` still takes one, because a test needs to
+/// state the instant it is asserting about.
 fn apply_provider_outcome(
     client_id: &str,
     account: Option<&str>,
     failure_source: &str,
-    now: DateTime<Utc>,
     outcome: ProviderFetchOutcome,
 ) -> Option<AgentUsageSnapshot> {
+    let now = Utc::now();
     apply_provider_outcome_with(
         &PROVIDER_LAST_GOOD,
         client_id,
@@ -1533,7 +1558,7 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
         Ok(None) => ProviderFetchOutcome::Absent,
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("grok", None, "oauth", now, outcome)
+    apply_provider_outcome("grok", None, "oauth", outcome)
 }
 
 async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
@@ -1568,7 +1593,7 @@ async fn fetch_copilot() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("copilot", None, "oauth", now, outcome)
+    apply_provider_outcome("copilot", None, "oauth", outcome)
 }
 
 async fn fetch_antigravity() -> AgentUsageSnapshot {
@@ -1592,13 +1617,12 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         },
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("antigravity", None, "oauth", now, outcome)
+    apply_provider_outcome("antigravity", None, "oauth", outcome)
         .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
-    let now = Utc::now();
-    apply_provider_outcome("codex", None, "oauth", now, fetch_codex_inner().await)
+    apply_provider_outcome("codex", None, "oauth", fetch_codex_inner().await)
         .expect("Codex is a required provider card")
 }
 
@@ -1702,9 +1726,8 @@ fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<Dat
 }
 
 async fn fetch_claude() -> AgentUsageSnapshot {
-    let now = Utc::now();
     let (failure_source, outcome) = fetch_claude_inner().await;
-    apply_provider_outcome("claude", None, failure_source, now, outcome)
+    apply_provider_outcome("claude", None, failure_source, outcome)
         .expect("Claude is a required provider card")
 }
 
@@ -1788,9 +1811,8 @@ async fn join_local_ordered<T: 'static>(
 }
 
 async fn fetch_claude_extra_account(config_dir: &str) -> AgentUsageSnapshot {
-    let now = Utc::now();
     let (failure_source, outcome) = fetch_claude_extra_inner(config_dir).await;
-    apply_provider_outcome("claude", Some(config_dir), failure_source, now, outcome)
+    apply_provider_outcome("claude", Some(config_dir), failure_source, outcome)
         .expect("an extra Claude account always produces a card")
 }
 

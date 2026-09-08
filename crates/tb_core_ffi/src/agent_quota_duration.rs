@@ -523,6 +523,32 @@ mod tests {
         );
     }
 
+    /// The boundary #296 turned on. A provider answering a window with no
+    /// usage yet reports `reset_at = <its now> + duration`, so the cycle's
+    /// start IS the instant the response was built. Evidence evaluated against
+    /// that instant is Ready; evaluated against a clock reading from one
+    /// second earlier — which is what holding `Utc::now()` across the request
+    /// produced — the same evidence is rejected and the window loses its
+    /// duration, its `window_minutes` and its pace with it.
+    #[test]
+    fn a_window_starting_exactly_now_is_ready_and_one_second_early_is_not() {
+        let response_at = 1_788_848_567;
+        let reset = response_at + 5 * HOUR;
+        let evidence = DurationEvidence::provider(reset, 5 * HOUR);
+
+        assert_eq!(
+            resolve_duration(response_at, Some(reset), Some(evidence), None, None),
+            DurationResolution::Ready {
+                duration_seconds: 5 * HOUR,
+                source: DurationSource::Provider,
+            }
+        );
+        assert_eq!(
+            resolve_duration(response_at - 1, Some(reset), Some(evidence), None, None),
+            DurationResolution::Unavailable(DurationUnavailableReason::InvalidEvidence)
+        );
+    }
+
     #[test]
     fn malformed_present_evidence_is_invalid_without_fallback() {
         let now = 10_000;
