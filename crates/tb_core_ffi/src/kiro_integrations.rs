@@ -5,8 +5,10 @@
 //! - **kiro-cli** writes it into a SQLite store (`auth_kv`, key
 //!   `kirocli:social:token`), the value a JSON object with `access_token`,
 //!   `profile_arn` and `expires_at`. We read it through the `sqlite3` binary
-//!   (read-only), the same subprocess approach `agent_antigravity.rs` uses for
-//!   the Antigravity CLI; there is no SQLite dependency in the crate.
+//!   (read-only) on macOS and Linux, the same subprocess approach
+//!   `agent_antigravity.rs` uses for the Antigravity CLI; there is no SQLite
+//!   dependency in the crate. Other targets have no `sqlite3` at a known path,
+//!   so this source is unavailable there and only the IDE token file is read.
 //! - **Kiro IDE** writes a plain JSON token file under `~/.aws/sso/cache`.
 //!
 //! We collect every source that holds a token, then pick the freshest: a valid
@@ -75,14 +77,38 @@ enum TokenParse {
 
 pub(crate) async fn kiro_credential(now: DateTime<Utc>) -> KiroCredentialLoad {
     let mut candidates = Vec::new();
+    let mut terminal: Option<String> = None;
     for outcome in [load_cli_candidate().await, load_ide_candidate()] {
         match outcome {
-            SourceOutcome::Terminal(display) => return KiroCredentialLoad::Terminal(display),
             SourceOutcome::Candidate(candidate) => candidates.push(candidate),
+            // Keep the first hard error, but do not return on it yet: a broken
+            // store in one source must not hide a valid token in the other. The
+            // error is surfaced only if no source yields a usable candidate.
+            SourceOutcome::Terminal(display) => {
+                if terminal.is_none() {
+                    terminal = Some(display);
+                }
+            }
             SourceOutcome::Absent => {}
         }
     }
-    select_candidate(candidates, now.timestamp_millis())
+    select_with_fallback(candidates, terminal, now.timestamp_millis())
+}
+
+/// Select the freshest candidate; a sibling source's hard error is surfaced only
+/// when no candidate is usable, so a broken store never hides a valid token.
+fn select_with_fallback(
+    candidates: Vec<Candidate>,
+    terminal: Option<String>,
+    now_ms: i64,
+) -> KiroCredentialLoad {
+    match select_candidate(candidates, now_ms) {
+        KiroCredentialLoad::Absent => match terminal {
+            Some(display) => KiroCredentialLoad::Terminal(display),
+            None => KiroCredentialLoad::Absent,
+        },
+        selected => selected,
+    }
 }
 
 /// Prefer a non-expired token (freshest expiry wins). When a source is present
@@ -95,7 +121,16 @@ fn select_candidate(candidates: Vec<Candidate>, now_ms: i64) -> KiroCredentialLo
     let best_fresh = candidates
         .into_iter()
         .filter(|candidate| candidate.expires_at_ms.is_none_or(|expiry| expiry > now_ms))
-        .max_by_key(|candidate| candidate.expires_at_ms.unwrap_or(i64::MAX));
+        .max_by_key(|candidate| {
+            // Prefer a token we can prove is fresh (a known future expiry) over
+            // one whose expiry is unknown, since an unknown expiry could in fact
+            // be past. Among known-fresh tokens the latest expiry wins; a token
+            // with no expiry is used only when it is the sole fresh candidate.
+            (
+                candidate.expires_at_ms.is_some(),
+                candidate.expires_at_ms.unwrap_or(i64::MIN),
+            )
+        });
     match best_fresh {
         Some(candidate) => KiroCredentialLoad::Present(KiroCredential {
             request_token: candidate.access_token.clone(),
@@ -253,7 +288,14 @@ fn parse_expires_at_ms(value: &Value) -> Option<i64> {
             } else {
                 millis
             };
-            (millis.is_finite() && millis >= 0.0).then_some(millis as i64)
+            // Bound the value before the `as i64` cast: that cast saturates, so
+            // an absurd expiry would become `i64::MAX` and, under the
+            // freshest-token ranking, outrank every real token. An out-of-range
+            // value reads as "unknown expiry" (None) instead, which ranks below
+            // any provably-fresh token.
+            (0.0..i64::MAX as f64)
+                .contains(&millis)
+                .then_some(millis as i64)
         }
         Value::String(text) if !text.trim().is_empty() => DateTime::parse_from_rfc3339(text.trim())
             .ok()
@@ -264,6 +306,12 @@ fn parse_expires_at_ms(value: &Value) -> Option<i64> {
 
 async fn read_cli_sqlite_value(db_path: &Path) -> Option<String> {
     let future = tokio::process::Command::new(SQLITE3_BIN)
+        // `-init /dev/null` stops sqlite3 from sourcing the user's ~/.sqliterc,
+        // whose `.mode`/`.headers` commands would corrupt the raw value we parse
+        // and whose `.shell`/`.system` commands would otherwise run on every
+        // quota refresh. This source is macOS/Linux only, so /dev/null is valid.
+        .arg("-init")
+        .arg("/dev/null")
         .arg("-readonly")
         .arg(db_path)
         .arg(CLI_TOKEN_QUERY)
@@ -312,16 +360,12 @@ fn cli_db_path() -> Option<PathBuf> {
     Some(root.join("kiro-cli").join("data.sqlite3"))
 }
 
-#[cfg(target_os = "windows")]
-fn cli_db_path() -> Option<PathBuf> {
-    let root = match std::env::var("APPDATA") {
-        Ok(root) if !root.is_empty() => PathBuf::from(root),
-        _ => crate::user_home_dir()?.join("AppData").join("Roaming"),
-    };
-    Some(root.join("kiro-cli").join("data.sqlite3"))
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+// Other targets (Windows included) have no `sqlite3` at a known absolute path
+// to read the kiro-cli store, so the CLI source is unavailable and a signed-in
+// user falls through to the Kiro IDE token file. Returning `None` here keeps
+// `load_cli_candidate` from launching a reader that cannot run, and from
+// advertising a store path it could never query.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn cli_db_path() -> Option<PathBuf> {
     None
 }
@@ -414,6 +458,10 @@ mod tests {
             serde_json::json!(null),
             serde_json::json!(-5),
             serde_json::json!(true),
+            // An oversized value must read as unknown (None), not saturate to
+            // i64::MAX on the cast and outrank every real token.
+            serde_json::json!(1e30),
+            serde_json::json!(9.3e18),
         ] {
             assert_eq!(parse_expires_at_ms(&bad), None, "{bad}");
         }
@@ -447,7 +495,8 @@ mod tests {
             }
             _ => panic!("expected a present credential"),
         }
-        // Freshest expiry wins among several non-expired.
+        // A provably-fresh token (known future expiry) beats one with an
+        // unknown expiry, and among known ones the latest expiry wins.
         let load = select_candidate(
             vec![
                 candidate(Some(now + 100), "soon"),
@@ -458,10 +507,53 @@ mod tests {
         );
         match load {
             KiroCredentialLoad::Present(credential) => {
-                assert_eq!(credential.request_token, "unknown-expiry");
+                assert_eq!(credential.request_token, "later");
             }
             _ => panic!("expected a present credential"),
         }
+        // An unknown-expiry token is used only when it is the sole fresh one.
+        let load = select_candidate(vec![candidate(None, "only-unknown")], now);
+        match load {
+            KiroCredentialLoad::Present(credential) => {
+                assert_eq!(credential.request_token, "only-unknown");
+            }
+            _ => panic!("expected a present credential"),
+        }
+    }
+
+    #[test]
+    fn a_valid_token_in_one_source_overrides_a_broken_other_source() {
+        // `kiro_credential` returns Terminal only when no source yields a usable
+        // token: a candidate must win over a sibling source's hard error, and the
+        // error is surfaced only when there is no candidate at all.
+        let now = 1_000_000;
+        let broken = Some("Kiro CLI token entry is malformed.".to_string());
+        // A valid candidate wins even though the other source errored.
+        let selected = select_with_fallback(
+            vec![candidate(Some(now + 5_000), "good")],
+            broken.clone(),
+            now,
+        );
+        assert!(
+            matches!(selected, KiroCredentialLoad::Present(credential) if credential.request_token == "good"),
+            "a collected candidate is selected regardless of another source's error"
+        );
+        // No candidate and a source errored -> surface that error, not Absent.
+        assert!(matches!(
+            select_with_fallback(vec![], broken, now),
+            KiroCredentialLoad::Terminal(_)
+        ));
+        // No candidate and no error -> Absent (simply not signed in).
+        assert!(matches!(
+            select_with_fallback(vec![], None, now),
+            KiroCredentialLoad::Absent
+        ));
+        // Every collected token expired -> the reauth Terminal from selection,
+        // regardless of whether another source also errored.
+        assert!(matches!(
+            select_with_fallback(vec![candidate(Some(now - 1), "stale")], None, now),
+            KiroCredentialLoad::Terminal(_)
+        ));
     }
 
     #[test]
