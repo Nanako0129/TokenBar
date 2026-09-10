@@ -7286,22 +7286,28 @@ enum SelfTest {
             summaryClients == registryClients && contributionClients == registryClients
                 && quotaClients == registryClients,
             "demo summary contributions and quota share the client set")
+        // The canonical card identities a demo client is expected to expose, in
+        // order. The authority for each is the provider's own card-ID constant
+        // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
+        // drift from what the app renders against the real provider — including
+        // when a typo is copied into both `cardId` and `paceStatus.windowKey`,
+        // where comparing the two fields to each other proves nothing. Most
+        // providers report the session/weekly pair; one whose real shape differs
+        // states its own row rather than forcing every client to match it.
+        let demoCardIdsByClient: [String: [String]] = [:]
+        let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count
                 && quota.agents.allSatisfy { agent in
-                    // Card identity, not window shape: a provider reporting one
-                    // monthly allowance or three rolling ones is as legitimate
-                    // as the session/weekly pair, so the count is not the
-                    // property. `uniqueCardWindows` is fail-closed on a repeated
-                    // card ID, which means asserting uniqueness ON that view can
-                    // never fail — compare it against the raw array instead, so
-                    // a fixture that wrote one ID twice shows up as a row the
-                    // app silently drops.
-                    agent.uniqueCardWindows.count == agent.windows.count
-                        && !agent.windows.isEmpty
+                    // The raw array, not `uniqueCardWindows`: that view is
+                    // fail-closed on a repeated card ID, so a fixture writing
+                    // one ID twice would reach this comparison already
+                    // deduplicated and match a shorter expectation.
+                    agent.windows.map(\.cardId)
+                        == (demoCardIdsByClient[agent.clientId] ?? defaultDemoCardIds)
                         && agent.windows.allSatisfy { $0.cardId == $0.paceStatus.windowKey }
                 },
-            "demo quota cards carry distinct card identities that match their pace keys")
+            "demo quota cards carry the canonical card identities their provider declares")
 
         let firstDemoWindows = quota.agents.first?.uniqueCardWindows ?? []
         let secondDemoWindows = quota.agents.dropFirst().first?.uniqueCardWindows ?? []
