@@ -38,9 +38,12 @@ keeps those changes auditable in the engine's `UPSTREAM.md`. TokenBar continues
 to own app-specific FFI, C ABI, Swift, and build wiring outside the submodule.
 
 > **Schema rule：** If a selected change alters serialized parser output,
-> dedup keys, or attribution, bump the shared engine's cache schema and prove
-> stale-cache rebuild. tokscale upstream's counter is not the shared engine's
-> counter.
+> dedup keys, or attribution, advance the shared engine's invalidation state
+> and prove stale-cache rebuild. That state is two counters, not one:
+> `CACHE_FORMAT_VERSION` for the serialized layout and cross-client types,
+> `parser_version(<client>)` for one client's parse semantics. Prefer the
+> per-client counter for a parser fix. tokscale upstream's counters are not
+> the shared engine's counters.
 
 ## Public tracking
 
