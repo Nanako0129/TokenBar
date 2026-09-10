@@ -7289,12 +7289,19 @@ enum SelfTest {
         expect(
             quota.agents.count == ClientRegistry.allIds.count
                 && quota.agents.allSatisfy { agent in
-                    let windows = agent.uniqueCardWindows
-                    return windows.count == 2
-                        && windows[0].cardId == "session.v1"
-                        && windows[1].cardId == "weekly.v1"
+                    // Card identity, not window shape: a provider reporting one
+                    // monthly allowance or three rolling ones is as legitimate
+                    // as the session/weekly pair, so the count is not the
+                    // property. `uniqueCardWindows` is fail-closed on a repeated
+                    // card ID, which means asserting uniqueness ON that view can
+                    // never fail — compare it against the raw array instead, so
+                    // a fixture that wrote one ID twice shows up as a row the
+                    // app silently drops.
+                    agent.uniqueCardWindows.count == agent.windows.count
+                        && !agent.windows.isEmpty
+                        && agent.windows.allSatisfy { $0.cardId == $0.paceStatus.windowKey }
                 },
-            "demo quota cards use unique canonical window identities")
+            "demo quota cards carry distinct card identities that match their pace keys")
 
         let firstDemoWindows = quota.agents.first?.uniqueCardWindows ?? []
         let secondDemoWindows = quota.agents.dropFirst().first?.uniqueCardWindows ?? []
@@ -7348,14 +7355,26 @@ enum SelfTest {
             "demo learning-duration and unavailable rows suppress projections")
         expect(
             quota.agents.dropFirst(2).allSatisfy { agent in
-                agent.uniqueCardWindows.allSatisfy {
-                    $0.paceStatus.state == .learningHistory
-                        && $0.paceStatus.durationSource == .contract
-                        && $0.paceStatus.completeCycles == 0
-                        && $0.historicalPace == nil
+                agent.uniqueCardWindows.allSatisfy { window in
+                    let pace = window.paceStatus
+                    guard pace.completeCycles == 0, window.historicalPace == nil else {
+                        return false
+                    }
+                    // The pace state a fixture claims has to match the evidence
+                    // its provider actually supplies. A declared cycle length
+                    // puts the window in learning-history; a provider that
+                    // reports a percent and nothing else leaves it learning the
+                    // duration. Demanding `contract` of every card was the same
+                    // rule for as long as every provider happened to declare one.
+                    if pace.durationSeconds == nil {
+                        return pace.state == .learningDuration
+                            && pace.durationSource == .observed
+                    }
+                    return pace.state == .learningHistory
+                        && pace.durationSource == .contract
                 }
             },
-            "remaining demo quota cards stay on canonical learning-history fixtures")
+            "remaining demo quota cards match the pace evidence their provider supplies")
 
         let modelReport = DemoData.modelReport
         let hourlyReport = DemoData.hourlyReport
