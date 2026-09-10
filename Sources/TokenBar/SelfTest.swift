@@ -4618,6 +4618,17 @@ enum SelfTest {
                 && unknownTransport?.first?.status == nil
                 && unknownTransport?.first?.osCode == nil,
             "unknown transport tuples drop associated numerics")
+        // The Kiro provider publishes diagnostics under clientId "kiro"; it is on
+        // the allowlist, so its id is preserved rather than rewritten to "unknown"
+        // like an unsupported client.
+        let kiroTransport = transportEntries(
+            transportBase.replacingOccurrences(of: "codex", with: "kiro")
+                + #","transportDiagnostic":{"category":"rateLimited","status":429,"osCode":-1}"#)
+        expect(
+            kiroTransport?.first?.clientId == "kiro"
+                && kiroTransport?.first?.category == "rateLimited"
+                && kiroTransport?.first?.status == 429,
+            "kiro transport diagnostics keep their client id")
         let malformedTransportBodies = [
             transportBase + #","transportDiagnostic":"not-an-object""#,
             transportBase + #","transportDiagnostic":{"status":500}"#,

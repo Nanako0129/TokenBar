@@ -711,7 +711,9 @@ package struct AgentUsageTransportLogEntry: Equatable, Sendable {
 }
 
 private let agentUsageTransportLogClientIds: Set<String> = [
-    "codex", "claude", "antigravity", "copilot", "grok",
+    // "kiro" carries the Kiro subscription quota; keep its transport diagnostics
+    // attributable instead of rewriting them to "unknown" like an unsupported id.
+    "codex", "claude", "antigravity", "copilot", "grok", "kiro",
 ]
 
 private let agentUsageTransportLogCategories: Set<String> = [
