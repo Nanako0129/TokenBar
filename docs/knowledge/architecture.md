@@ -4,7 +4,7 @@ id: kb-architecture
 kind: canonical
 scope: repository
 read_when: changing Rust parsing, the C ABI, Swift models, reports, cache, or filters
-last_verified: 2026-09-10
+last_verified: 2026-09-11
 sources: [".gitmodules", "Package.swift", "Makefile", "Sources/CTB/include/ctb.h", "crates/tb_core_ffi", "crates/tb_core_ffi/src/agent_account_scope.rs", "crates/tb_core_ffi/src/agent_quota_duration.rs", "crates/tb_core_ffi/src/agent_quota_history.rs", "crates/tb_core_ffi/src/agent_storage_windows.rs", "Sources/TokenBarCore", "Sources/TokenBar", "docs/knowledge/plans/provider-quota-pace.md", "vendor/README.md", "public tokscale-core commit b31e394", "public TokenBar PR #114", "public TokenBar-Windows PR #12", "public TokenBar-Windows PR #20"]
 ---
 
@@ -156,6 +156,12 @@ Pricing and quota are separate flows. Shared-engine tokscale pricing resolves mo
 | Quota curve snapshot | Rust `tb_quota_curve` over the publication-owned binding table | Request by `clientId`、`windowKey` and `publicationGeneration`；treat expiry and an unavailable binding as errors, `null` as absent history, and never reconstruct the series identity in Swift |
 | Tray quota selection | Swift `QuotaResolver` | Select from already decoded windows by `clientId|cardId`；do not make a second provider request |
 | Linear pace policy | Swift `TokenBarCore` | Use Rust-owned positive `durationSeconds` only for explicit Linear mode or `learningHistory`；never revive `learningDuration`、`unavailable` or legacy payloads from `windowMinutes` |
+
+Grok Bot 是獨立的 quota-only provider（`grok-bot`）；它沒有 TokenBar 可解析的本機 session logs，不把雲端 Bot 額度當作 Grok Build 的 token usage。Swift 在 `grok` 分頁透過 `ClientRegistry.tabSlice` 顯示 Build 與 Bot 的獨立額度卡，Overview 與 Quota lens 共用此成員清單。隱藏分頁會排除整組，Agent limits 的開關仍逐 client 生效；相同排除集合用於卡片、Overview 摘要與選單列 Auto。既有 Claude 多帳號列的獨立身分與顯示規則保持不變。
+
+`agent_grokbot` 優先唯讀取得 macOS Grok Bot 獨立 app 的目前帳號與 selected team；只有沒有桌面登入時才回退到 Cursor IDE。桌面登入無法解碼時回報錯誤，不切到另一個 IDE 帳號；存在帳號清單時也不以舊版殘留登入取代目前帳號。Electron safeStorage 解碼位於 macOS 專用的 `macos_safe_storage`，使用系統 CommonCrypto；金鑰查詢有時間上限，測試只用 synthetic ciphertext 與注入的解碼函式。TokenBar 不更新或寫回 Bot 登入資料。
+
+Bot 的 last-good cache 走共用 `ProviderFetchOutcome`，以 request-bearing credential、route 與所有帳號選擇參數經共用 credential resolver 取得的 opaque scope 綁定；team 變更、登出、登入失效與無效必要 meter 都不能復活舊額度。成功回應後，durable history 使用 desktop token 的 subject 或 Cursor request 的 user identity，加上 selected team；缺少可識別 owner 時仍顯示額度，但不記錄或混用 installation-wide history。Weekly card 與 series 的穩定鍵是 `weekly.v1`，duration evidence 只來自 provider 的 period start／reset；缺少 start 時進入 learning-duration，並非猜測七天。Pooled team allowance 與無效百分比回報明確錯誤。C ABI 簽章與 envelope 不變。
 
 Authoritative provider-reported costs use the shared engine's cost-provenance contract. A change to serialized message output must advance one of the engine's two invalidation counters — `CACHE_FORMAT_VERSION` when the bincode layout or a cross-client type moves, `parser_version(<client>)` when one client's parse semantics do — while report-time-only arithmetic changes require neither. [`vendor-tokscale.md`](vendor-tokscale.md#schema-and-parser-output) owns the full rule.
 

@@ -370,7 +370,7 @@ public enum TBCore {
         try unwrap(json.withCString { tb_set_claude_config_dirs($0) })
     }
 
-    /// OAuth quota cards for codex/claude/antigravity/copilot/grok. Network-bound;
+    /// OAuth quota cards for codex/claude/antigravity/copilot/grok/grok-bot. Network-bound;
     /// per-provider failures are reported in each snapshot's `error`.
     public static func agentUsage() throws -> AgentUsagePayload {
         let payload = try decodeAgentUsageBoundary(takeBytes(tb_agent_usage())) {

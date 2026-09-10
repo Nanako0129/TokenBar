@@ -55,6 +55,7 @@ public enum ClientRegistry {
         "micode": ("MiMo Code", "#fb923c"),
         "gjc": ("gjc", "#e11d48"),
         "grok": ("Grok Build", "#1f2937"),
+        "grok-bot": ("Grok Bot", "#000000"),
     ]
 
     /// Every registered client id, sorted. Demo fixtures use this canonical
@@ -175,7 +176,45 @@ public enum ClientRegistry {
     /// limits-hidden. A client hidden from either surface must not drive the
     /// tray quota % (an explicit tray selection is honored separately).
     public static func quotaExcludedClients() -> Set<String> {
-        hiddenClients().union(hiddenLimitsClients())
+        quotaExcludedClients(tabHidden: hiddenClients(), limitsHidden: hiddenLimitsClients())
+    }
+
+    /// Only tab visibility applies to the whole group. Quota switches remain
+    /// independent for each member (e.g. hiding Build's quota keeps Bot).
+    public static func quotaExcludedClients(
+        tabHidden: Set<String>, limitsHidden: Set<String>
+    ) -> Set<String> {
+        withGroupMembers(tabHidden).union(limitsHidden)
+    }
+
+    // MARK: - Grouped tabs
+
+    /// Client ids behind a top tab. The "grok" tab is a group: Grok Build
+    /// (local CLI session logs) and Grok Bot (Cursor-billed cloud quota) are
+    /// different data sources shown as two sections under one tab.
+    public static func tabSlice(_ id: String) -> [String] {
+        id == "grok" ? ["grok", "grok-bot"] : [id]
+    }
+
+    /// Tab-bar and single-client-titles label. Only the grouped tab differs
+    /// from its short name; every other tab keeps `shortName`.
+    public static func tabLabel(_ id: String) -> String {
+        id == "grok" ? "Grok Build & Bot" : shortName(id)
+    }
+
+    /// Card titles retain the full client name for ordinary tabs.
+    public static func tabDisplayName(_ id: String) -> String {
+        tabSlice(id).count > 1 ? tabLabel(id) : style(id).displayName
+    }
+
+    /// Expand a hidden set so group members follow their tab: hiding the
+    /// "grok" tab also hides the quota-only "grok-bot" row (which has no tab
+    /// of its own to hide). Explicit "grok-bot" entries pass through, so an
+    /// independent limits-toggle on the Bot row keeps working.
+    public static func withGroupMembers(_ ids: Set<String>) -> Set<String> {
+        var out = ids
+        if out.contains("grok") { out.insert("grok-bot") }
+        return out
     }
 
     /// The superset of client ids that can show a row in the multi-agent

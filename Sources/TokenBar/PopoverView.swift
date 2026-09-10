@@ -150,7 +150,7 @@ struct PopoverView: View {
     /// a client tab. Threaded into `ensureData` so the Hourly/Agents FFI fetch
     /// is scoped to the selection (accurate totals for shared hours/agents).
     private var lensClientIds: [String] {
-        activeTab == ClientTray.overviewTab ? displayClients : [activeTab]
+        activeTab == ClientTray.overviewTab ? displayClients : ClientRegistry.tabSlice(activeTab)
     }
 
     /// Daily/Monthly request turns only for visible canonical clients, keeping
@@ -660,7 +660,7 @@ struct PopoverView: View {
             // the hidden/order raws) so a live hide re-derives the slice.
             let singleClient = (activeTab != ClientTray.overviewTab && displayClients.contains(activeTab))
                 ? activeTab : nil
-            let clientIds = singleClient.map { [$0] } ?? displayClients
+            let clientIds = singleClient.map(ClientRegistry.tabSlice) ?? displayClients
             // Every displayed number must exclude hidden clients — including the
             // Overview aggregates. The model reuses the precomputed full `stats`
             // for the all-present slice and memoizes the hidden/single-client
@@ -694,8 +694,9 @@ struct PopoverView: View {
                     // at something no longer below it.
                     quotaSummary: QuotaSummaryFold.build(
                         payload: model.agentUsage,
-                        excluding: ClientRegistry.parseIdSet(hiddenRaw)
-                            .union(ClientRegistry.parseIdSet(limitsHiddenRaw)),
+                        excluding: ClientRegistry.quotaExcludedClients(
+                            tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+                            limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)),
                         paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
                     usageAttempted: model.agentUsageAttempted,
                     // The FOURTH statement of this gate, and the one that made

@@ -711,7 +711,7 @@ package struct AgentUsageTransportLogEntry: Equatable, Sendable {
 }
 
 private let agentUsageTransportLogClientIds: Set<String> = [
-    "codex", "claude", "antigravity", "copilot", "grok",
+    "codex", "claude", "antigravity", "copilot", "grok", "grok-bot",
 ]
 
 private let agentUsageTransportLogCategories: Set<String> = [

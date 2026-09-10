@@ -13,7 +13,7 @@ struct IconGalleryView: View {
         "codex", "droid", "kilocode", "kilo", "synthetic", "kiro", "codebuff",
         "cursor", "warp", "amp", "pi", "kimi",
         "cline", "jcode", "micode", "gjc", "grok",
-        "antigravity", "antigravity-cli",
+        "antigravity", "antigravity-cli", "grok-bot",
         "hermes", "roocode", "mux", "crush", "goose", "zed", "trae", "openclaw",
     ]
 

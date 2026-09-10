@@ -54,10 +54,10 @@ struct QuotaView: View {
                 }
                 if limitsEnabled {
                     AgentLimitsCard(
-                        clients: [singleClient], trace: trace, agentUsage: agentUsage,
+                        clients: clientIds, trace: trace, agentUsage: agentUsage,
                         usageAttempted: usageAttempted,
                         title: "%@ limits".localized(
-                            ClientRegistry.style(singleClient).displayName),
+                            ClientRegistry.tabDisplayName(singleClient)),
                         note: "Session / weekly / model limits",
                         restrict: true, curves: windowCurves)
                 }

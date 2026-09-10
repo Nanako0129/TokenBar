@@ -554,3 +554,7 @@
 "More than 10% and up to 25% remaining" = "剩余超过 10% 且不超过 25%";
 "10% or less remaining" = "剩余 10% 或更低";
 "Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors." = "自定义颜色根据每个项目的剩余额度应用：超过 25% 为正常；超过 10% 且不超过 25% 为较低；10% 或更低为极低。其他文本和额度不可用时使用正常颜色。自动模式保留原有配色。";
+
+/* Grok Bot quota setup */
+"Loading Grok Bot limits…" = "正在加载 Grok Bot 额度…";
+"Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "在这台 Mac 登录 Grok Bot，再刷新以查看每周额度。";
