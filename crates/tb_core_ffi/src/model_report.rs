@@ -123,12 +123,29 @@ fn local_cost_estimate(
         cache_write: entry.cache_write,
         reasoning: entry.reasoning,
         // `ModelUsage` carries no 1h/5m split, so this estimate prices the
-        // whole cache write at the 5-minute rate. That is already true today
-        // and stays true once the engine bills the 1h portion at 2x; the gap
-        // is a few percent, and this estimate exists to catch a mispriced
-        // provider at a 50x threshold, so it does not move the comparison.
-        // Closing the gap means adding the bucket to `ModelUsage`, which is a
-        // public FFI-crossing type.
+        // whole cache write at the 5-minute rate.
+        //
+        // This comment used to say the resulting gap was "a few percent".
+        // That was written without measuring and it is wrong. Priced against
+        // the real table, the 1h rate is exactly 1.6x the 5m rate
+        // (2.0 / 1.25) on every Claude model carrying both, so a row that is
+        // entirely 1h cache write is undershot by up to 60%, and mixed rows
+        // measured from real local data land at 10-14%.
+        //
+        // The conclusion it reached is still right, but for a structural
+        // reason rather than a small one — and the structure is what makes it
+        // durable. The rows this estimate judges and the rows the split
+        // affects do not overlap. Cache write in volume comes from the
+        // Anthropic models, whose cost tokscale computed from this same
+        // table: cost equals estimate, the ratio sits at ~1.0, nowhere near
+        // the 50x threshold. The self-reported rows the guard exists for
+        // (OpenCode through deepseek/openrouter) carry no cache write at all,
+        // so the split cannot reach them. A 60% undershoot would have to
+        // coincide with a self-reported cost to matter, and nothing produces
+        // both.
+        //
+        // Closing the gap anyway means adding the bucket to `ModelUsage`,
+        // which is a public FFI-crossing type.
         cache_write_1h: 0,
     };
     let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
