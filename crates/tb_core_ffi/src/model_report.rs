@@ -123,29 +123,49 @@ fn local_cost_estimate(
         cache_write: entry.cache_write,
         reasoning: entry.reasoning,
         // `ModelUsage` carries no 1h/5m split, so this estimate prices the
-        // whole cache write at the 5-minute rate.
+        // whole cache write at the 5-minute rate while tokscale priced the
+        // real split. The two disagree on any row holding 1h cache writes —
+        // and that includes the Anthropic rows, which this estimator runs on
+        // like every other row. There is no cohort it skips.
         //
-        // This comment used to say the resulting gap was "a few percent".
-        // That was written without measuring and it is wrong. Priced against
-        // the real table, the 1h rate is exactly 1.6x the 5m rate
-        // (2.0 / 1.25) on every Claude model carrying both, so a row that is
-        // entirely 1h cache write is undershot by up to 60%, and mixed rows
-        // measured from real local data land at 10-14%.
+        // What makes it safe is that the disagreement is BOUNDED, not that it
+        // is small or that it misses anyone. A 1h write costs 2x base input
+        // (`compute_cost` derives it as `2.0 * tiered_cost(...,
+        // input_cost_per_token, ...)` — no pricing table publishes a 1h key)
+        // where a 5m write is the table's `cache_creation_input_token_cost`,
+        // conventionally 1.25x input. So a row estimated entirely at the 5m
+        // rate understates a fully-1h row by at most 2.0/1.25 = 1.6x, and the
+        // ratio this feeds is inflated by the same factor at most.
         //
-        // The conclusion it reached is still right, but for a structural
-        // reason rather than a small one — and the structure is what makes it
-        // durable. The rows this estimate judges and the rows the split
-        // affects do not overlap. Cache write in volume comes from the
-        // Anthropic models, whose cost tokscale computed from this same
-        // table: cost equals estimate, the ratio sits at ~1.0, nowhere near
-        // the 50x threshold. The self-reported rows the guard exists for
-        // (OpenCode through deepseek/openrouter) carry no cache write at all,
-        // so the split cannot reach them. A 60% undershoot would have to
-        // coincide with a self-reported cost to matter, and nothing produces
-        // both.
+        // Measured on real local rows (cost/estimate inflation):
         //
-        // Closing the gap anyway means adding the bucket to `ModelUsage`,
-        // which is a public FFI-crossing type.
+        //     claude-opus-5     1.10x
+        //     claude-sonnet-5   1.12x
+        //     claude-fable-5    1.14x
+        //     claude-haiku-4-5  1.78x
+        //
+        // Haiku exceeds the 1.6x bound for a separate reason worth knowing:
+        // the provider hint steers its lookup to `perplexity/anthropic/
+        // claude-haiku-4-5`, a resale entry with no
+        // `cache_creation_input_token_cost` at all, so its 5m estimate drops
+        // cache write rather than underpricing it. The canonical
+        // `claude-haiku-4-5` key does carry the rate. That is the known
+        // provider-hint selection problem (upstream tokscale #57), not this
+        // assumption, and it affects `cost` and the estimate through the same
+        // lookup.
+        //
+        // 1.78x against a 50x threshold is not close, and closing that gap
+        // would need a row whose 1h cache write outweighs the rest of it by
+        // roughly 25x — cache write is written once and read many times, so
+        // the real rows run the other way (69M cache read against 4M cache
+        // write on the haiku row above).
+        //
+        // Two earlier versions of this comment were wrong: "a few percent"
+        // (unmeasured) and then "the affected and judged rows are disjoint"
+        // (they are not — every row is estimated). The bound is what holds.
+        //
+        // Closing the gap means adding the bucket to `ModelUsage`, which is a
+        // public FFI-crossing type.
         cache_write_1h: 0,
     };
     let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
