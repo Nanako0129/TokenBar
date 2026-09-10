@@ -161,3 +161,7 @@
 "10%% of quota ~ %@, unpriced models, ±%@%%" = "10%% of quota ~ %@, unpriced models, ±%@%%";
 "unpriced models, ±%@%%" = "unpriced models, ±%@%%";
 "10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%";
+
+/* Grok Bot quota setup */
+"Loading Grok Bot limits…" = "Loading Grok Bot limits…";
+"Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits.";

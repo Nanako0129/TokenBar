@@ -18,6 +18,7 @@ mod agent_account_scope;
 mod agent_antigravity;
 mod agent_copilot;
 mod agent_grok;
+mod agent_grokbot;
 mod agent_quota_duration;
 mod agent_quota_history;
 #[cfg(target_os = "windows")]
@@ -28,6 +29,8 @@ mod claude_config_dirs;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
+#[cfg(target_os = "macos")]
+mod macos_safe_storage;
 mod window_usage;
 mod model_report;
 mod opencode_integrations;
@@ -914,7 +917,7 @@ pub extern "C" fn tb_tokens_per_min() -> *mut c_char {
 }
 
 /// OAuth quota cards (`AgentUsagePayload` in agentUsage.ts) for
-/// codex/claude/antigravity/copilot/grok, fetched concurrently. Network-bound —
+/// codex/claude/antigravity/copilot/grok/grok-bot, fetched concurrently. Network-bound —
 /// call from a background thread. Per-provider failures land in each
 /// snapshot's `error` field; the call itself only fails on serialization.
 /// The publication gate assigns `publicationGeneration` and serializes the

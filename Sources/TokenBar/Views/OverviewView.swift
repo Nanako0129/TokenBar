@@ -82,7 +82,7 @@ struct OverviewView: View {
                     clients: clientIds, trace: trace, agentUsage: agentUsage,
                     usageAttempted: usageAttempted,
                     title: singleClient.map {
-                        "%@ limits".localized(ClientRegistry.style($0).displayName)
+                        "%@ limits".localized(ClientRegistry.tabDisplayName($0))
                     } ?? "Agent limits",
                     note: singleClient == nil
                         ? "OAuth quota" : "Session / weekly / model limits",

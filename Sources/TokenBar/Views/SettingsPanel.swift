@@ -458,7 +458,7 @@ struct SettingsPanel: View {
                     // A tab hidden below always hides its quota card too — the
                     // toggle here reflects that (off + disabled) rather than
                     // offering a state the card can never actually reach.
-                    let tabHiddenSet = ClientRegistry.parseIdSet(tabsHiddenRaw)
+                    let tabHiddenSet = ClientRegistry.withGroupMembers(ClientRegistry.parseIdSet(tabsHiddenRaw))
                     Divider()
                     VStack(spacing: 1) {
                         ForEach(limitOrdered, id: \.self) { id in
@@ -586,7 +586,7 @@ struct SettingsPanel: View {
                                     .gesture(dragGestureForTab(id: id, orderList: tabsUniverse))
 
                                 AgentIconView(clientId: id, size: 14)
-                                Text(ClientRegistry.shortName(id))
+                                Text(ClientRegistry.tabLabel(id))
                                     .font(.caption)
 
                                 if !canTab {

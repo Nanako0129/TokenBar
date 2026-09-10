@@ -57,6 +57,7 @@ struct AgentLimitsCard: View {
     @AppStorage(ClientRegistry.tabOrderKey) private var orderRaw = ""
     /// Per-client Agent-limits visibility, independent of tab visibility.
     @AppStorage(ClientRegistry.limitsHiddenKey) private var limitsHiddenRaw = ""
+    @AppStorage(ClientRegistry.tabHiddenKey) private var tabsHiddenRaw = ""
 
     /// The hovered trend indicator and where it sits inside this card. Uses
     /// the app's own tooltip rather than `.help()`: the system tooltip is a
@@ -210,18 +211,19 @@ struct AgentLimitsCard: View {
 
     /// Placeholder window labels for agents we know carry quotas but have no
     /// snapshot yet (LIMIT_ROWS in the web card).
-    private static let placeholderRows: [String: [String]] = [
+    nonisolated private static let placeholderRows: [String: [String]] = [
         "codex": ["Session", "Weekly"],
         "claude": ["Session", "Weekly"],
         "gemini": ["Pro", "Flash"],
         "grok": ["Weekly"],
+        "grok-bot": ["Weekly"],
     ]
 
     /// Every client id that can show a row in the multi-agent Agent-limits
     /// card. Thin wrapper over `ClientRegistry.knownLimitsClients` (the one
     /// implementation) that supplies this card's placeholder-row keys, so the
     /// registry-level lists and the card agree on the universe.
-    static func knownClientIds(agentUsage: AgentUsagePayload?, present: [String]) -> [String] {
+    nonisolated static func knownClientIds(agentUsage: AgentUsagePayload?, present: [String]) -> [String] {
         ClientRegistry.knownLimitsClients(
             present: present,
             quotaIds: (agentUsage?.agents ?? []).map(\.clientId),
@@ -317,10 +319,11 @@ struct AgentLimitsCard: View {
     /// account being exempt from this hide (see `expandedWithExtraAccounts`)
     /// is a decision made in the row list this function is handed, not inside
     /// this filter — `visible` itself stays the single, generic exit.
-    static func visible<T>(
-        _ candidates: [T], hiddenRaw: String, clientId: (T) -> String
+    nonisolated static func visible<T>(
+        _ candidates: [T], hiddenRaw: String, tabHidden: Set<String> = [], clientId: (T) -> String
     ) -> [T] {
-        let hidden = ClientRegistry.parseIdSet(hiddenRaw)
+        let hidden = ClientRegistry.quotaExcludedClients(
+            tabHidden: tabHidden, limitsHidden: ClientRegistry.parseIdSet(hiddenRaw))
         return candidates.filter { !hidden.contains(clientId($0)) }
     }
 
@@ -400,8 +403,7 @@ struct AgentLimitsCard: View {
         // set itself, unlike `limitsHiddenRaw`: there is no tab-level row for
         // an extra account to keep showing once its client's tab is gone.
         if reorderable {
-            let hiddenTabs = ClientRegistry.hiddenClients()
-            ids = ids.filter { !hiddenTabs.contains($0) }
+            ids = Self.visible(ids, hiddenRaw: "", tabHidden: ClientRegistry.parseIdSet(tabsHiddenRaw)) { $0 }
         }
         return expandedWithExtraAccounts(known: ids, visiblePrimaries: visiblePrimaries(of: ids))
     }
@@ -689,6 +691,13 @@ struct AgentLimitsCard: View {
             }
             if snapshot?.source == "unconfigured" {
                 setupPrompt()
+            } else if id == "grok-bot", snapshot == nil {
+                Text((usageAttempted
+                    ? "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits."
+                    : "Loading Grok Bot limits…").localized)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
             } else {
                 if let detail = detailText(snapshot) {
                     Text(detail)

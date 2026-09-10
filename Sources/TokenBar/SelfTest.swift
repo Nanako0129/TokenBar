@@ -5363,6 +5363,69 @@ enum SelfTest {
             ClientRegistry.parseIdSet("a,b,a") == Set(["a", "b"]),
             "parseIdSet splits and dedups")
 
+        // Grouped Grok tab: "grok" expands to the Build + Bot member slice
+        // under one "Grok Build & Bot" label; every other tab is its own
+        // singleton with its short name. Hiding the tab hides the quota-only
+        // Bot row too (it has no tab of its own).
+        expect(ClientRegistry.tabSlice("grok") == ["grok", "grok-bot"], "grok tab expands to Build + Bot")
+        expect(ClientRegistry.tabSlice("codex") == ["codex"], "plain tab is its own singleton")
+        expect(ClientRegistry.tabLabel("grok") == "Grok Build & Bot", "grok tab carries the group label")
+        expect(ClientRegistry.tabLabel("codex") == ClientRegistry.shortName("codex"), "plain tab keeps its short name")
+        expect(ClientRegistry.style("grok-bot").displayName == "Grok Bot", "grok-bot registry entry")
+        expect(
+            AgentLimitsCard.knownClientIds(agentUsage: nil, present: ClientRegistry.tabSlice("grok"))
+                == ["grok", "grok-bot"],
+            "Grok Bot keeps a visible setup row even without a quota snapshot")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["grok", "codex"])) == Set(["grok", "grok-bot", "codex"]),
+            "hidden grok tab pulls the Bot row along")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["codex"])) == Set(["codex"]),
+            "unrelated hidden ids pass through")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["grok-bot"])) == Set(["grok-bot"]),
+            "explicit Bot entry passes through for its independent toggle")
+
+        // Independent quota switches must agree in the grouped tab, overview,
+        // and automatic tray source. Only hiding the tab hides both members.
+        let grokQuotaJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"grok","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"billing.weekly.v1","label":"Weekly","usedPercent":90,"remainingPercent":10}]},
+          {"clientId":"grok-bot","source":"cursor","updatedAt":"now",
+           "windows":[{"cardId":"weekly.v1","label":"Weekly","usedPercent":80,"remainingPercent":20}]}
+        ]}
+        """
+        let grokQuota = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(grokQuotaJSON.utf8))
+        let grokVisibilityCases: [(String, Set<String>, Set<String>, [String], String?)] = [
+            ("both visible", [], [], ["grok", "grok-bot"], "grok"),
+            ("Build quota hidden", [], ["grok"], ["grok-bot"], "grok-bot"),
+            ("Bot quota hidden", [], ["grok-bot"], ["grok"], "grok"),
+            ("both quotas hidden", [], ["grok", "grok-bot"], [], nil),
+            ("Grok tab hidden", ["grok"], [], [], nil),
+        ]
+        for (label, tabHidden, limitsHidden, expected, expectedSource) in grokVisibilityCases {
+            let members = ClientRegistry.tabSlice("grok")
+            expect(
+                AgentLimitsCard.visible(
+                    members, hiddenRaw: limitsHidden.sorted().joined(separator: ","),
+                    tabHidden: tabHidden, clientId: { $0 }) == expected,
+                "Grok tab: \(label)")
+            expect(
+                AgentLimitsCard.visible(
+                    ["codex"] + members, hiddenRaw: limitsHidden.sorted().joined(separator: ","),
+                    tabHidden: tabHidden, clientId: { $0 })
+                    == ["codex"] + expected,
+                "Overview quotas: \(label)")
+            let excluded = ClientRegistry.quotaExcludedClients(
+                tabHidden: tabHidden, limitsHidden: limitsHidden)
+            expect(
+                QuotaResolver.resolve(payload: grokQuota, selection: "auto", excluding: excluded)?
+                    .clientId == expectedSource,
+                "Automatic tray quota: \(label)")
+        }
+
         // Tray totals with hidden clients excluded (issue #35). Fixture: two
         // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
         // tokens = input+output+cacheRead+cacheWrite+reasoning.
@@ -7294,7 +7357,7 @@ enum SelfTest {
         // where comparing the two fields to each other proves nothing. Most
         // providers report the session/weekly pair; one whose real shape differs
         // states its own row rather than forcing every client to match it.
-        let demoCardIdsByClient: [String: [String]] = [:]
+        let demoCardIdsByClient: [String: [String]] = ["grok-bot": ["weekly.v1"]]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count

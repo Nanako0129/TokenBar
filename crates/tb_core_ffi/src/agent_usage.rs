@@ -5,6 +5,7 @@ use crate::agent_account_scope::{
 use crate::agent_antigravity;
 use crate::agent_copilot;
 use crate::agent_grok;
+use crate::agent_grokbot;
 use crate::agent_quota_duration::{DurationEvidence, DurationSource, DurationUnavailableReason};
 use crate::agent_quota_history::{
     BatchObservationResult, HistoricalPace, HistoryError, HistoryOutcome, QuotaObservation,
@@ -1354,6 +1355,10 @@ fn usable_success(snapshot: &AgentUsageSnapshot) -> bool {
             .windows
             .iter()
             .any(|window| window.card_id == "billing.weekly.v1"),
+        "grok-bot" => snapshot
+            .windows
+            .iter()
+            .any(|window| window.card_id == agent_grokbot::WEEKLY_WINDOW_KEY),
         "claude" | "copilot" | "antigravity" => !snapshot.windows.is_empty(),
         _ => false,
     }
@@ -1507,12 +1512,13 @@ fn apply_provider_outcome(
 
 pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     let generated_at = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
-    let (codex, claude, antigravity, copilot, grok) = tokio::join!(
+    let (codex, claude, antigravity, copilot, grok, grokbot) = tokio::join!(
         fetch_codex(),
         fetch_claude_accounts(),
         fetch_antigravity(),
         fetch_copilot(),
-        fetch_grok()
+        fetch_grok(),
+        fetch_grokbot()
     );
     let mut agents = vec![codex];
     // The primary first, then any extra config directories. With none
@@ -1527,11 +1533,46 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
     if let Some(grok) = grok {
         agents.push(grok);
     }
+    if let Some(grokbot) = grokbot {
+        agents.push(grokbot);
+    }
     AgentUsagePayload {
         generated_at,
         publication_generation,
         agents,
         opencode_subscriptions: crate::opencode_integrations::detect_subscriptions(),
+    }
+}
+
+async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
+    let now = Utc::now();
+    let outcome = grokbot_outcome(agent_grokbot::fetch(now).await, now);
+    apply_provider_outcome("grok-bot", None, "oauth", outcome)
+}
+
+fn grokbot_outcome(
+    result: Result<Option<agent_grokbot::GrokBotData>, ProviderFetchFailure>,
+    now: DateTime<Utc>,
+) -> ProviderFetchOutcome {
+    match result {
+        Ok(Some(data)) => ProviderFetchOutcome::Success {
+            cache_binding: data.cache_binding,
+            snapshot: AgentUsageSnapshot {
+                account_key: None,
+                client_id: "grok-bot".to_string(),
+                source: "oauth".to_string(),
+                updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+                identity: data.identity,
+                account_scope: data.account_scope,
+                history_scope: data.history_scope,
+                windows: data.windows,
+                credits: None,
+                error: None,
+                transport_diagnostic: None,
+            },
+        },
+        Ok(None) => ProviderFetchOutcome::Absent,
+        Err(failure) => ProviderFetchOutcome::Failure(failure),
     }
 }
 
@@ -6402,6 +6443,107 @@ mod tests {
         assert!(cached.error.is_none());
         assert!(cached.transport_diagnostic.is_none());
         scope.cleanup();
+    }
+
+    #[test]
+    fn grokbot_adapter_preserves_only_same_request_transients() {
+        let now = Utc.timestamp_opt(1_789_041_600, 0).single().unwrap();
+        let scope = AccountScope::for_test("bot-account-a-personal");
+        let binding = ProviderCacheBinding::primary(scope.clone());
+        let other = ProviderCacheBinding::primary(AccountScope::for_test("bot-account-a-team"));
+        let failures = [
+            (
+                "same request",
+                Err(ProviderFetchFailure::transient(
+                    "retry",
+                    Some(binding.clone()),
+                    timeout_diagnostic(),
+                )),
+                true,
+            ),
+            (
+                "different team",
+                Err(ProviderFetchFailure::transient(
+                    "retry",
+                    Some(other),
+                    timeout_diagnostic(),
+                )),
+                false,
+            ),
+            (
+                "unbound",
+                Err(ProviderFetchFailure::transient(
+                    "retry",
+                    None,
+                    timeout_diagnostic(),
+                )),
+                false,
+            ),
+            (
+                "expired login",
+                Err(ProviderFetchFailure::terminal("sign in again")),
+                false,
+            ),
+            (
+                "malformed meter",
+                agent_grokbot::map_response("{}", now)
+                    .map(Some)
+                    .map_err(ProviderFetchFailure::terminal),
+                false,
+            ),
+            ("signed out", Ok(None), false),
+        ];
+        for (label, failure, keep) in failures {
+            let cache = Mutex::new(ProviderLastGoodCache::default());
+            let mut data = agent_grokbot::map_response(
+                r#"{
+                "usagePercent": 25,
+                "currentPeriodStart": "2026-09-08T12:00:00Z",
+                "nextResetTimestampUtc": "2026-09-15T12:00:00Z"
+            }"#,
+                now,
+            )
+            .unwrap();
+            data.account_scope = Ok(scope.clone());
+            data.history_scope = Ok(HistoryScope::for_test("bot-history-a"));
+            data.cache_binding = Some(binding.clone());
+            let fresh = apply_provider_outcome_with(
+                &cache,
+                "grok-bot",
+                None,
+                "oauth",
+                now,
+                grokbot_outcome(Ok(Some(data)), now),
+                |_| {},
+            )
+            .unwrap();
+            assert_eq!(fresh.windows[0].card_id, "weekly.v1");
+            assert_eq!(fresh.windows[0].remaining_percent, 75.0);
+            assert_eq!(lock_last_good(&cache).entries.len(), 1);
+            let later = now + chrono::Duration::minutes(1);
+            let result = apply_provider_outcome_with(
+                &cache,
+                "grok-bot",
+                None,
+                "oauth",
+                later,
+                grokbot_outcome(failure, later),
+                |_| panic!("failure must not enrich history"),
+            );
+            if keep {
+                let fallback = result.unwrap();
+                assert_eq!(fallback.updated_at, fresh.updated_at);
+                assert_eq!(fallback.windows.len(), 1);
+                assert!(fallback.error.is_some());
+                assert!(fallback.account_scope.is_err());
+            } else {
+                assert!(
+                    result.is_none_or(|snapshot| snapshot.windows.is_empty()),
+                    "{label}"
+                );
+                assert!(lock_last_good(&cache).entries.is_empty(), "{label}");
+            }
+        }
     }
 
     #[test]
