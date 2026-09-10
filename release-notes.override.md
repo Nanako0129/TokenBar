@@ -1,24 +1,24 @@
 ## Before you update
 
-**Reported costs move up, reported tokens move down, and neither is a change to what you actually spent.** Four separate pricing corrections land together.
+**Reported costs move up, reported tokens move down, and neither is a change to what you actually spent.** Four corrections land together, and they are not the same kind of thing.
 
-Three of them are repricings, measured over the same local corpus of 1,144 Claude transcripts.
+Only one of them changes a rate. Two were double counts, which is why some figures fall while the cost rises.
 
-- **One-hour prompt-cache writes were billed at the five-minute rate.** [#287](https://github.com/Nanako0129/TokenBar/issues/287)
+- **The rate: one-hour prompt-cache writes were billed at the five-minute rate.** [#287](https://github.com/Nanako0129/TokenBar/issues/287)
 
-  Anthropic charges 1.25× base input for a five-minute cache write and 2× for a one-hour one, and the transcript reports both under a single total. TokenBar read only that total and priced all of it at the cheaper rate. It now reads the split. On the measured corpus the one-hour TTL accounts for 79.6% of cache-write tokens and total cost rises **7.18%** — TokenBar stopped under-charging rather than starting to over-charge. **Token counts are unchanged.** Only the price attached to them moved.
+  Anthropic charges 1.25× base input for a five-minute cache write and 2× for a one-hour one, and the transcript reports both under a single total. TokenBar read only that total and priced all of it at the cheaper rate. It now reads the split. Measured over 1,144 local Claude transcripts, the one-hour TTL accounts for 79.6% of cache-write tokens and total cost rises **7.18%** — TokenBar stopped under-charging rather than starting to over-charge. **Token counts are unchanged.** Only the price attached to them moved.
 
-- **`tool_result` text was counted twice.** [#288](https://github.com/Nanako0129/TokenBar/issues/288) — thanks [@Mai0313](https://github.com/Mai0313)
+- **Counted twice: `tool_result` text.** [#288](https://github.com/Nanako0129/TokenBar/issues/288) — thanks [@Mai0313](https://github.com/Mai0313)
 
-  The parser estimated input tokens for a tool result at one per four characters, and then the next assistant turn reported the same text again in its own usage. Reported Claude input tokens fall, **by an amount that varies enormously with how tool-heavy the usage is**: −5.9% over the 1,144-transcript corpus, −91.9% over a contributor's 6,219. Output, cache reads and cache writes are byte-identical in both.
+  The parser estimated input tokens for a tool result at one per four characters, and then the next assistant turn reported the same text again in its own usage. Reported Claude input tokens fall, **by an amount that varies enormously with how tool-heavy the usage is**: −5.9% over those same 1,144 transcripts, −91.9% over a contributor's 6,219. Output, cache reads and cache writes are byte-identical in both.
 
-- **Codex reasoning tokens were priced twice.** [#289](https://github.com/Nanako0129/TokenBar/pull/289)
+- **Counted twice: Codex reasoning tokens.** [#289](https://github.com/Nanako0129/TokenBar/pull/289)
 
-  Historical Codex figures fall in proportion to reasoning effort — about 6% on one local corpus, more for an account that runs high effort throughout. Nothing was deleted. The same tokens are counted once instead of twice.
+  Codex reports its reasoning tokens as a *subset* of the output tokens it already reported, and TokenBar added them on top of that output instead of inside it, so every reasoning token was billed twice. Historical Codex costs fall in proportion to reasoning effort — around 6% on one local Codex corpus, more for an account that runs high effort throughout. Nothing was deleted; the same tokens are counted once.
 
-The fourth is not a repricing at all.
+The fourth was not a pricing error at all.
 
-- **A historical cost could change on its own, and now cannot.** [#300](https://github.com/Nanako0129/TokenBar/issues/300) — thanks [@huyanxius](https://github.com/huyanxius)
+- **Not stable: a historical cost could change on its own.** [#300](https://github.com/Nanako0129/TokenBar/issues/300) — thanks [@huyanxius](https://github.com/huyanxius)
 
   When several pricing entries matched a model equally well, the one used was whichever the lookup table happened to iterate first, and that order changed every time the table reloaded. The same usage could be priced one way today and another tomorrow with nothing new behind it. Two hundred runs against a fixed table returned two different answers — 117 runs one way, 83 the other. Ties are now broken deterministically, so an affected model settles once and stops moving.
 
