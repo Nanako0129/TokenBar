@@ -711,9 +711,10 @@ package struct AgentUsageTransportLogEntry: Equatable, Sendable {
 }
 
 private let agentUsageTransportLogClientIds: Set<String> = [
-    // "kiro" carries the Kiro subscription quota; keep its transport diagnostics
-    // attributable instead of rewriting them to "unknown" like an unsupported id.
-    "codex", "claude", "antigravity", "copilot", "grok", "kiro",
+    // "kiro" and "opencode" carry the Kiro and OpenCode Go subscription quotas;
+    // keep their transport diagnostics attributable instead of rewriting them to
+    // "unknown" like an unsupported id.
+    "codex", "claude", "antigravity", "copilot", "grok", "kiro", "opencode",
 ]
 
 private let agentUsageTransportLogCategories: Set<String> = [

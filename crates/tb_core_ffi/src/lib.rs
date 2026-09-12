@@ -19,6 +19,7 @@ mod agent_antigravity;
 mod agent_copilot;
 mod agent_grok;
 mod agent_kiro;
+mod agent_opencode_go;
 mod agent_quota_duration;
 mod agent_quota_history;
 #[cfg(target_os = "windows")]
