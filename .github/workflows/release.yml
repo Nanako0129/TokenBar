@@ -17,6 +17,19 @@ jobs:
           fetch-depth: 0
           submodules: recursive
 
+      # The notes are checked here, not only in CI, because CI does not run on
+      # tags: ci.yml triggers on pushes to main and on pull requests, so a tag
+      # cut from an unreviewed commit — or pushed before its main run finishes —
+      # would reach publication unchecked. `release_notes.sh` refuses a missing
+      # or empty source on its own, but a nonempty pair whose figures disagree
+      # would otherwise ship to the release page, the appcast and latest.json
+      # with nothing in between.
+      #
+      # First step, before the toolchain: a tag with bad notes should fail in
+      # seconds rather than after a twenty-minute build.
+      - name: Check the release notes for this tag
+        run: python3 scripts/check_release_notes.py "$GITHUB_REF_NAME"
+
       - uses: dtolnay/rust-toolchain@stable
 
       - uses: Swatinem/rust-cache@v2
