@@ -7324,7 +7324,11 @@ enum SelfTest {
         // where comparing the two fields to each other proves nothing. Most
         // providers report the session/weekly pair; one whose real shape differs
         // states its own row rather than forcing every client to match it.
-        let demoCardIdsByClient: [String: [String]] = [:]
+        let demoCardIdsByClient: [String: [String]] = [
+            // Kiro reports one monthly allowance rather than the session/weekly
+            // pair; the card ID is `agent_kiro.rs`'s `WINDOW_KEY`.
+            "kiro": ["usage.v1"]
+        ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count
