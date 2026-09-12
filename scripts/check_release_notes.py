@@ -24,7 +24,17 @@ import sys
 from pathlib import Path
 
 FOLD = str.maketrans({"−": "-", "–": "-", "—": "-", "×": "x"})
-NUMBER = re.compile(r"\d+(?:\.\d+)?")
+
+# The sign is part of the value: the whole point of this check is to catch the
+# two files disagreeing about a measurement, and "cost falls 5.9%" against
+# "cost rises 5.9%" is exactly that disagreement. Dropping the sign would let
+# it through, and these notes routinely carry signed percentages.
+#
+# The lookbehind is what keeps a range from reading as a negative. After
+# folding, "18-28 seconds" and "1-4 seconds" would otherwise yield -28 and -4;
+# a hyphen only counts as a sign when what precedes it is not part of a word or
+# number. A leading "+" is accepted for symmetry but does not occur today.
+NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?")
 
 
 def numbers(path: Path) -> list[str]:
