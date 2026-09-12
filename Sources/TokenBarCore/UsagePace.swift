@@ -107,15 +107,29 @@ public struct UsagePace: Sendable {
         return hr > 0 ? "%lldd %lldh".localized(days, hr) : "%lldd".localized(days)
     }
 
+    /// How long until `reset`, under the countdown's own rounding: seconds are
+    /// floored, then minutes are taken UP. Nil once the reset has passed.
+    ///
+    /// Not private, and not inlined into `resetText`, because a second caller
+    /// names a window by the same span (`AgentUsageSnapshot`'s qualifier for a
+    /// repeated label). `durationText` alone rounds to the NEAREST minute, so
+    /// deriving the span twice put "4h 59m" in a row's name beside "Resets in
+    /// 5h" in the same row for the first half of every minute. One contract,
+    /// one implementation.
+    public static func spanText(until reset: Date, now: Date = Date()) -> String? {
+        let seconds = floor(reset.timeIntervalSince(now))
+        guard seconds > 0 else { return nil }
+        let minutes = Int((seconds + 59) / 60)
+        return durationText(Double(minutes * 60))
+    }
+
     /// Localized countdown matching the Rust `resetText` rounding contract.
     /// The wire text is intentionally retained for compatibility, while the
     /// structured reset timestamp is the source for user-facing copy.
     public static func resetText(for resetsAt: String, now: Date = Date()) -> String? {
         guard let reset = parseRFC3339(resetsAt) else { return nil }
-        let seconds = floor(reset.timeIntervalSince(now))
-        guard seconds > 0 else { return "Resets now".localized }
-        let minutes = Int((seconds + 59) / 60)
-        return "Resets in %@".localized(durationText(Double(minutes * 60)))
+        guard let span = spanText(until: reset, now: now) else { return "Resets now".localized }
+        return "Resets in %@".localized(span)
     }
 }
 

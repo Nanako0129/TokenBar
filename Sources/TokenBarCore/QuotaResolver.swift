@@ -40,7 +40,14 @@ public enum QuotaResolver {
             return selection
         }
 
-        let windows = agent.uniqueCardWindows
+        // The RAW card view: a persisted pre-v3 selection holds the label the
+        // provider sent, and whether that label was ambiguous is a fact about
+        // what the provider sent. `uniqueCardWindows` qualifies a repeated
+        // label with its window's duration, which can leave exactly one window
+        // still carrying the raw text and migrate a selection that used to
+        // match two. Card IDs are identical in both views, so the value this
+        // returns is unchanged for every selection that was already unique.
+        let windows = agent.rawCardWindows
         if let exact = windows.first(where: { $0.cardId == parsed.value }) {
             return Self.selection(clientId: agent.clientId, cardId: exact.cardId)
         }

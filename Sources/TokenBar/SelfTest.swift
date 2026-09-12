@@ -4251,6 +4251,42 @@ enum SelfTest {
             }
         }
 
+        // #286 reaches this picker too. A provider that repeats a WHITELISTED
+        // label — two windows both called `Weekly` — comes out of the card view
+        // as `Weekly · Session` and `Weekly · Weekly`, and the sanitiser used to
+        // accept any whitelisted PREFIX, collapsing both rows back to `Weekly`.
+        // An exact match keeps the bare word and sends a qualified one to the
+        // indexed fallback, which is distinct per row.
+        let repeatedSafeJSON = """
+        {"generatedAt":"t","publicationGeneration":7,"agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"t","windows":[
+            {"cardId":"a.v1","label":"Weekly","usedPercent":10,"remainingPercent":90,
+             "windowMinutes":300,
+             "paceStatus":{"state":"learningHistory","windowKey":"a.v1",
+             "durationSeconds":18000,"durationSource":"provider","completeCycles":1}},
+            {"cardId":"b.v1","label":"Weekly","usedPercent":20,"remainingPercent":80,
+             "windowMinutes":10080,
+             "paceStatus":{"state":"learningHistory","windowKey":"b.v1",
+             "durationSeconds":604800,"durationSource":"provider","completeCycles":1}}
+          ]}
+        ]}
+        """
+        let repeatedSafePayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(repeatedSafeJSON.utf8))
+        let repeatedSafeLabels = ClientTray.settingsRows(
+            presentClients: ["codex"], payload: repeatedSafePayload, enabled: Set(["codex"]),
+            selections: ["codex": "a.v1"], hidden: Set<String>(), orderRaw: "",
+            officialClients: officialClientIDs
+        ).first?.options.dropFirst().map(\.label) ?? []
+        expect(
+            repeatedSafePayload.agents[0].uniqueCardWindows.map(\.label)
+                == ["Weekly · Session", "Weekly · Weekly"],
+            "a repeated whitelisted label is qualified in the card view, so the "
+                + "picker below is asked the question this guards")
+        expect(
+            repeatedSafeLabels.count == 2 && Set(repeatedSafeLabels).count == 2,
+            "and the per-client window picker keeps the two rows distinguishable")
+
         for (phase, attempted, spinning, name) in [
             (DashboardModel.Phase.loading, false, true, "loading unsettled"),
             (.loading, true, true, "loading after quota"),
@@ -4965,6 +5001,219 @@ enum SelfTest {
                 && QuotaResolver.canonicalSelection(payload: duplicatePayload, selection: "dupe|Session")
                     == "dupe|Session",
             "exact cardId wins over same-named legacy label")
+
+        // Issue #286: Codex names both windows of one additional limit after
+        // the limit, so the 5-hour and the 7-day Spark allowance arrive with
+        // the same label and different card IDs. The card view qualifies a
+        // repeated label with the window's own duration; a label that appears
+        // once, and the identities themselves, are untouched.
+        let sparkJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":300,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.primary.v1",
+              "durationSeconds":18000,"durationSource":"provider","completeCycles":3}},
+             {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":10080,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.secondary.v1",
+              "durationSeconds":604800,"durationSource":"provider","completeCycles":2}},
+             {"cardId":"weekly.v1","label":"Weekly","usedPercent":40,"remainingPercent":60,
+              "windowMinutes":10080,
+              "paceStatus":{"state":"learningHistory","windowKey":"weekly.v1",
+              "durationSeconds":604800,"durationSource":"contract","completeCycles":5}}
+           ]}
+        ]}
+        """
+        let sparkPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(sparkJSON.utf8))
+        let sparkWindows = sparkPayload.agents[0].uniqueCardWindows
+        expect(
+            sparkWindows.map(\.label) == ["Codex Spark · Session", "Codex Spark · Weekly", "Weekly"],
+            "repeated window label is qualified by duration, a unique one is left alone")
+        expect(
+            sparkWindows.map(\.cardId) == [
+                "additional.deadbeef.primary.v1", "additional.deadbeef.secondary.v1", "weekly.v1",
+            ] && sparkWindows.compactMap(\.paceStatus.windowKey) == [
+                "additional.deadbeef.primary.v1", "additional.deadbeef.secondary.v1", "weekly.v1",
+            ] && sparkPayload.agents[0].windows.map(\.label)
+                == ["Codex Spark", "Codex Spark", "Weekly"],
+            "qualifying a label changes no identity and no wire value")
+        expect(
+            QuotaResolver.resolve(
+                payload: sparkPayload,
+                selection: "codex|additional.deadbeef.secondary.v1")?
+                .window.durationSeconds == 604_800,
+            "each qualified option still resolves to its own window")
+
+        // Qualification must not break a tie the legacy-label migration exists
+        // to refuse. Only one of these two same-labelled windows has duration
+        // evidence — the sibling is still learning its own — so qualifying the
+        // card view leaves exactly one window carrying the raw text, and a
+        // persisted pre-v3 label that matched BOTH would migrate to whichever
+        // window happened to lack a duration. Ambiguity is a fact about what
+        // the provider sent, so the migration reads the raw labels.
+        let mixedJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,"windowMinutes":300,
+              "paceStatus":{"state":"learningHistory","windowKey":"additional.deadbeef.primary.v1",
+              "durationSeconds":18000,"durationSource":"provider","completeCycles":3}},
+             {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+              "usedPercent":0,"remainingPercent":100,
+              "paceStatus":{"state":"learningDuration",
+              "windowKey":"additional.deadbeef.secondary.v1",
+              "durationSource":"observed","completeCycles":0}}
+           ]}
+        ]}
+        """
+        let mixedPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(mixedJSON.utf8))
+        expect(
+            mixedPayload.agents[0].uniqueCardWindows.map(\.label)
+                == ["Codex Spark · 1", "Codex Spark · 2"]
+                && mixedPayload.agents[0].rawCardWindows.map(\.label)
+                    == ["Codex Spark", "Codex Spark"],
+            "a group with one length and one durationless sibling has no tier that "
+                + "names both, so it falls to ordinals and the provider's own text "
+                + "survives only in the raw view the migration reads")
+        expect(
+            QuotaResolver.canonicalSelection(
+                payload: mixedPayload, selection: "codex|Codex Spark") == "codex|Codex Spark",
+            "a persisted label that was ambiguous before qualification stays unmigrated")
+        expect(
+            QuotaResolver.resolve(payload: mixedPayload, selection: "codex|Codex Spark") == nil,
+            "and it stays explicit rather than following Auto to one of the two")
+
+        // The qualifier has to carry the remainder. Provider durations are not
+        // whole hours by contract, and truncating to the largest unit rebuilds
+        // the very ambiguity this change removes — one hour and ninety minutes
+        // would both read `1h`. When two durations render the same anyway, the
+        // pair is left as the provider labelled it rather than being given a
+        // distinction the reader cannot act on.
+        func sparkPair(_ first: Int64, _ second: Int64) -> [String] {
+            let json = """
+            {"generatedAt":"now","agents":[
+              {"clientId":"codex","source":"fixture","updatedAt":"now",
+               "windows":[
+                 {"cardId":"a.v1","label":"Codex Spark","usedPercent":0,
+                  "remainingPercent":100,"windowMinutes":\(first / 60),
+                  "paceStatus":{"state":"learningHistory","windowKey":"a.v1",
+                  "durationSeconds":\(first),"durationSource":"provider","completeCycles":1}},
+                 {"cardId":"b.v1","label":"Codex Spark","usedPercent":0,
+                  "remainingPercent":100,"windowMinutes":\(second / 60),
+                  "paceStatus":{"state":"learningHistory","windowKey":"b.v1",
+                  "durationSeconds":\(second),"durationSource":"provider","completeCycles":1}}
+               ]}
+            ]}
+            """
+            return try! JSONDecoder()
+                .decode(AgentUsagePayload.self, from: Data(json.utf8))
+                .agents[0].uniqueCardWindows.map(\.label)
+        }
+        expect(
+            sparkPair(3_600, 5_400) == ["Codex Spark · 1h", "Codex Spark · 1h 30m"],
+            "durations differing below the largest unit still produce different names")
+        expect(
+            sparkPair(18_000, 604_800) == ["Codex Spark · Session", "Codex Spark · Weekly"],
+            "and the two lengths the engine already names take those same words")
+        // Two windows of one period have no period to be told apart by, so the
+        // length tier is refused and the reset tier is asked — these two carry
+        // no reset either, so the ordinal is what remains. #286 requires a
+        // unique name here, not the identical pair it was filed about.
+        expect(
+            sparkPair(90, 119) == ["Codex Spark · 1", "Codex Spark · 2"],
+            "windows whose lengths render identically still get unique names")
+
+        // A generated name must also avoid a label some OTHER window already
+        // carries. Two durationless `Foo` windows beside one already called
+        // `Foo · 1` used to produce `Foo · 1` twice: uniqueness inside the
+        // repeated group says nothing about the rest of the card view.
+        let collisionJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"a.v1","label":"Foo","usedPercent":0,"remainingPercent":100},
+             {"cardId":"b.v1","label":"Foo","usedPercent":0,"remainingPercent":100},
+             {"cardId":"c.v1","label":"Foo · 1","usedPercent":0,"remainingPercent":100}
+           ]}
+        ]}
+        """
+        let collisionLabels = try! JSONDecoder()
+            .decode(AgentUsagePayload.self, from: Data(collisionJSON.utf8))
+            .agents[0].uniqueCardWindows.map(\.label)
+        expect(
+            Set(collisionLabels).count == 3 && collisionLabels.contains("Foo · 1"),
+            "a generated name steps over a label another window already carries")
+
+        // The state the issue was filed from, and the one this account is in:
+        // Codex reports a window with no usage yet as
+        // `unavailable(invalidEvidence)`, and `UsageWindow.unavailable` clears
+        // the duration and `windowMinutes` with it, so BOTH rows arrive at
+        // 100% remaining with no length at all. The reset each row already
+        // displays is what separates them.
+        let resetOnly: [String] = {
+            let iso = ISO8601DateFormatter()
+            let soon = iso.string(from: Date().addingTimeInterval(5 * 3_600))
+            let later = iso.string(from: Date().addingTimeInterval(7 * 86_400))
+            let json = """
+            {"generatedAt":"now","agents":[
+              {"clientId":"codex","source":"fixture","updatedAt":"now",
+               "windows":[
+                 {"cardId":"additional.deadbeef.primary.v1","label":"Codex Spark",
+                  "usedPercent":0,"remainingPercent":100,"resetsAt":"\(soon)",
+                  "paceStatus":{"state":"unavailable",
+                  "windowKey":"additional.deadbeef.primary.v1",
+                  "completeCycles":0,"reason":"invalidEvidence"}},
+                 {"cardId":"additional.deadbeef.secondary.v1","label":"Codex Spark",
+                  "usedPercent":0,"remainingPercent":100,"resetsAt":"\(later)",
+                  "paceStatus":{"state":"unavailable",
+                  "windowKey":"additional.deadbeef.secondary.v1",
+                  "completeCycles":0,"reason":"invalidEvidence"}}
+               ]}
+            ]}
+            """
+            return try! JSONDecoder()
+                .decode(AgentUsagePayload.self, from: Data(json.utf8))
+                .agents[0].uniqueCardWindows.map(\.label)
+        }()
+        expect(
+            resetOnly == ["Codex Spark · 5h", "Codex Spark · 7d"],
+            "a pair the provider left without any duration is named by the resets "
+                + "the rows already show")
+
+        // And named under the countdown's rounding, not its own. The countdown
+        // takes minutes UP while `durationText` alone rounds to the nearest, so
+        // a reset one second inside five hours put `4h 59m` in the name beside
+        // `Resets in 5h` in the same row, for the first half of every minute.
+        let roundingIso = ISO8601DateFormatter()
+        let nearlyFiveHours = Date().addingTimeInterval(5 * 3_600 - 1)
+        let roundingJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"fixture","updatedAt":"now",
+           "windows":[
+             {"cardId":"a.v1","label":"Codex Spark","usedPercent":0,
+              "remainingPercent":100,"resetsAt":"\(roundingIso.string(from: nearlyFiveHours))",
+              "paceStatus":{"state":"unavailable","windowKey":"a.v1",
+              "completeCycles":0,"reason":"invalidEvidence"}},
+             {"cardId":"b.v1","label":"Codex Spark","usedPercent":0,
+              "remainingPercent":100,
+              "resetsAt":"\(roundingIso.string(from: Date().addingTimeInterval(7 * 86_400)))",
+              "paceStatus":{"state":"unavailable","windowKey":"b.v1",
+              "completeCycles":0,"reason":"invalidEvidence"}}
+           ]}
+        ]}
+        """
+        let roundingPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(roundingJSON.utf8))
+        let roundingWindow = roundingPayload.agents[0].uniqueCardWindows[0]
+        expect(
+            roundingWindow.label == "Codex Spark · 5h"
+                && UsagePace.resetText(for: roundingWindow.resetsAt ?? "") == "Resets in 5h",
+            "the qualifier and the countdown beside it round the same way")
 
         // Auto pick excludes hidden clients (issue #36): hiding the tightest
         // (claude|Session, 12%) makes auto fall to the next healthy card
@@ -7079,15 +7328,28 @@ enum SelfTest {
             summaryClients == registryClients && contributionClients == registryClients
                 && quotaClients == registryClients,
             "demo summary contributions and quota share the client set")
+        // The canonical card identities a demo client is expected to expose, in
+        // order. The authority for each is the provider's own card-ID constant
+        // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
+        // drift from what the app renders against the real provider — including
+        // when a typo is copied into both `cardId` and `paceStatus.windowKey`,
+        // where comparing the two fields to each other proves nothing. Most
+        // providers report the session/weekly pair; one whose real shape differs
+        // states its own row rather than forcing every client to match it.
+        let demoCardIdsByClient: [String: [String]] = [:]
+        let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count
                 && quota.agents.allSatisfy { agent in
-                    let windows = agent.uniqueCardWindows
-                    return windows.count == 2
-                        && windows[0].cardId == "session.v1"
-                        && windows[1].cardId == "weekly.v1"
+                    // The raw array, not `uniqueCardWindows`: that view is
+                    // fail-closed on a repeated card ID, so a fixture writing
+                    // one ID twice would reach this comparison already
+                    // deduplicated and match a shorter expectation.
+                    agent.windows.map(\.cardId)
+                        == (demoCardIdsByClient[agent.clientId] ?? defaultDemoCardIds)
+                        && agent.windows.allSatisfy { $0.cardId == $0.paceStatus.windowKey }
                 },
-            "demo quota cards use unique canonical window identities")
+            "demo quota cards carry the canonical card identities their provider declares")
 
         let firstDemoWindows = quota.agents.first?.uniqueCardWindows ?? []
         let secondDemoWindows = quota.agents.dropFirst().first?.uniqueCardWindows ?? []
@@ -7141,14 +7403,26 @@ enum SelfTest {
             "demo learning-duration and unavailable rows suppress projections")
         expect(
             quota.agents.dropFirst(2).allSatisfy { agent in
-                agent.uniqueCardWindows.allSatisfy {
-                    $0.paceStatus.state == .learningHistory
-                        && $0.paceStatus.durationSource == .contract
-                        && $0.paceStatus.completeCycles == 0
-                        && $0.historicalPace == nil
+                agent.uniqueCardWindows.allSatisfy { window in
+                    let pace = window.paceStatus
+                    guard pace.completeCycles == 0, window.historicalPace == nil else {
+                        return false
+                    }
+                    // The pace state a fixture claims has to match the evidence
+                    // its provider actually supplies. A declared cycle length
+                    // puts the window in learning-history; a provider that
+                    // reports a percent and nothing else leaves it learning the
+                    // duration. Demanding `contract` of every card was the same
+                    // rule for as long as every provider happened to declare one.
+                    if pace.durationSeconds == nil {
+                        return pace.state == .learningDuration
+                            && pace.durationSource == .observed
+                    }
+                    return pace.state == .learningHistory
+                        && pace.durationSource == .contract
                 }
             },
-            "remaining demo quota cards stay on canonical learning-history fixtures")
+            "remaining demo quota cards match the pace evidence their provider supplies")
 
         let modelReport = DemoData.modelReport
         let hourlyReport = DemoData.hourlyReport
@@ -11682,6 +11956,57 @@ enum SelfTest {
                "SC1 no agent tab open issues no message scan")
         expect((scanCounts?.open ?? 0) >= 1,
                "SC1 an open agent tab does scan, so the bound above is not vacuous")
+
+        // SC2. The scan range used to be anchored on the live window, so a
+        // provider that reports a reset without a window length took the whole
+        // history down with it: `unionStart` returned nil, `refreshWindowUsage`
+        // returned before scanning, and no scan covering this client's cycles
+        // was ever cached — leaving every row of the history card on "Reading
+        // local usage…" permanently rather than for the length of a scan.
+        // Measured on live Codex data 2026-09-08: all three of its windows
+        // carried `resetsAt` with `durationSeconds` nil.
+        //
+        // The cycles are their own range, so both numbers are asserted: a scan
+        // that runs but produces no joined row would satisfy the count alone.
+        let hsReset = wNow - 7_200
+        let hsPayload: AgentUsagePayload = {
+            let json = """
+            {"generatedAt":"t","publicationGeneration":7,"agents":[
+              {"clientId":"codex","source":"oauth","updatedAt":"t","windows":[
+                {"cardId":"main.weekly.v1","label":"Weekly","usedPercent":0,
+                 "remainingPercent":100,"resetsAt":"\(wIso)",
+                 "paceStatus":{"state":"unavailable","windowKey":"main.weekly.v1",
+                               "completeCycles":0,"reason":"invalidEvidence"}}
+              ]}
+            ]}
+            """
+            return try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(json.utf8))
+        }()
+        let durationlessScan: (scans: Int, rows: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: hsPayload)
+            src.curve = windowCurve(
+                resetAtSecs: hsReset, durationSecs: 18_000,
+                at: [(hsReset - 15_000, 4), (hsReset - 600, 40)], isActive: false)
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.windowUsageClient = "codex"
+            m.refreshWindowQuotaHalves()
+            src.scans = 0
+            await m.refreshWindowUsage()
+            return (scans: src.scans, rows: m.quotaHistory.count)
+        }
+        expect(durationlessScan?.scans == 1,
+               "SC2 a window with no provider duration still scans for its history")
+        expect(durationlessScan?.rows == 1,
+               "SC2 and the scan reaches the history rows rather than only running")
 
         // SS1. `windowCardClients` is assigned from `displayClients`, which
         // arrives with graph data, so it is briefly empty on every top-level
