@@ -1641,7 +1641,7 @@ async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
             }
         }
     };
-    apply_provider_outcome("opencode", None, "api", now, outcome)
+    apply_provider_outcome("opencode", None, "api", outcome)
 }
 
 async fn fetch_antigravity() -> AgentUsageSnapshot {

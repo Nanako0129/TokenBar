@@ -7336,7 +7336,11 @@ enum SelfTest {
         // where comparing the two fields to each other proves nothing. Most
         // providers report the session/weekly pair; one whose real shape differs
         // states its own row rather than forcing every client to match it.
-        let demoCardIdsByClient: [String: [String]] = [:]
+        let demoCardIdsByClient: [String: [String]] = [
+            // OpenCode Go reports three rolling windows rather than the
+            // session/weekly pair; the card IDs are `agent_opencode_go.rs`'s.
+            "opencode": ["rolling.v1", "weekly.v1", "monthly.v1"]
+        ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count
