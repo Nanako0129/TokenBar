@@ -406,6 +406,36 @@ enum DemoData {
             let sessionUsed = Double(12 + (index * 7) % 76)
             let weeklyUsed = max(5, sessionUsed * 0.58)
             let windows: [[String: Any]]
+            if id == "kiro" {
+                // The real Kiro provider reports one monthly allowance and no
+                // cycle-length evidence, so pace learns the duration
+                // (learning-duration). Model that honestly rather than the
+                // generic Session/Weekly fixture.
+                windows = [
+                    [
+                        "cardId": "usage.v1",
+                        "label": "Monthly",
+                        "usedPercent": 41.0,
+                        "remainingPercent": 59.0,
+                        "resetsAt": formatter.string(
+                            from: now.addingTimeInterval(TimeInterval(weeklyDuration))),
+                        "resetText": "in 18d",
+                        "paceStatus": [
+                            "state": "learningDuration",
+                            "windowKey": "usage.v1",
+                            "durationSource": "observed",
+                            "completeCycles": 0,
+                        ],
+                    ]
+                ]
+                return [
+                    "clientId": id,
+                    "source": "fixture",
+                    "updatedAt": updated,
+                    "identity": ["email": "demo@\(id).local", "plan": "Kiro Pro"],
+                    "windows": windows,
+                ] as [String: Any]
+            }
             // The `opencode` client carries the OpenCode Go subscription quota:
             // rolling/weekly/monthly percent windows (ported from mana.bar).
             // Give it those three so the demo card matches the real provider

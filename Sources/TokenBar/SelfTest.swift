@@ -1812,6 +1812,25 @@ enum SelfTest {
             UsageAttributionSettings.subscriptionClients(from: opencodeDuplicatePayload) == ["codex"],
             "a subscription reported by both sources appears once")
 
+        // Kiro is a real multi-vendor subscription (architecture.md attribution
+        // table), not a router: its own quota snapshot makes it an assignment
+        // target, exactly like Copilot and unlike opencode, which is excluded.
+        // The Kiro provider now publishes such a snapshot, so this guards that
+        // it is admitted here rather than filtered out.
+        let kiroPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(#"{"generatedAt":"now","agents":[{"clientId":"kiro","source":"oauth","updatedAt":"now","identity":{"plan":"Kiro Pro"},"windows":[{"cardId":"usage.v1","label":"Monthly","usedPercent":41,"remainingPercent":59,"paceStatus":{"state":"learningDuration","windowKey":"usage.v1","completeCycles":0}}]}]}"#.utf8))
+        expect(
+            UsageAttributionSettings.subscriptionClients(from: kiroPayload) == ["kiro"],
+            "a kiro quota snapshot makes kiro an assignment target")
+        // Kiro sells a deepseek plan, so a kiro row logged against deepseek is
+        // its own spend — the owning-source rule resolves it to kiro.
+        expect(
+            UsageAttributionSettings.suggestionTarget(
+                sourceClient: "kiro", provider: "deepseek",
+                subscriptionClients: ["kiro"]) == .assigned("kiro"),
+            "kiro's own deepseek usage suggests the kiro subscription")
+
         // The structural guard, not another hand-kept row. Rust's
         // `subscription_label` renames four providers and capitalizes the rest,
         // so every provider a subscription serves must be reachable from its
@@ -4609,6 +4628,17 @@ enum SelfTest {
                 && unknownTransport?.first?.status == nil
                 && unknownTransport?.first?.osCode == nil,
             "unknown transport tuples drop associated numerics")
+        // The Kiro provider publishes diagnostics under clientId "kiro"; it is on
+        // the allowlist, so its id is preserved rather than rewritten to "unknown"
+        // like an unsupported client.
+        let kiroTransport = transportEntries(
+            transportBase.replacingOccurrences(of: "codex", with: "kiro")
+                + #","transportDiagnostic":{"category":"rateLimited","status":429,"osCode":-1}"#)
+        expect(
+            kiroTransport?.first?.clientId == "kiro"
+                && kiroTransport?.first?.category == "rateLimited"
+                && kiroTransport?.first?.status == 429,
+            "kiro transport diagnostics keep their client id")
         // The OpenCode Go provider publishes diagnostics under clientId "opencode";
         // it is on the allowlist, so its id is preserved rather than rewritten to
         // "unknown" like an unsupported client.
@@ -7337,9 +7367,12 @@ enum SelfTest {
         // providers report the session/weekly pair; one whose real shape differs
         // states its own row rather than forcing every client to match it.
         let demoCardIdsByClient: [String: [String]] = [
+            // Kiro reports one monthly allowance rather than the session/weekly
+            // pair; the card ID is `agent_kiro.rs`'s `WINDOW_KEY`.
+            "kiro": ["usage.v1"],
             // OpenCode Go reports three rolling windows rather than the
             // session/weekly pair; the card IDs are `agent_opencode_go.rs`'s.
-            "opencode": ["rolling.v1", "weekly.v1", "monthly.v1"]
+            "opencode": ["rolling.v1", "weekly.v1", "monthly.v1"],
         ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
