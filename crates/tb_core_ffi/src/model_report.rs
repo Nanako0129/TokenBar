@@ -122,14 +122,50 @@ fn local_cost_estimate(
         cache_read: entry.cache_read,
         cache_write: entry.cache_write,
         reasoning: entry.reasoning,
-        // `ModelUsage` carries no 1h/5m split, so this estimate prices the
-        // whole cache write at the 5-minute rate. That is already true today
-        // and stays true once the engine bills the 1h portion at 2x; the gap
-        // is a few percent, and this estimate exists to catch a mispriced
-        // provider at a 50x threshold, so it does not move the comparison.
-        // Closing the gap means adding the bucket to `ModelUsage`, which is a
-        // public FFI-crossing type.
-        cache_write_1h: 0,
+        // `ModelUsage` carries no 1h/5m split, so this has to assume one.
+        // Assume ALL of it is 1h, which is the more expensive of the two:
+        // this estimate is the denominator of a ratio compared against a
+        // threshold, so only an UPPER bound on it is safe. Under-estimating
+        // inflates the ratio and invents warnings; over-estimating only
+        // deflates it and stays quiet, which is the right way to fail for a
+        // guard against costs wrong by three orders of magnitude.
+        //
+        // The asymmetry is not theoretical. This line used to pass 0 (price
+        // everything at the 5m rate) and that produced a real false-positive
+        // path, found in review of #309:
+        //
+        //   `compute_cost` charges a 1h write at 2x base input, deriving it
+        //   as `2.0 * tiered_cost(..., input_cost_per_token, ...)` because no
+        //   pricing table publishes a 1h key. The 5m rate is the table's
+        //   `cache_creation_input_token_cost` — which some entries omit. The
+        //   provider hint steers `claude-haiku-4-5` to
+        //   `perplexity/anthropic/claude-haiku-4-5`, a resale entry with no
+        //   such key (the canonical one has 1.25e-06; upstream tokscale #57).
+        //   So a 5m-priced estimate dropped that row's cache write entirely
+        //   while tokscale still billed it. A row that builds a large cache,
+        //   has a small input/output remainder and takes no later cache reads
+        //   — ordinary for a session that ends after priming — then reaches
+        //   `cost / estimate` above 50 on a LOCALLY priced row, showing "cost
+        //   reported by the client" over a number no client reported.
+        //
+        // Pricing the whole write at 1h closes that path at the source rather
+        // than bounding it: the estimate now includes those tokens even when
+        // the matched entry has no 5m rate, because the 1h rate is derived
+        // from input rather than looked up. Where the real split was 5m the
+        // estimate runs high by at most 2.0/1.25 = 1.6x, which only makes the
+        // guard quieter.
+        //
+        // The rows the guard exists for are unaffected either way: OpenCode's
+        // self-reported costs come through deepseek/openrouter with no cache
+        // write at all.
+        //
+        // Two earlier comments here argued this was safe with `0`, first
+        // because the gap was "a few percent" (unmeasured; it reaches 60% of
+        // the cache-write component) and then because the affected and judged
+        // rows were disjoint (they are not — every row is estimated). Both
+        // were reasoning about how big the error was. The error's DIRECTION
+        // was the part that mattered.
+        cache_write_1h: entry.cache_write,
     };
     let estimate = pricing.calculate_cost_with_provider(&entry.model, Some(&entry.provider), &usage);
     (estimate.is_finite() && estimate > 0.0).then_some(estimate)
@@ -650,6 +686,65 @@ mod tests {
         let mut e = priced_entry("m", 1.0);
         e.input = 3_000_000;
         assert_eq!(local_cost_estimate(Some(&service), &e), Some(3.0));
+    }
+
+    /// The false-positive path from #309's review: an entry with an input
+    /// rate but no 5m cache-write rate (what the provider hint selects for
+    /// haiku). Pricing the write at 5m drops it from the estimate while
+    /// tokscale still bills it at 2x input, so a cache-heavy row with a small
+    /// remainder clears the 50x threshold on a locally priced row.
+    #[test]
+    fn cache_write_is_estimated_even_without_a_5m_rate() {
+        let mut litellm = std::collections::HashMap::new();
+        litellm.insert(
+            "no5m".to_string(),
+            tokscale_core::pricing::litellm::ModelPricing {
+                input_cost_per_token: Some(1e-6),
+                // cache_creation_input_token_cost deliberately absent.
+                ..Default::default()
+            },
+        );
+        let service = tokscale_core::pricing::PricingService::new(
+            litellm,
+            std::collections::HashMap::new(),
+        );
+
+        let mut e = entry(100_000, 0, 0, 10_000_000, 0);
+        e.model = "no5m".to_string();
+        e.provider = "anthropic".to_string();
+        e.cost = 0.0;
+
+        // 100K input at 1e-6 is 0.10; 10M cache write at 2x input is 20.00.
+        let estimate = local_cost_estimate(Some(&service), &e).expect("priced");
+        assert!(
+            estimate > 20.0,
+            "the cache write must be in the estimate, got {estimate}"
+        );
+
+        // What tokscale would charge if that write were entirely 1h — the
+        // estimate must not sit below it, or the ratio inflates.
+        let billed = service.calculate_cost_with_provider(
+            "no5m",
+            Some("anthropic"),
+            &tokscale_core::TokenBreakdown {
+                input: e.input,
+                output: 0,
+                cache_read: 0,
+                cache_write: e.cache_write,
+                reasoning: 0,
+                cache_write_1h: e.cache_write,
+            },
+        );
+        assert!(
+            estimate >= billed,
+            "estimate {estimate} must upper-bound the billed {billed}"
+        );
+        // Pricing it at 5m instead would have left 0.10 against a billed
+        // 20.10 — a ratio of 201x on a locally priced row.
+        assert!(
+            billed / estimate <= 1.0,
+            "ratio must not exceed 1.0 when cost equals the fully-1h price"
+        );
     }
 
     #[test]
