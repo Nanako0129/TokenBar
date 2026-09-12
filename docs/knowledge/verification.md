@@ -131,8 +131,10 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 > 凡是驗收由偏好驅動的畫面——**usage attribution 宣告、Settings 持久化、狀態列項目狀態**——一律用 bundle，但**必須指定一次性的 bundle identifier**：
 >
 > ```bash
-> BUNDLE_ID=com.nyanako.tokenbar.uxcheck scripts/bundle.sh
+> BUNDLE_ID=com.nyanako.tokenbar.uxcheck make bundle
 > ```
+>
+> **走 `make bundle`，不要直接叫 `scripts/bundle.sh`**：`Makefile:95-99` 會先跑 `relink_if_stale` 與 `rebuild_if_header_stale`，而該 script 只跑 `swift build -c release`。少了那兩道，改完 Rust 或 `ctb.h` 之後 SwiftPM 會沉默地沿用舊執行檔或舊 CTB module（理由寫在 `Makefile:101-121`），於是你驗到的是上一版的行為卻以為驗過了。`BUNDLE_ID` 由環境傳入，`make` 會原樣轉給 script。
 >
 > **只覆寫 identifier，不要改 `OUT_DIR`**：產物仍然是 `dist/TokenBar.app`，下方的清理程序因此原封不動適用。另建一條路徑會多出一個沒有清理程序的產物。
 >
