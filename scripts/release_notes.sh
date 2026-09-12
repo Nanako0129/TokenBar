@@ -39,13 +39,17 @@ SRC_TXT="release-notes/${TAG}.txt"
 SRC_MD="release-notes/${TAG}.md"
 
 # --- Version-bound sources, required. ----------------------------------------
+# -s, not -f: an empty file would pass an existence check and then ship. The
+# appcast renderer skips its description when the text is empty (its own -s
+# guard) and latest.json would carry empty notes, so the release would complete
+# with nothing to show for it.
 MISSING=()
-[[ -f "$SRC_TXT" ]] || MISSING+=("$SRC_TXT")
-[[ -f "$SRC_MD" ]] || MISSING+=("$SRC_MD")
+[[ -s "$SRC_TXT" ]] || MISSING+=("$SRC_TXT")
+[[ -s "$SRC_MD" ]] || MISSING+=("$SRC_MD")
 if (( ${#MISSING[@]} > 0 )); then
   {
     printf 'error: no release notes for %s\n' "$TAG"
-    printf 'Write these before tagging:\n'
+    printf 'Write these before tagging (missing, or present but empty):\n'
     printf '  %s\n' "${MISSING[@]}"
     printf 'Notes are hand-written and named after the tag; there is no fallback,\n'
     printf 'so a release cannot inherit the previous version'"'"'s text.\n'

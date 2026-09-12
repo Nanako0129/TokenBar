@@ -36,10 +36,28 @@ FOLD = str.maketrans({"−": "-", "–": "-", "—": "-", "×": "x"})
 # number. A leading "+" is accepted for symmetry but does not occur today.
 NUMBER = re.compile(r"(?<![\w.])[-+]?\d+(?:\.\d+)?")
 
+# Identifiers are not measurements. The markdown cites issues and pull requests
+# as `[#287](https://github.com/.../pull/287)`, which puts 287 into its number
+# set twice over — once from the link text, once from the URL path, where the
+# preceding `/` does not stop the lookbehind. A wrong figure in the plain text
+# would then be reported as present merely because some PR happens to carry
+# that number. On the committed v1.17.0 markdown, seven of its twenty-four
+# distinct numbers come only from links (286, 287, 288, 289, 293, 296, 300);
+# removing them leaves exactly the seventeen the plain text also states.
+#
+# Contributor handles need no special case: `@Mai0313` is already excluded,
+# because the digits are preceded by a word character.
+INLINE_LINK = re.compile(r"\[([^\]]*)\]\([^)]*\)")
+BARE_URL = re.compile(r"https?://\S+")
+ISSUE_REF = re.compile(r"#\d+")
+
 
 def numbers(path: Path) -> list[str]:
-    text = path.read_text(encoding="utf-8").translate(FOLD).replace(",", "")
-    return NUMBER.findall(text)
+    text = path.read_text(encoding="utf-8")
+    text = INLINE_LINK.sub(r"\1", text)   # keep the link text, drop the target
+    text = BARE_URL.sub(" ", text)
+    text = ISSUE_REF.sub(" ", text)
+    return NUMBER.findall(text.translate(FOLD).replace(",", ""))
 
 
 def main() -> int:
@@ -54,6 +72,16 @@ def main() -> int:
     if missing:
         for p in missing:
             print(f"error: missing {p}", file=sys.stderr)
+        return 1
+
+    # An empty file is not a release with nothing to say; it is a file someone
+    # created to get past the existence check. Both would ship: the appcast
+    # renderer skips its description when the text is empty, and latest.json
+    # would carry empty notes.
+    empty = [p for p in (txt_path, md_path) if not p.read_text(encoding="utf-8").strip()]
+    if empty:
+        for p in empty:
+            print(f"error: {p} is empty", file=sys.stderr)
         return 1
 
     txt = numbers(txt_path)
