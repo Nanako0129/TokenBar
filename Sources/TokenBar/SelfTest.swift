@@ -7316,15 +7316,28 @@ enum SelfTest {
             summaryClients == registryClients && contributionClients == registryClients
                 && quotaClients == registryClients,
             "demo summary contributions and quota share the client set")
+        // The canonical card identities a demo client is expected to expose, in
+        // order. The authority for each is the provider's own card-ID constant
+        // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
+        // drift from what the app renders against the real provider — including
+        // when a typo is copied into both `cardId` and `paceStatus.windowKey`,
+        // where comparing the two fields to each other proves nothing. Most
+        // providers report the session/weekly pair; one whose real shape differs
+        // states its own row rather than forcing every client to match it.
+        let demoCardIdsByClient: [String: [String]] = [:]
+        let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
             quota.agents.count == ClientRegistry.allIds.count
                 && quota.agents.allSatisfy { agent in
-                    let windows = agent.uniqueCardWindows
-                    return windows.count == 2
-                        && windows[0].cardId == "session.v1"
-                        && windows[1].cardId == "weekly.v1"
+                    // The raw array, not `uniqueCardWindows`: that view is
+                    // fail-closed on a repeated card ID, so a fixture writing
+                    // one ID twice would reach this comparison already
+                    // deduplicated and match a shorter expectation.
+                    agent.windows.map(\.cardId)
+                        == (demoCardIdsByClient[agent.clientId] ?? defaultDemoCardIds)
+                        && agent.windows.allSatisfy { $0.cardId == $0.paceStatus.windowKey }
                 },
-            "demo quota cards use unique canonical window identities")
+            "demo quota cards carry the canonical card identities their provider declares")
 
         let firstDemoWindows = quota.agents.first?.uniqueCardWindows ?? []
         let secondDemoWindows = quota.agents.dropFirst().first?.uniqueCardWindows ?? []
@@ -7378,14 +7391,26 @@ enum SelfTest {
             "demo learning-duration and unavailable rows suppress projections")
         expect(
             quota.agents.dropFirst(2).allSatisfy { agent in
-                agent.uniqueCardWindows.allSatisfy {
-                    $0.paceStatus.state == .learningHistory
-                        && $0.paceStatus.durationSource == .contract
-                        && $0.paceStatus.completeCycles == 0
-                        && $0.historicalPace == nil
+                agent.uniqueCardWindows.allSatisfy { window in
+                    let pace = window.paceStatus
+                    guard pace.completeCycles == 0, window.historicalPace == nil else {
+                        return false
+                    }
+                    // The pace state a fixture claims has to match the evidence
+                    // its provider actually supplies. A declared cycle length
+                    // puts the window in learning-history; a provider that
+                    // reports a percent and nothing else leaves it learning the
+                    // duration. Demanding `contract` of every card was the same
+                    // rule for as long as every provider happened to declare one.
+                    if pace.durationSeconds == nil {
+                        return pace.state == .learningDuration
+                            && pace.durationSource == .observed
+                    }
+                    return pace.state == .learningHistory
+                        && pace.durationSource == .contract
                 }
             },
-            "remaining demo quota cards stay on canonical learning-history fixtures")
+            "remaining demo quota cards match the pace evidence their provider supplies")
 
         let modelReport = DemoData.modelReport
         let hourlyReport = DemoData.hourlyReport
