@@ -126,7 +126,29 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 
 ## Local build and UX acceptance
 
-不需要 `.app` bundle 語意的人工 UI 檢查，優先從 repository root 執行 `swift run TokenBar --open-popover`。只有 icon、`Info.plist`、`LSUIElement`、Sparkle、autostart 或安裝路徑等 bundle-only 行為，才以 `make bundle` 產生的 `dist/TokenBar.app` 驗收。
+> **⚠️ `make run` 與 bundle 讀的不是同一個 `UserDefaults` 網域。** `swift run TokenBar`（`make run` 就是它）產出裸執行檔：`.build/debug/` 底下沒有 `.app`，執行檔內查不到 `CFBundleIdentifier`，因此 `UserDefaults.standard` 落在以行程名為名的網域 **`TokenBar`**，而正式 bundle 用 **`com.nyanako.tokenbar`**。兩份偏好互不可見，且裸執行檔那一份會隨著開發過程被寫入，內容與使用者實際設定無關。
+>
+> 凡是驗收由偏好驅動的畫面——**usage attribution 宣告、Settings 持久化、狀態列項目狀態**——一律用 bundle，但**必須指定一次性的 bundle identifier**：
+>
+> ```bash
+> BUNDLE_ID=com.nyanako.tokenbar.uxcheck make bundle
+> ```
+>
+> **走 `make bundle`，不要直接叫 `scripts/bundle.sh`**：`Makefile:95-99` 會先跑 `relink_if_stale` 與 `rebuild_if_header_stale`，而該 script 只跑 `swift build -c release`。少了那兩道，改完 Rust 或 `ctb.h` 之後 SwiftPM 會沉默地沿用舊執行檔或舊 CTB module（理由寫在 `Makefile:101-121`），於是你驗到的是上一版的行為卻以為驗過了。`BUNDLE_ID` 由環境傳入，`make` 會原樣轉給 script。
+>
+> **只覆寫 identifier，不要改 `OUT_DIR`**：產物仍然是 `dist/TokenBar.app`，下方的清理程序因此原封不動適用。另建一條路徑會多出一個沒有清理程序的產物。
+>
+> `scripts/bundle.sh:15` 的預設 identifier 是出貨用的 `com.nyanako.tokenbar`，所以直接跑 `make bundle` 再操作 Settings，會把**使用者正式的偏好**改掉——`SettingsPanel.swift:839-848` 是直接 `UserDefaults.standard.set(...)`，刪掉 app 也不會還原。`make selftest-bundled` 早就是這樣取得自己的 identifier（`Makefile:79`、`:88` 的 `SELFTEST_BUNDLE_ID`），驗收沿用同一個機制即可。
+>
+> 一次性 identifier 的網域一開始是空的，所以受測的宣告要先在該 app 裡設一次——那正是被測的路徑。但**網域不會隨 app 一起被刪**，所以清理程序多一行 `defaults delete`；不刪的話下一次驗收會繼承上一次的宣告，於是「空網域」這個前提在第二次就不成立。
+>
+> 這條規則來自一次實際的假回歸。Codex 時間窗歷史卡的每一列都顯示零 token 與零金額，並印出「額度變動了 N%，但這台機器上沒有記錄到」，而同一台機器上安裝的 bundle 顯示正常；當時 engine pin 剛推進過，於是看起來像那次推進造成的回歸。實際鏈條與 engine 無關：`tokenbar.usage.attribution.confirmed` 在兩個網域的內容不同，受測 client 在 bundle 網域有宣告、在行程名網域沒有，於是 `UsageAttribution.resolve` 回 `.unassigned`，`QuotaHistory.swift` 的 `spanTotals` 歸屬閘門把該 span 的每一則訊息都跳過，`spanTokens` 與 `spanCost` 皆為 0，`WindowEquivalence.aggregate` 因此回 `.unaccounted`。週期本身讀固定路徑的 `quota-pace-history-v3.json`，不受網域影響，所以列仍在——這正是它看起來像資料缺失而非組態差異的原因。
+>
+> 同時排除掉的方向，記下來避免重查：推進前後兩個 engine pin 對同一批 span 回傳位元相同的訊息數與 token 總量，隔離快取也不改變結果——該鏈條不經過 `UsageAttribution`。
+>
+> **不要**讓裸執行檔改讀 `UserDefaults(suiteName: "com.nyanako.tokenbar")` 來迴避這件事：那會讓開發執行檔寫進使用者正式的偏好網域，摧毀 `SELFTEST_BUNDLE_ID` 建立的隔離。
+
+不需要 `.app` bundle 語意、且不依賴 `UserDefaults` 的人工 UI 檢查，優先從 repository root 執行 `swift run TokenBar --open-popover`。需要 `make bundle` 產生的 `dist/TokenBar.app` 的有兩類：一是 icon、`Info.plist`、`LSUIElement`、Sparkle、autostart 或安裝路徑等 bundle-only 行為；二是**任何由偏好驅動的畫面**（usage attribution、Settings 持久化、狀態列項目狀態），且必須帶一次性的 `BUNDLE_ID`，理由與指令見上方的網域警告。以 Argument Domain 注入初始偏好的 deterministic 檢查不在此限，因為那種檢查自帶偏好、不讀既有網域。
 
 Provider quota pace 以 `swift run TokenBar --demo --open-popover` 提供 deterministic 人工驗收面；snapshot badge 明示 `FIXTURE`，且 `DemoUsageDataSource` 不呼叫 live FFI、不讀寫 quota cache。Historical／Linear／Off 都要實際呈現；驗收時必須區分低 remaining 觸發的 quota 長條黃／紅健康色，與 deficit stage 觸發的 pace marker／footer 橘色。橘色只看 actual 有沒有越過 expected 線，不看是哪個 estimator 畫出那條線——Historical 與 Linear 的 deficit 同色，狀態文案仍必須分辨兩者。舊規則（只有 `available` 可上色）已廢止：`available` 由每次 refresh 重跑的 out-of-sample fit gate 決定，同一張卡會在 Historical 與 `learningHistory` 之間來回，把顏色綁在 basis 上會讓使用者看到預測「一下子就不見了」，而底層 deficit 其實一直存在。
 
@@ -172,6 +194,9 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 test -e "$ROOT/dist/.metadata_never_index"
 "$LSREGISTER" -u "$LOCAL_APP" 2>/dev/null || true
 rm -rf -- "$LOCAL_APP"
+
+# 偏好驅動的驗收若用了一次性 identifier，網域不會隨 app 消失，要另外刪。
+defaults delete com.nyanako.tokenbar.uxcheck 2>/dev/null || true
 ```
 
 清理後，Spotlight 與 LaunchServices 查詢都不應再列出 repository 的 `dist/TokenBar.app`；正常情況只保留 `/Applications/TokenBar.app`：
