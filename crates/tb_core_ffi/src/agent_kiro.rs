@@ -13,10 +13,15 @@
 //!   a non-finite or out-of-bounds percentage as `invalid`: it must not be
 //!   recorded. A `current` above `limit`, a non-positive `limit`, or a negative
 //!   amount drops the window rather than becoming a plausible `100%` card.
-//! - **A stale reset is dropped, not shown.** The endpoint always reports the
-//!   NEXT reset, so a reset at or before now is not trustworthy evidence; the
-//!   reset falls back to `None` (learning duration) rather than dating the card
-//!   to a cycle that has already ended.
+//! - **An expired reset invalidates the reading, not just the reset.** The
+//!   endpoint always reports the NEXT reset, so one at or before now cannot
+//!   describe the current cycle. `provider-quota-pace.md` classes that as
+//!   `invalid`, which is not recorded at all: the response is terminal rather
+//!   than a card with the reset quietly removed, which would read as healthy
+//!   and — since `usable_success` admits Kiro on a non-empty window — would be
+//!   written into the last-good cache over the previous good reading. An
+//!   ABSENT reset is a different reading and keeps the window; the provider
+//!   naming no cycle end is not the same as naming an impossible one.
 //!
 //! The window carries no duration evidence: the endpoint reports the reset
 //! instant but not the cycle length (a Kiro plan resets on the account's own
@@ -161,7 +166,21 @@ pub(crate) fn decode_usage_response(
         .and_then(|info| info.subscription_title)
         .filter(|title| !title.trim().is_empty())
         .map(clean_plan);
-    let resets_at = reset_from_epoch_seconds(response.next_date_reset, now);
+    let resets_at = match reset_from_epoch_seconds(response.next_date_reset, now) {
+        ResetEvidence::Absent => None,
+        ResetEvidence::Valid(reset) => Some(reset),
+        // `provider-quota-pace.md` classes an expired reset as `invalid`, and an
+        // invalid reading is not recorded. Emitting the percentage with the
+        // reset quietly removed would present it as a healthy learning-duration
+        // card, and because `usable_success` admits Kiro on a non-empty window,
+        // that card would enter the last-good cache and overwrite the previous
+        // good reading — the outcome the classification exists to prevent.
+        ResetEvidence::Expired => {
+            return Err(ProviderFetchFailure::terminal(
+                "Kiro usage API reported a quota reset that has already passed.",
+            ));
+        }
+    };
     let windows = response
         .usage_breakdown_list
         .first()
@@ -178,14 +197,32 @@ pub(crate) fn decode_usage_response(
     Ok((plan, windows))
 }
 
-/// Kiro reports `nextDateReset` as epoch seconds. A non-finite value, or one
-/// that does not resolve to a time strictly after `now`, is dropped: the API
-/// reports the NEXT reset, so a past reset is stale evidence, not the window's
-/// real cycle end.
-fn reset_from_epoch_seconds(value: Option<f64>, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-    let seconds = value.filter(|value| value.is_finite())?;
-    let reset = Utc.timestamp_opt(seconds as i64, 0).single()?;
-    (reset > now).then_some(reset)
+/// What `nextDateReset` established, which is not the same question as what it
+/// contained. An absent reset and an expired one are different readings: the
+/// first says the provider did not name a cycle end, the second says it named
+/// one that cannot be true, since the field reports the NEXT reset.
+enum ResetEvidence {
+    /// No reset reported, or a value that resolves to no instant at all. The
+    /// window is kept and the pace lifecycle learns the duration.
+    Absent,
+    Valid(DateTime<Utc>),
+    /// Reported, but at or before `now`.
+    Expired,
+}
+
+/// Kiro reports `nextDateReset` as epoch seconds.
+fn reset_from_epoch_seconds(value: Option<f64>, now: DateTime<Utc>) -> ResetEvidence {
+    let Some(seconds) = value.filter(|value| value.is_finite()) else {
+        return ResetEvidence::Absent;
+    };
+    let Some(reset) = Utc.timestamp_opt(seconds as i64, 0).single() else {
+        return ResetEvidence::Absent;
+    };
+    if reset > now {
+        ResetEvidence::Valid(reset)
+    } else {
+        ResetEvidence::Expired
+    }
 }
 
 fn map_window(
@@ -296,22 +333,40 @@ mod tests {
     }
 
     #[test]
-    fn a_stale_or_absent_reset_drops_to_none_but_keeps_the_window() {
-        // A reset in the past (before now) is stale evidence and is dropped, but
-        // the usage percent still shows.
-        let stale = r#"{
+    fn an_expired_reset_is_terminal_while_an_absent_one_keeps_the_window() {
+        // `nextDateReset` reports the NEXT reset, so one at or before now cannot
+        // describe the current cycle. That is `invalid` evidence, and an invalid
+        // reading is not recorded: dropping only the reset would leave a healthy
+        // learning-duration card that `usable_success` then writes into the
+        // last-good cache over the previous good reading.
+        let expired = r#"{
             "nextDateReset": 1704067200,
             "usageBreakdownList": [{"currentUsageWithPrecision": 30.0, "usageLimitWithPrecision": 100.0}]
         }"#;
-        let (_, windows) = decode_usage_response(stale, now()).unwrap();
+        assert!(matches!(
+            decode_usage_response(expired, now()),
+            Err(ProviderFetchFailure::Terminal { .. })
+        ));
+
+        // A reset exactly at `now` is not in the future either, so it is expired
+        // rather than merely unhelpful — the boundary the comparison turns on.
+        let at_now = r#"{
+            "nextDateReset": 1788912000,
+            "usageBreakdownList": [{"currentUsageWithPrecision": 30.0, "usageLimitWithPrecision": 100.0}]
+        }"#;
+        assert!(matches!(
+            decode_usage_response(at_now, now()),
+            Err(ProviderFetchFailure::Terminal { .. })
+        ));
+
+        // An absent reset is a different reading: the provider named no cycle
+        // end, so the percentage stands and the pace lifecycle learns the
+        // duration. This is the case that must NOT become terminal.
+        let no_reset = r#"{"usageBreakdownList":[{"currentUsageWithPrecision":30.0,"usageLimitWithPrecision":100.0}]}"#;
+        let (_, windows) = decode_usage_response(no_reset, now()).unwrap();
         assert_eq!(windows.len(), 1);
         assert_eq!(windows[0].resets_at_for_test(), None);
         assert!((windows[0].remaining_for_test() - 70.0).abs() < 0.01);
-
-        // A missing reset behaves the same (learning duration, kept).
-        let no_reset = r#"{"usageBreakdownList":[{"currentUsageWithPrecision":30.0,"usageLimitWithPrecision":100.0}]}"#;
-        let (_, windows) = decode_usage_response(no_reset, now()).unwrap();
-        assert_eq!(windows[0].resets_at_for_test(), None);
     }
 
     #[test]
