@@ -131,10 +131,14 @@ Live account-scope smoke必須在hermetic security suite通過後才執行，且
 > 凡是驗收由偏好驅動的畫面——**usage attribution 宣告、Settings 持久化、狀態列項目狀態**——一律用 bundle，但**必須指定一次性的 bundle identifier**：
 >
 > ```bash
-> BUNDLE_ID=com.nyanako.tokenbar.uxcheck OUT_DIR=dist/uxcheck scripts/bundle.sh
+> BUNDLE_ID=com.nyanako.tokenbar.uxcheck scripts/bundle.sh
 > ```
 >
-> `scripts/bundle.sh:15` 的預設是出貨用的 `com.nyanako.tokenbar`，所以直接跑 `make bundle` 再操作 Settings，會把**使用者正式的偏好**改掉——`SettingsPanel.swift:839-848` 是直接 `UserDefaults.standard.set(...)`，刪掉 `dist/` 那顆 app 也不會還原。`make selftest-bundled` 早就是這樣做的（`Makefile:79`、`:88` 用 `SELFTEST_BUNDLE_ID`），驗收沿用同一個機制即可。一次性 identifier 的網域是空的，要先在該 app 裡把受測的宣告設一次，這正是被測的那條路徑。
+> **只覆寫 identifier，不要改 `OUT_DIR`**：產物仍然是 `dist/TokenBar.app`，下方的清理程序因此原封不動適用。另建一條路徑會多出一個沒有清理程序的產物。
+>
+> `scripts/bundle.sh:15` 的預設 identifier 是出貨用的 `com.nyanako.tokenbar`，所以直接跑 `make bundle` 再操作 Settings，會把**使用者正式的偏好**改掉——`SettingsPanel.swift:839-848` 是直接 `UserDefaults.standard.set(...)`，刪掉 app 也不會還原。`make selftest-bundled` 早就是這樣取得自己的 identifier（`Makefile:79`、`:88` 的 `SELFTEST_BUNDLE_ID`），驗收沿用同一個機制即可。
+>
+> 一次性 identifier 的網域一開始是空的，所以受測的宣告要先在該 app 裡設一次——那正是被測的路徑。但**網域不會隨 app 一起被刪**，所以清理程序多一行 `defaults delete`；不刪的話下一次驗收會繼承上一次的宣告，於是「空網域」這個前提在第二次就不成立。
 >
 > 這條規則來自一次實際的假回歸。Codex 時間窗歷史卡的每一列都顯示零 token 與零金額，並印出「額度變動了 N%，但這台機器上沒有記錄到」，而同一台機器上安裝的 bundle 顯示正常；當時 engine pin 剛推進過，於是看起來像那次推進造成的回歸。實際鏈條與 engine 無關：`tokenbar.usage.attribution.confirmed` 在兩個網域的內容不同，受測 client 在 bundle 網域有宣告、在行程名網域沒有，於是 `UsageAttribution.resolve` 回 `.unassigned`，`QuotaHistory.swift` 的 `spanTotals` 歸屬閘門把該 span 的每一則訊息都跳過，`spanTokens` 與 `spanCost` 皆為 0，`WindowEquivalence.aggregate` 因此回 `.unaccounted`。週期本身讀固定路徑的 `quota-pace-history-v3.json`，不受網域影響，所以列仍在——這正是它看起來像資料缺失而非組態差異的原因。
 >
@@ -188,6 +192,9 @@ LSREGISTER="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchS
 test -e "$ROOT/dist/.metadata_never_index"
 "$LSREGISTER" -u "$LOCAL_APP" 2>/dev/null || true
 rm -rf -- "$LOCAL_APP"
+
+# 偏好驅動的驗收若用了一次性 identifier，網域不會隨 app 消失，要另外刪。
+defaults delete com.nyanako.tokenbar.uxcheck 2>/dev/null || true
 ```
 
 清理後，Spotlight 與 LaunchServices 查詢都不應再列出 repository 的 `dist/TokenBar.app`；正常情況只保留 `/Applications/TokenBar.app`：
