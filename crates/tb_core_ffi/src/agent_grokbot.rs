@@ -284,6 +284,17 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
         );
     }
 
+    if first_bool(
+        obj,
+        &["hasNonZeroIncludedLimit", "has_non_zero_included_limit"],
+    ) == Some(false)
+    {
+        return Err(
+            "Grok Bot has no included allowance; no individual weekly quota is available."
+                .to_string(),
+        );
+    }
+
     let used = first_f64(obj, &["usagePercent", "usage_percent"])
         .ok_or_else(|| "Cursor omitted the Grok Bot usage percentage.".to_string())?;
     if !used.is_finite() || !(0.0..=100.0).contains(&used) {
@@ -653,6 +664,46 @@ mod tests {
         )
         .unwrap();
         assert!((data.windows[0].remaining_for_test() - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn distinguishes_no_included_allowance_from_unused_allowance() {
+        for (flag, meter, reset) in [
+            (
+                "hasNonZeroIncludedLimit",
+                "usagePercent",
+                "nextResetTimestampUtc",
+            ),
+            (
+                "has_non_zero_included_limit",
+                "usage_percent",
+                "next_reset_timestamp_utc",
+            ),
+        ] {
+            let mut body = serde_json::json!({
+                flag: false, meter: 0, reset: "2026-09-15T15:40:06Z"
+            });
+            let error = map_response(&body.to_string(), now()).unwrap_err();
+            assert_eq!(
+                error,
+                "Grok Bot has no included allowance; no individual weekly quota is available."
+            );
+
+            // A real allowance with zero usage still has all of its quota left.
+            body[flag] = Value::Bool(true);
+            let unused = map_response(&body.to_string(), now()).unwrap();
+            assert_eq!(unused.windows[0].remaining_for_test(), 100.0);
+
+            // Older responses omit this optional signal entirely.
+            body.as_object_mut().unwrap().remove(flag);
+            assert_eq!(
+                map_response(&body.to_string(), now())
+                    .unwrap()
+                    .windows
+                    .len(),
+                1
+            );
+        }
     }
 
     #[test]

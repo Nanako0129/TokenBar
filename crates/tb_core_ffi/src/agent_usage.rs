@@ -6584,6 +6584,17 @@ mod tests {
                 false,
             ),
             ("signed out", Ok(None), false),
+            (
+                "no included allowance",
+                agent_grokbot::map_response(
+                    r#"{"hasNonZeroIncludedLimit":false,"usagePercent":0,
+                        "nextResetTimestampUtc":"2026-09-15T12:00:00Z"}"#,
+                    now,
+                )
+                .map(Some)
+                .map_err(ProviderFetchFailure::terminal),
+                false,
+            ),
         ];
         for (label, failure, keep) in failures {
             let cache = Mutex::new(ProviderLastGoodCache::default());
