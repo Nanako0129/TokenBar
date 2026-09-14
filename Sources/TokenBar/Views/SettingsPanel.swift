@@ -185,9 +185,11 @@ struct SettingsPanel: View {
         // Client-tabs universe: every client that can be a top tab (present)
         // OR a quota card (knownIds — e.g. quota-only Antigravity), so both
         // orderings are managed from one list. Mirrors displayClients' source.
-        let presentSet = Set(presentClients ?? [])
+        let tabClients = ClientRegistry.tabClients(
+            present: presentClients ?? [], quotaIds: agentUsage?.configuredClientIds ?? [])
+        let presentSet = Set(tabClients)
         let tabsUniverse = ClientRegistry.orderedClients(
-            Self.orderedUnion(presentClients ?? [], knownIds), orderRaw: tabsOrderRaw)
+            Self.orderedUnion(tabClients, knownIds), orderRaw: tabsOrderRaw)
 
         VStack(alignment: .leading, spacing: 14) {
             switch page {

@@ -1172,8 +1172,16 @@ private struct DashboardSnapshot {
     /// counts as fresh.
     private static let unionScanMaxAge: TimeInterval = 30
 
-    /// Which agent tabs may need a card. Drives the union range.
+    /// Provider ids eligible for quota cards and history, including quota-only sources.
     var windowCardClients: [String] = []
+
+    private var quotaVisibility: (tabs: Set<String>, limits: Set<String>, order: String)?
+
+    /// The view supplies preferences, not a usage-derived provider list. Keep
+    /// them for the next quota publication, which can arrive before graph data.
+    func configureQuotaVisibility(tabHidden: Set<String>, limitsHidden: Set<String>, orderRaw: String) {
+        quotaVisibility = (tabHidden, limitsHidden, orderRaw)
+    }
 
     /// Quota readings for EVERY window each client offers, keyed
     /// `"<clientId>|<cardId>"` — the same identity the card's candidates use.
@@ -1185,9 +1193,43 @@ private struct DashboardSnapshot {
     var windowCurves: [String: [QuotaSample]] = [:]
 
     /// Stage 1. Synchronous and local: reads the in-memory payload and the
-    /// persisted quota curve. Deliberately NOT async and NOT driven from the
-    /// quota poll — the whole point is that it does not wait on the network.
+    /// persisted quota curve. Refreshes from already published data without
+    /// waiting for another network request or a local usage scan.
     func refreshWindowQuotaHalves() {
+        if let visibility = quotaVisibility {
+            windowCardClients = ClientRegistry.quotaClients(
+                present: stats?.presentClients ?? [],
+                quotaIds: agentUsage?.configuredClientIds ?? [],
+                tabHidden: visibility.tabs, orderRaw: visibility.order)
+        }
+        let visibleAgents = (agentUsage?.agents ?? []).filter { agent in
+            windowCardClients.contains(agent.clientId)
+                // Limits switches hide the primary row. Extra Claude accounts
+                // keep their own identity, as they do in AgentLimitsCard.
+                && (agent.accountKey != nil
+                    || !(quotaVisibility?.limits.contains(agent.clientId) ?? false))
+        }
+        if quotaVisibility != nil, agentUsage != nil {
+            let keys = Set(visibleAgents.flatMap { agent in
+                agent.uniqueCardWindows.map {
+                    AccountIdentity(clientId: agent.clientId, accountKey: agent.accountKey)
+                        .windowKey(cardId: $0.cardId)
+                }
+            })
+            // A hidden/removed window must not survive through the transient
+            // read retention below. In particular, no-allowance responses have
+            // no windows, so their previous curve is no longer eligible.
+            windowCurves = windowCurves.filter { keys.contains($0.key) }
+            quotaWindowSummaries = quotaWindowSummaries.filter { keys.contains($0.id) }
+            quotaHeatmaps = quotaHeatmaps.filter { keys.contains($0.key) }
+            quotaHeatmapWindows = quotaHeatmapWindows.filter { keys.contains($0.id) }
+            qualifyingCycles = qualifyingCycles.filter { keys.contains($0.key) }
+            quotaEquivalences = quotaEquivalences.filter { keys.contains($0.key) }
+            windowCards = windowCards.filter {
+                windowCardClients.contains($0.key)
+                    && !(quotaVisibility?.limits.contains($0.key) ?? false)
+            }
+        }
         let now = Int64(Date().timeIntervalSince1970 * 1000)
         // Deliberately NOT `try?`: swallowing the error here is what let a
         // transient generation expiry be reported to the user as "this window
@@ -1198,7 +1240,7 @@ private struct DashboardSnapshot {
                 clientId: c, accountKey: account, windowKey: key, generation: gen)
         }
         if let payload = agentUsage {
-            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+            for agent in visibleAgents {
                 for window in agent.uniqueCardWindows {
                     // A failed read keeps whatever the row already had. Blanking
                     // it would drop a drawn sparkline to a bar for one refresh
@@ -1213,7 +1255,7 @@ private struct DashboardSnapshot {
                 }
             }
         }
-        for clientId in windowCardClients {
+        for clientId in windowCardClients where !(quotaVisibility?.limits.contains(clientId) ?? false) {
             let state = WindowCardLoader.quotaHalf(
                 payload: agentUsage, clientId: clientId,
                 attempted: agentUsageAttempted,
@@ -1259,24 +1301,10 @@ private struct DashboardSnapshot {
             }
         }
 
-        // Strip summaries cover every displayed client. They read curves only,
-        // so the cost is `windowCardClients.count` file reads, not a scan.
-        //
-        // Skipped entirely when no client is on screen, for the same reason the
-        // curve loop above keeps what a failed read already had: `collected`
-        // would be empty because there was nothing to collect FROM, and
-        // publishing that empty as the answer makes the strip card state "no
-        // completed windows recorded yet". `windowCardClients` is assigned from
-        // `displayClients`, which arrives with graph data, so it is briefly
-        // empty whenever the top-level view changes — which is exactly when the
-        // card was seen blanking and coming back.
-        // An empty client set has two causes. `displayClients` arrives with
-        // graph data, so before that it is empty transiently — publishing then
-        // overwrote a populated strip with nothing on every top-level view
-        // change. But the user hiding their last visible client is ALSO an
-        // empty set, and a permanent one: skipping publication there left the
-        // strip and the grid showing a client that is no longer on screen.
-        // `stats` is the graph's own arrival signal, so it separates the two.
+        // Strip summaries read quota curves only, without scanning local usage.
+        // Configured visibility prunes hidden/removed windows above even before
+        // graph arrival. Callers supplying the client list directly retain their
+        // loading state until discovery settles, then clear an empty selection.
         if windowCardClients.isEmpty, stats != nil {
             quotaWindowSummaries = []
             quotaHeatmaps = [:]
@@ -1296,7 +1324,7 @@ private struct DashboardSnapshot {
             // partial result rather than an empty one. A successful nil is
             // still genuinely no history and still skips.
             var readFailed = false
-            for agent in payload.agents where windowCardClients.contains(agent.clientId) {
+            for agent in visibleAgents {
                 for window in agent.uniqueCardWindows {
                     guard let key = window.paceStatus.windowKey,
                           let generation = payload.publicationGeneration

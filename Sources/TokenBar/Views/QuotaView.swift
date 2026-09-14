@@ -61,10 +61,22 @@ struct QuotaView: View {
                         note: "Session / weekly / model limits",
                         restrict: true, curves: windowCurves)
                 }
-                QuotaHistoryCard(
-                    clientId: singleClient, cycles: quotaCycles,
-                    rows: quotaHistory, colors: colors, attempted: usageAttempted,
-                    scanFailed: scanFailed, curveUnreadable: curveUnreadable)
+                if clientIds.count > 1 || windowCard == nil {
+                    // A grouped tab compares independent subscriptions. These
+                    // folds need quota history only, including Bot-only installs.
+                    QuotaHistoryStripCard(
+                        summaries: windowSummaries.filter { clientIds.contains($0.clientId) },
+                        equivalences: equivalences, attempted: usageAttempted)
+                    QuotaHeatmapCard(
+                        windows: heatmapWindows.filter { clientIds.contains($0.clientId) },
+                        heatmaps: heatmaps, equivalences: equivalences,
+                        attempted: usageAttempted)
+                } else {
+                    QuotaHistoryCard(
+                        clientId: singleClient, cycles: quotaCycles,
+                        rows: quotaHistory, colors: colors, attempted: usageAttempted,
+                        scanFailed: scanFailed, curveUnreadable: curveUnreadable)
+                }
             } else {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.

@@ -432,7 +432,7 @@ private struct DashboardModelTestSource: UsageDataSource {
 /// double; only `windowUsage` is instrumented.
 private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendable {
     private let inner = DashboardModelTestSource(failingGraphYear: "")
-    private let payload: AgentUsagePayload
+    var payload: AgentUsagePayload
     var scans = 0
     /// Which account each scan asked for, in order. `SC1` only needs the count;
     /// the per-account cases need to see that the right accounts were asked.
@@ -459,12 +459,16 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// a case give a second Claude account its own distinct curve so a test
     /// can prove the two are not conflated.
     var curveByAccount: [String?: QuotaCurve] = [:]
+    var curveByClient: [String: QuotaCurve] = [:]
+    var curveReads: [(client: String, generation: UInt64)] = []
 
     func quotaCurveSync(
         clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
+        curveReads.append((clientId, generation))
         if failCurveRead { throw QuotaUnavailable() }
         if let byAccount = curveByAccount[accountKey] { return byAccount }
+        if let byClient = curveByClient[clientId] { return byClient }
         return curve
     }
 
@@ -5444,6 +5448,11 @@ enum SelfTest {
         expect(ClientRegistry.tabLabel("grok") == "Grok Build & Bot", "grok tab carries the group label")
         expect(ClientRegistry.tabLabel("codex") == ClientRegistry.shortName("codex"), "plain tab keeps its short name")
         expect(ClientRegistry.style("grok-bot").displayName == "Grok Bot", "grok-bot registry entry")
+        expect(ClientRegistry.tabClients(present: [], quotaIds: ["grok-bot"]) == ["grok"],
+               "Bot-only login offers the grouped tab without local usage")
+        expect(ClientRegistry.tabClients(present: ["codex", "grok"], quotaIds: ["grok-bot", "grok"])
+                == ["codex", "grok"],
+               "grouped quota navigation does not duplicate the Grok tab")
         expect(
             AgentLimitsCard.knownClientIds(agentUsage: nil, present: ClientRegistry.tabSlice("grok"))
                 == ["grok", "grok-bot"],
@@ -11563,6 +11572,97 @@ enum SelfTest {
         let wCurve = windowCurve(
             resetAtSecs: wReset, durationSecs: 18_000,
             at: [(wNow - 3_000, 4), (wNow - 600, 9)])
+
+        // PR #316: drive provider discovery through the shipping poll and
+        // curve reader, with NO graph load or manually supplied client list.
+        let botWindow = (card: "weekly.v1", key: "weekly.v1", resetsAt: wIso, durationSecs: Int64(604_800))
+        let botOnly = windowPayload([(client: "grok-bot", windows: [botWindow])])
+        let buildAndBot = windowPayload([
+            (client: "grok", windows: [(card: "billing.weekly.v1", key: "billing.weekly.v1",
+                                       resetsAt: wIso, durationSecs: 604_800)]),
+            (client: "grok-bot", windows: [botWindow]),
+        ], generation: 8)
+        let switchedBot = windowPayload([(client: "grok-bot", windows: [botWindow])], generation: 9)
+        let noBotAllowance = try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(#"{"generatedAt":"t","publicationGeneration":10,"agents":[{"clientId":"grok-bot","source":"oauth","updatedAt":"t","windows":[],"error":"No included allowance"}]}"#.utf8))
+        let botCurve = windowCurve(resetAtSecs: wReset, durationSecs: 604_800,
+                                  at: [(wNow - 3_000, 20), (wNow - 600, 35)], isActive: false)
+        let buildCurve = windowCurve(resetAtSecs: wReset, durationSecs: 604_800,
+                                    at: [(wNow - 3_000, 2), (wNow - 600, 5)], isActive: false)
+        let nextBotCurve = windowCurve(resetAtSecs: wReset, durationSecs: 604_800,
+                                      at: [(wNow - 3_000, 60), (wNow - 600, 80)], isActive: false)
+        let quotaOnlyFlow: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: botOnly)
+            src.curveByClient = ["grok-bot": botCurve, "grok": buildCurve]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            @MainActor func publish(_ payload: AgentUsagePayload) async {
+                src.payload = payload
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage?.publicationGeneration != payload.publicationGeneration, spins < 2_000 {
+                    try? await Task.sleep(for: .milliseconds(1))
+                    spins += 1
+                }
+                poll.cancel()
+                // Wake the registry wait after cancellation, without waiting
+                // through its minute-long timer or altering production timing.
+                ClaudeExtraRoots.RegistryChange.signal()
+                await poll.value
+            }
+            await publish(botOnly)
+            let botKey = "grok-bot|weekly.v1"
+            let buildKey = "grok|billing.weekly.v1"
+            var result: [String: Bool] = [:]
+            result["Bot-only history loads without local usage or scans"] =
+                m.stats == nil && src.scans == 0 && m.windowCardClients == ["grok-bot"]
+            result["Bot-only sparkline receives recorded samples"] =
+                m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == true
+            result["Bot-only history strip and heatmap receive recorded movement"] =
+                m.quotaWindowSummaries.contains { $0.id == botKey }
+                && m.quotaHeatmapWindows.contains { $0.id == botKey }
+                && m.quotaHeatmaps[botKey]?.hasMovement == true
+            await publish(buildAndBot)
+            result["Build and Bot retain independent curves in the same tab"] =
+                m.windowCurves[buildKey]?.contains(where: { $0.usedPercent == 5 }) == true
+                && m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == true
+            src.curveReads = []
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            result["hiding Build's quota preserves only Bot history"] =
+                m.windowCurves[buildKey] == nil && m.quotaWindowSummaries.map(\.clientId) == ["grok-bot"]
+                && !src.curveReads.contains { $0.client == "grok" }
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok-bot"], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            result["hiding Bot's quota preserves only Build history"] =
+                m.windowCurves[botKey] == nil && m.quotaWindowSummaries.map(\.clientId) == ["grok"]
+            m.configureQuotaVisibility(tabHidden: ["grok"], limitsHidden: [], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            result["hiding the grouped tab clears every quota surface before graph arrival"] =
+                m.windowCurves.isEmpty && m.quotaWindowSummaries.isEmpty
+                && m.quotaHeatmaps.isEmpty && m.quotaHeatmapWindows.isEmpty
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            src.curveByClient["grok-bot"] = nextBotCurve
+            src.curveReads = []
+            await publish(switchedBot)
+            result["a new account/team publication replaces history through its own binding"] =
+                m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 80 }) == true
+                && m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == false
+                && src.curveReads.allSatisfy { $0.generation == 9 }
+                && m.windowCurves[buildKey] == nil
+            src.curveReads = []
+            await publish(noBotAllowance)
+            result["no allowance removes old curves without reading or reviving history"] =
+                m.windowCurves.isEmpty && m.quotaWindowSummaries.isEmpty && m.quotaHeatmaps.isEmpty
+                && src.curveReads.isEmpty
+            return result
+        }
+        expect(quotaOnlyFlow != nil, "Grok Bot quota-only integration fixture completes")
+        for (label, passed) in (quotaOnlyFlow ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "Grok Bot: \(label)")
+        }
 
         // L1a. `quotaHalf` takes no UsageDataSource at all, so the network is
         // unreachable by signature rather than by discipline — the assertion

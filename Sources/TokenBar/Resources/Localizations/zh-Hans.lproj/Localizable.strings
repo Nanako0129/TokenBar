@@ -558,3 +558,4 @@
 /* Grok Bot quota setup */
 "Loading Grok Bot limits…" = "正在加载 Grok Bot 额度…";
 "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "在这台 Mac 登录 Grok Bot，再刷新以查看每周额度。";
+"No local usage records in this range." = "此期间没有本地用量记录。";

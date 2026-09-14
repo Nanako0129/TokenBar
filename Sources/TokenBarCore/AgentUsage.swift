@@ -701,6 +701,14 @@ public struct AgentUsagePayload: Decodable, Sendable {
     /// Subscription-type providers opencode is authed against (e.g. ["Codex"]).
     /// Omitted from the JSON entirely when empty.
     public let opencodeSubscriptions: [String]?
+
+    /// Configured quota sources also belong in navigation without session logs.
+    /// Error-only snapshots stay reachable; setup placeholders do not add tabs.
+    public var configuredClientIds: [String] {
+        var seen = Set<String>()
+        return agents.filter { $0.source != "unconfigured" }.map(\.clientId)
+            .filter { seen.insert($0).inserted }
+    }
 }
 
 package struct AgentUsageTransportLogEntry: Equatable, Sendable {

@@ -200,6 +200,27 @@ public enum ClientRegistry {
         id == "grok" ? ["grok", "grok-bot"] : [id]
     }
 
+    /// Navigation includes configured quota sources even without local usage.
+    /// Group members share one tab but retain their provider identities below it.
+    public static func tabClients(present: [String], quotaIds: [String]) -> [String] {
+        var seen = Set<String>()
+        return (present + quotaIds).map { $0 == "grok-bot" ? "grok" : $0 }
+            .filter { seen.insert($0).inserted }
+    }
+
+    /// Quota curves use provider ids, never the grouped navigation ids alone.
+    /// Keep local clients for loading/error cards and add quota-only providers.
+    public static func quotaClients(
+        present: [String], quotaIds: [String], tabHidden: Set<String>,
+        orderRaw: String
+    ) -> [String] {
+        let hidden = withGroupMembers(tabHidden)
+        var seen = Set<String>()
+        let ids = (present.flatMap(tabSlice) + quotaIds)
+            .filter { !hidden.contains($0) && seen.insert($0).inserted }
+        return orderedClients(ids, orderRaw: orderRaw)
+    }
+
     /// Tab-bar and single-client-titles label. Only the grouped tab differs
     /// from its short name; every other tab keeps `shortName`.
     public static func tabLabel(_ id: String) -> String {

@@ -165,3 +165,4 @@
 /* Grok Bot quota setup */
 "Loading Grok Bot limits…" = "Loading Grok Bot limits…";
 "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits.";
+"No local usage records in this range." = "No local usage records in this range.";
