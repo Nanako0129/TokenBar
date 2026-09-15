@@ -44,6 +44,17 @@ struct QuotaHistoryCard: View {
     /// this line stale until something unrelated rebuilt the body.
     @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
 
+    /// Not read for its value: this card's per-window state has to be dropped
+    /// when the reader picks a different window, and this key is where that
+    /// choice lives (`WindowCardLoader.selectedCardId` resolves `cycles`
+    /// through it). Switching client tabs rebuilds the lens and takes the
+    /// `@State` below with it; switching Session to Weekly inside one client
+    /// does not — same view identity, an entirely different history underneath
+    /// it. A reader who had grown the list to 36 rows would land on a new
+    /// window already fully expanded, with no "Show more" to explain why, and
+    /// with both aggregates folded over an inherited row count.
+    @AppStorage(WindowCardLoader.selectionKey) private var windowSelectionRaw = ""
+
     @State private var expanded: Int64?
 
     /// How many rows are drawn right now. Grows by `visibleRows` per press of
@@ -111,6 +122,14 @@ struct QuotaHistoryCard: View {
                 showMore
                 footnote
             }
+        }
+        // The expanded row goes with it. A `resetAtMs` from the previous
+        // window will not match anything in the new list, so keeping it is
+        // harmless until the day two windows share a reset instant — and then
+        // it silently opens a row nobody opened.
+        .onChange(of: windowSelectionRaw) {
+            shownCount = Self.visibleRows
+            expanded = nil
         }
     }
 
