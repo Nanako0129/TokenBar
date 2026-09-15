@@ -4,7 +4,7 @@ id: kb-migration-ledger
 kind: ledger
 scope: repository
 read_when: auditing knowledge coverage, adding a memory/plan source, or deciding what stays private
-last_verified: 2026-07-28
+last_verified: 2026-09-15
 sources: ["memory index", "project memory set", "plan set", "sanitized local guidance source", "sanitized local visual-experiment source"]
 source_total: 58
 memory_count: 37
@@ -74,7 +74,7 @@ boundary_counts: {memory: 37, plan: 19, local: 2}
 | `SRC-017` | memory | External issue and PR review workflow | active | repo-public | summarize | `workflow.md`, `verification.md`, `communication.md` / public contribution process | No private account or credential mechanics copied |
 | `SRC-018` | memory | Public PR and issue writing style | active | repo-public | summarize | `communication.md` / public GitHub surfaces | Hard-wrap, Unicode, and technical-reply rules represented without private tool paths |
 | `SRC-019` | memory | tokscale sync history and selective alignment lessons | active | repo-public | summarize | `vendor-tokscale.md`, `plans/tokscale-alignment.md`, `decisions/0003-selective-upstream-alignment.md` / engine `UPSTREAM.md`, consumer pin, and issue #45 | Current schema, selective boundary, and upstream bookkeeping checked against the reviewed shared-engine commit |
-| `SRC-020` | memory | Branch naming and PR authorization workflow | active | repo-public | summarize | `workflow.md`, `AGENTS.md` / canonical workflow | Rule matches adapter authorization and current public contribution history |
+| `SRC-020` | memory | Branch naming and PR authorization workflow | active | repo-public | summarize | `workflow.md`, `AGENTS.md` / canonical workflow | Branch rule changed to `<type>/<kebab-summary>` on 2026-09-15 to match public contribution history (25 of the 40 most recently merged branches were slash-form, 15 dash-form); authorization rules unchanged |
 | `SRC-021` | memory | Traditional Chinese punctuation and bilingual layout | active | repo-public | summarize | `communication.md`, `docs/knowledge/README.md` / canonical style contract | Chinese punctuation and bilingual separator rules reviewed in new docs |
 | `SRC-022` | memory | Sparkle multi-item appcast correction | historical | repo-public | summarize | `release.md`, `history/release-and-ui-incidents.md` / release script and appcast | Multi-item, channel, and preservation semantics checked against release source |
 | `SRC-023` | memory | Agent icon audit and shipped correction | historical | repo-public | summarize | `history/release-and-ui-incidents.md` / current resources and public release history | Official-asset and renderer-support lessons retained without private asset URLs or scratchpad details |

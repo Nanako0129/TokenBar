@@ -4,7 +4,7 @@ id: kb-workflow
 kind: canonical
 scope: repository
 read_when: creating a branch, reviewing a change, touching external contributions, or preparing integration
-last_verified: 2026-07-14
+last_verified: 2026-09-15
 sources: ["AGENTS.md", ".github/workflows/ci.yml", ".github/workflows/release.yml", "vendor/README.md", "public GitHub contribution history"]
 ---
 
@@ -45,7 +45,7 @@ flowchart LR
 
 | 規則 | 做法 |
 |---|---|
-| Branch naming | 使用 `<type>-<kebab-summary>`，`type` 與 commit 前綴一致，例如 `docs-knowledge-base` 或 `fix-ffi-resilience`。 |
+| Branch naming | 使用 `<type>/<kebab-summary>`，`type` 與 commit 前綴一致（`feat`、`fix`、`docs`、`chore`、`refactor`、`test`、`ci`），例如 `fix/registry-sleep-cancellation` 或 `docs/knowledge-base`；Syrtis-Windows 與 tokscale-core 同一條規則。既有的 `<type>-<summary>` 分支不改名。 |
 | Worktree | 需要隔離 dirty checkout 時使用獨立 worktree；不要以 stash、reset 或切 branch 方式碰使用者未提交的主 checkout。 |
 | Commit scope | 讓每個 commit 對應單一可審查 concern；文件遷移可拆成 routing 與 canonical knowledge 兩個批次。 |
 | Commit subject | 使用 `type(scope): imperative subject`；不把協作者署名要求當成 commit convention。 |
