@@ -1565,8 +1565,12 @@ pub async fn run(publication_generation: u64) -> AgentUsagePayload {
 }
 
 async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
-    let now = Utc::now();
-    let outcome = grokbot_outcome(agent_grokbot::fetch(now).await, now);
+    // After the fetch, not before it: `agent_grokbot::fetch` can sit behind a
+    // Keychain authorization prompt for up to 25s, and this instant becomes the
+    // snapshot's `updated_at`. The adapter takes its own instant for the reset
+    // comparison for the same reason.
+    let result = agent_grokbot::fetch().await;
+    let outcome = grokbot_outcome(result, Utc::now());
     apply_provider_outcome("grok-bot", None, "oauth", outcome)
 }
 

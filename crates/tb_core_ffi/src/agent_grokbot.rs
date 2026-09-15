@@ -116,7 +116,21 @@ impl GrokBotCredentials {
 
 /// Returns `None` only when neither app has a login. Unreadable desktop auth
 /// must surface an error, never silently switch to a different IDE account.
-pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Option<GrokBotData>, ProviderFetchFailure> {
+///
+/// Takes no `now`: the reset validation in `map_response` is a comparison
+/// against the present, and this function's own work is what makes a
+/// caller-supplied instant stale. Reading the Keychain can put an OS
+/// authorization prompt in front of the user — this adapter waits up to 25s
+/// for it — and the request follows that. A reset that expired inside that
+/// window would still compare as future, and since an expired reset is now
+/// terminal rather than merely reset-less, the stale card would be published
+/// as a success and overwrite the last-good entry: exactly the outcome the
+/// expiry check exists to prevent. The parameter is removed rather than moved
+/// below the `await` so a pre-request timestamp cannot be handed back in,
+/// matching `agent_kiro.rs` and `apply_provider_outcome` (`bf7a6b92`).
+/// `map_response` keeps its parameter, because its tests need to state the
+/// instant they are asserting about.
+pub(crate) async fn fetch() -> Result<Option<GrokBotData>, ProviderFetchFailure> {
     // Keychain may ask the user for access; do not block the async runtime.
     let loaded = match tokio::task::spawn_blocking(load_credentials).await {
         Ok(result) => result,
@@ -131,12 +145,11 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Option<GrokBotData>, Pro
         Ok(None) => return Ok(None),
         Err(e) => return Err(ProviderFetchFailure::terminal(e)),
     };
-    fetch_with_credentials(credentials, now).await.map(Some)
+    fetch_with_credentials(credentials).await.map(Some)
 }
 
 async fn fetch_with_credentials(
     credentials: GrokBotCredentials,
-    now: DateTime<Utc>,
 ) -> Result<GrokBotData, ProviderFetchFailure> {
     let scope = credentials.resolve_account_scope().map_err(|_| {
         ProviderFetchFailure::terminal("Grok Bot account identity could not be verified.")
@@ -170,7 +183,9 @@ async fn fetch_with_credentials(
     .await
     .map_err(|failure| response_failure(failure, &credentials, binding.clone()))?;
 
-    let mut data = map_response(&body, now).map_err(ProviderFetchFailure::terminal)?;
+    // Taken here, after the body is in hand, so the expiry comparison below
+    // judges the reading against the instant it was actually read.
+    let mut data = map_response(&body, Utc::now()).map_err(ProviderFetchFailure::terminal)?;
     data.account_scope = Ok(scope);
     data.cache_binding = binding;
     data.history_scope = match credentials.history_owner() {
@@ -303,7 +318,27 @@ pub(crate) fn map_response(body: &str, now: DateTime<Utc>) -> Result<GrokBotData
 
     let reset = first_timestamp(obj, &["nextResetTimestampUtc", "next_reset_timestamp_utc"])
         .ok_or_else(|| "Cursor omitted the Grok Bot reset time.".to_string())?;
+    // An expired reset invalidates the reading, not just the reset. The field
+    // reports the NEXT reset, so a value in the past is a claim that cannot be
+    // true, and the percentage beside it describes a window that has already
+    // rolled over. Publishing it constructs `weekly.v1`, and `usable_success`
+    // treats the card as cacheable purely because that key exists — so a stale
+    // reading would overwrite the last-good entry rather than be discarded.
+    // `enrich_snapshot` marking the pace `invalidEvidence` afterwards does not
+    // reach that decision. `provider-quota-pace.md` classes an expired reset as
+    // invalid; `agent_kiro.rs` rejects one for the same reason.
+    if reset <= now {
+        return Err(
+            "Grok Bot reported a quota reset that has already passed. Open Grok Bot, then refresh."
+                .to_string(),
+        );
+    }
     let start = first_timestamp(obj, &["currentPeriodStart", "current_period_start"]);
+    // A start at or after the reset cannot describe the window that reset ends.
+    // Dropping just the start keeps the quota reading, which is still true —
+    // only the duration derived from the pair is unusable, and a zero or
+    // negative span would be published as provider-reported evidence.
+    let start = start.filter(|start| *start < reset);
     let duration = start
         .map(|start| DurationEvidence::provider(reset.timestamp(), (reset - start).num_seconds()));
 
@@ -1080,6 +1115,67 @@ mod tests {
         .unwrap();
         let window = serde_json::to_value(&data.windows[0]).unwrap();
         assert_eq!(window["paceStatus"]["state"], "learningDuration");
+    }
+
+    /// An expired reset is terminal; a start that cannot bound the window only
+    /// costs the duration. Both used to build `weekly.v1` regardless, and
+    /// `usable_success` caches the card on that key alone, so the reading would
+    /// overwrite the last-good entry instead of being discarded.
+    #[test]
+    fn invalid_reset_bounds_are_rejected_while_a_valid_pair_still_maps() {
+        // Control: the same shape with bounds that ARE valid, so a fixture that
+        // never reaches the checks below cannot pass this test silently.
+        let ok = map_response(
+            r#"{
+            "usagePercent": 30,
+            "currentPeriodStart": "2026-09-08T12:00:00Z",
+            "nextResetTimestampUtc": "2026-09-15T12:00:00Z"
+        }"#,
+            now(),
+        )
+        .unwrap();
+        assert_eq!(
+            serde_json::to_value(&ok.windows[0]).unwrap()["paceStatus"]["durationSeconds"],
+            604800
+        );
+
+        // Reset already passed at `now`: the percentage beside it describes a
+        // window that has already rolled over.
+        let expired = map_response(
+            r#"{
+            "usagePercent": 30, "nextResetTimestampUtc": "2026-09-09T12:00:00Z"
+        }"#,
+            now(),
+        )
+        .unwrap_err();
+        assert!(expired.contains("already passed"), "got {expired}");
+
+        // Exactly at `now` is also past: the field reports the NEXT reset.
+        assert!(map_response(
+            r#"{
+            "usagePercent": 30, "nextResetTimestampUtc": "2026-09-10T12:00:00Z"
+        }"#,
+            now()
+        )
+        .unwrap_err()
+        .contains("already passed"));
+
+        // A start at or after the reset cannot bound the window it ends. The
+        // quota reading survives — only the derived duration is dropped, rather
+        // than a zero or negative span being published as provider evidence.
+        for start in ["2026-09-15T12:00:00Z", "2026-09-16T12:00:00Z"] {
+            let body = format!(
+                r#"{{"usagePercent": 30, "currentPeriodStart": "{start}",
+                     "nextResetTimestampUtc": "2026-09-15T12:00:00Z"}}"#
+            );
+            let data = map_response(&body, now()).unwrap();
+            let window = serde_json::to_value(&data.windows[0]).unwrap();
+            assert_eq!(window["cardId"], "weekly.v1", "the quota reading survives");
+            assert_eq!(
+                window["paceStatus"]["state"], "learningDuration",
+                "but the unusable span is not published as provider duration"
+            );
+        }
     }
 
     fn desktop_token(subject: &str, signature: &str, team_id: Option<u64>) -> GrokBotCredentials {
