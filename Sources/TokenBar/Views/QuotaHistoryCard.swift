@@ -46,6 +46,11 @@ struct QuotaHistoryCard: View {
 
     @State private var expanded: Int64?
 
+    /// How many rows are drawn right now. Grows by `visibleRows` per press of
+    /// the footer button and never shrinks, which is the property the two
+    /// aggregates below depend on — see `shownRows`.
+    @State private var shownCount = QuotaHistoryCard.visibleRows
+
     /// Below this the cycle was barely witnessed and its consumption figure is
     /// not evidence about the window — the app simply was not running for most
     /// of it. Shown, but marked.
@@ -53,9 +58,19 @@ struct QuotaHistoryCard: View {
     private static let barWidth: CGFloat = 62
     private static let barHeight: CGFloat = 4
     private static let barGap: CGFloat = 2
-    /// Enough to read a trend without turning the lens into a scroll marathon.
-    /// The engine retains 128 cycles, so this is a display choice, not a
-    /// storage one — and one worth revisiting if anyone asks for more.
+    /// How many rows the card opens with, and how many each press of the
+    /// footer button adds. The ceiling is not here: `cycles` arrives already
+    /// capped at `QuotaHistoryFold.consideredCycles` by `WindowCardLoader`, so
+    /// pressing until the button disappears shows everything the fold admits
+    /// and reaching further is an engine change, not a display one.
+    ///
+    /// Growing the list rather than paging it or nesting a scroller: the two
+    /// aggregates on this card — the equivalence line and the usage bar's
+    /// scale — are computed over the rows on screen, so a pager would hand the
+    /// same history a different ratio on every page. And the whole dashboard
+    /// already sits in one vertical `ScrollView`, which a second same-axis
+    /// scroller inside the card would fight for the wheel.
+    ///
     /// Not private: `QuotaHistoryFold.consideredCycles` has to stay at or above
     /// it, and the selftest asserts that. A cap below this number would draw
     /// fewer rows than this card intends without anything saying so.
@@ -83,23 +98,59 @@ struct QuotaHistoryCard: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
                 let joined = byCycle
+                let drawn = shownCycles
                 equivalence
                 VStack(spacing: 0) {
-                    ForEach(cycles.prefix(Self.visibleRows), id: \.resetAtMs) { cycle in
+                    ForEach(drawn, id: \.resetAtMs) { cycle in
                         row(cycle, row: joined[cycle.resetAtMs])
-                        if cycle.resetAtMs != cycles.prefix(Self.visibleRows).last?.resetAtMs {
+                        if cycle.resetAtMs != drawn.last?.resetAtMs {
                             Divider().opacity(0.4)
                         }
                     }
                 }
+                showMore
                 footnote
             }
         }
     }
 
+    /// The cycles drawn as rows. One statement of it, because three things read
+    /// it: the row list, the equivalence, and the usage bar's scale.
+    private var shownCycles: [QuotaCycle] {
+        Array(cycles.prefix(shownCount))
+    }
+
     private var subtitle: String? {
         guard !cycles.isEmpty else { return nil }
-        return "%@ windows".localized(String(min(cycles.count, Self.visibleRows)))
+        return "%@ windows".localized(String(shownCycles.count))
+    }
+
+    /// How many rows the next press would add: the step, or what is left if
+    /// that is less. Zero means the button is not drawn at all — a "Show 0
+    /// more" that did nothing is the failure this clamps away, and it is
+    /// reachable whenever the admitted cycle count is not a multiple of the
+    /// step.
+    static func moreCount(total: Int, shown: Int) -> Int {
+        max(0, min(total - shown, visibleRows))
+    }
+
+    /// The grow control. Absent once every admitted cycle is on screen, which
+    /// is also how the card says there is no more history rather than leaving a
+    /// button that would do nothing.
+    @ViewBuilder
+    private var showMore: some View {
+        let more = Self.moreCount(total: cycles.count, shown: shownCount)
+        if more > 0 {
+            Button {
+                shownCount += Self.visibleRows
+            } label: {
+                Text("Show %@ more".localized(String(more)))
+                    .font(.caption2)
+            }
+            .buttonStyle(.link)
+            .padding(.top, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 
     @ViewBuilder
@@ -185,13 +236,18 @@ struct QuotaHistoryCard: View {
     /// The rows actually on screen.
     ///
     /// One statement of it. The question is asked three times — the `ForEach`
-    /// draws `cycles.prefix(visibleRows)`, the equivalence accumulates over the
-    /// same set, and the usage bar scales against it — and had three answers,
-    /// the scale's being "every retained row". A hidden older cycle with the
-    /// largest total then set the scale and made every visible bar short, which
-    /// is precisely the comparison the bar claims to be making.
+    /// draws `shownCycles`, the equivalence accumulates over the same set, and
+    /// the usage bar scales against it — and had three answers, the scale's
+    /// being "every retained row". A hidden older cycle with the largest total
+    /// then set the scale and made every visible bar short, which is precisely
+    /// the comparison the bar claims to be making.
+    ///
+    /// Pressing Show more therefore moves both aggregates, and that is the
+    /// intended reading: they describe what is on screen. It is also why the
+    /// row count only ever grows — a control that could shrink it would make
+    /// the equivalence oscillate between two answers for one history.
     private var shownRows: [QuotaHistoryRow] {
-        let shown = Set(cycles.prefix(Self.visibleRows).map(\.resetAtMs))
+        let shown = Set(shownCycles.map(\.resetAtMs))
         return rows.filter { shown.contains($0.id) }
     }
 

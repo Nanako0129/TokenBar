@@ -12599,6 +12599,33 @@ enum SelfTest {
         expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the history card's row list still fits inside the cap, which "
                 + "would otherwise silently draw fewer rows than the card intends")
+        // QH-MORE. The footer button's own arithmetic. The card opens at
+        // `visibleRows` and grows by it, so the last press on a history whose
+        // length is not a multiple of the step offers a partial batch, and the
+        // press after that must offer nothing at all — an unclamped
+        // `total - shown` draws "Show -4 more" there, and a missing zero case
+        // leaves a button that does nothing.
+        let qhStep = QuotaHistoryCard.visibleRows
+        let qhCap = QuotaHistoryFold.consideredCycles
+        expect(QuotaHistoryCard.moreCount(total: qhStep, shown: qhStep) == 0
+                   && QuotaHistoryCard.moreCount(total: qhStep - 1, shown: qhStep) == 0,
+               "QH-MORE no grow control once every admitted cycle is drawn, including "
+                   + "when the history is shorter than the opening row count")
+        expect(QuotaHistoryCard.moreCount(total: qhCap, shown: qhStep) == qhStep
+                   && QuotaHistoryCard.moreCount(total: qhStep + 3, shown: qhStep) == 3,
+               "QH-MORE the next press offers a full step, or the remainder when "
+                   + "fewer than a step are left")
+        // The control terminates at the fold's cap rather than somewhere of its
+        // own: pressing until it disappears must land exactly on every cycle
+        // `WindowCardLoader` admits, never short of it.
+        var qhShown = qhStep
+        var qhPresses = 0
+        while QuotaHistoryCard.moreCount(total: qhCap, shown: qhShown) > 0, qhPresses < 100 {
+            qhShown += qhStep
+            qhPresses += 1
+        }
+        expect(qhShown >= qhCap && qhPresses < 100,
+               "QH-MORE pressing to exhaustion reaches every considered cycle")
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago
