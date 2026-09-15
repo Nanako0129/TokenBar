@@ -45,7 +45,7 @@ flowchart LR
 
 | 規則 | 做法 |
 |---|---|
-| Branch naming | 使用 `<type>/<kebab-summary>`，`type` 與 commit 前綴一致（`feat`、`fix`、`docs`、`chore`、`refactor`、`test`、`ci`），例如 `fix/registry-sleep-cancellation` 或 `docs/knowledge-base`；Syrtis-Windows 與 tokscale-core 同一條規則。既有的 `<type>-<summary>` 分支不改名。 |
+| Branch naming | 使用 `<type>/<kebab-summary>`，`type` 與該 commit 的 Conventional Commit 前綴一致（`feat`、`fix`、`docs`、`chore`、`refactor`、`test`、`ci`、`build`、`perf`，或這個 repo 的 commit 已在用的其他前綴——清單不封閉），例如 `fix/registry-sleep-cancellation` 或 `docs/knowledge-base`；Syrtis-Windows 與 tokscale-core 同一條規則。既有的 `<type>-<summary>` 分支不改名。 |
 | Worktree | 需要隔離 dirty checkout 時使用獨立 worktree；不要以 stash、reset 或切 branch 方式碰使用者未提交的主 checkout。 |
 | Commit scope | 讓每個 commit 對應單一可審查 concern；文件遷移可拆成 routing 與 canonical knowledge 兩個批次。 |
 | Commit subject | 使用 `type(scope): imperative subject`；不把協作者署名要求當成 commit convention。 |

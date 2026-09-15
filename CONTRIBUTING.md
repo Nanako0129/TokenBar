@@ -75,7 +75,7 @@ Create a topic branch from the current upstream `main` branch, and keep each bra
 
 | Area | Convention |
 |---|---|
-| Branch name | `<type>/<kebab-summary>`, where `type` is the Conventional Commit prefix (`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`), such as `fix/registry-sleep-cancellation` or `docs/contributing-guide`. The same rule applies in Syrtis-Windows and tokscale-core. Existing `<type>-<summary>` branches keep their names. |
+| Branch name | `<type>/<kebab-summary>`, where `type` is the commit's Conventional Commit prefix (`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`, `perf`, or any other prefix this repository's commits already use — the list is not closed), such as `fix/registry-sleep-cancellation` or `docs/contributing-guide`. The same rule applies in Syrtis-Windows and tokscale-core. Existing `<type>-<summary>` branches keep their names. |
 | Commit subject | `type(scope): imperative subject` |
 | Commit scope | One reviewable concern; do not mix unrelated cleanup with the functional change |
 | Submission | Open a pull request for the completed topic; core, FFI, vendor, contract, release-chain, user-visible, or multi-file changes require full review |
