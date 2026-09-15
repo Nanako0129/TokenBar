@@ -12079,6 +12079,13 @@ enum SelfTest {
                 m.windowCardClients = ["codex"]
                 m.windowUsageClient = "codex"
                 m.refreshWindowQuotaHalves()
+                // Explicit, not incidental. Before the poller's sleep became
+                // cancellable this line was a 60-second wait that happened to
+                // outlive the 30s union-scan TTL, so the refresh below scanned
+                // for a reason nothing stated. Dropping the caches says what
+                // the assertion actually needs: a refresh with nothing cached
+                // must reach a scan.
+                DashboardModel.invalidateScanDerivedCaches()
                 src.scans = 0
                 await m.refreshWindowUsage()
                 return (scans: src.scans,
@@ -15092,6 +15099,10 @@ enum SelfTest {
             // The all-agent lens: no card on screen, only the estimates.
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // Same barrier as the block below and the SC-INV one: with the
+            // poller's cancel now prompt, nothing expires the union-scan TTL
+            // on its own, and a cached scan would let this count zero.
+            DashboardModel.invalidateScanDerivedCaches()
             src.scans = 0
             src.scannedAccounts = []
             await m.refreshWindowUsage()
@@ -15166,6 +15177,10 @@ enum SelfTest {
             _ = await poll.value
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // See the note in the SC-INV block: the poller's cancel used to
+            // take a minute, which expired the union-scan TTL by accident and
+            // is why the refresh below produced per-account scans at all.
+            DashboardModel.invalidateScanDerivedCaches()
             await m.refreshWindowUsage()
             return m.quotaEquivalences
         }
