@@ -44,22 +44,19 @@ struct QuotaHistoryCard: View {
     /// this line stale until something unrelated rebuilt the body.
     @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
 
-    /// Not read for its value: this card's per-window state has to be dropped
-    /// when the reader picks a different window, and this key is where that
-    /// choice lives (`WindowCardLoader.selectedCardId` resolves `cycles`
-    /// through it). Switching client tabs rebuilds the lens and takes the
-    /// `@State` below with it; switching Session to Weekly inside one client
-    /// does not — same view identity, an entirely different history underneath
-    /// it. A reader who had grown the list to 36 rows would land on a new
-    /// window already fully expanded, with no "Show more" to explain why, and
-    /// with both aggregates folded over an inherited row count.
-    @AppStorage(WindowCardLoader.selectionKey) private var windowSelectionRaw = ""
-
     @State private var expanded: Int64?
 
     /// How many rows are drawn right now. Grows by `visibleRows` per press of
     /// the footer button and never shrinks, which is the property the two
     /// aggregates below depend on — see `shownRows`.
+    ///
+    /// Per window, not per card: `QuotaView` gives this view an identity of
+    /// `WindowCardLoader.historyCardId`, so picking a different window builds a
+    /// new card and this returns to its opening value along with `expanded`.
+    /// Without that, switching Session to Weekly kept the reader's expansion —
+    /// same view identity, an entirely different history underneath it — and
+    /// landed them on a window already grown to 36 rows with no "Show more"
+    /// beneath it and both aggregates folded over the inherited count.
     @State private var shownCount = QuotaHistoryCard.visibleRows
 
     /// Below this the cycle was barely witnessed and its consumption figure is
@@ -122,14 +119,6 @@ struct QuotaHistoryCard: View {
                 showMore
                 footnote
             }
-        }
-        // The expanded row goes with it. A `resetAtMs` from the previous
-        // window will not match anything in the new list, so keeping it is
-        // harmless until the day two windows share a reset instant — and then
-        // it silently opens a row nobody opened.
-        .onChange(of: windowSelectionRaw) {
-            shownCount = Self.visibleRows
-            expanded = nil
         }
     }
 

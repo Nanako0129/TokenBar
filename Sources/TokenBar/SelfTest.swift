@@ -12625,19 +12625,12 @@ enum SelfTest {
                    && QuotaHistoryCard.moreCount(total: qhStep + 3, shown: qhStep) == 3,
                "QH-MORE the next step is a full batch, or the remainder when fewer "
                    + "than a batch are left")
-        // Stepping by `visibleRows` from the opening count reaches the fold's
-        // cap rather than stopping short of it — a step that did not divide the
-        // distance would leave rows the loader admitted permanently unreachable.
-        // This walks the arithmetic, not the button.
-        var qhShown = qhStep
-        var qhPresses = 0
-        while QuotaHistoryCard.moreCount(total: qhCap, shown: qhShown) > 0, qhPresses < 100 {
-            qhShown += qhStep
-            qhPresses += 1
-        }
-        expect(qhShown >= qhCap && qhPresses < 100,
-               "QH-MORE stepping from the opening count reaches every considered "
-                   + "cycle, so no admitted row is unreachable by repeated steps")
+        // A third assertion stood here and was deleted rather than reworded. It
+        // stepped a local integer to the cap and concluded that no admitted row
+        // is unreachable — a conclusion it could not reach, since it never
+        // touched `shownCycles`, and one that is not at risk anyway: the drawn
+        // set is a `prefix`, so overshooting the cap simply clamps. Its premise,
+        // that a step not dividing the distance would strand rows, was false.
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago
