@@ -407,6 +407,29 @@ enum WindowCardLoader {
         return "\(clientId)|\(selected.window.cardId)"
     }
 
+    /// The `"<clientId>|<cardId>"` whose history `cycles` above returns.
+    ///
+    /// Deliberately NOT `selectedCardId`: that one resolves through `select`,
+    /// this and `cycles` resolve through `pickForHistory`, and the two differ
+    /// on exactly the cases the history card is about — a window the live
+    /// picker refuses still has a recorded history to draw. A surface keyed on
+    /// this therefore cannot disagree with the list it is keying.
+    ///
+    /// It is the stored preference RESOLVED, which is the distinction that
+    /// matters to a caller wanting to know whether the history changed
+    /// underneath it. The raw `selectionKey` answers neither direction: a
+    /// choice saved for another client leaves this client's window untouched,
+    /// and a window disappearing from the payload changes this without the
+    /// preference moving at all.
+    static func historyCardId(payload: AgentUsagePayload?, clientId: String) -> String? {
+        guard let payload,
+              let selected = pickForHistory(
+                  payload: payload, clientId: clientId,
+                  chosen: UserDefaults.standard.string(forKey: selectionKey))
+        else { return nil }
+        return "\(clientId)|\(selected.window.cardId)"
+    }
+
     /// Not private: `AgentLimitsCard`'s sparkline needs the same series for
     /// every window a client offers, not just the one the card selected. Same
     /// function so the two surfaces cannot disagree about which readings belong

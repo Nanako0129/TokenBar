@@ -86,8 +86,23 @@ where
     )
 }
 
+/// Takes no `now`: it reads the clock after the response arrives, because the
+/// reset test in `map_window` is a comparison against the present.
+///
+/// The caller used to capture `Utc::now()` on its first line and hold it across
+/// the credential load and the request, so the instant a reset was judged
+/// against was older than the response by construction — by the request
+/// timeout. A reset that expired inside that window still compared as future,
+/// and the window was kept rather than dropped, producing a card dated to a
+/// cycle that had already ended.
+///
+/// The parameter is removed rather than moved below the `await` at the call
+/// site, following `bf7a6b92` ("read the clock after the provider response, not
+/// before it"), which took the same parameter away from `apply_provider_outcome`
+/// and recorded why: a pre-request timestamp cannot be handed back in.
+/// `decode_usage_response` keeps its own parameter, because its tests need to
+/// state the instant they are asserting about.
 pub(crate) async fn fetch(
-    now: DateTime<Utc>,
     credential: OpenCodeGoCredential,
 ) -> Result<OpenCodeGoData, ProviderFetchFailure> {
     let verified = agent_account_scope::resolve_credential(
@@ -150,7 +165,7 @@ pub(crate) async fn fetch(
             "OpenCode Go usage API rejected the request (status {status})."
         )),
     })?;
-    let windows = decode_usage_response(&body, now)?;
+    let windows = decode_usage_response(&body, Utc::now())?;
     Ok(OpenCodeGoData {
         identity: Some(AgentIdentity {
             email: None,

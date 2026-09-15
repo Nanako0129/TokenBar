@@ -1704,7 +1704,7 @@ async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
             ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display))
         }
         crate::opencode_integrations::OpenCodeGoCredentialLoad::Present(credential) => {
-            match agent_opencode_go::fetch(now, credential).await {
+            match agent_opencode_go::fetch(credential).await {
                 Ok(data) => ProviderFetchOutcome::Success {
                     cache_binding: Some(data.cache_binding),
                     snapshot: AgentUsageSnapshot {

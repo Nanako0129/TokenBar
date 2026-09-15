@@ -407,6 +407,7 @@
 /* ===== 額度歷史 ===== */
 "Window history" = "時間窗歷史";
 "%@ windows" = "%@ 個窗";
+"Show %@ more" = "再顯示 %@ 個";
 "No earlier windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到更早的時間窗。TokenBar 執行期間會逐步累積。";
 "TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
 "Nothing in this window was charged to this subscription." = "這個時間窗內沒有用量記在這個訂閱上。";

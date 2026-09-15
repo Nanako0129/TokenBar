@@ -47,7 +47,7 @@ If you use an automated coding client, it must also follow [`AGENTS.md`](AGENTS.
 | Sparkle, appcast, Homebrew, Pages, or release notes | [`release.md`](docs/knowledge/release.md) and [`workflow.md`](docs/knowledge/workflow.md) |
 | Landing site structure, deployment, or product claims | [`landing/AGENTS.md`](landing/AGENTS.md) and [`release.md`](docs/knowledge/release.md) |
 
-Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/3eec58460543e6238785de2b19a13205b1ddcb05/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`. A reviewed Native pin advance normally uses only the exact `tokscale-core` gitlink; when it travels with an app-owned C ABI change, as the `tb_window_usage` account parameter does, that change is named and the Windows port is notified under the `ctb.h` signature rule. Consumer gates re-establish build-decoder compatibility, and the engine's LocalOnly, CostCoverage, embedded-cost, and partial-estimation semantics are not claimed to have reached Swift.
+Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/d6512f5ae62c2be6751ed93adb9391ffe3f91579/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`. A reviewed Native pin advance normally uses only the exact `tokscale-core` gitlink; when it travels with an app-owned C ABI change, as the `tb_window_usage` account parameter does, that change is named and the Windows port is notified under the `ctb.h` signature rule. Consumer gates re-establish build-decoder compatibility, and the engine's LocalOnly, CostCoverage, embedded-cost, and partial-estimation semantics are not claimed to have reached Swift.
 
 ## Development environment
 
@@ -75,7 +75,7 @@ Create a topic branch from the current upstream `main` branch, and keep each bra
 
 | Area | Convention |
 |---|---|
-| Branch name | `<type>-<kebab-summary>`, such as `fix-ffi-resilience` or `docs-contributing-guide` |
+| Branch name | `<type>/<kebab-summary>`, where `type` is the Conventional Commit prefix of the branch's primary concern — the type its pull-request title carries (`feat`, `fix`, `docs`, `chore`, `refactor`, `test`, `ci`, `build`, `perf`, or any other prefix this repository's commits already use; the list is not closed) — such as `fix/registry-sleep-cancellation` or `docs/contributing-guide`. Supporting commits on the branch may use other types. The same rule applies in Syrtis-Windows and tokscale-core. Existing `<type>-<summary>` branches keep their names. |
 | Commit subject | `type(scope): imperative subject` |
 | Commit scope | One reviewable concern; do not mix unrelated cleanup with the functional change |
 | Submission | Open a pull request for the completed topic; core, FFI, vendor, contract, release-chain, user-visible, or multi-file changes require full review |

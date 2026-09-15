@@ -406,6 +406,7 @@
 /* ===== 额度历史 ===== */
 "Window history" = "窗口历史";
 "%@ windows" = "%@ 个窗口";
+"Show %@ more" = "再显示 %@ 个";
 "No earlier windows recorded yet. They accumulate as TokenBar runs." = "尚无更早的窗口记录。TokenBar 运行期间会逐步积累。";
 "TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar 仅观测到此窗口的 %@%%，因此显示的用量只是下限。";
 "Nothing in this window was charged to this subscription." = "此窗口内没有用量计入该订阅。";

@@ -341,7 +341,16 @@ enum ClaudeExtraRoots {
                 guard !Task.isCancelled else { return }
                 resume(id)
             }
-            await withCheckedContinuation { waiters[id] = $0 }
+            // Cancellation-aware: a plain `withCheckedContinuation` observes
+            // only `resume(id)` — a registry signal or the timeout above — so
+            // cancelling the poller left it parked here for the rest of the
+            // minute. The popover closing is exactly that cancel, and the
+            // selftest pays it 11 times (~840s of a 958s run).
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { waiters[id] = $0 }
+            } onCancel: {
+                Task { @MainActor in resume(id) }
+            }
             timeout.cancel()
         }
 

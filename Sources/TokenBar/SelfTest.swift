@@ -12131,6 +12131,42 @@ enum SelfTest {
                 window: sparkWindow, samples: [], nowMs: sparkNow) == nil,
             "SP4 no readings at all keeps the bar")
 
+        // RC-CANCEL. A cancelled poller must stop within the turn, not at the
+        // end of its minute.
+        //
+        // `RegistryChange.sleep` parks on a continuation that only `resume(id)`
+        // reaches — a registry signal, or its own 60s timeout. Without a
+        // cancellation handler the flag is set and nothing observes it, so
+        // `await poll.value` waits out the full interval. That is a product
+        // defect before it is a test-speed one: closing the popover cancels
+        // this exact task, and the poller stayed parked for up to a minute.
+        //
+        // Measured on this suite: eleven such waits, 839s of a 958s run.
+        //
+        // The bound is deliberately generous. The claim is "within the turn,
+        // not within the minute", and a CI runner under load can take a while
+        // to schedule the resumption — but not five seconds, and nothing near
+        // the 60 it used to take.
+        let rcCancelElapsed: Double? = awaitMainActorValue {
+            let started = ContinuousClock.now
+            let task = Task { @MainActor in
+                await ClaudeExtraRoots.RegistryChange.sleep(
+                    upTo: 60, since: ClaudeExtraRoots.RegistryChange.epoch)
+            }
+            // Let it reach the continuation before cancelling, or the cancel
+            // lands on a task that has not parked yet and the check passes
+            // without exercising the handler at all.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            task.cancel()
+            _ = await task.value
+            let d = started.duration(to: ContinuousClock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+        expect(
+            (rcCancelElapsed ?? 99) < 5,
+            "RC-CANCEL a cancelled registry sleep returns within the turn, not "
+                + "at the end of its 60-second interval")
+
         // MARK: scan scope (SC)
         //
         // The message scan follows what is on screen. Measured 2026-08-16:
@@ -12221,6 +12257,138 @@ enum SelfTest {
                "SC2 a window with no provider duration still scans for its history")
         expect(durationlessScan?.rows == 1,
                "SC2 and the scan reaches the history rows rather than only running")
+
+        // SC-INV. An inverted scan range must not read as an empty window.
+        // Engine PR #27 answers `from >= until` with an empty list where the
+        // previous pin returned an error, so this consumer now has to decide
+        // what that means instead of inheriting it. A range that ends before
+        // it begins was never scanned, and reporting zero usage for it is the
+        // "no data" versus "could not get data" conflation that issue #320 and
+        // V15/V16/V17 are about. The guard keeps this consumer's behaviour
+        // identical across the pin advance rather than letting the engine's
+        // new contract change what the card says.
+        let invFuture = Int64(Date().timeIntervalSince1970) + 86_400
+        let invIso = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: Double(invFuture + 3_600)))
+        let invPayload = windowPayload([
+            (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                         resetsAt: invIso, durationSecs: 18_000)]),
+        ])
+        func invRun(sampleAt: Int64, resetAt: Int64) -> (scans: Int, failed: Bool)? {
+            awaitMainActorValue {
+                let src = WindowScanCountingSource(payload: invPayload)
+                src.curve = windowCurve(
+                    resetAtSecs: resetAt, durationSecs: 18_000,
+                    at: [(sampleAt, 4), (sampleAt + 600, 9)], isActive: false)
+                let m = DashboardModel(source: src, initialYear: nil)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage == nil, spins < 2_000 {
+                    try? await Task.sleep(nanoseconds: 1_000_000)
+                    spins += 1
+                }
+                poll.cancel()
+                _ = await poll.value
+                m.windowCardClients = ["codex"]
+                m.windowUsageClient = "codex"
+                m.refreshWindowQuotaHalves()
+                // Explicit, not incidental. Before the poller's sleep became
+                // cancellable this line was a 60-second wait that happened to
+                // outlive the 30s union-scan TTL, so the refresh below scanned
+                // for a reason nothing stated. Dropping the caches says what
+                // the assertion actually needs: a refresh with nothing cached
+                // must reach a scan.
+                DashboardModel.invalidateScanDerivedCaches()
+                src.scans = 0
+                await m.refreshWindowUsage()
+                return (scans: src.scans,
+                        failed: m.windowScanFailedClients.contains("codex"))
+            }
+        }
+        let invAhead = invRun(sampleAt: invFuture, resetAt: invFuture + 3_600)
+        expect(invAhead?.scans == 0,
+               "SC-INV a range whose start is in the future issues no scan at all")
+        expect(invAhead?.failed == true,
+               "SC-INV and the card settles on scan-failed rather than reporting zero usage")
+        // Without this control the two bounds above are satisfied by a model
+        // that never scans and always reports failure, which is the shape this
+        // guard could produce if it were written one comparison wrong.
+        let invNow = Int64(Date().timeIntervalSince1970)
+        let invPast = invRun(sampleAt: invNow - 3_000, resetAt: invNow + 3_600)
+        expect((invPast?.scans ?? 0) >= 1,
+               "SC-INV a normal range still scans, so the guard is not swallowing every range")
+        expect(invPast?.failed == false,
+               "SC-INV and a normal range does not settle as failed")
+
+        // SC-INV-CACHE. The guard has to sit above the cached-scan branch, not
+        // beside the engine call. `UnionScan.covers` tests only the lower
+        // bound, so a normal scan cached moments earlier satisfies it for a
+        // future `from`; that branch then CLEARS the failure and renders the
+        // window from data that never covered it. Reaching the bad state needs
+        // no engine call at all, which is why the cases above could not see it
+        // — they only ever exercised the uncached path.
+        let invCached: (scans: Int, failed: Bool, ready: Bool)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: invPayload)
+            let nowS = Int64(Date().timeIntervalSince1970)
+            src.curve = windowCurve(
+                resetAtSecs: nowS + 3_600, durationSecs: 18_000,
+                at: [(nowS - 3_000, 4), (nowS - 2_400, 9)], isActive: false)
+            let m = DashboardModel(source: src, initialYear: nil)
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage == nil, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowCardClients = ["codex"]
+            m.windowUsageClient = "codex"
+            m.refreshWindowQuotaHalves()
+            // Phase 1: a normal range, so a scan lands in the cache.
+            await m.refreshWindowUsage()
+            // Phase 2: the provider now reports a cycle that starts in the
+            // future, while the scan cached a moment ago is still fresh.
+            let ahead = Int64(Date().timeIntervalSince1970) + 86_400
+            src.curve = windowCurve(
+                resetAtSecs: ahead + 3_600, durationSecs: 18_000,
+                at: [(ahead, 4), (ahead + 600, 9)], isActive: false)
+            m.refreshWindowQuotaHalves()
+            src.scans = 0
+            await m.refreshWindowUsage()
+            // The flag alone was not enough. `refreshWindowQuotaHalves` admits
+            // a fresh scan even for a client already marked failed, and
+            // `usageHalf` did not check the scan's upper bound, so the card
+            // was overwritten with `.ready` and empty usage while the flag sat
+            // there set. What the card SAYS is the assertion that matters.
+            var readyNow = false
+            if case .ready? = m.windowCards["codex"] { readyNow = true }
+            return (scans: src.scans,
+                    failed: m.windowScanFailedClients.contains("codex"),
+                    ready: readyNow)
+        }
+        expect(invCached?.scans == 0,
+               "SC-INV-CACHE a future range issues no scan even with a fresh cache present")
+        expect(invCached?.failed == true,
+               "SC-INV-CACHE and the fresh cache does not clear the failure for a range it never covered")
+        expect(invCached?.ready == false,
+               "SC-INV-CACHE and the card itself does not settle as ready on that cache")
+
+        // SC-INV-COVERS. The contract of the predicate all of the above rests
+        // on, pinned at both ends because only one of them used to be tested.
+        // A scan answers for a window only if the window opens inside the
+        // range that scan actually walked.
+        let invScan = UnionScan(
+            fromMs: 1_000, untilMs: 2_000, capturedAt: Date(), messages: [])
+        expect(invScan.covers(start: 1_500),
+               "SC-INV-COVERS a window opening inside the scanned range is answerable")
+        expect(!invScan.covers(start: 500),
+               "SC-INV-COVERS one opening before the scan began is not, which would under-count")
+        expect(!invScan.covers(start: 2_500),
+               "SC-INV-COVERS and one opening after the scan ended is not either, which would report zero")
+        expect(!invScan.covers(start: 2_000),
+               "SC-INV-COVERS the upper bound is half-open, matching slice: a window opening exactly at untilMs owns no scanned message")
+
 
         // SS1. `windowCardClients` is assigned from `displayClients`, which
         // arrives with graph data, so it is briefly empty on every top-level
@@ -12608,6 +12776,54 @@ enum SelfTest {
         expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the history card's row list still fits inside the cap, which "
                 + "would otherwise silently draw fewer rows than the card intends")
+        // QH-MORE. The arithmetic behind the footer button, and ONLY that.
+        //
+        // What these do not touch: the button's action, its visibility, and the
+        // row list itself all live in SwiftUI `@State` that this suite cannot
+        // drive, so nothing below would notice the action becoming a no-op or
+        // the list staying at twelve while the number in the label counts down.
+        // That half is an on-screen check, and the card carries no claim that
+        // it has been made here.
+        //
+        // What they do pin: the card opens at `visibleRows` and grows by it, so
+        // a history whose length is not a multiple of the step ends on a
+        // partial batch, and the state after it must return zero rather than a
+        // negative — an unclamped `total - shown` puts "Show -4 more" in the
+        // label, and a zero that is not treated as absent leaves a control that
+        // does nothing.
+        let qhStep = QuotaHistoryCard.visibleRows
+        let qhCap = QuotaHistoryFold.consideredCycles
+        expect(QuotaHistoryCard.moreCount(total: qhStep, shown: qhStep) == 0
+                   && QuotaHistoryCard.moreCount(total: qhStep - 1, shown: qhStep) == 0,
+               "QH-MORE the step arithmetic offers nothing once the drawn count has "
+                   + "reached the admitted one, including when the history is shorter "
+                   + "than the opening row count")
+        expect(QuotaHistoryCard.moreCount(total: qhCap, shown: qhStep) == qhStep
+                   && QuotaHistoryCard.moreCount(total: qhStep + 3, shown: qhStep) == 3,
+               "QH-MORE the next step is a full batch, or the remainder when fewer "
+                   + "than a batch are left")
+        // The SECOND step, which is the one the shipping numbers make partial
+        // and which the two assertions above do not reach: both ask only about
+        // a drawn count of `qhStep`. An implementation that answered zero for
+        // any remainder below a full batch would satisfy neither of them and
+        // would still hide the button at 24 of 32 rows, stranding the last
+        // eight with no way to ask for them.
+        //
+        // The 8 is written out rather than recomputed from `moreCount`, which
+        // would make the expectation the thing under test, and the cap and step
+        // are pinned beside it so that moving either turns this red with the
+        // arithmetic to redo stated in one place.
+        expect(qhCap == 32 && qhStep == 12
+                   && QuotaHistoryCard.moreCount(total: qhCap, shown: 24) == 8,
+               "QH-MORE the second step offers the final partial batch of 8; if the "
+                   + "cap or the opening count moved, recompute the numbers here")
+        // A fourth assertion stood here and was deleted rather than reworded. It
+        // stepped a local integer to the cap and concluded that no admitted row
+        // is unreachable — a conclusion it could not reach, since it never
+        // touched `shownCycles`, and one that is not at risk anyway: the drawn
+        // set is a `prefix`, so overshooting the cap simply clamps. Its premise,
+        // that a step not dividing the distance would strand rows, was false.
+        // What it did cover, the second step above, is now asserted directly.
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago
@@ -15048,11 +15264,15 @@ enum SelfTest {
         // `rebuildQuotaEquivalences` builds no row for it at all — not a
         // `.tooFewCycles` row, no key. Drop the run factor from
         // `deltaQualifies` and the key appears.
-        func runsCurve(cycles: [[Double]]) -> QuotaCurve {
+        /// `offsetSecs` shifts every cycle bodily in time. It exists so a
+        /// fixture that is known to produce qualifying cycles can be replayed
+        /// with those same cycles dated in the FUTURE, which no amount of
+        /// reshaping the readings can express.
+        func runsCurve(cycles: [[Double]], offsetSecs: Int64 = 0) -> QuotaCurve {
             var points: [String] = []
             var oldest = Int64.max, newest = Int64.min
             for (index, readings) in cycles.enumerated() {
-                let reset = m3fNow - Int64(cycles.count - index) * 18_000
+                let reset = m3fNow + offsetSecs - Int64(cycles.count - index) * 18_000
                 // Spread from 17,000s before reset towards 1,000s before, so
                 // every cycle's observed fraction is about 16,000 / 18,000.
                 // Integer division means a 4-reading cycle ends a second or two
@@ -15140,6 +15360,10 @@ enum SelfTest {
             // The all-agent lens: no card on screen, only the estimates.
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // Same barrier as the block below and the SC-INV one: with the
+            // poller's cancel now prompt, nothing expires the union-scan TTL
+            // on its own, and a cached scan would let this count zero.
+            DashboardModel.invalidateScanDerivedCaches()
             src.scans = 0
             src.scannedAccounts = []
             await m.refreshWindowUsage()
@@ -15214,6 +15438,10 @@ enum SelfTest {
             _ = await poll.value
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // See the note in the SC-INV block: the poller's cancel used to
+            // take a minute, which expired the union-scan TTL by accident and
+            // is why the refresh below produced per-account scans at all.
+            DashboardModel.invalidateScanDerivedCaches()
             await m.refreshWindowUsage()
             return m.quotaEquivalences
         }
@@ -15254,6 +15482,55 @@ enum SelfTest {
         expect(
             (m3qAccounts ?? []).count == 2,
             "M3-q the two accounts are scanned once each, not once per window")
+
+        // SC-INV-EQUIV. The lens half of the inverted-range guard, on the one
+        // fixture already proven above to produce equivalence rows — an empty
+        // fixture would let the "publishes none" assertion pass while
+        // measuring nothing, which is what the control below exists to catch.
+        //
+        // `refreshAllAgentQuotaEquivalences` returns THROUGH
+        // `rebuildQuotaEquivalences()`, so its own guard cannot stop the
+        // rebuild from reading the scan cached a moment earlier. Only
+        // `UnionScan.covers` can, and while it tested `fromMs` alone that scan
+        // also satisfied a cycle dated a day ahead: the lens then folded a
+        // span the scan ends before and published the empty aggregate as a
+        // current row instead of dropping the row.
+        let m3qInv: (before: Int, after: Int)? = awaitMainActorValue {
+            let src = WindowScanCountingSource(payload: m3fPayload)
+            src.curveByAccount = [nil: m3qCurve(accountUsed: [40, 45, 50])]
+            src.messagesByAccount = ["": m3qPrimaryRows]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.windowCardClients = ["claude"]
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while !m.agentUsageAttempted, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            poll.cancel()
+            _ = await poll.value
+            m.windowUsageClient = nil
+            m.quotaLensAllAgents = true
+            await m.refreshWindowUsage()
+            let before = m.quotaEquivalences.count
+            // The same three cycles, moved bodily a day into the future, while
+            // the scan taken for the past ones is still cached and fresh.
+            src.curveByAccount = [
+                nil: runsCurve(
+                    cycles: [[0, 40], [0, 45], [0, 50]], offsetSecs: 86_400),
+            ]
+            m.refreshWindowQuotaHalves()
+            await m.refreshWindowUsage()
+            return (before: before, after: m.quotaEquivalences.count)
+        }
+        expect(
+            (m3qInv?.before ?? 0) > 0,
+            "SC-INV-EQUIV control: this fixture does publish equivalence rows, "
+                + "so the assertion below is a removal rather than an empty fixture")
+        expect(
+            m3qInv?.after == 0,
+            "SC-INV-EQUIV a future-dated cycle publishes no equivalence row, "
+                + "rather than an empty one folded from a scan that ends before it")
 
         if failures > 0 {
             print("\(failures) selftest check(s) failed")

@@ -1262,14 +1262,23 @@ private struct DashboardSnapshot {
                 curve: readCurve, nowMs: now)
             // Fold in a usage half we already hold, so a stage-1 refresh does
             // not throw away a completed scan and blink back to loading.
-            // The scan's AGE, not just its existence. A covering scan that has
-            // aged past `unionScanMaxAge` and whose replacement then threw left
-            // this branch winning over the failure branch below, so the card
-            // returned to `.ready` with arbitrarily stale totals instead of
-            // saying the refresh failed. Freshness is what `.ready` claims.
-            if case let .quotaOnly(q, _) = state, let scan = unionScan(for: Self.cardAccountKey),
-               Date().timeIntervalSince(scan.capturedAt) < Self.unionScanMaxAge
-                   || !windowScanFailed(for: clientId),
+            //
+            // A settled failure wins over any scan, at any age. This used to
+            // test the scan's AGE instead — admitting a fresh scan even for a
+            // client already marked failed — which held while the only way to
+            // be marked failed was a throw from a scan of THIS range. It is no
+            // longer: an unscannable range settles as failed without the
+            // engine being asked, and `usageHalf` answers an unresolvable
+            // window with an EMPTY usage half rather than `nil`, so this
+            // branch published `.ready` with zero usage over a span nothing
+            // had looked at — the exact claim the failure flag exists to stop.
+            //
+            // The age test is deleted rather than kept beside this one: it was
+            // only ever reached with the flag set, so it stated this same rule
+            // more weakly, and a redundant check that can disagree is a second
+            // failure mode rather than a second line of defence.
+            if case let .quotaOnly(q, _) = state, !windowScanFailed(for: clientId),
+               let scan = unionScan(for: Self.cardAccountKey),
                let (settled, usage) = WindowCardLoader.usageHalf(
                    quota: q, scan: scan, confirmed: UsageAttribution.confirmed().records) {
                 windowCards[clientId] = .ready(settled, usage)
@@ -1297,6 +1306,31 @@ private struct DashboardSnapshot {
                 // navigated away from while the picker highlighted the new one.
                 continue
             } else {
+                // A card holding a scan that cannot answer for the window it
+                // shows lands here, as `.quotaOnly(scanFailed: false)` —
+                // "Reading local usage…" under a chart that is already drawn.
+                // Deliberate, and bounded; both were measured, not assumed.
+                //
+                // Reachable when the selected window opens after the scan ended
+                // while the union `from` still precedes `now`. `from` is the
+                // MINIMUM start across every candidate window and the oldest
+                // cycle, so the range guard in `refreshWindowUsage` passes, the
+                // scan completes, and `usageHalf` then declines — `covers`
+                // tests both ends.
+                //
+                // Bounded by two constants rather than by hope: the cached scan
+                // stops being reused 30 seconds after capture
+                // (`unionScanMaxAge`, tested at the cached branch) and
+                // `pollAgentUsage` calls `refreshWindowUsage` at most 60 seconds
+                // apart, so the next rescan carries `untilMs` past the window
+                // and the card resolves itself inside about one poll interval.
+                //
+                // Deliberate because NOTHING FAILED. The scan succeeded; it was
+                // taken before this window opened, which is the only true thing
+                // to say about it. Settling as `scanFailed: true` would render
+                // an error for a failure that did not occur and then silently
+                // correct itself — a worse claim than "a scan is pending",
+                // which is what is actually happening.
                 windowCards[clientId] = state
             }
         }
@@ -1625,6 +1659,23 @@ private struct DashboardSnapshot {
             ? qualifyingCycles.values.compactMap { $0.cycles.last?.evidenceStartMs }.min() : nil
         guard let client = windowUsageClient else {
             guard let from = equivalenceStart else { return }
+            // An inverted range is a fault upstream, not an empty window. The
+            // engine answers `from >= until` with an empty list rather than an
+            // error (`get_window_usage`, engine PR #27), so without this the
+            // loop below would cache an empty `UnionScan` and every estimate
+            // drawn from it would read as "this account spent nothing" for a
+            // span that was never scanned. `from` is the oldest qualifying
+            // cycle's `evidenceStartMs` and the bound is `now`, so reaching
+            // here means a cycle claims to start in the future.
+            guard from < now else {
+                // Rebuild before leaving: a previously published equivalence
+                // for this window key would otherwise stay on the lens next to
+                // the newly refreshed future-dated cycles, which is a stale row
+                // presented as current. The normal path below ends in the same
+                // call for the same reason.
+                rebuildQuotaEquivalences()
+                return
+            }
             // One scan per account with a qualifying window, not one scan for
             // all of them. Each account's estimate divides its own usage by its
             // own quota movement; a shared scan is the conflation issue #258
@@ -1687,6 +1738,25 @@ private struct DashboardSnapshot {
                 payload: agentUsage, clients: [client], nowMs: now),
             quotaCycles.last?.evidenceStartMs,
         ].compactMap({ $0 }).min() else { return }
+        // Inverted range, settled before anything else can answer for it.
+        // Before engine PR #27 the engine rejected `from >= until` outright and
+        // the call below threw, so the card said the scan had failed; it now
+        // returns an empty list, which would make the card assert zero usage
+        // for a range it never looked at — the "no data" versus "could not get
+        // data" conflation issue #320 and selftest V15/V16/V17 are about.
+        //
+        // This sits ABOVE the cached-scan branch on purpose. `UnionScan.covers`
+        // tests only the lower bound, so a normal scan cached moments earlier
+        // satisfies it for a future `from`, and that branch would then clear
+        // the failure and render the future window as zero usage — the very
+        // outcome this guard exists to prevent, reached without ever calling
+        // the engine. Guarding after it left the hole open on the only path
+        // that does not need a scan.
+        guard from < now else {
+            windowScanFailedClients.insert(client)
+            refreshWindowQuotaHalves()
+            return
+        }
         // Serve the cached scan while it still covers the range and is fresh.
         // Rescanning on every reopen was the whole complaint: the staging made
         // the wait visible, it did not make it rare.

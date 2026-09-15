@@ -132,10 +132,20 @@ struct UnionScan: Sendable {
     /// thing that ever mentioned the omission.
     var undatedCount: Int = 0
 
-    /// Whether this scan can answer for a window starting at `start`. A scan
-    /// that begins after the window did would silently under-count, which is
-    /// worse than not answering.
-    func covers(start: Int64) -> Bool { start >= fromMs }
+    /// Whether this scan can answer for a window starting at `start`.
+    ///
+    /// Both ends matter, for the same reason. A scan that begins after the
+    /// window did would silently under-count; a scan that ENDED before the
+    /// window began holds nothing from it at all — and every consumer reads a
+    /// non-answer as an answer of zero, which is the "no data" versus "could
+    /// not get data" conflation issue #320 is about. Testing only `fromMs` let
+    /// a scan taken moments ago satisfy this for a window starting tomorrow,
+    /// so the card, the equivalence lens and the history rows each rendered a
+    /// span nothing had looked at as empty. One half-answer, three surfaces.
+    ///
+    /// The upper bound is half-open to match `slice`: a window opening exactly
+    /// at `untilMs` owns no message this scan collected.
+    func covers(start: Int64) -> Bool { start >= fromMs && start < untilMs }
 
     /// Half-open `[from, to)`, matching the FFI's own interval and
     /// `QuotaHistoryFold.rows`.
