@@ -11954,6 +11954,42 @@ enum SelfTest {
                 window: sparkWindow, samples: [], nowMs: sparkNow) == nil,
             "SP4 no readings at all keeps the bar")
 
+        // RC-CANCEL. A cancelled poller must stop within the turn, not at the
+        // end of its minute.
+        //
+        // `RegistryChange.sleep` parks on a continuation that only `resume(id)`
+        // reaches — a registry signal, or its own 60s timeout. Without a
+        // cancellation handler the flag is set and nothing observes it, so
+        // `await poll.value` waits out the full interval. That is a product
+        // defect before it is a test-speed one: closing the popover cancels
+        // this exact task, and the poller stayed parked for up to a minute.
+        //
+        // Measured on this suite: eleven such waits, 839s of a 958s run.
+        //
+        // The bound is deliberately generous. The claim is "within the turn,
+        // not within the minute", and a CI runner under load can take a while
+        // to schedule the resumption — but not five seconds, and nothing near
+        // the 60 it used to take.
+        let rcCancelElapsed: Double? = awaitMainActorValue {
+            let started = ContinuousClock.now
+            let task = Task { @MainActor in
+                await ClaudeExtraRoots.RegistryChange.sleep(
+                    upTo: 60, since: ClaudeExtraRoots.RegistryChange.epoch)
+            }
+            // Let it reach the continuation before cancelling, or the cancel
+            // lands on a task that has not parked yet and the check passes
+            // without exercising the handler at all.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            task.cancel()
+            _ = await task.value
+            let d = started.duration(to: ContinuousClock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+        expect(
+            (rcCancelElapsed ?? 99) < 5,
+            "RC-CANCEL a cancelled registry sleep returns within the turn, not "
+                + "at the end of its 60-second interval")
+
         // MARK: scan scope (SC)
         //
         // The message scan follows what is on screen. Measured 2026-08-16:
