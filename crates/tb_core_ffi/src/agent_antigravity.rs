@@ -966,7 +966,16 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
     };
     match fetch_available_models(&context, now).await {
         PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
-        PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
+        PrimaryQuotaAttempt::Forbidden => {
+            // The CLI can provide the current quota even when the remote
+            // Code Assist endpoint rejects the request. Prefer it here so a
+            // usable CLI does not fall through to the misleading
+            // retrieveUserQuota permission error.
+            match fetch_agy_cli(now).await {
+                Ok(fetched) => PrimaryAttempt::Success(fetched),
+                Err(_) => PrimaryAttempt::Forbidden(context),
+            }
+        }
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
             PrimaryAttempt::SchemaContradiction { context, failure }
         }
