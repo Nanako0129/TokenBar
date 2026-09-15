@@ -545,6 +545,10 @@ enum DemoData {
                         ],
                     ],
                 ]
+            case _ where id == "grok-bot":
+                windows = [learningHistoryWindow(
+                    cardId: "weekly.v1", label: "Weekly",
+                    used: weeklyUsed, duration: weeklyDuration)]
             default:
                 windows = [
                     learningHistoryWindow(

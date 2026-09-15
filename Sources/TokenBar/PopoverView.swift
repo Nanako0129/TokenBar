@@ -121,12 +121,32 @@ struct PopoverView: View {
         AppView.effective(activeView.wrappedValue, hiddenRaw: hiddenViewsRaw)
     }
 
-    /// Client ids shown in the top tab bar: present clients minus the user's
-    /// hidden set, in their saved order. Drives both the tab row and the
-    /// fall-back-to-Overview guard (see `.onChange` below).
+    /// Available tabs come from both local usage and configured quota sources.
+    private var presentTabClients: [String] {
+        ClientRegistry.tabClients(
+            present: model.stats?.presentClients ?? [],
+            quotaIds: model.agentUsage?.configuredClientIds ?? [])
+    }
+
+    /// Visible tabs in saved order, shared by the tab row and navigation guards.
     private var displayClients: [String] {
         ClientRegistry.displayClients(
+            present: presentTabClients, hiddenRaw: hiddenRaw, orderRaw: orderRaw)
+    }
+
+    private var displayUsageClients: [String] {
+        ClientRegistry.displayClients(
             present: model.stats?.presentClients ?? [], hiddenRaw: hiddenRaw, orderRaw: orderRaw)
+    }
+
+    /// Detailed usage joins require actual local records. Quota-only providers
+    /// still get curves, summaries and heatmaps through the quota publication.
+    private var quotaUsageClient: String? {
+        let excluded = ClientRegistry.quotaExcludedClients(
+            tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+            limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw))
+        return effectiveView == .quota && displayUsageClients.contains(activeTab)
+            && !excluded.contains(activeTab) ? activeTab : nil
     }
 
     /// Years shown in the picker: `knownYears` minus years in which ONLY hidden
@@ -150,7 +170,7 @@ struct PopoverView: View {
     /// a client tab. Threaded into `ensureData` so the Hourly/Agents FFI fetch
     /// is scoped to the selection (accurate totals for shared hours/agents).
     private var lensClientIds: [String] {
-        activeTab == ClientTray.overviewTab ? displayClients : [activeTab]
+        activeTab == ClientTray.overviewTab ? displayUsageClients : ClientRegistry.tabSlice(activeTab)
     }
 
     /// Daily/Monthly request turns only for visible canonical clients, keeping
@@ -163,6 +183,13 @@ struct PopoverView: View {
     /// graph payload — so every lazy lens now keys on the full active slice.
     private var lazyClientIds: [String] { lensClientIds }
 
+    private var quotaRefreshID: String {
+        [windowSelectionRaw, activeTab, hiddenRaw, attributionRaw,
+         effectiveView.rawValue, String(extraRootsGeneration), limitsHiddenRaw, orderRaw,
+         displayClients.joined(separator: ","), displayUsageClients.joined(separator: ",")]
+            .joined(separator: "|")
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -174,7 +201,7 @@ struct PopoverView: View {
             if !displayClients.isEmpty {
                 DashboardTabs(
                     clients: displayClients,
-                    presentClients: model.stats?.presentClients ?? [],
+                    presentClients: presentTabClients,
                     active: clientTab, kbdHints: cmdHeld)
                     .padding(.horizontal, 12)
                     .padding(.bottom, 8)
@@ -289,17 +316,15 @@ struct PopoverView: View {
         // moves when a root is added or removed — so every visible quota
         // surface kept drawing the old root set until a poll happened to call
         // `refreshWindowUsage` again, up to a minute later.
-        .task(id: "\(windowSelectionRaw)|\(activeTab)|\(hiddenRaw)|\(attributionRaw)|"
-              + "\(effectiveView.rawValue)|\(extraRootsGeneration)|"
-              + displayClients.joined(separator: ",")) {
-            model.windowCardClients = displayClients
+        .task(id: quotaRefreshID) {
+            model.configureQuotaVisibility(
+                tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw), orderRaw: orderRaw)
             // The scan follows what is on screen; the curves do not. See
             // `windowUsageClient`.
             // Gated on the lens too: the window card and its history live only
             // here now, so no other lens can make the app pay for a scan.
-            model.windowUsageClient =
-                (effectiveView == .quota && activeTab != ClientTray.overviewTab
-                    && displayClients.contains(activeTab)) ? activeTab : nil
+            model.windowUsageClient = quotaUsageClient
             // The all-agent Quota lens is the only surface that wants the
             // equivalence scan, and only while it is on screen.
             model.quotaLensAllAgents =
@@ -396,6 +421,9 @@ struct PopoverView: View {
         .onChange(of: displayClients) { _, _ in
             resetTabIfHidden()
         }
+        .onChange(of: model.agentUsageAttempted) { _, _ in
+            resetTabIfHidden()
+        }
         .onChange(of: hiddenViewsRaw, initial: true) { _, _ in
             resetViewIfHidden()
         }
@@ -408,7 +436,10 @@ struct PopoverView: View {
     /// displayClients so hiding the active tab — which leaves it in
     /// presentClients — still falls back.
     private func resetTabIfHidden() {
-        guard model.stats?.presentClients != nil else { return }
+        // Wait for both discoveries before discarding a saved quota-only tab.
+        // An explicit hide still takes effect immediately.
+        guard ClientRegistry.parseIdSet(hiddenRaw).contains(activeTab)
+            || (model.stats != nil && model.agentUsageAttempted) else { return }
         if activeTab != ClientTray.overviewTab, !displayClients.contains(activeTab) {
             clientTab.wrappedValue = ClientTray.overviewTab
         }
@@ -660,7 +691,7 @@ struct PopoverView: View {
             // the hidden/order raws) so a live hide re-derives the slice.
             let singleClient = (activeTab != ClientTray.overviewTab && displayClients.contains(activeTab))
                 ? activeTab : nil
-            let clientIds = singleClient.map { [$0] } ?? displayClients
+            let clientIds = singleClient.map(ClientRegistry.tabSlice) ?? displayUsageClients
             // Every displayed number must exclude hidden clients — including the
             // Overview aggregates. The model reuses the precomputed full `stats`
             // for the all-present slice and memoizes the hidden/single-client
@@ -675,7 +706,9 @@ struct PopoverView: View {
                     modelReport: model.modelReport, modelLoading: model.modelLoading,
                     colors: model.colors,
                     trace: model.trace,
-                    singleClient: singleClient, year: model.year,
+                    singleClient: singleClient,
+                    hasLocalUsage: clientIds.contains { model.stats?.presentClients.contains($0) == true },
+                    year: model.year,
                     hidden: ClientRegistry.parseIdSet(hiddenRaw),
                     // The user's own pace mode, not the fold's default. Leaving
                     // it out meant the summary always projected Historically
@@ -694,8 +727,9 @@ struct PopoverView: View {
                     // at something no longer below it.
                     quotaSummary: QuotaSummaryFold.build(
                         payload: model.agentUsage,
-                        excluding: ClientRegistry.parseIdSet(hiddenRaw)
-                            .union(ClientRegistry.parseIdSet(limitsHiddenRaw)),
+                        excluding: ClientRegistry.quotaExcludedClients(
+                            tabHidden: ClientRegistry.parseIdSet(hiddenRaw),
+                            limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw)),
                         paceMode: PaceMode(rawValue: paceModeRaw) ?? .historical),
                     usageAttempted: model.agentUsageAttempted,
                     // The FOURTH statement of this gate, and the one that made
@@ -726,7 +760,7 @@ struct PopoverView: View {
                     // curves — so the gate was not saving work, it was blanking
                     // a feature.
                     windowCurves: model.windowCurves,
-                    windowCard: singleClient.flatMap { model.windowCards[$0] },
+                    windowCard: quotaUsageClient.flatMap { model.windowCards[$0] },
                     quotaCycles: model.quotaCycles, quotaHistory: model.quotaHistory,
                     colors: model.colors,
                     // Folded from the series model rather than from the raw
@@ -889,7 +923,7 @@ struct PopoverView: View {
         guard mods == .command, let chars = event.charactersIgnoringModifiers?.lowercased()
         else { return false }
 
-        let tabs = [ClientTray.overviewTab] + ClientRegistry.displayClients(present: model.stats?.presentClients ?? [])
+        let tabs = [ClientTray.overviewTab] + displayClients
         switch chars {
         case "1", "2", "3", "4", "5", "6", "7", "8", "9":
             let index = Int(chars)! - 1

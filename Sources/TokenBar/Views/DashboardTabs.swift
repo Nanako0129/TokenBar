@@ -46,7 +46,7 @@ struct DashboardTabs: View {
                     ForEach(Array(clients.enumerated()), id: \.element) { i, id in
                         let style = ClientRegistry.style(id)
                         tab(
-                            id: id, label: ClientRegistry.shortName(id),
+                            id: id, label: ClientRegistry.tabLabel(id),
                             color: style.color, index: i + 2)
                             // Only client tabs publish a frame, so Overview can
                             // never be picked as a drop target.

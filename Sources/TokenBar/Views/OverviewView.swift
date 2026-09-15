@@ -19,6 +19,7 @@ struct OverviewView: View {
     let trace: [TraceBucket]
     /// Set when this view shows a single client's slice.
     var singleClient: String?
+    var hasLocalUsage = true
     /// Dashboard year filter (nil = all time), forwarded to the chart card.
     var year: String?
     /// The user's tab-hidden set, passed in from the observing parent
@@ -82,7 +83,7 @@ struct OverviewView: View {
                     clients: clientIds, trace: trace, agentUsage: agentUsage,
                     usageAttempted: usageAttempted,
                     title: singleClient.map {
-                        "%@ limits".localized(ClientRegistry.style($0).displayName)
+                        "%@ limits".localized(ClientRegistry.tabDisplayName($0))
                     } ?? "Agent limits",
                     note: singleClient == nil
                         ? "OAuth quota" : "Session / weekly / model limits",
@@ -97,7 +98,16 @@ struct OverviewView: View {
                     curves: windowCurves)
             }
         case .chart:
-            chart
+            if singleClient != nil && !hasLocalUsage {
+                DashCard("Token Usage") {
+                    Text("No local usage records in this range.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                }
+            } else {
+                chart
+            }
         case .trace:
             if singleClient == nil {
                 UsageTraceCard(buckets: trace, windowSecs: 600, hidden: hidden)

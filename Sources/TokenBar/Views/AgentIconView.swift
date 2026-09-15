@@ -29,6 +29,7 @@ struct AgentIconView: View {
     private static let iconAliases: [String: String] = [
         "antigravity-cli": "antigravity",
         "kilo": "kilocode",
+        "grok-bot": "grok",
     ]
 
     /// Full icons whose mark has no opaque background of its own (dark ink or

@@ -34,6 +34,8 @@ chrono = "0.4"
 # same version line tokscale-core already pulls in.
 dirs = "5"
 rayon = "1.10"
+# Read Cursor's local login store without creating or modifying the database.
+rusqlite = { version = "0.32", features = ["bundled"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7"

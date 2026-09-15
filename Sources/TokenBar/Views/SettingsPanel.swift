@@ -185,9 +185,11 @@ struct SettingsPanel: View {
         // Client-tabs universe: every client that can be a top tab (present)
         // OR a quota card (knownIds — e.g. quota-only Antigravity), so both
         // orderings are managed from one list. Mirrors displayClients' source.
-        let presentSet = Set(presentClients ?? [])
+        let tabClients = ClientRegistry.tabClients(
+            present: presentClients ?? [], quotaIds: agentUsage?.configuredClientIds ?? [])
+        let presentSet = Set(tabClients)
         let tabsUniverse = ClientRegistry.orderedClients(
-            Self.orderedUnion(presentClients ?? [], knownIds), orderRaw: tabsOrderRaw)
+            Self.orderedUnion(tabClients, knownIds), orderRaw: tabsOrderRaw)
 
         VStack(alignment: .leading, spacing: 14) {
             switch page {
@@ -458,7 +460,7 @@ struct SettingsPanel: View {
                     // A tab hidden below always hides its quota card too — the
                     // toggle here reflects that (off + disabled) rather than
                     // offering a state the card can never actually reach.
-                    let tabHiddenSet = ClientRegistry.parseIdSet(tabsHiddenRaw)
+                    let tabHiddenSet = ClientRegistry.withGroupMembers(ClientRegistry.parseIdSet(tabsHiddenRaw))
                     Divider()
                     VStack(spacing: 1) {
                         ForEach(limitOrdered, id: \.self) { id in
@@ -586,7 +588,7 @@ struct SettingsPanel: View {
                                     .gesture(dragGestureForTab(id: id, orderList: tabsUniverse))
 
                                 AgentIconView(clientId: id, size: 14)
-                                Text(ClientRegistry.shortName(id))
+                                Text(ClientRegistry.tabLabel(id))
                                     .font(.caption)
 
                                 if !canTab {

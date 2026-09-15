@@ -1713,6 +1713,7 @@ dependencies = [
  "parking_lot",
  "rayon",
  "reqwest",
+ "rusqlite",
  "rustls",
  "security-framework",
  "serde",

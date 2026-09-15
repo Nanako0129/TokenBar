@@ -701,6 +701,14 @@ public struct AgentUsagePayload: Decodable, Sendable {
     /// Subscription-type providers opencode is authed against (e.g. ["Codex"]).
     /// Omitted from the JSON entirely when empty.
     public let opencodeSubscriptions: [String]?
+
+    /// Configured quota sources also belong in navigation without session logs.
+    /// Error-only snapshots stay reachable; setup placeholders do not add tabs.
+    public var configuredClientIds: [String] {
+        var seen = Set<String>()
+        return agents.filter { $0.source != "unconfigured" }.map(\.clientId)
+            .filter { seen.insert($0).inserted }
+    }
 }
 
 package struct AgentUsageTransportLogEntry: Equatable, Sendable {
@@ -711,10 +719,10 @@ package struct AgentUsageTransportLogEntry: Equatable, Sendable {
 }
 
 private let agentUsageTransportLogClientIds: Set<String> = [
-    // "kiro" and "opencode" carry the Kiro and OpenCode Go subscription quotas;
-    // keep their transport diagnostics attributable instead of rewriting them to
-    // "unknown" like an unsupported id.
-    "codex", "claude", "antigravity", "copilot", "grok", "kiro", "opencode",
+    // "grok-bot", "kiro" and "opencode" carry the Grok Bot, Kiro and OpenCode
+    // Go subscription quotas; keep their transport diagnostics attributable
+    // instead of rewriting them to "unknown" like an unsupported id.
+    "codex", "claude", "antigravity", "copilot", "grok", "grok-bot", "kiro", "opencode",
 ]
 
 private let agentUsageTransportLogCategories: Set<String> = [
