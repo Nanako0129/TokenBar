@@ -15532,6 +15532,47 @@ enum SelfTest {
             "SC-INV-EQUIV a future-dated cycle publishes no equivalence row, "
                 + "rather than an empty one folded from a scan that ends before it")
 
+        // FLOW-WIDTH (#335). A legend entry whose model name is longer than the
+        // popover is wide must truncate, not report its full ideal width and
+        // drag the card out past the fixed 400pt frame. Measured through a real
+        // hosting controller because `FlowLayout` can only be driven by an
+        // actual SwiftUI layout pass — `Subviews` is not constructible here.
+        let flowWidths: (unbounded: CGFloat, bounded: CGFloat, limit: CGFloat)? =
+            awaitMainActorValue { @MainActor in
+                @MainActor func width(proposing proposal: CGFloat) -> CGFloat {
+                    let legend = FlowLayout(hSpacing: 8, vSpacing: 3) {
+                        ForEach(0..<3) { index in
+                            HStack(spacing: 4) {
+                                Circle().frame(width: 6, height: 6)
+                                Text(
+                                    "hauhaucs/qwen3.8-27b-uncensored-hauhaucs-aggressive"
+                                        + "-mtp-gguf/qwen3.8-27b-\(index)"
+                                ).lineLimit(1)
+                            }
+                            .font(.caption2)
+                        }
+                    }
+                    return NSHostingController(rootView: legend)
+                        .sizeThatFits(
+                            in: CGSize(width: proposal, height: .greatestFiniteMagnitude)
+                        ).width
+                }
+                return (
+                    unbounded: width(proposing: .greatestFiniteMagnitude),
+                    bounded: width(proposing: PopoverChrome.width),
+                    limit: PopoverChrome.width
+                )
+            }
+        expect(
+            flowWidths.map { $0.unbounded > $0.limit } ?? false,
+            "FLOW-WIDTH control: the fixture's model names really are wider than "
+                + "the popover, so the assertion below is a clamp rather than a "
+                + "label that happened to fit")
+        expect(
+            flowWidths.map { $0.bounded <= $0.limit } ?? false,
+            "FLOW-WIDTH a legend row longer than the popover reports at most the "
+                + "proposed width instead of pushing the card past its frame")
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
