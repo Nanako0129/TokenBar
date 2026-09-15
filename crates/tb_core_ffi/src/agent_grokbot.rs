@@ -460,7 +460,12 @@ fn desktop_secrets_path() -> PathBuf {
     if let Some(path) = std::env::var_os("TOKENBAR_GROK_BOT_SECRETS").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
     }
-    dirs::home_dir()
+    // `crate::user_home_dir`, not `dirs::home_dir`: the repository's policy is
+    // that a non-empty `HOME` wins over the platform account directory, and
+    // this is a credential path — reading the wrong home reads a different
+    // identity's login. `dirs::home_dir` is the fallback inside that helper,
+    // for the Windows GUI and Task Scheduler launches where `HOME` is absent.
+    crate::user_home_dir()
         .unwrap_or_default()
         .join("Library/Application Support/Grok Bot/sand-secrets.json")
 }
@@ -573,7 +578,9 @@ fn cursor_state_db_path() -> PathBuf {
     if let Some(path) = std::env::var_os("TOKENBAR_CURSOR_STATE_VSCDB").filter(|p| !p.is_empty()) {
         return PathBuf::from(path);
     }
-    dirs::home_dir()
+    // Same policy as `desktop_secrets_path`: this selects which account's
+    // Cursor login is read.
+    crate::user_home_dir()
         .map(|home| home.join("Library/Application Support/Cursor/User/globalStorage/state.vscdb"))
         .unwrap_or_else(|| PathBuf::from("state.vscdb"))
 }
