@@ -12599,6 +12599,54 @@ enum SelfTest {
         expect(QuotaHistoryCard.visibleRows <= QuotaHistoryFold.consideredCycles,
                "QH-CAP the history card's row list still fits inside the cap, which "
                 + "would otherwise silently draw fewer rows than the card intends")
+        // QH-MORE. The arithmetic behind the footer button, and ONLY that.
+        //
+        // What these do not touch: the button's action, its visibility, and the
+        // row list itself all live in SwiftUI `@State` that this suite cannot
+        // drive, so nothing below would notice the action becoming a no-op or
+        // the list staying at twelve while the number in the label counts down.
+        // That half is an on-screen check, and the card carries no claim that
+        // it has been made here.
+        //
+        // What they do pin: the card opens at `visibleRows` and grows by it, so
+        // a history whose length is not a multiple of the step ends on a
+        // partial batch, and the state after it must return zero rather than a
+        // negative — an unclamped `total - shown` puts "Show -4 more" in the
+        // label, and a zero that is not treated as absent leaves a control that
+        // does nothing.
+        let qhStep = QuotaHistoryCard.visibleRows
+        let qhCap = QuotaHistoryFold.consideredCycles
+        expect(QuotaHistoryCard.moreCount(total: qhStep, shown: qhStep) == 0
+                   && QuotaHistoryCard.moreCount(total: qhStep - 1, shown: qhStep) == 0,
+               "QH-MORE the step arithmetic offers nothing once the drawn count has "
+                   + "reached the admitted one, including when the history is shorter "
+                   + "than the opening row count")
+        expect(QuotaHistoryCard.moreCount(total: qhCap, shown: qhStep) == qhStep
+                   && QuotaHistoryCard.moreCount(total: qhStep + 3, shown: qhStep) == 3,
+               "QH-MORE the next step is a full batch, or the remainder when fewer "
+                   + "than a batch are left")
+        // The SECOND step, which is the one the shipping numbers make partial
+        // and which the two assertions above do not reach: both ask only about
+        // a drawn count of `qhStep`. An implementation that answered zero for
+        // any remainder below a full batch would satisfy neither of them and
+        // would still hide the button at 24 of 32 rows, stranding the last
+        // eight with no way to ask for them.
+        //
+        // The 8 is written out rather than recomputed from `moreCount`, which
+        // would make the expectation the thing under test, and the cap and step
+        // are pinned beside it so that moving either turns this red with the
+        // arithmetic to redo stated in one place.
+        expect(qhCap == 32 && qhStep == 12
+                   && QuotaHistoryCard.moreCount(total: qhCap, shown: 24) == 8,
+               "QH-MORE the second step offers the final partial batch of 8; if the "
+                   + "cap or the opening count moved, recompute the numbers here")
+        // A fourth assertion stood here and was deleted rather than reworded. It
+        // stepped a local integer to the cap and concluded that no admitted row
+        // is unreachable — a conclusion it could not reach, since it never
+        // touched `shownCycles`, and one that is not at risk anyway: the drawn
+        // set is a `prefix`, so overshooting the cap simply clamps. Its premise,
+        // that a step not dividing the distance would strand rows, was false.
+        // What it did cover, the second step above, is now asserted directly.
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago

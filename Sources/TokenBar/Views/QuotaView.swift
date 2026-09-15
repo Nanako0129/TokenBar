@@ -65,6 +65,18 @@ struct QuotaView: View {
                     clientId: singleClient, cycles: quotaCycles,
                     rows: quotaHistory, colors: colors, attempted: usageAttempted,
                     scanFailed: scanFailed, curveUnreadable: curveUnreadable)
+                    // The card holds per-window state — how many rows the
+                    // reader has grown the list to, and which row is open — and
+                    // switching windows inside one client does not by itself
+                    // rebuild it. Keyed on the RESOLVED window rather than the
+                    // stored preference: a choice saved for another client does
+                    // not move this one's window, and a window vanishing from
+                    // the payload moves it without the preference changing.
+                    // Same resolution the cycle list itself went through, so
+                    // the key cannot name a window other than the one the rows
+                    // came from.
+                    .id(WindowCardLoader.historyCardId(
+                        payload: agentUsage, clientId: singleClient))
             } else {
                 // Trend first: it answers "where is my spend going" across
                 // subscriptions, which the window-by-window card below cannot.
