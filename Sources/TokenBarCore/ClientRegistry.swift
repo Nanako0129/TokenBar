@@ -257,7 +257,15 @@ public enum ClientRegistry {
         let quotaSet = Set(quotaIds)
         func known(_ id: String) -> Bool { placeholders.contains(id) || quotaSet.contains(id) }
         var seen = Set<String>()
-        return (present.filter(known) + quotaIds).filter { seen.insert($0).inserted }
+        // `flatMap(tabSlice)` for the same reason `quotaClients` does it: a
+        // grouped tab is one id here and several rows on screen. With Grok
+        // Build present locally and Grok Bot signed out, the card renders the
+        // Bot's setup row (it has a placeholder) while an unexpanded `present`
+        // offered no `grok-bot` toggle to hide it — the user could only hide
+        // the whole Grok tab or every limits card. Expanding is idempotent, so
+        // a caller that already sliced loses nothing.
+        return (present.flatMap(tabSlice).filter(known) + quotaIds)
+            .filter { seen.insert($0).inserted }
     }
 
     /// Sorts `ids` by the user's saved tab order (`tabOrderKey`), appending

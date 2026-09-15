@@ -5453,10 +5453,21 @@ enum SelfTest {
         expect(ClientRegistry.tabClients(present: ["codex", "grok"], quotaIds: ["grok-bot", "grok"])
                 == ["codex", "grok"],
                "grouped quota navigation does not duplicate the Grok tab")
+        // Unexpanded, which is what the Settings panel actually passes. This
+        // assertion used to slice the input itself and so could never observe
+        // the defect: the universe was derived from the grouped tab id alone,
+        // leaving no `grok-bot` toggle for a setup row the card still drew.
+        expect(
+            AgentLimitsCard.knownClientIds(agentUsage: nil, present: ["grok"])
+                == ["grok", "grok-bot"],
+            "Grok Bot keeps a visible setup row even without a quota snapshot, "
+                + "from the grouped tab id the panel passes")
+        // Control: pre-sliced input is unchanged, so expanding inside cannot
+        // double up for a caller that already did it.
         expect(
             AgentLimitsCard.knownClientIds(agentUsage: nil, present: ClientRegistry.tabSlice("grok"))
                 == ["grok", "grok-bot"],
-            "Grok Bot keeps a visible setup row even without a quota snapshot")
+            "and expanding is idempotent for a caller that already sliced")
         expect(
             ClientRegistry.withGroupMembers(Set(["grok", "codex"])) == Set(["grok", "grok-bot", "codex"]),
             "hidden grok tab pulls the Bot row along")
