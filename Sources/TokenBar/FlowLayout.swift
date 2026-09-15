@@ -17,12 +17,22 @@ struct FlowLayout: Layout {
         for row in rows(for: subviews, width: bounds.width).rows {
             origin.x = bounds.minX
             for index in row.indices {
-                let size = subviews[index].sizeThatFits(.unspecified)
+                let size = fittedSize(of: subviews[index], limit: bounds.width)
                 subviews[index].place(at: origin, proposal: ProposedViewSize(size))
                 origin.x += size.width + hSpacing
             }
             origin.y += row.height + vSpacing
         }
+    }
+
+    /// Ideal size, capped at the row width. Without the cap a single
+    /// oversized item (a very long model name in a chart legend, #335)
+    /// reports its full ideal width, and the popover card grows past its
+    /// fixed frame instead of letting the label truncate.
+    private func fittedSize(of view: LayoutSubview, limit: CGFloat) -> CGSize {
+        let ideal = view.sizeThatFits(.unspecified)
+        guard ideal.width > limit else { return ideal }
+        return view.sizeThatFits(ProposedViewSize(width: limit, height: nil))
     }
 
     private struct Row {
@@ -37,7 +47,7 @@ struct FlowLayout: Layout {
         var x: CGFloat = 0
         var maxX: CGFloat = 0
         for (index, view) in subviews.enumerated() {
-            let size = view.sizeThatFits(.unspecified)
+            let size = fittedSize(of: view, limit: width)
             if x > 0, x + size.width > width {
                 rows.append(Row())
                 x = 0
