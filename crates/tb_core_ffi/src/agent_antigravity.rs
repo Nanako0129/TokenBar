@@ -153,8 +153,76 @@ fn should_try_agy_fallback(failure: &ProviderFetchFailure) -> bool {
     matches!(failure, ProviderFetchFailure::Terminal { .. })
 }
 
+/// The host whose DNS failure precedes the CLI's interactive escalation.
+///
+/// `agy --print` is documented as non-interactive, and it is not: with an
+/// expired cached token and no resolver it logs
+/// `lookup oauth2.googleapis.com: no such host`, promotes that network failure
+/// to an authentication failure, and opens a browser tab for a consumer OAuth
+/// flow (#329). A quota poll must not be able to start that.
+#[cfg(target_os = "macos")]
+const OAUTH_TOKEN_HOST: &str = "oauth2.googleapis.com";
+
+/// Whether the CLI's token endpoint resolves right now.
+///
+/// DNS only. The escalation in #329 is gated on resolution failing, so a
+/// connect would buy no additional signal and would spend a real round trip on
+/// every poll. Two seconds because this runs ahead of a subprocess that is
+/// already allowed 35, and a resolver that has not answered in two is the
+/// just-woken state this guards.
+#[cfg(target_os = "macos")]
+async fn oauth_endpoint_resolves() -> bool {
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        tokio::net::lookup_host((OAUTH_TOKEN_HOST, 443)),
+    )
+    .await
+    {
+        // An empty answer is not a usable resolution, so it is treated as a
+        // failure rather than as "resolved with no addresses".
+        Ok(Ok(mut addresses)) => addresses.next().is_some(),
+        Ok(Err(_)) | Err(_) => false,
+    }
+}
+
+/// Refuse to invoke the CLI when its own token endpoint cannot be resolved.
+///
+/// The guard has to sit in front of the invocation rather than around it. The
+/// call site already wraps the subprocess in a 35-second `timeout` with
+/// `kill_on_drop`, and #329 still recorded a process that started at 13:05:57
+/// and escalated at 13:23:23 — eighteen minutes, across a sleep. A monotonic
+/// timer does not advance while the machine is asleep, so the deadline that
+/// should have killed that process had barely moved when it woke and carried on
+/// to the browser. Anything that manages the child after spawning it is subject
+/// to the same freeze; only not spawning it is not.
+///
+/// Taking the runner as a parameter is what lets a test assert the child is
+/// never spawned, rather than inferring it from the returned error.
+async fn fetch_agy_cli_gated<Run, RunFuture>(
+    now: DateTime<Utc>,
+    endpoint_resolves: bool,
+    run: Run,
+) -> Result<Fetched, ProviderFetchFailure>
+where
+    Run: FnOnce(DateTime<Utc>) -> RunFuture,
+    RunFuture: std::future::Future<Output = Result<Fetched, ProviderFetchFailure>>,
+{
+    if !endpoint_resolves {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity quota is unavailable while the network is unreachable.",
+        ));
+    }
+    run(now).await
+}
+
 #[cfg(target_os = "macos")]
 async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+    let endpoint_resolves = oauth_endpoint_resolves().await;
+    fetch_agy_cli_gated(now, endpoint_resolves, run_agy_cli_candidates).await
+}
+
+#[cfg(target_os = "macos")]
+async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
     let candidates = agy_cli_artifact_candidates().await;
     let mut last_failure = None;
     for executable in candidates {
@@ -3513,5 +3581,53 @@ mod tests {
             ProviderFetchFailure::Terminal { .. } => panic!("timeout must remain transient"),
         }
         scope.cleanup();
+    }
+
+    /// #329: a quota poll must not be able to spawn the CLI when the CLI's own
+    /// token endpoint cannot be resolved, because `agy --print` answers an
+    /// unresolvable endpoint by opening a browser tab for interactive OAuth.
+    ///
+    /// The runner is a counter rather than a real invocation, so this asserts
+    /// the child is never spawned instead of inferring it from the error text —
+    /// an error message can be produced by a path that also ran the CLI.
+    #[tokio::test]
+    async fn an_unresolvable_token_endpoint_does_not_spawn_the_cli() {
+        let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
+        let runs = std::cell::Cell::new(0);
+
+        let blocked = fetch_agy_cli_gated(now, false, |now| {
+            runs.set(runs.get() + 1);
+            async move { Ok(unreachable_probe_fetched(now)) }
+        })
+        .await;
+        assert_eq!(runs.get(), 0, "an unreachable endpoint must not spawn agy");
+        assert!(matches!(blocked, Err(ProviderFetchFailure::Terminal { .. })));
+
+        // Control. Without it, `runs == 0` above would also hold if the gate
+        // rejected every call for an unrelated reason, or if the runner were
+        // never wired in at all.
+        let allowed = fetch_agy_cli_gated(now, true, |now| {
+            runs.set(runs.get() + 1);
+            async move { Ok(unreachable_probe_fetched(now)) }
+        })
+        .await;
+        assert_eq!(runs.get(), 1, "a resolvable endpoint must still spawn agy");
+        assert!(allowed.is_ok());
+    }
+
+    fn unreachable_probe_fetched(now: DateTime<Utc>) -> Fetched {
+        Fetched {
+            source: "agy".to_string(),
+            identity: None,
+            account_scope: Err(AccountScopeError::NoTrustedEvidence),
+            history_scope: Err(AccountScopeError::NoTrustedEvidence),
+            cache_binding: None,
+            windows: vec![UsageWindow::from_provider_used_percent(
+                "Probe".to_string(),
+                10.0,
+                None,
+                now,
+            )],
+        }
     }
 }
