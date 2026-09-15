@@ -11954,6 +11954,42 @@ enum SelfTest {
                 window: sparkWindow, samples: [], nowMs: sparkNow) == nil,
             "SP4 no readings at all keeps the bar")
 
+        // RC-CANCEL. A cancelled poller must stop within the turn, not at the
+        // end of its minute.
+        //
+        // `RegistryChange.sleep` parks on a continuation that only `resume(id)`
+        // reaches — a registry signal, or its own 60s timeout. Without a
+        // cancellation handler the flag is set and nothing observes it, so
+        // `await poll.value` waits out the full interval. That is a product
+        // defect before it is a test-speed one: closing the popover cancels
+        // this exact task, and the poller stayed parked for up to a minute.
+        //
+        // Measured on this suite: eleven such waits, 839s of a 958s run.
+        //
+        // The bound is deliberately generous. The claim is "within the turn,
+        // not within the minute", and a CI runner under load can take a while
+        // to schedule the resumption — but not five seconds, and nothing near
+        // the 60 it used to take.
+        let rcCancelElapsed: Double? = awaitMainActorValue {
+            let started = ContinuousClock.now
+            let task = Task { @MainActor in
+                await ClaudeExtraRoots.RegistryChange.sleep(
+                    upTo: 60, since: ClaudeExtraRoots.RegistryChange.epoch)
+            }
+            // Let it reach the continuation before cancelling, or the cancel
+            // lands on a task that has not parked yet and the check passes
+            // without exercising the handler at all.
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            task.cancel()
+            _ = await task.value
+            let d = started.duration(to: ContinuousClock.now).components
+            return Double(d.seconds) + Double(d.attoseconds) / 1e18
+        }
+        expect(
+            (rcCancelElapsed ?? 99) < 5,
+            "RC-CANCEL a cancelled registry sleep returns within the turn, not "
+                + "at the end of its 60-second interval")
+
         // MARK: scan scope (SC)
         //
         // The message scan follows what is on screen. Measured 2026-08-16:
@@ -12079,6 +12115,13 @@ enum SelfTest {
                 m.windowCardClients = ["codex"]
                 m.windowUsageClient = "codex"
                 m.refreshWindowQuotaHalves()
+                // Explicit, not incidental. Before the poller's sleep became
+                // cancellable this line was a 60-second wait that happened to
+                // outlive the 30s union-scan TTL, so the refresh below scanned
+                // for a reason nothing stated. Dropping the caches says what
+                // the assertion actually needs: a refresh with nothing cached
+                // must reach a scan.
+                DashboardModel.invalidateScanDerivedCaches()
                 src.scans = 0
                 await m.refreshWindowUsage()
                 return (scans: src.scans,
@@ -15092,6 +15135,10 @@ enum SelfTest {
             // The all-agent lens: no card on screen, only the estimates.
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // Same barrier as the block below and the SC-INV one: with the
+            // poller's cancel now prompt, nothing expires the union-scan TTL
+            // on its own, and a cached scan would let this count zero.
+            DashboardModel.invalidateScanDerivedCaches()
             src.scans = 0
             src.scannedAccounts = []
             await m.refreshWindowUsage()
@@ -15166,6 +15213,10 @@ enum SelfTest {
             _ = await poll.value
             m.windowUsageClient = nil
             m.quotaLensAllAgents = true
+            // See the note in the SC-INV block: the poller's cancel used to
+            // take a minute, which expired the union-scan TTL by accident and
+            // is why the refresh below produced per-account scans at all.
+            DashboardModel.invalidateScanDerivedCaches()
             await m.refreshWindowUsage()
             return m.quotaEquivalences
         }
