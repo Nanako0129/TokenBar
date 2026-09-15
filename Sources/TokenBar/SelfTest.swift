@@ -12625,12 +12625,28 @@ enum SelfTest {
                    && QuotaHistoryCard.moreCount(total: qhStep + 3, shown: qhStep) == 3,
                "QH-MORE the next step is a full batch, or the remainder when fewer "
                    + "than a batch are left")
-        // A third assertion stood here and was deleted rather than reworded. It
+        // The SECOND step, which is the one the shipping numbers make partial
+        // and which the two assertions above do not reach: both ask only about
+        // a drawn count of `qhStep`. An implementation that answered zero for
+        // any remainder below a full batch would satisfy neither of them and
+        // would still hide the button at 24 of 32 rows, stranding the last
+        // eight with no way to ask for them.
+        //
+        // The 8 is written out rather than recomputed from `moreCount`, which
+        // would make the expectation the thing under test, and the cap and step
+        // are pinned beside it so that moving either turns this red with the
+        // arithmetic to redo stated in one place.
+        expect(qhCap == 32 && qhStep == 12
+                   && QuotaHistoryCard.moreCount(total: qhCap, shown: 24) == 8,
+               "QH-MORE the second step offers the final partial batch of 8; if the "
+                   + "cap or the opening count moved, recompute the numbers here")
+        // A fourth assertion stood here and was deleted rather than reworded. It
         // stepped a local integer to the cap and concluded that no admitted row
         // is unreachable — a conclusion it could not reach, since it never
         // touched `shownCycles`, and one that is not at risk anyway: the drawn
         // set is a `prefix`, so overshooting the cap simply clamps. Its premise,
         // that a step not dividing the distance would strand rows, was false.
+        // What it did cover, the second step above, is now asserted directly.
         // QH-CAP-LIFETIME. The cap belongs to the surfaces that pay for a scan.
         // Lifetime summaries pay nothing and answer about ALL of history, so a
         // cap applied at the fold made a window that ran out forty cycles ago
