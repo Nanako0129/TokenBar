@@ -203,15 +203,33 @@ struct SettingsWindowView: View {
         //
         // The identity carries the client list because the closure reads it and
         // it arrives with the graph, after this view first appears.
-        .task(id: "\(tabsHiddenRaw)|\(tabsOrderRaw)|"
+        // Configured, not assigned. Setting `windowCardClients` directly used
+        // the usage-derived list, so a quota-only provider — one with a login
+        // but no local records — was never in it and its persisted curve was
+        // never read, while the preview card still drew the row from the quota
+        // payload. The row appeared with a plain bar instead of its chart.
+        // `configureQuotaVisibility` hands the model the same three inputs the
+        // popover gives it, and `refreshWindowQuotaHalves` derives membership
+        // from them plus the quota publication, which is also what keeps it
+        // current as later publications arrive.
+        .task(id: "\(tabsHiddenRaw)|\(tabsOrderRaw)|\(limitsHiddenRaw)|"
               + previewClients.joined(separator: ",")) {
-            model.windowCardClients = previewClients
+            model.configureQuotaVisibility(
+                tabHidden: ClientRegistry.parseIdSet(tabsHiddenRaw),
+                limitsHidden: ClientRegistry.parseIdSet(limitsHiddenRaw),
+                orderRaw: tabsOrderRaw)
             model.refreshWindowQuotaHalves()
         }
     }
 
     /// Clients the preview card renders, derived exactly as the card itself
-    /// derives them so the curve set and the rows cannot disagree.
+    /// derives them.
+    ///
+    /// This is no longer also the curve set: quota-only providers reach the
+    /// card through the quota payload rather than through local usage, so the
+    /// curves are derived by `refreshWindowQuotaHalves` from the visibility
+    /// configured above. Keeping this list as the curve set is what left those
+    /// providers charted as plain bars.
     private var previewClients: [String] {
         ClientRegistry.displayClients(
             present: model.stats?.presentClients ?? [],
