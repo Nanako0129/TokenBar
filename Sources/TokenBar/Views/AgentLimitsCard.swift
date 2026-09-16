@@ -827,7 +827,15 @@ struct AgentLimitsCard: View {
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else {
-                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. Nothing is sent anywhere; the login is read on this Mac and never stored by TokenBar.")
+                // Says what actually happens, including the network request.
+                // An earlier draft said "nothing is sent anywhere", which was
+                // false at the exact moment it mattered: Allow leads to a
+                // request that carries the decrypted token to api2.cursor.sh
+                // as a Bearer header. A privacy assurance attached to a
+                // permission prompt has to describe the transmission, not
+                // deny it — the narrower true guarantees are no storage, no
+                // logging, and no other destination.
+                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then used to ask Grok Bot's own server (api2.cursor.sh) for your usage, which is the same request the Grok Bot app makes. TokenBar never stores it, never logs it, and sends it nowhere else.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

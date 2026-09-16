@@ -150,7 +150,7 @@
 "Allow" = "待授權";
 "Not now" = "暫時不要";
 "Waiting for macOS…" = "等待 macOS 回應…";
-"Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. Nothing is sent anywhere; the login is read on this Mac and never stored by TokenBar." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，TokenBar 需要讀取它——macOS 會跳出視窗請你允許。資料不會傳送到任何地方，登入資訊只在這台 Mac 上讀取，TokenBar 不會儲存。";
+"Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then used to ask Grok Bot's own server (api2.cursor.sh) for your usage, which is the same request the Grok Bot app makes. TokenBar never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，TokenBar 需要讀取它——macOS 會跳出視窗請你允許。讀到之後，TokenBar 會用這個登入向 Grok Bot 自己的伺服器（api2.cursor.sh）查詢你的用量，和 Grok Bot app 本身發出的請求相同。TokenBar 不會儲存、不會記錄，也不會送去任何其他地方。";
 "TokenBar is not reading your Grok Bot limits." = "TokenBar 沒有在讀取你的 Grok Bot 額度。";
 "Error" = "錯誤";
 "Live" = "使用中";
