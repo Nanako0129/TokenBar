@@ -146,6 +146,20 @@ char *tb_set_extra_scan_paths(const char *json);
 // themselves and decides whose credential each quota card is fetched with.
 // Passing one where the other is expected fails silently in both directions.
 char *tb_set_claude_config_dirs(const char *json);
+// Replace the process-wide registry of macOS Keychain consent — which clients
+// the user has agreed to let this process read a Keychain item for. `json` is
+// `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`, full-replace
+// semantics ({} clears every grant). Success data is
+// `{"grantedCount":N,"rejected":[{"client","reason"}]}`; a client id this
+// consumer does not wire Keychain consent for is rejected and never stored,
+// while `false` is an ordinary answer rather than a rejection.
+//
+// A client absent from the registry is never read from the Keychain at all, so
+// the OS authorization dialog cannot appear before the app has asked the user
+// itself. Only "grok-bot" is wired today. The registry is in-memory and starts
+// empty every launch, so the caller owns re-applying the user's stored answer
+// at startup; a process that never calls this raises no dialog.
+char *tb_set_keychain_consent(const char *json);
 
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);
