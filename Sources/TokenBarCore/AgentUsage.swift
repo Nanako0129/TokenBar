@@ -538,6 +538,53 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
             AgentUsageTransportDiagnostic.self, forKey: .transportDiagnostic)
     }
 
+    /// Backend `source` values that mean "this card is waiting on the user",
+    /// not "this card failed". Both arrive as a terminal provider failure with
+    /// a non-nil `error` — `source` is the only field separating them, which is
+    /// why every consumer that distinguishes them has to check it BEFORE it
+    /// checks `error`.
+    ///
+    /// `unconfigured`: no credential exists at all (Claude's setup prompt).
+    /// `keychain-consent`: a credential exists and works, but reading it would
+    /// raise a macOS authorization dialog the user has not agreed to yet.
+    /// `keychain-denied`: the user agreed, but macOS did not grant access —
+    /// they pressed Deny, or left the dialog unanswered. Also a prompt rather
+    /// than a malfunction: nothing is broken, the permission simply is not
+    /// there, and the card offers to ask again.
+    /// Enumerated by `setupBadgeKey`, which is the single place that decides
+    /// both membership and what the badge says — see its doc for why they are
+    /// not two lists.
+
+    /// Whether this card is a prompt for the user rather than a malfunction.
+    /// Named once here because the answer is stated at three call sites, and
+    /// a fourth `source ==` literal added later would silently render a prompt
+    /// as a red error.
+    public var isSetupPlaceholder: Bool {
+        setupBadgeKey != nil
+    }
+
+    /// The localization key the status badge shows for a placeholder card, or
+    /// `nil` when this card is not one.
+    ///
+    /// Lives here, beside the source list, rather than as a ternary at the
+    /// badge. Adding `keychain-denied` to the set while leaving the badge
+    /// matching only `keychain-consent` is exactly what happened once: the
+    /// refused card correctly stopped being an error and then read "Set up",
+    /// which is wrong twice over — the login IS set up, and the action is to
+    /// retry authorization. Deciding it here means a new source cannot be
+    /// half-added; it has to answer this.
+    ///
+    /// "Allow" is the badge's own key and names a STATE. The button uses the
+    /// separate `consent.action.allow`, because a language that distinguishes
+    /// state from action cannot serve both from one entry.
+    public var setupBadgeKey: String? {
+        switch source {
+        case "unconfigured": "Set up"
+        case "keychain-consent", "keychain-denied": "Allow"
+        default: nil
+        }
+    }
+
     /// Order-preserving card view shared by quota resolvers and consumers.
     /// A duplicate card ID is fail-closed after the first occurrence; labels
     /// never repair or disambiguate a card collision.
@@ -706,7 +753,7 @@ public struct AgentUsagePayload: Decodable, Sendable {
     /// Error-only snapshots stay reachable; setup placeholders do not add tabs.
     public var configuredClientIds: [String] {
         var seen = Set<String>()
-        return agents.filter { $0.source != "unconfigured" }.map(\.clientId)
+        return agents.filter { !$0.isSetupPlaceholder }.map(\.clientId)
             .filter { seen.insert($0).inserted }
     }
 }

@@ -1571,7 +1571,34 @@ async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
     // comparison for the same reason.
     let result = agent_grokbot::fetch().await;
     let outcome = grokbot_outcome(result, Utc::now());
-    apply_provider_outcome("grok-bot", None, "oauth", outcome)
+    let failure_source = grokbot_failure_source(&outcome);
+    apply_provider_outcome("grok-bot", None, failure_source, outcome)
+}
+
+/// Which `source` a failed Grok Bot fetch publishes under. Everything is
+/// `"oauth"` except the one failure that is not a malfunction: a desktop login
+/// exists and works, but the user has not agreed to let us read the Keychain
+/// for it yet. `empty_error_snapshot` copies this straight into the snapshot's
+/// `source`, and Swift checks that marker *before* it checks `error`, so this
+/// is what keeps a declined prompt from rendering as a red error badge.
+fn grokbot_failure_source(outcome: &ProviderFetchOutcome) -> &'static str {
+    let ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) = outcome else {
+        return "oauth";
+    };
+    if display == agent_grokbot::GROK_BOT_KEYCHAIN_CONSENT_REQUIRED {
+        return "keychain-consent";
+    }
+    // The grant was given but did not produce access: the user pressed Deny,
+    // or left the dialog unanswered past the 25s bound. Distinct from
+    // `keychain-consent` because the app has to do something different — it
+    // reverts the stored answer, so the next poll does not reopen the dialog.
+    // Without that, clicking Allow and then denying at the OS level would
+    // reinstate exactly the every-60s prompting this feature exists to stop.
+    #[cfg(target_os = "macos")]
+    if display == crate::macos_safe_storage::KEYCHAIN_ACCESS_DENIED {
+        return "keychain-denied";
+    }
+    "oauth"
 }
 
 fn grokbot_outcome(
@@ -6651,6 +6678,74 @@ mod tests {
                 assert!(lock_last_good(&cache).entries.is_empty(), "{label}");
             }
         }
+    }
+
+    /// A withheld Keychain consent has to reach Swift as a setup state, not as
+    /// an error. Both travel as a `Terminal` failure with a non-nil `error`, so
+    /// `source` is the only field that separates them — and Swift checks it
+    /// before it checks `error`. If this mapping regresses, a user who answered
+    /// "don't allow" is told the app is broken.
+    #[test]
+    fn withheld_keychain_consent_publishes_a_setup_source_not_an_error_source() {
+        let now = Utc.timestamp_opt(1_757_000_000, 0).single().unwrap();
+        let consent = grokbot_outcome(
+            Err(ProviderFetchFailure::terminal(
+                agent_grokbot::GROK_BOT_KEYCHAIN_CONSENT_REQUIRED,
+            )),
+            now,
+        );
+        assert_eq!(grokbot_failure_source(&consent), "keychain-consent");
+
+        // Control: every other terminal failure keeps the old source, so this
+        // test cannot pass by mapping everything to the new marker.
+        let broken = grokbot_outcome(
+            Err(ProviderFetchFailure::terminal("Could not read the Grok Bot login.")),
+            now,
+        );
+        assert_eq!(grokbot_failure_source(&broken), "oauth");
+
+        // A grant that did not produce access is its own state: the app has to
+        // revert the stored answer, or the next poll reopens the dialog.
+        #[cfg(target_os = "macos")]
+        {
+            let refused = grokbot_outcome(
+                Err(ProviderFetchFailure::terminal(
+                    crate::macos_safe_storage::KEYCHAIN_ACCESS_DENIED,
+                )),
+                now,
+            );
+            assert_eq!(grokbot_failure_source(&refused), "keychain-denied");
+        }
+        let success = grokbot_outcome(
+            agent_grokbot::map_response(
+                r#"{"usagePercent":25,"nextResetTimestampUtc":"2099-01-01T00:00:00Z"}"#,
+                now,
+            )
+            .map(Some)
+            .map_err(ProviderFetchFailure::terminal),
+            now,
+        );
+        assert_eq!(grokbot_failure_source(&success), "oauth");
+
+        // And the source survives into the published snapshot, which is what
+        // Swift actually reads.
+        let cache = Mutex::new(ProviderLastGoodCache::default());
+        let snapshot = apply_provider_outcome_with(
+            &cache,
+            "grok-bot",
+            None,
+            grokbot_failure_source(&consent),
+            now,
+            consent,
+            |_| panic!("a consent prompt must not enrich history"),
+        )
+        .expect("a withheld consent must still publish a card");
+        assert_eq!(snapshot.source, "keychain-consent");
+        assert!(snapshot.windows.is_empty());
+        assert_eq!(
+            snapshot.error.as_deref(),
+            Some(agent_grokbot::GROK_BOT_KEYCHAIN_CONSENT_REQUIRED)
+        );
     }
 
     #[test]

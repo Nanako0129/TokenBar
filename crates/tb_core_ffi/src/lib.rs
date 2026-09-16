@@ -31,6 +31,7 @@ mod claude_config_dirs;
 mod extra_scan_paths;
 mod filter_parity_probe;
 mod hourly_report;
+mod keychain_consent;
 mod kiro_integrations;
 #[cfg(target_os = "macos")]
 mod macos_safe_storage;
@@ -1024,6 +1025,51 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
     })
 }
 
+/// Replace the process-wide registry of macOS Keychain consent (see the
+/// `keychain_consent` module doc). `json` is an object of
+/// `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`;
+/// full-replace semantics (`{}` clears every grant). Success data is
+/// `{"grantedCount":N,"rejected":[{"client","reason"}]}`; a client id this
+/// consumer does not wire Keychain consent for is rejected and never stored,
+/// while `false` is an ordinary answer and is not a rejection.
+///
+/// A WIRED client whose id is absent from the registry is never read from the
+/// Keychain, so the OS authorization dialog cannot appear for it before the
+/// app has asked the user. The one wired client is `grok-bot`, whose gate sits
+/// in `agent_grokbot::decode_desktop_secret` immediately before the decrypt —
+/// not at "a desktop login exists", so a plaintext-stored secret keeps working
+/// ungated.
+///
+/// This is not a process-wide no-Keychain guarantee: `agent_usage` reads the
+/// Claude credentials through `/usr/bin/security` without consulting this
+/// registry, so `tb_agent_usage` can still raise a dialog for a protected
+/// Claude item. Wiring that client would be a UI change, not an ABI change.
+///
+/// The registry is in-memory and starts empty every launch: the caller owns
+/// re-applying the user's stored answer, and a process that never calls this
+/// reads no Grok Bot Keychain item.
+///
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+#[no_mangle]
+pub unsafe extern "C" fn tb_set_keychain_consent(json: *const c_char) -> *mut c_char {
+    guarded("tb_set_keychain_consent", || {
+        envelope(unsafe { set_keychain_consent_from_c(json) })
+    })
+}
+
+/// # Safety
+/// `json` must be NULL or a valid NUL-terminated UTF-8 string.
+unsafe fn set_keychain_consent_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
+    if json.is_null() {
+        return Err("Keychain consent payload must not be NULL".to_string());
+    }
+    let raw = unsafe { CStr::from_ptr(json) }
+        .to_str()
+        .map_err(|_| "Keychain consent payload is not valid UTF-8".to_string())?;
+    keychain_consent::set_from_json(raw)
+}
+
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated UTF-8 string.
 unsafe fn set_claude_config_dirs_from_c(json: *const c_char) -> Result<serde_json::Value, String> {
@@ -1122,6 +1168,54 @@ mod tests {
     use usage_tail::UsageTailer;
 
     static QUOTA_CURVE_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    /// Drives the real `extern "C"` symbol rather than `set_from_json`, so the
+    /// envelope encoding, the NUL check and the UTF-8 check are all exercised
+    /// by the same path Swift and the Windows P/Invoke binding call.
+    #[test]
+    fn the_keychain_consent_setter_round_trips_through_the_c_abi() {
+        let _g = keychain_consent::TEST_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        keychain_consent::reset_for_test();
+
+        let payload = CString::new(r#"{"grok-bot":true}"#).expect("payload has no interior NUL");
+        let raw = unsafe { tb_set_keychain_consent(payload.as_ptr()) };
+        assert!(!raw.is_null(), "setter returned NULL");
+        let reply = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("reply is UTF-8")
+            .to_string();
+        unsafe { tb_free(raw) };
+        assert!(reply.contains("\"ok\":true"), "setter failed: {reply}");
+        assert!(reply.contains("\"grantedCount\":1"), "{reply}");
+        assert!(keychain_consent::allowed("grok-bot"));
+
+        // NULL is a failed envelope, not a crash and not a silent grant.
+        let raw = unsafe { tb_set_keychain_consent(std::ptr::null()) };
+        let reply = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("reply is UTF-8")
+            .to_string();
+        unsafe { tb_free(raw) };
+        assert!(reply.contains("\"ok\":false"), "{reply}");
+        assert!(
+            keychain_consent::allowed("grok-bot"),
+            "a rejected payload must not disturb the answer already given"
+        );
+
+        // Non-UTF-8 bytes are refused the same way.
+        let invalid = [0xffu8, 0xfe, 0x00];
+        let raw = unsafe { tb_set_keychain_consent(invalid.as_ptr() as *const c_char) };
+        let reply = unsafe { CStr::from_ptr(raw) }
+            .to_str()
+            .expect("reply is UTF-8")
+            .to_string();
+        unsafe { tb_free(raw) };
+        assert!(reply.contains("\"ok\":false"), "{reply}");
+
+        keychain_consent::reset_for_test();
+    }
 
     /// Clearing the caches loses to a scan that was already running: it
     /// snapshots its roots at the top and publishes after the clear, putting

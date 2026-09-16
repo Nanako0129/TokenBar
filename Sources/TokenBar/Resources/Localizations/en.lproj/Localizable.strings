@@ -24,6 +24,11 @@
 
 /* Window usage card — English is already the key for these, but listed
    explicitly so the key set stays visible in one place. */
+/* The Keychain consent BUTTON. A semantic key because English renders it
+   identically to the "Allow" badge while the two are different parts of
+   speech — the badge names a state, the button names an action — and
+   languages that distinguish them cannot serve both from one entry. */
+"consent.action.allow" = "Allow";
 "Session window" = "Session window";
 "Loading" = "Loading";
 "Waiting for quota…" = "Waiting for quota…";

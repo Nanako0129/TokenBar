@@ -146,6 +146,31 @@ char *tb_set_extra_scan_paths(const char *json);
 // themselves and decides whose credential each quota card is fetched with.
 // Passing one where the other is expected fails silently in both directions.
 char *tb_set_claude_config_dirs(const char *json);
+// Replace the process-wide registry of macOS Keychain consent — which clients
+// the user has agreed to let this process read a Keychain item for. `json` is
+// `{"<public-client-id>": true|false}`, e.g. `{"grok-bot":true}`, full-replace
+// semantics ({} clears every grant). Success data is
+// `{"grantedCount":N,"rejected":[{"client","reason"}]}`; a client id this
+// consumer does not wire Keychain consent for is rejected and never stored,
+// while `false` is an ordinary answer rather than a rejection.
+//
+// Scope: this registry governs ONLY the clients it wires, and "grok-bot" is
+// the only id this build accepts. Its Keychain item is not read while that id
+// is absent, so macOS cannot raise its authorization dialog for the Grok Bot
+// login before the app has asked the user itself; the gate sits immediately
+// before the decrypt of the desktop login rather than at "a login exists", so
+// a plaintext-stored secret keeps working ungated.
+//
+// It is NOT a process-wide no-Keychain guarantee. The Claude provider reads
+// `Claude Code-credentials` and `tokenbar-claude-oauth-token` through
+// `/usr/bin/security` on its own, ungated, so `tb_agent_usage` can still raise
+// a dialog for a protected Claude item whether or not this setter was called.
+// Wiring that client would be a UI change here, not an ABI change.
+//
+// The registry is in-memory and starts empty every launch, so the caller owns
+// re-applying the user's stored answer at startup; a process that never calls
+// this reads no Grok Bot Keychain item.
+char *tb_set_keychain_consent(const char *json);
 
 // Release a string returned by any tb_* entry point.
 void tb_free(char *p);

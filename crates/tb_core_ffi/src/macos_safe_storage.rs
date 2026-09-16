@@ -39,11 +39,24 @@ extern "C" {
 // Deliberately no Debug implementation: even a derived key is a secret.
 pub(crate) struct Key([u8; 16]);
 
+/// Every way `from_keychain` can fail to obtain the key, collapsed into one
+/// message on purpose — the sub-causes (the user pressed Deny, the dialog went
+/// unanswered for 25s, the item is gone, `security` could not be spawned) are
+/// not separable from the CLI's exit status with any confidence, and they call
+/// for the same thing from the user.
+///
+/// Named rather than inlined because a consumer has to recognise it: this is
+/// the one failure that means "the grant the user gave us did not produce
+/// access". The app reverts the stored consent on it, so that a denial stops
+/// the poll loop from reopening the dialog every 60s — which is the behaviour
+/// the consent feature exists to prevent, and which a grant left standing
+/// after a refusal would recreate.
+pub(crate) const KEYCHAIN_ACCESS_DENIED: &str =
+    "Cannot access the Grok Bot login in Keychain. Allow access to Grok Bot Safe Storage, then refresh.";
+
 impl Key {
     pub(crate) fn from_keychain(service: &str) -> Result<Self, String> {
-        let denied = || {
-            "Cannot access the Grok Bot login in Keychain. Allow access to Grok Bot Safe Storage, then refresh.".to_string()
-        };
+        let denied = || KEYCHAIN_ACCESS_DENIED.to_string();
         let mut child = Command::new("/usr/bin/security")
             .args(["find-generic-password", "-s", service, "-w"])
             .stdin(Stdio::null())

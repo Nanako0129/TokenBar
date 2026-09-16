@@ -78,6 +78,20 @@ struct AgentLimitsCard: View {
 
     private static let trendTooltipWidth: CGFloat = 184
 
+    /// Feedback for the up-to-25s the adapter waits on an unanswered Keychain
+    /// dialog. No spinner: the system dialog is on screen and IS the feedback
+    /// — a second progress indicator behind it would only compete with it.
+    @State private var granting = false
+    /// Whether the stored answer is an explicit no, which picks the collapsed
+    /// one-line copy. Local because it changes on a button press, before any
+    /// new payload arrives.
+    @State private var consentDeclined = false
+    // Both are card-level, not per-row, which is correct only while exactly
+    // one client can be in the consent state. `grok-bot` is the only one the
+    // core wires today. Wiring a second (Claude is the candidate) makes these
+    // two rows share one flag, so one card's Allow would disable the other's
+    // button and seed its copy from the wrong stored answer — key them by
+    // client id at that point, before adding the second prompt.
     @State private var dragId: String?
     @State private var overId: String?
     @State private var cardFrames: [String: CGRect] = [:]
@@ -710,6 +724,10 @@ struct AgentLimitsCard: View {
             }
             if snapshot?.source == "unconfigured" {
                 setupPrompt()
+            } else if let source = snapshot?.source,
+                source == "keychain-consent" || source == "keychain-denied"
+            {
+                consentPrompt(source: source)
             } else if id == "grok-bot", snapshot == nil {
                 Text((usageAttempted
                     ? "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits."
@@ -799,12 +817,114 @@ struct AgentLimitsCard: View {
         }
     }
 
+    /// Shown when a Grok Bot desktop login exists but reading it would raise a
+    /// macOS Keychain dialog the user has not agreed to (source
+    /// "keychain-consent"). This is the whole feature: the explanation and the
+    /// choice arrive BEFORE the system dialog, not after it.
+    ///
+    /// Collapses to one line once the answer is no, keeping Allow available —
+    /// a decline has to be reversible somewhere, and the card the user
+    /// declined on is where they will look. There is no Settings toggle and no
+    /// revoke: revoking would not close the Keychain ACL macOS already holds,
+    /// so it would promise something the app cannot deliver.
+    @ViewBuilder private func consentPrompt(source: String) -> some View {
+        let accessDenied = source == "keychain-denied"
+        VStack(alignment: .leading, spacing: 6) {
+            if accessDenied {
+                // The user said yes here and macOS said no. Naming which half
+                // failed is the whole point: a generic error would send them
+                // looking for a problem in TokenBar, and the collapsed
+                // "not reading your limits" line would imply they chose this.
+                Text("macOS did not allow access to the Grok Bot login, so TokenBar stopped asking. Choose Allow to try again — macOS will show its permission dialog.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if consentDeclined {
+                Text("TokenBar is not reading your Grok Bot limits.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                // Says what actually happens, including the network request.
+                // An earlier draft said "nothing is sent anywhere", which was
+                // false at the exact moment it mattered: Allow leads to a
+                // request that carries the decrypted token to api2.cursor.sh
+                // as a Bearer header. A privacy assurance attached to a
+                // permission prompt has to describe the transmission, not
+                // deny it.
+                //
+                // Every clause here is checkable from this repository: the
+                // host is `GROK_BOT_DESKTOP_USAGE_URL`, and "never stores,
+                // never logs, nowhere else" is the adapter's own contract. A
+                // second draft added "the same request the Grok Bot app
+                // makes", which is NOT checkable here — the only basis is the
+                // adapter module doc's "just as the desktop app does", itself
+                // an unverified claim, and repeating it would be the same
+                // mistake that produced the first draft. Reassurance that
+                // cannot be checked does not belong in a permission prompt,
+                // even when it is probably true.
+                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. TokenBar never stores it, never logs it, and sends it nowhere else.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack(spacing: 8) {
+                // `consent.action.allow`, not the badge's "Allow" key. In
+                // English both render "Allow", but the two are different parts
+                // of speech: the badge names a STATE the card is in, the
+                // button names an ACTION the user takes. Chinese has no word
+                // that does both — a state label reads as "awaiting
+                // authorization" on a button, which describes the situation
+                // instead of offering to change it. One key for both would
+                // force every translator to pick which half to get wrong.
+                Button(granting ? "Waiting for macOS…".localized : "consent.action.allow".localized) {
+                    granting = true
+                    GrokBotKeychainConsent.answer(true)
+                }
+                .disabled(granting)
+                if !consentDeclined {
+                    Button("Not now".localized) {
+                        GrokBotKeychainConsent.answer(false)
+                        consentDeclined = true
+                    }
+                    .buttonStyle(.borderless)
+                    // Disabled while a grant is in flight. The store serializes
+                    // both answers through one queue, so clicking this after
+                    // Allow already resolves correctly — the later refusal wins
+                    // and clears the registry. This is about what the sequence
+                    // LOOKS like: macOS may already be showing the dialog the
+                    // first click asked for, and offering "Not now" underneath
+                    // it invites the user to answer the same question twice.
+                    .disabled(granting)
+                }
+            }
+        }
+        // Keyed on the source, so both flags are re-seeded whenever a new
+        // payload changes what this card is saying — not only on first
+        // appearance. `granting` in particular MUST be cleared here: it is set
+        // when Allow is pressed and the attempt only concludes when a payload
+        // comes back, so without this the button stays disabled reading
+        // "Waiting for macOS…" forever after a denial.
+        .task(id: source) {
+            granting = false
+            consentDeclined = GrokBotKeychainConsent.answer() == false
+        }
+    }
+
     private func statusBadge(snapshot: AgentUsageSnapshot?, isLive: Bool) -> some View {
         let text: String
         var color: Color = .secondary
-        if snapshot?.source == "unconfigured" {
-            // Not set up yet -- neutral prompt, not an alarming red error.
-            text = "Set up".localized
+        if let badgeKey = snapshot?.setupBadgeKey {
+            // Waiting on the user -- a neutral prompt, not an alarming red
+            // error. Must stay AHEAD of the `error != nil` branch below:
+            // every placeholder state carries a non-nil error, and `source` is
+            // the only field that tells them apart.
+            //
+            // The key comes from the snapshot rather than from a ternary here,
+            // so adding a source cannot half-land: "Set up" is wrong for a
+            // Grok Bot login that is already set up and working, and copy that
+            // misnames the action outlives the code.
+            text = badgeKey.localized
         } else if snapshot?.error != nil {
             text = "Error".localized
             color = .red

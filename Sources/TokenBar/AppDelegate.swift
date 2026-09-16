@@ -89,6 +89,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // out costs considerably more.
         ClaudeExtraRoots.apply()
 
+        // Same split for the same reason: the Keychain consent registry is
+        // also an in-memory RwLock that starts empty, so Swift re-applies the
+        // user's stored answer. Only a granted answer makes a call — an empty
+        // registry already denies, which is exactly right both for someone who
+        // has not been asked and for someone who said no.
+        GrokBotKeychainConsent.applyIfGranted()
+
         let controller = StatusItemController()
         statusController = controller
         let animator = TrayAnimator(controller: controller, source: usageSource)

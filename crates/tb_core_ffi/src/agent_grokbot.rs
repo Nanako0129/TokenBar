@@ -420,12 +420,25 @@ fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
     }
 }
 
+/// Marker error for "a desktop login is here, but the user has not agreed to
+/// let us read the Keychain for it". `fetch_grokbot` turns this into a snapshot
+/// with `source == "keychain-consent"`, so the card shows a prompt with an
+/// Allow button rather than a red error.
+///
+/// Distinct from every other terminal failure on purpose: nothing is broken
+/// and there is nothing to fix, the app simply has not been given permission
+/// yet. Rendering it as an error would tell a user who answered "don't allow"
+/// that the app malfunctioned.
+pub(crate) const GROK_BOT_KEYCHAIN_CONSENT_REQUIRED: &str =
+    "TokenBar needs your permission to read the Grok Bot login from Keychain.";
+
 fn load_credentials() -> Result<Option<GrokBotCredentials>, String> {
     #[cfg(target_os = "macos")]
     let mut key = None;
     load_credentials_from_sources(
         &desktop_secrets_path(),
         &cursor_state_db_path(),
+        &|| crate::keychain_consent::allowed("grok-bot"),
         |ciphertext| {
             #[cfg(target_os = "macos")]
             {
@@ -448,9 +461,12 @@ fn load_credentials() -> Result<Option<GrokBotCredentials>, String> {
 fn load_credentials_from_sources(
     desktop_path: &Path,
     cursor_path: &Path,
+    keychain_consent: &impl Fn() -> bool,
     decrypt: impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<Option<GrokBotCredentials>, String> {
-    if let Some(credentials) = load_desktop_credentials_from(desktop_path, decrypt)? {
+    if let Some(credentials) =
+        load_desktop_credentials_from(desktop_path, keychain_consent, decrypt)?
+    {
         return Ok(Some(credentials));
     }
     load_credentials_from(cursor_path).map(|value| value.map(GrokBotCredentials::Cursor))
@@ -472,6 +488,7 @@ fn desktop_secrets_path() -> PathBuf {
 
 fn load_desktop_credentials_from(
     path: &Path,
+    keychain_consent: &impl Fn() -> bool,
     mut decrypt: impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<Option<GrokBotCredentials>, String> {
     let raw = match std::fs::read_to_string(path) {
@@ -524,15 +541,22 @@ fn load_desktop_credentials_from(
     let Some(stored_token) = login.get("cursor-access-token") else {
         return Ok(None);
     };
-    let access_token =
-        decode_desktop_secret(stored_token.as_str().ok_or_else(malformed)?, &mut decrypt)?;
+    let access_token = decode_desktop_secret(
+        stored_token.as_str().ok_or_else(malformed)?,
+        keychain_consent,
+        &mut decrypt,
+    )?;
     if access_token.is_empty() {
         return Err(malformed());
     }
     let team_id = login
         .get("cursor-selected-team-id")
         .map(|value| {
-            let team = decode_desktop_secret(value.as_str().ok_or_else(malformed)?, &mut decrypt)?;
+            let team = decode_desktop_secret(
+                value.as_str().ok_or_else(malformed)?,
+                keychain_consent,
+                &mut decrypt,
+            )?;
             team.parse::<u64>()
                 .ok()
                 .filter(|id| *id > 0)
@@ -547,6 +571,7 @@ fn load_desktop_credentials_from(
 
 fn decode_desktop_secret(
     value: &str,
+    keychain_consent: &impl Fn() -> bool,
     decrypt: &mut impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<String, String> {
     let malformed =
@@ -571,6 +596,30 @@ fn decode_desktop_secret(
     let ciphertext = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|_| malformed())?;
+    // The gate sits here, immediately before the only call that can reach the
+    // Keychain — not at "a desktop login exists". A `plaintext:v1:` secret
+    // returned above needs no key at all, and gating that would break a login
+    // there is nothing to ask about. Everything before this point is file
+    // reads and JSON parsing, so "a login is here" stays knowable with zero
+    // Keychain contact, which is what lets the app explain itself first.
+    //
+    // A closure, not a `bool` snapshot taken at the top of the load. The
+    // answer can change while this call is in flight — the user clicks Allow,
+    // the fetch starts, they change their mind — and a snapshot would carry
+    // the withdrawn grant past the refusal. The window is not theoretical:
+    // this function runs TWICE per login (the access token, then
+    // `cursor-selected-team-id`), and the first `decrypt` can sit on an
+    // unanswered macOS dialog for up to 25s, which is exactly when a user
+    // reconsiders. Re-reading here means a refusal takes effect at the next
+    // Keychain read rather than at the next poll.
+    //
+    // Still a parameter rather than a direct `keychain_consent::allowed` call:
+    // a global read cannot be driven by the injectable seam the negative tests
+    // depend on, and "the decrypt closure was never invoked" is the assertion
+    // this whole feature rests on.
+    if !keychain_consent() {
+        return Err(GROK_BOT_KEYCHAIN_CONSENT_REQUIRED.to_string());
+    }
     decrypt(&ciphertext)
 }
 
@@ -928,7 +977,7 @@ mod tests {
         )
         .unwrap();
         let credentials =
-            load_credentials_from_sources(&desktop_path, &cursor_path, |data| match data {
+            load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |data| match data {
                 b"active-token" => Ok("desktop-test-token".to_string()),
                 b"active-team" => Ok("42".to_string()),
                 _ => panic!("must read only the active access token and its team"),
@@ -966,16 +1015,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let credentials =
-            load_credentials_from_sources(
-                &desktop_path,
-                &cursor_path,
-                |_| Ok("native".to_string()),
-            )
-            .unwrap()
-            .unwrap();
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
+            Ok("native".to_string())
+        })
+        .unwrap()
+        .unwrap();
         assert!(matches!(credentials, GrokBotCredentials::Desktop { .. }));
-        let error = load_credentials_from_sources(&desktop_path, &cursor_path, |_| {
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
             Err("Keychain denied".to_string())
         })
         .err()
@@ -983,7 +1029,8 @@ mod tests {
         assert_eq!(error, "Keychain denied");
         std::fs::write(&desktop_path, "invalid JSON").unwrap();
         assert!(
-            load_credentials_from_sources(&desktop_path, &cursor_path, |_| unreachable!()).is_err()
+            load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| unreachable!())
+                .is_err()
         );
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1000,6 +1047,7 @@ mod tests {
         let credentials = load_credentials_from_sources(
             &dir.join("missing.json"),
             &cursor_path,
+            &|| true,
             |_| unreachable!(),
         )
         .unwrap()
@@ -1027,7 +1075,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_credentials_from_sources(&path, &cursor_path, |_| panic!(
+            load_credentials_from_sources(&path, &cursor_path, &|| true, |_| panic!(
                 "signed-out tokens must not be decrypted"
             ))
             .unwrap()
@@ -1041,7 +1089,7 @@ mod tests {
         let ciphertext = encoded(b"encrypted-token");
         let scoped = format!("scoped:v1:{}:{ciphertext}", "a".repeat(64));
         assert_eq!(
-            decode_desktop_secret(&scoped, &mut |data| {
+            decode_desktop_secret(&scoped, &|| true, &mut |data| {
                 assert_eq!(data, b"encrypted-token");
                 Ok("decoded-token".to_string())
             })
@@ -1051,12 +1099,15 @@ mod tests {
         assert_eq!(
             decode_desktop_secret(
                 &format!("plaintext:v1:{}", encoded(b"dev-token")),
+                &|| true,
                 &mut |_| unreachable!()
             )
             .unwrap(),
             "dev-token"
         );
-        assert!(decode_desktop_secret("scoped:v1:invalid:abc", &mut |_| unreachable!()).is_err());
+        assert!(
+            decode_desktop_secret("scoped:v1:invalid:abc", &|| true, &mut |_| unreachable!()).is_err()
+        );
 
         let (dir, _) = temp_state_db("invalid_team", &[]);
         let path = dir.join("sand-secrets.json");
@@ -1069,7 +1120,184 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert!(load_desktop_credentials_from(&path, |_| unreachable!()).is_err());
+        assert!(load_desktop_credentials_from(&path, &|| true, |_| unreachable!()).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Writes an encrypted (non-`plaintext:v1:`) desktop login — the shape that
+    /// needs the Keychain — and returns (dir, desktop path, cursor path).
+    fn temp_encrypted_desktop_login(tag: &str, rows: &[(&str, &str)]) -> (PathBuf, PathBuf, PathBuf)
+    {
+        let (dir, cursor_path) = temp_state_db(tag, rows);
+        let desktop_path = dir.join("sand-secrets.json");
+        std::fs::write(
+            &desktop_path,
+            serde_json::json!({"cursor-access-token": encoded(b"ciphertext")}).to_string(),
+        )
+        .unwrap();
+        (dir, desktop_path, cursor_path)
+    }
+
+    /// The whole point of the feature: an encrypted desktop login must not be
+    /// decrypted — and therefore must not reach `Key::from_keychain` and the
+    /// OS dialog it raises — until the user has agreed.
+    #[test]
+    fn desktop_login_is_not_decrypted_without_keychain_consent() {
+        let (dir, desktop_path, cursor_path) = temp_encrypted_desktop_login("no_consent", &[]);
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
+            unreachable!("consent absent must not reach the Keychain")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error, GROK_BOT_KEYCHAIN_CONSENT_REQUIRED);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Control for the test above. Without it that one passes on a fixture that
+    /// never reaches the decrypt at all — a wrong key name or an unresolvable
+    /// active account would make the trap unreachable and the assertion
+    /// meaningless. This proves the same fixture does reach it when consent is
+    /// present, so the only thing the negative test measures is the gate.
+    #[test]
+    fn consented_desktop_login_still_decrypts() {
+        let (dir, desktop_path, cursor_path) = temp_encrypted_desktop_login("consent", &[]);
+        let mut decrypts = 0;
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
+            decrypts += 1;
+            Ok("granted-token".to_string())
+        })
+        .unwrap()
+        .expect("a consented desktop login must still load");
+        assert!(matches!(credentials, GrokBotCredentials::Desktop { .. }));
+        assert!(decrypts > 0, "the fixture never reached the decrypt");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Withholding consent must not quietly fetch quota for a different
+    /// account. Same invariant as the module doc's "never silently switch to a
+    /// different IDE account": the Cursor login here is perfectly usable, and
+    /// using it would attribute one account's usage to the other's card.
+    #[test]
+    fn consent_absent_does_not_fall_back_to_the_cursor_login() {
+        let (dir, desktop_path, cursor_path) = temp_encrypted_desktop_login(
+            "no_consent_no_fallback",
+            &[
+                ("cursorAuth/accessToken", "ide-token"),
+                ("glass.lastSignedInAuthId", "user_abcDEF1234567890xyzAB"),
+            ],
+        );
+        // Control: the same Cursor fixture does load when no desktop login is
+        // in the way, so the assertion below is about the gate and not about a
+        // fixture that could never have produced credentials.
+        assert!(
+            load_credentials_from_sources(&dir.join("missing.json"), &cursor_path, &|| false, |_| {
+                unreachable!()
+            })
+            .unwrap()
+            .is_some(),
+            "the Cursor fixture must be loadable for this test to mean anything"
+        );
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
+            unreachable!("consent absent must not reach the Keychain")
+        })
+        .err()
+        .unwrap();
+        assert_eq!(error, GROK_BOT_KEYCHAIN_CONSENT_REQUIRED);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// The gate sits at the decrypt, not at "a desktop login exists". A
+    /// `plaintext:v1:` secret needs no key, so asking about it would block a
+    /// login there is nothing to ask about.
+    #[test]
+    fn plaintext_desktop_secret_needs_no_consent() {
+        let (dir, cursor_path) = temp_state_db("plaintext_no_consent", &[]);
+        let desktop_path = dir.join("sand-secrets.json");
+        std::fs::write(
+            &desktop_path,
+            serde_json::json!({
+                "cursor-access-token": format!("plaintext:v1:{}", encoded(b"dev-token"))
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
+            unreachable!("a plaintext secret must not reach the Keychain either")
+        })
+        .unwrap()
+        .expect("a plaintext desktop login must load without consent");
+        assert!(matches!(credentials, GrokBotCredentials::Desktop { .. }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Consent withdrawn mid-load must take effect at the next Keychain read,
+    /// not at the next poll. A login carries two encrypted fields, and the
+    /// first decrypt can sit on an unanswered macOS dialog for up to 25s —
+    /// ample time to press Not now — so a `bool` snapshot taken before the
+    /// file was even read would carry the withdrawn grant into the second
+    /// read. The closure here answers `true` once and `false` afterwards,
+    /// which is the shape of exactly that sequence.
+    #[test]
+    fn consent_withdrawn_mid_load_stops_the_next_keychain_read() {
+        let (dir, cursor_path) = temp_state_db("withdrawn", &[]);
+        let desktop_path = dir.join("sand-secrets.json");
+        std::fs::write(
+            &desktop_path,
+            serde_json::json!({
+                "cursor-access-token": encoded(b"ciphertext"),
+                "cursor-selected-team-id": encoded(b"team-ciphertext")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let asked = std::cell::Cell::new(0);
+        let decrypts = std::cell::Cell::new(0);
+        let error = load_credentials_from_sources(
+            &desktop_path,
+            &cursor_path,
+            &|| {
+                asked.set(asked.get() + 1);
+                asked.get() == 1
+            },
+            |_| {
+                decrypts.set(decrypts.get() + 1);
+                Ok("granted-token".to_string())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, GROK_BOT_KEYCHAIN_CONSENT_REQUIRED);
+        assert_eq!(
+            decrypts.get(),
+            1,
+            "the withdrawal must stop the SECOND Keychain read; the first had \
+             already been authorized when it ran"
+        );
+        assert_eq!(asked.get(), 2, "consent must be re-read per Keychain read");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Users on the Cursor fallback have nothing to consent to — that path is
+    /// a read-only SQLite open, no Keychain and no dialog — so their card must
+    /// be byte-identical to before the feature existed.
+    #[test]
+    fn cursor_only_users_are_unaffected_by_the_consent_gate() {
+        let (dir, cursor_path) = temp_state_db(
+            "cursor_only_no_consent",
+            &[
+                ("cursorAuth/accessToken", "ide-token"),
+                ("glass.lastSignedInAuthId", "user_abcDEF1234567890xyzAB"),
+            ],
+        );
+        let credentials = load_credentials_from_sources(
+            &dir.join("missing.json"),
+            &cursor_path,
+            &|| false,
+            |_| unreachable!(),
+        )
+        .unwrap()
+        .expect("the Cursor fallback must load with consent withheld");
+        assert!(matches!(credentials, GrokBotCredentials::Cursor(_)));
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1089,7 +1317,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                load_desktop_credentials_from(&path, |_| panic!("stale login"))
+                load_desktop_credentials_from(&path, &|| true, |_| panic!("stale login"))
                     .unwrap()
                     .is_none()
             );

@@ -70,6 +70,13 @@ struct AgentUsagePublicationState {
 
 /// Process-lifetime MainActor state shared by every UI consumer, including the
 /// dashboard models and the independent tray poller.
+///
+/// `resolve` is also where a refused Keychain grant is withdrawn, because this
+/// is the one place every payload passes through. Doing it in the card would
+/// miss the case that matters most: with the popover closed, the tray keeps
+/// polling every five minutes, and a grant left standing after the user
+/// pressed Deny would reopen the macOS dialog on that schedule with nothing on
+/// screen to explain it.
 @MainActor
 enum AgentUsagePublicationCoordinator {
     private static var state = AgentUsagePublicationState()
@@ -77,7 +84,9 @@ enum AgentUsagePublicationCoordinator {
     static var latestPayload: AgentUsagePayload? { state.latest }
 
     static func resolve(_ candidate: AgentUsagePayload) -> AgentUsagePayload {
-        state.resolve(candidate)
+        let resolved = state.resolve(candidate)
+        GrokBotKeychainConsent.revokeIfAccessWasDenied(resolved)
+        return resolved
     }
 
     /// Test seam only: back to the state of a process that has published
