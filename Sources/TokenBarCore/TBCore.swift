@@ -92,6 +92,23 @@ public struct ClaudeConfigDirsResult: Decodable, Equatable, Sendable {
     public let rejected: [RejectedConfigDir]
 }
 
+/// One client id `tb_set_keychain_consent` refused, and why: the core wires
+/// Keychain consent for a fixed set of clients, and a grant nothing reads
+/// would claim the user was asked about a dialog that still appears unasked.
+public struct RejectedKeychainConsent: Decodable, Equatable, Sendable {
+    public let client: String
+    public let reason: String
+}
+
+/// Result of `tb_set_keychain_consent`.
+public struct KeychainConsentResult: Decodable, Equatable, Sendable {
+    /// Clients this process may now read a Keychain item for. A client not
+    /// counted here is never reached at all, so macOS is never given the
+    /// chance to raise its authorization dialog for it.
+    public let grantedCount: Int
+    public let rejected: [RejectedKeychainConsent]
+}
+
 /// Thin Swift facade over the tb_core_ffi staticlib. All calls are blocking;
 /// invoke from a background thread/actor in app code. `agentUsage()` is also
 /// network-bound.
@@ -368,6 +385,25 @@ public enum TBCore {
     /// user configured — not the scan subset the core accepted.
     public static func setClaudeConfigDirs(json: String) throws -> ClaudeConfigDirsResult {
         try unwrap(json.withCString { tb_set_claude_config_dirs($0) })
+    }
+
+    /// Replace the process-wide registry of macOS Keychain consent. `json` is
+    /// `{"<public-client-id>": true|false}`; full-replace semantics — `{}`
+    /// clears every grant. The intent is that a client absent from the
+    /// registry is never read from the Keychain, so macOS cannot raise its
+    /// authorization dialog before the app has asked the user itself.
+    ///
+    /// - Warning: No adapter consults the registry in this revision, so
+    ///   calling this does not yet change what the core does. The entry point
+    ///   lands ahead of its consumer because `ctb.h` is a cross-repo contract
+    ///   whose changes the Windows port has to be notified of; the Grok Bot
+    ///   gate follows in a separate change. Nothing in the app should call
+    ///   this until then.
+    ///
+    /// The core registry is in-memory and starts empty every launch, so the
+    /// app owns re-applying the stored answer at startup and after each edit.
+    public static func setKeychainConsent(json: String) throws -> KeychainConsentResult {
+        try unwrap(json.withCString { tb_set_keychain_consent($0) })
     }
 
     /// OAuth quota cards for codex/claude/antigravity/copilot/grok/grok-bot. Network-bound;
