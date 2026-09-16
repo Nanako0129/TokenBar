@@ -86,6 +86,12 @@ struct AgentLimitsCard: View {
     /// one-line copy. Local because it changes on a button press, before any
     /// new payload arrives.
     @State private var consentDeclined = false
+    // Both are card-level, not per-row, which is correct only while exactly
+    // one client can be in the consent state. `grok-bot` is the only one the
+    // core wires today. Wiring a second (Claude is the candidate) makes these
+    // two rows share one flag, so one card's Allow would disable the other's
+    // button and seed its copy from the wrong stored answer — key them by
+    // client id at that point, before adding the second prompt.
     @State private var dragId: String?
     @State private var overId: String?
     @State private var cardFrames: [String: CGRect] = [:]
