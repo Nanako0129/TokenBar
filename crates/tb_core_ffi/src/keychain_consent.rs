@@ -4,10 +4,18 @@
 //! no warning.
 //!
 //! Reading a Keychain item makes macOS — not TokenBar — ask the question, and
-//! by then it is too late to explain what is being read or why. The adapter
-//! therefore asks this registry first and declines to reach the Keychain at
-//! all until the answer is yes. The app owns the explanation and the "Allow"
-//! button; this registry is only how that answer crosses the FFI boundary.
+//! by then it is too late to explain what is being read or why. An adapter is
+//! therefore meant to ask this registry first and decline to reach the
+//! Keychain at all until the answer is yes. The app owns the explanation and
+//! the "Allow" button; this registry is only how that answer crosses the FFI
+//! boundary.
+//!
+//! ⚠️ **As of this revision no adapter consults it yet.** The registry and its
+//! entry point land first because `ctb.h` is a cross-repo contract and the
+//! Windows port needs the symbol to port; the Grok Bot gate — at
+//! `agent_grokbot::decode_desktop_secret`'s `decrypt` call — and the app-side
+//! prompt follow in the consumer change. Until then the dialog still appears
+//! unannounced, and this registry changes nothing.
 //!
 //! **Deliberately two-valued.** "Never asked" and "declined" are the same
 //! thing to an adapter — in both cases it must not touch the Keychain — so
