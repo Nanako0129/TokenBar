@@ -438,7 +438,7 @@ fn load_credentials() -> Result<Option<GrokBotCredentials>, String> {
     load_credentials_from_sources(
         &desktop_secrets_path(),
         &cursor_state_db_path(),
-        crate::keychain_consent::allowed("grok-bot"),
+        &|| crate::keychain_consent::allowed("grok-bot"),
         |ciphertext| {
             #[cfg(target_os = "macos")]
             {
@@ -461,7 +461,7 @@ fn load_credentials() -> Result<Option<GrokBotCredentials>, String> {
 fn load_credentials_from_sources(
     desktop_path: &Path,
     cursor_path: &Path,
-    keychain_consent: bool,
+    keychain_consent: &impl Fn() -> bool,
     decrypt: impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<Option<GrokBotCredentials>, String> {
     if let Some(credentials) =
@@ -488,7 +488,7 @@ fn desktop_secrets_path() -> PathBuf {
 
 fn load_desktop_credentials_from(
     path: &Path,
-    keychain_consent: bool,
+    keychain_consent: &impl Fn() -> bool,
     mut decrypt: impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<Option<GrokBotCredentials>, String> {
     let raw = match std::fs::read_to_string(path) {
@@ -571,7 +571,7 @@ fn load_desktop_credentials_from(
 
 fn decode_desktop_secret(
     value: &str,
-    keychain_consent: bool,
+    keychain_consent: &impl Fn() -> bool,
     decrypt: &mut impl FnMut(&[u8]) -> Result<String, String>,
 ) -> Result<String, String> {
     let malformed =
@@ -602,7 +602,22 @@ fn decode_desktop_secret(
     // there is nothing to ask about. Everything before this point is file
     // reads and JSON parsing, so "a login is here" stays knowable with zero
     // Keychain contact, which is what lets the app explain itself first.
-    if !keychain_consent {
+    //
+    // A closure, not a `bool` snapshot taken at the top of the load. The
+    // answer can change while this call is in flight — the user clicks Allow,
+    // the fetch starts, they change their mind — and a snapshot would carry
+    // the withdrawn grant past the refusal. The window is not theoretical:
+    // this function runs TWICE per login (the access token, then
+    // `cursor-selected-team-id`), and the first `decrypt` can sit on an
+    // unanswered macOS dialog for up to 25s, which is exactly when a user
+    // reconsiders. Re-reading here means a refusal takes effect at the next
+    // Keychain read rather than at the next poll.
+    //
+    // Still a parameter rather than a direct `keychain_consent::allowed` call:
+    // a global read cannot be driven by the injectable seam the negative tests
+    // depend on, and "the decrypt closure was never invoked" is the assertion
+    // this whole feature rests on.
+    if !keychain_consent() {
         return Err(GROK_BOT_KEYCHAIN_CONSENT_REQUIRED.to_string());
     }
     decrypt(&ciphertext)
@@ -962,7 +977,7 @@ mod tests {
         )
         .unwrap();
         let credentials =
-            load_credentials_from_sources(&desktop_path, &cursor_path, true, |data| match data {
+            load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |data| match data {
                 b"active-token" => Ok("desktop-test-token".to_string()),
                 b"active-team" => Ok("42".to_string()),
                 _ => panic!("must read only the active access token and its team"),
@@ -1000,13 +1015,13 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, true, |_| {
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
             Ok("native".to_string())
         })
         .unwrap()
         .unwrap();
         assert!(matches!(credentials, GrokBotCredentials::Desktop { .. }));
-        let error = load_credentials_from_sources(&desktop_path, &cursor_path, true, |_| {
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
             Err("Keychain denied".to_string())
         })
         .err()
@@ -1014,7 +1029,7 @@ mod tests {
         assert_eq!(error, "Keychain denied");
         std::fs::write(&desktop_path, "invalid JSON").unwrap();
         assert!(
-            load_credentials_from_sources(&desktop_path, &cursor_path, true, |_| unreachable!())
+            load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| unreachable!())
                 .is_err()
         );
         std::fs::remove_dir_all(dir).unwrap();
@@ -1032,7 +1047,7 @@ mod tests {
         let credentials = load_credentials_from_sources(
             &dir.join("missing.json"),
             &cursor_path,
-            true,
+            &|| true,
             |_| unreachable!(),
         )
         .unwrap()
@@ -1060,7 +1075,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            load_credentials_from_sources(&path, &cursor_path, true, |_| panic!(
+            load_credentials_from_sources(&path, &cursor_path, &|| true, |_| panic!(
                 "signed-out tokens must not be decrypted"
             ))
             .unwrap()
@@ -1074,7 +1089,7 @@ mod tests {
         let ciphertext = encoded(b"encrypted-token");
         let scoped = format!("scoped:v1:{}:{ciphertext}", "a".repeat(64));
         assert_eq!(
-            decode_desktop_secret(&scoped, true, &mut |data| {
+            decode_desktop_secret(&scoped, &|| true, &mut |data| {
                 assert_eq!(data, b"encrypted-token");
                 Ok("decoded-token".to_string())
             })
@@ -1084,14 +1099,14 @@ mod tests {
         assert_eq!(
             decode_desktop_secret(
                 &format!("plaintext:v1:{}", encoded(b"dev-token")),
-                true,
+                &|| true,
                 &mut |_| unreachable!()
             )
             .unwrap(),
             "dev-token"
         );
         assert!(
-            decode_desktop_secret("scoped:v1:invalid:abc", true, &mut |_| unreachable!()).is_err()
+            decode_desktop_secret("scoped:v1:invalid:abc", &|| true, &mut |_| unreachable!()).is_err()
         );
 
         let (dir, _) = temp_state_db("invalid_team", &[]);
@@ -1105,7 +1120,7 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        assert!(load_desktop_credentials_from(&path, true, |_| unreachable!()).is_err());
+        assert!(load_desktop_credentials_from(&path, &|| true, |_| unreachable!()).is_err());
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1129,7 +1144,7 @@ mod tests {
     #[test]
     fn desktop_login_is_not_decrypted_without_keychain_consent() {
         let (dir, desktop_path, cursor_path) = temp_encrypted_desktop_login("no_consent", &[]);
-        let error = load_credentials_from_sources(&desktop_path, &cursor_path, false, |_| {
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
             unreachable!("consent absent must not reach the Keychain")
         })
         .err()
@@ -1147,7 +1162,7 @@ mod tests {
     fn consented_desktop_login_still_decrypts() {
         let (dir, desktop_path, cursor_path) = temp_encrypted_desktop_login("consent", &[]);
         let mut decrypts = 0;
-        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, true, |_| {
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| true, |_| {
             decrypts += 1;
             Ok("granted-token".to_string())
         })
@@ -1175,14 +1190,14 @@ mod tests {
         // in the way, so the assertion below is about the gate and not about a
         // fixture that could never have produced credentials.
         assert!(
-            load_credentials_from_sources(&dir.join("missing.json"), &cursor_path, false, |_| {
+            load_credentials_from_sources(&dir.join("missing.json"), &cursor_path, &|| false, |_| {
                 unreachable!()
             })
             .unwrap()
             .is_some(),
             "the Cursor fixture must be loadable for this test to mean anything"
         );
-        let error = load_credentials_from_sources(&desktop_path, &cursor_path, false, |_| {
+        let error = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
             unreachable!("consent absent must not reach the Keychain")
         })
         .err()
@@ -1206,12 +1221,59 @@ mod tests {
             .to_string(),
         )
         .unwrap();
-        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, false, |_| {
+        let credentials = load_credentials_from_sources(&desktop_path, &cursor_path, &|| false, |_| {
             unreachable!("a plaintext secret must not reach the Keychain either")
         })
         .unwrap()
         .expect("a plaintext desktop login must load without consent");
         assert!(matches!(credentials, GrokBotCredentials::Desktop { .. }));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Consent withdrawn mid-load must take effect at the next Keychain read,
+    /// not at the next poll. A login carries two encrypted fields, and the
+    /// first decrypt can sit on an unanswered macOS dialog for up to 25s —
+    /// ample time to press Not now — so a `bool` snapshot taken before the
+    /// file was even read would carry the withdrawn grant into the second
+    /// read. The closure here answers `true` once and `false` afterwards,
+    /// which is the shape of exactly that sequence.
+    #[test]
+    fn consent_withdrawn_mid_load_stops_the_next_keychain_read() {
+        let (dir, cursor_path) = temp_state_db("withdrawn", &[]);
+        let desktop_path = dir.join("sand-secrets.json");
+        std::fs::write(
+            &desktop_path,
+            serde_json::json!({
+                "cursor-access-token": encoded(b"ciphertext"),
+                "cursor-selected-team-id": encoded(b"team-ciphertext")
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let asked = std::cell::Cell::new(0);
+        let decrypts = std::cell::Cell::new(0);
+        let error = load_credentials_from_sources(
+            &desktop_path,
+            &cursor_path,
+            &|| {
+                asked.set(asked.get() + 1);
+                asked.get() == 1
+            },
+            |_| {
+                decrypts.set(decrypts.get() + 1);
+                Ok("granted-token".to_string())
+            },
+        )
+        .err()
+        .unwrap();
+        assert_eq!(error, GROK_BOT_KEYCHAIN_CONSENT_REQUIRED);
+        assert_eq!(
+            decrypts.get(),
+            1,
+            "the withdrawal must stop the SECOND Keychain read; the first had \
+             already been authorized when it ran"
+        );
+        assert_eq!(asked.get(), 2, "consent must be re-read per Keychain read");
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -1230,7 +1292,7 @@ mod tests {
         let credentials = load_credentials_from_sources(
             &dir.join("missing.json"),
             &cursor_path,
-            false,
+            &|| false,
             |_| unreachable!(),
         )
         .unwrap()
@@ -1255,7 +1317,7 @@ mod tests {
             )
             .unwrap();
             assert!(
-                load_desktop_credentials_from(&path, true, |_| panic!("stale login"))
+                load_desktop_credentials_from(&path, &|| true, |_| panic!("stale login"))
                     .unwrap()
                     .is_none()
             );
