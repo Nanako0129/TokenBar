@@ -29,7 +29,16 @@
 //! The registry starts empty every launch — it is in-memory, not persisted —
 //! so Swift owns re-applying the user's stored answer at startup. The empty
 //! default is the correct behaviour for a process that never calls the setter:
-//! no Keychain contact, no dialog.
+//! no Grok Bot Keychain contact, no dialog for it.
+//!
+//! **This is not a process-wide no-Keychain guarantee.** `agent_usage` reads
+//! `Claude Code-credentials` and `tokenbar-claude-oauth-token` through
+//! `/usr/bin/security` without consulting anything here, so a protected Claude
+//! item can still raise a dialog. That client is out of scope on purpose — it
+//! has shipped for a long time, its users have already answered the ACL, and
+//! putting the flagship card behind a consent gate is a separate product
+//! decision. Because this registry is client-keyed, adding it later is a UI
+//! change rather than an ABI change.
 
 use std::collections::BTreeSet;
 use std::sync::{LazyLock, RwLock};

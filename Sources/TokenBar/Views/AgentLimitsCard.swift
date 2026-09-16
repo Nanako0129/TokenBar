@@ -851,7 +851,15 @@ struct AgentLimitsCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
             HStack(spacing: 8) {
-                Button(granting ? "Waiting for macOS…".localized : "Allow".localized) {
+                // `consent.action.allow`, not the badge's "Allow" key. In
+                // English both render "Allow", but the two are different parts
+                // of speech: the badge names a STATE the card is in, the
+                // button names an ACTION the user takes. Chinese has no word
+                // that does both — a state label reads as "awaiting
+                // authorization" on a button, which describes the situation
+                // instead of offering to change it. One key for both would
+                // force every translator to pick which half to get wrong.
+                Button(granting ? "Waiting for macOS…".localized : "consent.action.allow".localized) {
                     granting = true
                     GrokBotKeychainConsent.answer(true)
                 }

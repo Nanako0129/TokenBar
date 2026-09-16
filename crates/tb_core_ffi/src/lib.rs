@@ -1033,14 +1033,21 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
 /// consumer does not wire Keychain consent for is rejected and never stored,
 /// while `false` is an ordinary answer and is not a rejection.
 ///
-/// A client whose id is absent from the registry is never read from the
-/// Keychain at all, so the OS authorization dialog cannot appear before the
-/// app has asked the user for itself. The one wired client is `grok-bot`,
-/// whose gate sits in `agent_grokbot::decode_desktop_secret` immediately
-/// before the decrypt — not at "a desktop login exists", so a plaintext-stored
-/// secret keeps working ungated. The registry is in-memory and starts
-/// empty every launch: the caller owns re-applying the user's stored answer,
-/// and a process that never calls this raises no dialog.
+/// A WIRED client whose id is absent from the registry is never read from the
+/// Keychain, so the OS authorization dialog cannot appear for it before the
+/// app has asked the user. The one wired client is `grok-bot`, whose gate sits
+/// in `agent_grokbot::decode_desktop_secret` immediately before the decrypt —
+/// not at "a desktop login exists", so a plaintext-stored secret keeps working
+/// ungated.
+///
+/// This is not a process-wide no-Keychain guarantee: `agent_usage` reads the
+/// Claude credentials through `/usr/bin/security` without consulting this
+/// registry, so `tb_agent_usage` can still raise a dialog for a protected
+/// Claude item. Wiring that client would be a UI change, not an ABI change.
+///
+/// The registry is in-memory and starts empty every launch: the caller owns
+/// re-applying the user's stored answer, and a process that never calls this
+/// reads no Grok Bot Keychain item.
 ///
 /// # Safety
 /// `json` must be NULL or a valid NUL-terminated UTF-8 string.

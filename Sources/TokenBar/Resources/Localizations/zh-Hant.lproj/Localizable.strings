@@ -147,7 +147,11 @@
 "Set up" = "待設定";
 /* Keychain consent. Deliberately not "待設定" — the Grok Bot login already is
    set up; what is missing is permission to read it. */
+/* Badge: a STATE the card is in. */
 "Allow" = "待授權";
+/* Button: an ACTION the user takes. Deliberately not "待授權" — a state label
+   on a button describes the situation instead of offering to change it. */
+"consent.action.allow" = "允許";
 "Not now" = "暫時不要";
 "Waiting for macOS…" = "等待 macOS 回應…";
 "Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. TokenBar never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，TokenBar 需要讀取它——macOS 會跳出視窗請你允許。讀到之後，這個登入會被送到 Grok Bot 的用量端點（api2.cursor.sh）去查詢你的額度。TokenBar 不會儲存、不會記錄，也不會送去任何其他地方。";

@@ -102,9 +102,11 @@ public struct RejectedKeychainConsent: Decodable, Equatable, Sendable {
 
 /// Result of `tb_set_keychain_consent`.
 public struct KeychainConsentResult: Decodable, Equatable, Sendable {
-    /// Clients this process may now read a Keychain item for. A client not
-    /// counted here is never reached at all, so macOS is never given the
-    /// chance to raise its authorization dialog for it.
+    /// Clients this process may now read a Keychain item for. A WIRED client
+    /// not counted here is not reached, so macOS is not given the chance to
+    /// raise its authorization dialog for that client. Says nothing about
+    /// clients this registry does not wire — the Claude provider reads its own
+    /// Keychain items ungated.
     public let grantedCount: Int
     public let rejected: [RejectedKeychainConsent]
 }
@@ -389,14 +391,16 @@ public enum TBCore {
 
     /// Replace the process-wide registry of macOS Keychain consent. `json` is
     /// `{"<public-client-id>": true|false}`; full-replace semantics — `{}`
-    /// clears every grant. A client absent from the registry is never read
-    /// from the Keychain, so macOS cannot raise its authorization dialog
-    /// before the app has asked the user itself.
+    /// clears every grant. A wired client absent from the registry is not read
+    /// from the Keychain, so macOS cannot raise its authorization dialog for
+    /// that client before the app has asked the user itself. `grok-bot` is the
+    /// only wired client; Claude reads its own Keychain items ungated, so this
+    /// is not a process-wide no-dialog guarantee.
     ///
     /// The core registry is in-memory and starts empty every launch, so the
     /// app owns re-applying the stored answer at startup and after each edit —
     /// see `GrokBotKeychainConsent`. Not calling this at all is the correct
-    /// behaviour for a user who has not agreed: it leaves the Keychain
+    /// behaviour for a user who has not agreed: the Grok Bot item is left
     /// untouched.
     public static func setKeychainConsent(json: String) throws -> KeychainConsentResult {
         try unwrap(json.withCString { tb_set_keychain_consent($0) })
