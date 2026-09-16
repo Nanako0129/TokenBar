@@ -15208,6 +15208,19 @@ enum SelfTest {
             payload("keychain-denied").agents.allSatisfy(\.isSetupPlaceholder)
                 && payload("keychain-denied").configuredClientIds.isEmpty,
             "a refused grant is a prompt, not a red error badge")
+        // The badge text, not just placeholder membership. Adding the source
+        // to the set while leaving the badge matching only `keychain-consent`
+        // made a refused card read "Set up" — wrong twice over, since the
+        // login IS set up and the action is to retry authorization.
+        expect(
+            [
+                payload("unconfigured").agents[0].setupBadgeKey,
+                payload("keychain-consent").agents[0].setupBadgeKey,
+                payload("keychain-denied").agents[0].setupBadgeKey,
+                payload("oauth").agents[0].setupBadgeKey,
+            ] == ["Set up", "Allow", "Allow", nil],
+            "every placeholder source must name its own badge, and a working "
+                + "card must name none")
 
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.

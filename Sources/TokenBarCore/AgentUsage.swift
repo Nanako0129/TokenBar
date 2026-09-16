@@ -551,16 +551,38 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// they pressed Deny, or left the dialog unanswered. Also a prompt rather
     /// than a malfunction: nothing is broken, the permission simply is not
     /// there, and the card offers to ask again.
-    static let setupPlaceholderSources: Set<String> = [
-        "unconfigured", "keychain-consent", "keychain-denied",
-    ]
+    /// Enumerated by `setupBadgeKey`, which is the single place that decides
+    /// both membership and what the badge says — see its doc for why they are
+    /// not two lists.
 
     /// Whether this card is a prompt for the user rather than a malfunction.
     /// Named once here because the answer is stated at three call sites, and
     /// a fourth `source ==` literal added later would silently render a prompt
     /// as a red error.
     public var isSetupPlaceholder: Bool {
-        Self.setupPlaceholderSources.contains(source)
+        setupBadgeKey != nil
+    }
+
+    /// The localization key the status badge shows for a placeholder card, or
+    /// `nil` when this card is not one.
+    ///
+    /// Lives here, beside the source list, rather than as a ternary at the
+    /// badge. Adding `keychain-denied` to the set while leaving the badge
+    /// matching only `keychain-consent` is exactly what happened once: the
+    /// refused card correctly stopped being an error and then read "Set up",
+    /// which is wrong twice over — the login IS set up, and the action is to
+    /// retry authorization. Deciding it here means a new source cannot be
+    /// half-added; it has to answer this.
+    ///
+    /// "Allow" is the badge's own key and names a STATE. The button uses the
+    /// separate `consent.action.allow`, because a language that distinguishes
+    /// state from action cannot serve both from one entry.
+    public var setupBadgeKey: String? {
+        switch source {
+        case "unconfigured": "Set up"
+        case "keychain-consent", "keychain-denied": "Allow"
+        default: nil
+        }
     }
 
     /// Order-preserving card view shared by quota resolvers and consumers.

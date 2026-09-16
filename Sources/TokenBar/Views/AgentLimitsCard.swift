@@ -914,16 +914,17 @@ struct AgentLimitsCard: View {
     private func statusBadge(snapshot: AgentUsageSnapshot?, isLive: Bool) -> some View {
         let text: String
         var color: Color = .secondary
-        if snapshot?.isSetupPlaceholder == true {
+        if let badgeKey = snapshot?.setupBadgeKey {
             // Waiting on the user -- a neutral prompt, not an alarming red
             // error. Must stay AHEAD of the `error != nil` branch below:
-            // both placeholder states carry a non-nil error, and `source` is
+            // every placeholder state carries a non-nil error, and `source` is
             // the only field that tells them apart.
             //
-            // Two strings rather than one. "Set up" is wrong for a Grok Bot
-            // login that is already set up and working -- what it needs is
-            // permission, and copy that misnames the action outlives the code.
-            text = (snapshot?.source == "keychain-consent" ? "Allow" : "Set up").localized
+            // The key comes from the snapshot rather than from a ternary here,
+            // so adding a source cannot half-land: "Set up" is wrong for a
+            // Grok Bot login that is already set up and working, and copy that
+            // misnames the action outlives the code.
+            text = badgeKey.localized
         } else if snapshot?.error != nil {
             text = "Error".localized
             color = .red
