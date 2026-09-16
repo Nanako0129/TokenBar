@@ -11,8 +11,9 @@
 //! boundary.
 //!
 //! ⚠️ **As of this revision no adapter consults it yet.** The registry and its
-//! entry point land first because `ctb.h` is a cross-repo contract and the
-//! Windows port needs the symbol to port; the Grok Bot gate — at
+//! entry point land first because `ctb.h` is a cross-repo contract whose
+//! changes the Windows port has to be notified of, so the surface is worth
+//! reviewing on its own; the Grok Bot gate — at
 //! `agent_grokbot::decode_desktop_secret`'s `decrypt` call — and the app-side
 //! prompt follow in the consumer change. Until then the dialog still appears
 //! unannounced, and this registry changes nothing.

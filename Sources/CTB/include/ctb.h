@@ -161,9 +161,10 @@ char *tb_set_claude_config_dirs(const char *json);
 // !! As of this revision NO adapter consults the registry yet, so setting it
 // does not change behaviour: the Grok Bot Keychain read still happens and the
 // dialog still appears unannounced. This entry point lands ahead of its
-// consumer because `ctb.h` is a cross-repo contract and the Windows port needs
-// the symbol to port; the macOS-only gate follows in a separate change. Do not
-// quote the guarantee above as something a caller can rely on until then.
+// consumer because `ctb.h` is a cross-repo contract whose changes the Windows
+// port has to be notified of, so the surface is worth reviewing on its own;
+// the macOS-only gate follows in a separate change. Do not quote the guarantee
+// above as something a caller can rely on until then.
 //
 // The registry is in-memory and starts empty every launch, so the caller owns
 // re-applying the user's stored answer at startup; a process that never calls

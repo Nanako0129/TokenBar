@@ -395,9 +395,10 @@ public enum TBCore {
     ///
     /// - Warning: No adapter consults the registry in this revision, so
     ///   calling this does not yet change what the core does. The entry point
-    ///   lands ahead of its consumer because `ctb.h` is a cross-repo contract;
-    ///   the Grok Bot gate follows in a separate change. Nothing in the app
-    ///   should call this until then.
+    ///   lands ahead of its consumer because `ctb.h` is a cross-repo contract
+    ///   whose changes the Windows port has to be notified of; the Grok Bot
+    ///   gate follows in a separate change. Nothing in the app should call
+    ///   this until then.
     ///
     /// The core registry is in-memory and starts empty every launch, so the
     /// app owns re-applying the stored answer at startup and after each edit.
