@@ -175,11 +175,16 @@ enum GrokBotKeychainConsent {
     /// `static var` safe here and why the comparison lives inside the block.
     nonisolated(unsafe) private static var lastInstalledPayload: String?
 
-    #if DEBUG
     /// Lets the selftest drive the grant-then-decline sequence from a known
     /// starting point, since the registry is process-wide.
+    ///
+    /// Not behind `#if DEBUG`: the suite runs from the release binary too —
+    /// that is what `make selftest-bundled` is — so a debug-only helper makes
+    /// `SelfTest.swift` fail to compile in the release configuration, which is
+    /// how this reached a pushed tag. The other `ForTesting` helpers in
+    /// `DashboardModel`, `AttributedSeriesModel`, `ClaudeExtraRoots` and
+    /// `DiscordIPC` carry no such guard for the same reason.
     static func resetInstalledPayloadForTesting() {
         applyQueue.sync { lastInstalledPayload = nil }
     }
-    #endif
 }
