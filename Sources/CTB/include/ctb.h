@@ -154,21 +154,15 @@ char *tb_set_claude_config_dirs(const char *json);
 // consumer does not wire Keychain consent for is rejected and never stored,
 // while `false` is an ordinary answer rather than a rejection.
 //
-// The intent is that a client absent from the registry is never read from the
-// Keychain at all, so the OS authorization dialog cannot appear before the app
-// has asked the user itself. "grok-bot" is the only id this build accepts.
-//
-// !! As of this revision NO adapter consults the registry yet, so setting it
-// does not change behaviour: the Grok Bot Keychain read still happens and the
-// dialog still appears unannounced. This entry point lands ahead of its
-// consumer because `ctb.h` is a cross-repo contract whose changes the Windows
-// port has to be notified of, so the surface is worth reviewing on its own;
-// the macOS-only gate follows in a separate change. Do not quote the guarantee
-// above as something a caller can rely on until then.
+// A client absent from the registry is never read from the Keychain at all, so
+// the OS authorization dialog cannot appear before the app has asked the user
+// itself. "grok-bot" is the only id this build accepts, and its gate sits
+// immediately before the decrypt of the desktop login — not at "a login
+// exists", so a plaintext-stored secret keeps working ungated.
 //
 // The registry is in-memory and starts empty every launch, so the caller owns
 // re-applying the user's stored answer at startup; a process that never calls
-// this leaves the registry empty.
+// this reaches no Keychain and raises no dialog.
 char *tb_set_keychain_consent(const char *json);
 
 // Release a string returned by any tb_* entry point.

@@ -389,19 +389,15 @@ public enum TBCore {
 
     /// Replace the process-wide registry of macOS Keychain consent. `json` is
     /// `{"<public-client-id>": true|false}`; full-replace semantics — `{}`
-    /// clears every grant. The intent is that a client absent from the
-    /// registry is never read from the Keychain, so macOS cannot raise its
-    /// authorization dialog before the app has asked the user itself.
-    ///
-    /// - Warning: No adapter consults the registry in this revision, so
-    ///   calling this does not yet change what the core does. The entry point
-    ///   lands ahead of its consumer because `ctb.h` is a cross-repo contract
-    ///   whose changes the Windows port has to be notified of; the Grok Bot
-    ///   gate follows in a separate change. Nothing in the app should call
-    ///   this until then.
+    /// clears every grant. A client absent from the registry is never read
+    /// from the Keychain, so macOS cannot raise its authorization dialog
+    /// before the app has asked the user itself.
     ///
     /// The core registry is in-memory and starts empty every launch, so the
-    /// app owns re-applying the stored answer at startup and after each edit.
+    /// app owns re-applying the stored answer at startup and after each edit —
+    /// see `GrokBotKeychainConsent`. Not calling this at all is the correct
+    /// behaviour for a user who has not agreed: it leaves the Keychain
+    /// untouched.
     public static func setKeychainConsent(json: String) throws -> KeychainConsentResult {
         try unwrap(json.withCString { tb_set_keychain_consent($0) })
     }

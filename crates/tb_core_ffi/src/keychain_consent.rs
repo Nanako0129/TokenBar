@@ -4,19 +4,15 @@
 //! no warning.
 //!
 //! Reading a Keychain item makes macOS — not TokenBar — ask the question, and
-//! by then it is too late to explain what is being read or why. An adapter is
-//! therefore meant to ask this registry first and decline to reach the
-//! Keychain at all until the answer is yes. The app owns the explanation and
-//! the "Allow" button; this registry is only how that answer crosses the FFI
-//! boundary.
+//! by then it is too late to explain what is being read or why. An adapter
+//! therefore asks this registry first and declines to reach the Keychain at
+//! all until the answer is yes. The app owns the explanation and the "Allow"
+//! button; this registry is only how that answer crosses the FFI boundary.
 //!
-//! ⚠️ **As of this revision no adapter consults it yet.** The registry and its
-//! entry point land first because `ctb.h` is a cross-repo contract whose
-//! changes the Windows port has to be notified of, so the surface is worth
-//! reviewing on its own; the Grok Bot gate — at
-//! `agent_grokbot::decode_desktop_secret`'s `decrypt` call — and the app-side
-//! prompt follow in the consumer change. Until then the dialog still appears
-//! unannounced, and this registry changes nothing.
+//! The one consumer today is `agent_grokbot::decode_desktop_secret`, which
+//! checks it immediately before its `decrypt` call — at the decrypt and not at
+//! "a desktop login exists", because a `plaintext:v1:` secret needs no key and
+//! there is nothing to ask about.
 //!
 //! **Deliberately two-valued.** "Never asked" and "declined" are the same
 //! thing to an adapter — in both cases it must not touch the Keychain — so
@@ -50,14 +46,6 @@ static KEYCHAIN_CONSENT: LazyLock<RwLock<BTreeSet<String>>> =
 /// Whether the user has agreed to let TokenBar read this client's Keychain
 /// item. `false` by default, which is what makes "we never asked" and "the
 /// user said no" behave identically without either being stored.
-///
-// `allow(dead_code)` because this registry and its entry point land ahead of
-// the adapter that reads them: `ctb.h` is a cross-repo contract, so the
-// Windows port is a notified consumer and gets the symbol to port before the
-// macOS-only Grok Bot gate exists to call it. Delete this attribute in the
-// change that adds `agent_grokbot`'s call — if it survives past that, the gate
-// was never wired and the dialog still appears unannounced.
-#[allow(dead_code)]
 pub(crate) fn allowed(client_id: &str) -> bool {
     KEYCHAIN_CONSENT
         .read()
