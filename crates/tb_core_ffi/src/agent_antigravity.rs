@@ -966,16 +966,7 @@ async fn fetch_oauth_primary(now: DateTime<Utc>) -> PrimaryAttempt<RemoteContext
     };
     match fetch_available_models(&context, now).await {
         PrimaryQuotaAttempt::Success(windows) => PrimaryAttempt::Success(context.finish(windows)),
-        PrimaryQuotaAttempt::Forbidden => {
-            // The CLI can provide the current quota even when the remote
-            // Code Assist endpoint rejects the request. Prefer it here so a
-            // usable CLI does not fall through to the misleading
-            // retrieveUserQuota permission error.
-            match fetch_agy_cli(now).await {
-                Ok(fetched) => PrimaryAttempt::Success(fetched),
-                Err(_) => PrimaryAttempt::Forbidden(context),
-            }
-        }
+        PrimaryQuotaAttempt::Forbidden => PrimaryAttempt::Forbidden(context),
         PrimaryQuotaAttempt::SchemaContradiction(failure) => {
             PrimaryAttempt::SchemaContradiction { context, failure }
         }
@@ -1828,17 +1819,20 @@ fn client_artifact_candidates() -> Vec<PathBuf> {
 #[cfg(target_os = "macos")]
 async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
     static CACHE: tokio::sync::OnceCell<Vec<PathBuf>> = tokio::sync::OnceCell::const_new();
-    CACHE
-        .get_or_init(|| async {
-            // PATH is the normal resolution rule. Only start a login shell
-            // when the GUI process did not inherit a usable PATH entry.
-            if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
-                return vec![path];
-            }
+    if let Some(cached) = CACHE.get() {
+        return cached.clone();
+    }
+
+    // PATH is the normal resolution rule. Only start a login shell when the
+    // GUI process did not inherit a usable PATH entry. Do not cache an empty
+    // result: the CLI may be installed after TokenBar has started.
+    let candidates =
+        if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
+            vec![path]
+        } else {
             agy_cli_artifact_candidates_from(None, discover_agy_from_login_shell().await)
-        })
-        .await
-        .clone()
+        };
+    cache_non_empty_agy_candidates(&CACHE, candidates)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -1860,6 +1854,19 @@ fn agy_cli_artifact_candidates_from(
         }
     }
     candidates
+}
+
+fn cache_non_empty_agy_candidates(
+    cache: &tokio::sync::OnceCell<Vec<PathBuf>>,
+    candidates: Vec<PathBuf>,
+) -> Vec<PathBuf> {
+    if let Some(cached) = cache.get() {
+        return cached.clone();
+    }
+    if !candidates.is_empty() {
+        let _ = cache.set(candidates.clone());
+    }
+    cache.get().cloned().unwrap_or(candidates)
 }
 
 fn executable_from_path(path_env: Option<&OsStr>, name: &str) -> Option<PathBuf> {
@@ -2410,6 +2417,22 @@ mod tests {
                 Some(shell_candidate.clone()),
             ),
             vec![shell_candidate]
+        );
+    }
+
+    #[test]
+    fn empty_agy_candidate_cache_does_not_block_later_discovery() {
+        let cache = tokio::sync::OnceCell::const_new();
+        let candidate = PathBuf::from("/tmp/agy");
+
+        assert!(cache_non_empty_agy_candidates(&cache, Vec::new()).is_empty());
+        assert_eq!(
+            cache_non_empty_agy_candidates(&cache, vec![candidate.clone()]),
+            vec![candidate.clone()]
+        );
+        assert_eq!(
+            cache_non_empty_agy_candidates(&cache, Vec::new()),
+            vec![candidate]
         );
     }
 
