@@ -870,6 +870,14 @@ struct AgentLimitsCard: View {
                         consentDeclined = true
                     }
                     .buttonStyle(.borderless)
+                    // Disabled while a grant is in flight. The store serializes
+                    // both answers through one queue, so clicking this after
+                    // Allow already resolves correctly — the later refusal wins
+                    // and clears the registry. This is about what the sequence
+                    // LOOKS like: macOS may already be showing the dialog the
+                    // first click asked for, and offering "Not now" underneath
+                    // it invites the user to answer the same question twice.
+                    .disabled(granting)
                 }
             }
         }

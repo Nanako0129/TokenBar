@@ -34,36 +34,58 @@ enum GrokBotKeychainConsent {
         defaults.object(forKey: storageKey) as? Bool
     }
 
-    /// Record the user's answer and, if it is yes, make it take effect now.
+    /// Record the user's answer and make it take effect now — BOTH answers.
     ///
-    /// Declining makes no core call: the registry is already empty for this
-    /// client, and there is nothing to wake because nothing will change. What
-    /// the write buys is that the answer STICKS — a terminal provider failure
-    /// does not suppress retries, so without a remembered "no" every poll
-    /// would put the dialog back (60s with the popover open, 5 min from the
-    /// tray).
-    static func answer(_ granted: Bool, defaults: UserDefaults = .standard) {
+    /// An earlier version installed only grants and returned early on a
+    /// decline, on the reasoning that the registry is already empty. That is
+    /// true exactly once. After a grant it is wrong twice over: declining left
+    /// the process still reading the Keychain until the next launch, and —
+    /// because the install is asynchronous — clicking Allow then Not now let
+    /// the queued grant land after the refusal was stored, so `UserDefaults`
+    /// said no while the registry said yes. Routing both answers through the
+    /// same serial queue makes the last click win, which is the only rule a
+    /// user can predict.
+    ///
+    /// What the persisted write buys separately is that the answer STICKS
+    /// across launches: a terminal provider failure does not suppress retries,
+    /// so without a remembered "no" every poll would put the dialog back (60s
+    /// with the popover open, 5 min from the tray).
+    /// `setConsent` is injectable here and not only on `apply` because this is
+    /// the production entry point — the buttons call this, nothing calls
+    /// `apply` directly. A test that drove `apply` instead could not observe
+    /// this function's own decisions at all: reverting it to install grants
+    /// only left such a test green while the defect was fully present.
+    static func answer(
+        _ granted: Bool,
+        defaults: UserDefaults = .standard,
+        setConsent: (@Sendable (String) -> Void)? = nil
+    ) {
         defaults.set(granted, forKey: storageKey)
-        guard granted else { return }
-        apply()
+        if let setConsent {
+            apply(granted: granted, setConsent: setConsent)
+        } else {
+            apply(granted: granted)
+        }
     }
 
     /// Re-install a previously granted answer into the core registry. Called
-    /// at launch, where only the granted case does anything: an empty registry
-    /// already denies, which is the correct behaviour for everyone else.
+    /// at launch, where only the granted case does anything: the registry
+    /// starts empty, so denying it again would be a call and a wake that
+    /// change nothing.
     static func applyIfGranted(defaults: UserDefaults = .standard) {
         guard answer(defaults: defaults) == true else { return }
-        apply()
+        apply(granted: true)
     }
 
-    /// Payload for the one wired client. Exposed for the selftest, which
+    /// Payloads for the one wired client. Exposed for the selftest, which
     /// asserts the exact JSON rather than that "a call happened" — the core
-    /// rejects an unknown client id silently as far as this path is concerned,
-    /// so a typo here would produce a grant that is never honoured and a card
-    /// that never fills.
+    /// rejects an unknown client id, so a typo here would produce a grant that
+    /// is never honoured and a card that never fills.
     static let grantedPayload = #"{"grok-bot":true}"#
+    /// Full-replace with nothing, which is how the core spells "revoked".
+    static let deniedPayload = "{}"
 
-    /// Install the grant and make the quota cards notice.
+    /// Install the answer and make the quota cards notice.
     ///
     /// The setter is a parameter with the real one as its default, the same
     /// seam `ClaudeExtraRoots.install(setConfigDirs:setScanPaths:)` uses: the
@@ -74,12 +96,23 @@ enum GrokBotKeychainConsent {
     /// from a button on the MainActor and the queue hop costs nothing; sharing
     /// the shape with its sibling is worth more than saving it.
     static func apply(
+        granted: Bool = true,
         setConsent: @escaping @Sendable (String) -> Void = {
             _ = try? TBCore.setKeychainConsent(json: $0)
         }
     ) {
+        let payload = granted ? grantedPayload : deniedPayload
         applyQueue.async {
-            setConsent(grantedPayload)
+            // Compared on the queue, not before it, or two fast clicks both
+            // read the same stale value and the later one is dropped. The
+            // registry starts empty every launch, so the initial `nil` means
+            // "denied" and a decline from a process that never granted
+            // correctly does nothing at all — no FFI call, no wake.
+            guard lastInstalledPayload != payload else { return }
+            let hadInstalled = lastInstalledPayload != nil
+            lastInstalledPayload = payload
+            guard granted || hadInstalled else { return }
+            setConsent(payload)
             Task { @MainActor in
                 // Invalidate BEFORE signalling, the same order and for the
                 // same reason as `ClaudeExtraRoots.install`: a poll woken
@@ -101,6 +134,24 @@ enum GrokBotKeychainConsent {
     /// with two consumers, and a consent install must not queue behind a scan
     /// path probe that can block for a mount timeout — the user just pressed a
     /// button and is waiting for a system dialog.
+    ///
+    /// Serial is also what makes the last click win: `answer` writes
+    /// `UserDefaults` synchronously but installs asynchronously, so two clicks
+    /// in quick succession must reach the core in the order they were made or
+    /// the persisted answer and the registry disagree.
     private static let applyQueue = DispatchQueue(
         label: "com.nyanako.tokenbar.grok-bot-keychain-consent", qos: .userInitiated)
+
+    /// What this process last handed the core, or `nil` if it never called the
+    /// setter. Touched only from `applyQueue`, which is what makes a plain
+    /// `static var` safe here and why the comparison lives inside the block.
+    nonisolated(unsafe) private static var lastInstalledPayload: String?
+
+    #if DEBUG
+    /// Lets the selftest drive the grant-then-decline sequence from a known
+    /// starting point, since the registry is process-wide.
+    static func resetInstalledPayloadForTesting() {
+        applyQueue.sync { lastInstalledPayload = nil }
+    }
+    #endif
 }

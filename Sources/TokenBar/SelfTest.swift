@@ -15077,6 +15077,7 @@ enum SelfTest {
         // matters is that the FFI call and the wake both occur, and a real
         // setter would put a genuine Keychain grant into this process.
         let consentWake: (installed: String?, woke: Bool)? = awaitMainActorValue {
+            GrokBotKeychainConsent.resetInstalledPayloadForTesting()
             let before = ClaudeExtraRoots.RegistryChange.epoch
             let installed = UncheckedBox<String?>(nil)
             GrokBotKeychainConsent.apply(setConsent: { installed.value = $0 })
@@ -15103,6 +15104,9 @@ enum SelfTest {
             let suite = "tokenbar.selftest.keychainDecline"
             let defaults = UserDefaults(suiteName: suite)!
             defaults.removePersistentDomain(forName: suite)
+            // From "never installed anything", which is the state a decline
+            // from a user who was never granted actually starts in.
+            GrokBotKeychainConsent.resetInstalledPayloadForTesting()
             let before = ClaudeExtraRoots.RegistryChange.epoch
             GrokBotKeychainConsent.answer(false, defaults: defaults)
             try? await Task.sleep(nanoseconds: 100_000_000)
@@ -15114,6 +15118,51 @@ enum SelfTest {
             declineWoke == false,
             "declining woke the poll loops, which is how a refused prompt comes "
                 + "straight back")
+
+        // Declining AFTER a grant is the opposite case and must clear the
+        // registry. Returning early on every decline — the first version —
+        // left this process still reading the Keychain until relaunch, and,
+        // because the install is asynchronous, let a queued grant land after
+        // the refusal was stored: UserDefaults said no while the core said
+        // yes. Both answers now go through the same serial queue, so the last
+        // click wins.
+        //
+        // Driven through `answer(_:defaults:setConsent:)` — the function the
+        // buttons call — and NOT through `apply`. An earlier version of this
+        // test called `apply` directly and stayed green when `answer` was
+        // reverted to installing grants only: it was measuring a function no
+        // button reaches.
+        let revoke: (installed: [String], woke: Bool)? = awaitMainActorValue {
+            let suite = "tokenbar.selftest.keychainRevoke"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            GrokBotKeychainConsent.resetInstalledPayloadForTesting()
+            let installed = UncheckedBox<[String]>([])
+            GrokBotKeychainConsent.answer(
+                true, defaults: defaults, setConsent: { installed.value.append($0) })
+            for _ in 0..<200 where installed.value.isEmpty {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+            }
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            GrokBotKeychainConsent.answer(
+                false, defaults: defaults, setConsent: { installed.value.append($0) })
+            var woke = false
+            for _ in 0..<200 where !woke {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            }
+            defaults.removePersistentDomain(forName: suite)
+            return (installed.value, woke)
+        }
+        expect(
+            revoke?.installed == [#"{"grok-bot":true}"#, "{}"],
+            "declining after a grant must full-replace the registry with {} — "
+                + "otherwise this process keeps reading the Keychain until the "
+                + "next launch despite the user's refusal")
+        expect(
+            revoke?.woke == true,
+            "revoking did not wake the poll loops, so the card keeps showing "
+                + "quota fetched under a consent the user has withdrawn")
 
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.
