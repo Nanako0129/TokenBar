@@ -724,8 +724,10 @@ struct AgentLimitsCard: View {
             }
             if snapshot?.source == "unconfigured" {
                 setupPrompt()
-            } else if snapshot?.source == "keychain-consent" {
-                consentPrompt()
+            } else if let source = snapshot?.source,
+                source == "keychain-consent" || source == "keychain-denied"
+            {
+                consentPrompt(source: source)
             } else if id == "grok-bot", snapshot == nil {
                 Text((usageAttempted
                     ? "Sign in to Grok Bot on this Mac, then refresh to see its weekly limits."
@@ -825,9 +827,19 @@ struct AgentLimitsCard: View {
     /// declined on is where they will look. There is no Settings toggle and no
     /// revoke: revoking would not close the Keychain ACL macOS already holds,
     /// so it would promise something the app cannot deliver.
-    @ViewBuilder private func consentPrompt() -> some View {
+    @ViewBuilder private func consentPrompt(source: String) -> some View {
+        let accessDenied = source == "keychain-denied"
         VStack(alignment: .leading, spacing: 6) {
-            if consentDeclined {
+            if accessDenied {
+                // The user said yes here and macOS said no. Naming which half
+                // failed is the whole point: a generic error would send them
+                // looking for a problem in TokenBar, and the collapsed
+                // "not reading your limits" line would imply they chose this.
+                Text("macOS did not allow access to the Grok Bot login, so TokenBar stopped asking. Choose Allow to try again — macOS will show its permission dialog.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if consentDeclined {
                 Text("TokenBar is not reading your Grok Bot limits.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -887,9 +899,16 @@ struct AgentLimitsCard: View {
                 }
             }
         }
-        // The card is rebuilt as the payload changes, so the local flags are
-        // re-seeded from the stored answer rather than kept across rebuilds.
-        .onAppear { consentDeclined = GrokBotKeychainConsent.answer() == false }
+        // Keyed on the source, so both flags are re-seeded whenever a new
+        // payload changes what this card is saying — not only on first
+        // appearance. `granting` in particular MUST be cleared here: it is set
+        // when Allow is pressed and the attempt only concludes when a payload
+        // comes back, so without this the button stays disabled reading
+        // "Waiting for macOS…" forever after a denial.
+        .task(id: source) {
+            granting = false
+            consentDeclined = GrokBotKeychainConsent.answer() == false
+        }
     }
 
     private func statusBadge(snapshot: AgentUsageSnapshot?, isLive: Bool) -> some View {

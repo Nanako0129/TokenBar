@@ -15164,6 +15164,51 @@ enum SelfTest {
             "revoking did not wake the poll loops, so the card keeps showing "
                 + "quota fetched under a consent the user has withdrawn")
 
+        // A grant that did not produce access has to be withdrawn, or the
+        // feature recreates the bug it exists to fix: the user clicks Allow,
+        // presses Deny in the macOS dialog, and the grant stays — so every
+        // poll reads the Keychain again and reopens the dialog, 60s with the
+        // popover open and 5 min from the tray, with nothing on screen to
+        // explain it.
+        func payload(_ source: String) -> AgentUsagePayload {
+            try! JSONDecoder().decode(
+                AgentUsagePayload.self,
+                from: Data(
+                    """
+                    {"generatedAt":"now","agents":[
+                      {"clientId":"grok-bot","source":"\(source)","updatedAt":"now",
+                       "windows":[],"error":"denied"}
+                    ]}
+                    """.utf8))
+        }
+        let afterDenial: [Bool?]? = awaitMainActorValue {
+            let suite = "tokenbar.selftest.keychainDenied"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            defaults.set(true, forKey: GrokBotKeychainConsent.storageKey)
+            // Controls first: neither an ordinary failure nor the pre-grant
+            // prompt may clear a standing grant, or this would revoke on every
+            // payload and the assertion below would mean nothing.
+            GrokBotKeychainConsent.revokeIfAccessWasDenied(payload("oauth"), defaults: defaults)
+            let afterOauth = GrokBotKeychainConsent.answer(defaults: defaults)
+            GrokBotKeychainConsent.revokeIfAccessWasDenied(
+                payload("keychain-consent"), defaults: defaults)
+            let afterConsent = GrokBotKeychainConsent.answer(defaults: defaults)
+            GrokBotKeychainConsent.revokeIfAccessWasDenied(
+                payload("keychain-denied"), defaults: defaults)
+            let afterDenied = GrokBotKeychainConsent.answer(defaults: defaults)
+            defaults.removePersistentDomain(forName: suite)
+            return [afterOauth, afterConsent, afterDenied]
+        }
+        expect(
+            afterDenial ?? [] == [true, true, false],
+            "a refused Keychain grant must be withdrawn — and only by the "
+                + "refusal, not by an ordinary failure or by the prompt itself")
+        expect(
+            payload("keychain-denied").agents.allSatisfy(\.isSetupPlaceholder)
+                && payload("keychain-denied").configuredClientIds.isEmpty,
+            "a refused grant is a prompt, not a red error badge")
+
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.
         //

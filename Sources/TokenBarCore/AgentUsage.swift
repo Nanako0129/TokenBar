@@ -547,7 +547,13 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
     /// `unconfigured`: no credential exists at all (Claude's setup prompt).
     /// `keychain-consent`: a credential exists and works, but reading it would
     /// raise a macOS authorization dialog the user has not agreed to yet.
-    static let setupPlaceholderSources: Set<String> = ["unconfigured", "keychain-consent"]
+    /// `keychain-denied`: the user agreed, but macOS did not grant access —
+    /// they pressed Deny, or left the dialog unanswered. Also a prompt rather
+    /// than a malfunction: nothing is broken, the permission simply is not
+    /// there, and the card offers to ask again.
+    static let setupPlaceholderSources: Set<String> = [
+        "unconfigured", "keychain-consent", "keychain-denied",
+    ]
 
     /// Whether this card is a prompt for the user rather than a malfunction.
     /// Named once here because the answer is stated at three call sites, and

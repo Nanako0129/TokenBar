@@ -77,6 +77,34 @@ enum GrokBotKeychainConsent {
         apply(granted: true)
     }
 
+    /// Withdraw a grant that did not produce access.
+    ///
+    /// The core reports `source == "keychain-denied"` when the user gave
+    /// permission in the app but macOS did not grant it — they pressed Deny,
+    /// or left the dialog unanswered past the adapter's 25s bound. Leaving the
+    /// grant in place would be the original bug wearing a new hat: a terminal
+    /// provider failure does not suppress retries, so the next poll would read
+    /// the Keychain again and reopen the dialog, every 60s with the popover
+    /// open and every 5 minutes from the tray.
+    ///
+    /// Reverting to `false` rather than to "never asked" is deliberate. The
+    /// user HAS answered, and the card says so; what they have not done is
+    /// complete the OS half, which the prompt now offers to retry. Never asked
+    /// would show them the full explanation again as if nothing had happened.
+    ///
+    /// Idempotent: every payload passes through here, and only the first one
+    /// carrying the marker does any work.
+    static func revokeIfAccessWasDenied(
+        _ payload: AgentUsagePayload,
+        defaults: UserDefaults = .standard
+    ) {
+        let denied = payload.agents.contains {
+            $0.clientId == "grok-bot" && $0.source == "keychain-denied"
+        }
+        guard denied, answer(defaults: defaults) == true else { return }
+        answer(false, defaults: defaults)
+    }
+
     /// Payloads for the one wired client. Exposed for the selftest, which
     /// asserts the exact JSON rather than that "a call happened" — the core
     /// rejects an unknown client id, so a typo here would produce a grant that

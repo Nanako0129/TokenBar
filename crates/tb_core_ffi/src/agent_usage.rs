@@ -1582,14 +1582,23 @@ async fn fetch_grokbot() -> Option<AgentUsageSnapshot> {
 /// `source`, and Swift checks that marker *before* it checks `error`, so this
 /// is what keeps a declined prompt from rendering as a red error badge.
 fn grokbot_failure_source(outcome: &ProviderFetchOutcome) -> &'static str {
-    match outcome {
-        ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display })
-            if display == agent_grokbot::GROK_BOT_KEYCHAIN_CONSENT_REQUIRED =>
-        {
-            "keychain-consent"
-        }
-        _ => "oauth",
+    let ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display }) = outcome else {
+        return "oauth";
+    };
+    if display == agent_grokbot::GROK_BOT_KEYCHAIN_CONSENT_REQUIRED {
+        return "keychain-consent";
     }
+    // The grant was given but did not produce access: the user pressed Deny,
+    // or left the dialog unanswered past the 25s bound. Distinct from
+    // `keychain-consent` because the app has to do something different — it
+    // reverts the stored answer, so the next poll does not reopen the dialog.
+    // Without that, clicking Allow and then denying at the OS level would
+    // reinstate exactly the every-60s prompting this feature exists to stop.
+    #[cfg(target_os = "macos")]
+    if display == crate::macos_safe_storage::KEYCHAIN_ACCESS_DENIED {
+        return "keychain-denied";
+    }
+    "oauth"
 }
 
 fn grokbot_outcome(
@@ -6694,6 +6703,19 @@ mod tests {
             now,
         );
         assert_eq!(grokbot_failure_source(&broken), "oauth");
+
+        // A grant that did not produce access is its own state: the app has to
+        // revert the stored answer, or the next poll reopens the dialog.
+        #[cfg(target_os = "macos")]
+        {
+            let refused = grokbot_outcome(
+                Err(ProviderFetchFailure::terminal(
+                    crate::macos_safe_storage::KEYCHAIN_ACCESS_DENIED,
+                )),
+                now,
+            );
+            assert_eq!(grokbot_failure_source(&refused), "keychain-denied");
+        }
         let success = grokbot_outcome(
             agent_grokbot::map_response(
                 r#"{"usagePercent":25,"nextResetTimestampUtc":"2099-01-01T00:00:00Z"}"#,

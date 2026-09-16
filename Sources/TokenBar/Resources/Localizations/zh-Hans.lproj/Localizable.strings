@@ -155,6 +155,7 @@
 "Waiting for macOS…" = "等待 macOS 响应…";
 "Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. TokenBar never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登录信息存在你的钥匙串里。要显示每周额度，TokenBar 需要读取它——macOS 会弹出窗口请你允许。读到之后，这个登录会被送到 Grok Bot 的用量端点（api2.cursor.sh）去查询你的额度。TokenBar 不会存储、不会记录，也不会发送到任何其他地方。";
 "TokenBar is not reading your Grok Bot limits." = "TokenBar 没有在读取你的 Grok Bot 额度。";
+"macOS did not allow access to the Grok Bot login, so TokenBar stopped asking. Choose Allow to try again — macOS will show its permission dialog." = "macOS 没有允许访问 Grok Bot 的登录信息，所以 TokenBar 停止询问了。选择「允许」可以再试一次——macOS 会再显示一次权限窗口。";
 "Error" = "错误";
 "Live" = "实时";
 "No quota" = "无额度";
