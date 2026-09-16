@@ -12,6 +12,15 @@ private final class AsyncResultBox<Value: Sendable>: @unchecked Sendable {
     var result: Result<Value, Error>?
 }
 
+/// Captures what an injected closure was handed, when that closure runs on a
+/// background queue and the assertion is made on the main actor afterwards.
+/// The write happens-before the read (the test waits for an observable effect
+/// of the same call), so a plain class is enough.
+private final class UncheckedBox<Value>: @unchecked Sendable {
+    var value: Value
+    init(_ value: Value) { self.value = value }
+}
+
 private actor ThrottleCallCounter {
     private(set) var count = 0
     func bump() { count += 1 }
@@ -5477,6 +5486,46 @@ enum SelfTest {
         expect(
             ClientRegistry.withGroupMembers(Set(["grok-bot"])) == Set(["grok-bot"]),
             "explicit Bot entry passes through for its independent toggle")
+
+        // Keychain consent: a card waiting on the user's permission is a
+        // prompt, not a failure. Both placeholder sources carry a non-nil
+        // `error`, so anything that reads `error` first mislabels them.
+        let consentPayloadJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"w","label":"Weekly","usedPercent":10,"remainingPercent":90}]},
+          {"clientId":"claude","source":"unconfigured","updatedAt":"now",
+           "windows":[],"error":"Claude OAuth credentials not found."},
+          {"clientId":"grok-bot","source":"keychain-consent","updatedAt":"now",
+           "windows":[],"error":"TokenBar needs your permission to read the Grok Bot login from Keychain."}
+        ]}
+        """
+        let consentPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(consentPayloadJSON.utf8))
+        expect(
+            consentPayload.configuredClientIds == ["codex"],
+            "a card awaiting Keychain consent adds no navigation tab, like the setup placeholder")
+        // Control: the same payload with an ordinary error DOES stay
+        // navigable, so the assertion above is about the placeholder sources
+        // and not about `error` being non-nil.
+        let erroredPayload = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(consentPayloadJSON
+                .replacingOccurrences(of: "\"keychain-consent\"", with: "\"oauth\"").utf8))
+        expect(
+            erroredPayload.configuredClientIds == ["codex", "grok-bot"],
+            "an error-only card stays reachable; only setup placeholders drop out")
+        expect(
+            consentPayload.agents.filter(\.isSetupPlaceholder).map(\.clientId)
+                == ["claude", "grok-bot"],
+            "both placeholder sources answer the shared predicate")
+        // The Overview row still draws, because the card's known-id union does
+        // not go through `configuredClientIds` — losing the tab must not lose
+        // the only surface carrying the Allow button.
+        expect(
+            AgentLimitsCard.knownClientIds(agentUsage: consentPayload, present: [])
+                .contains("grok-bot"),
+            "the consent row survives in the limits card even with no tab")
 
         // Independent quota switches must agree in the grouped tab, overview,
         // and automatic tray source. Only hiding the tab hides both members.
@@ -14995,6 +15044,76 @@ enum SelfTest {
             "M3-o4 a first install with no accounts configured does not wake "
                 + "pollers — there is nothing for the extra wake to correct")
         ClaudeExtraRoots.resetAppliedConfigDirsForTesting()
+
+        // Keychain consent, the stored answer. Three-valued on purpose:
+        // `bool(forKey:)` would collapse "declined" into "never asked" and put
+        // the full explanation back in front of someone who already said no.
+        let storedAnswers: [Bool?]? = awaitMainActorValue {
+            let defaults = UserDefaults(suiteName: "tokenbar.selftest.keychainConsentStore")!
+            defaults.removePersistentDomain(forName: "tokenbar.selftest.keychainConsentStore")
+            let unasked = GrokBotKeychainConsent.answer(defaults: defaults)
+            // `answer(false)` deliberately makes no core call, so this drives
+            // the store without installing anything.
+            GrokBotKeychainConsent.answer(false, defaults: defaults)
+            let declined = GrokBotKeychainConsent.answer(defaults: defaults)
+            defaults.set(true, forKey: GrokBotKeychainConsent.storageKey)
+            let granted = GrokBotKeychainConsent.answer(defaults: defaults)
+            defaults.removePersistentDomain(forName: "tokenbar.selftest.keychainConsentStore")
+            return [unasked, declined, granted]
+        }
+        expect(
+            storedAnswers ?? [] == [nil, false, true],
+            "the stored answer must distinguish never-asked from declined — "
+                + "collapsing them re-explains the prompt to someone who said no")
+
+        // Keychain consent, the wake half. Granting has to make the cards
+        // notice NOW — the user just clicked Allow and macOS is about to put
+        // its dialog on screen. Without the wake they would watch an unchanged
+        // card for up to the 60s poll tick; without the throttle invalidation
+        // the woken fetch is answered from the ≤50s cached payload, built
+        // before consent existed. Both must happen, so both are asserted.
+        //
+        // The setter is injected for the same reason `install`'s two are: what
+        // matters is that the FFI call and the wake both occur, and a real
+        // setter would put a genuine Keychain grant into this process.
+        let consentWake: (installed: String?, woke: Bool)? = awaitMainActorValue {
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            let installed = UncheckedBox<String?>(nil)
+            GrokBotKeychainConsent.apply(setConsent: { installed.value = $0 })
+            var woke = false
+            for _ in 0..<200 where !woke {
+                try? await Task.sleep(nanoseconds: 10_000_000)
+                woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            }
+            return (installed.value, woke)
+        }
+        expect(
+            consentWake?.installed == #"{"grok-bot":true}"#,
+            "granting sends exactly {\"grok-bot\":true} — the core refuses any "
+                + "other client id, so a wrong payload grants nothing and the "
+                + "card never fills")
+        expect(
+            consentWake?.woke == true,
+            "granting did not wake the poll loops, so the card sits unchanged "
+                + "for up to a full 60s tick after the user clicks Allow")
+        // Control: declining installs nothing and wakes nobody. Without it the
+        // assertion above could pass on an `apply` that signalled
+        // unconditionally, which would re-ask a user who said no.
+        let declineWoke: Bool? = awaitMainActorValue {
+            let suite = "tokenbar.selftest.keychainDecline"
+            let defaults = UserDefaults(suiteName: suite)!
+            defaults.removePersistentDomain(forName: suite)
+            let before = ClaudeExtraRoots.RegistryChange.epoch
+            GrokBotKeychainConsent.answer(false, defaults: defaults)
+            try? await Task.sleep(nanoseconds: 100_000_000)
+            let woke = ClaudeExtraRoots.RegistryChange.epoch != before
+            defaults.removePersistentDomain(forName: suite)
+            return woke
+        }
+        expect(
+            declineWoke == false,
+            "declining woke the poll loops, which is how a refused prompt comes "
+                + "straight back")
 
         // M3-p. A payload fetched under the previous registry must not be
         // applied, only dropped.

@@ -103,6 +103,36 @@ enum Smoke {
             return "\(result.registeredCount) extra account(s) registered"
         }
 
+        // Install the user's real Keychain answer before the quota check below,
+        // for the same reason `claude-accounts` sends the real account list: an
+        // empty registry here would describe a process no user runs. It would
+        // also make the Grok Bot card below report a consent prompt on a
+        // machine that granted consent long ago, which reads as a regression.
+        //
+        // Consequence worth stating: on a machine that HAS granted, this is
+        // what lets the quota check reach the Keychain, so smoke can raise the
+        // macOS dialog. That is the status quo — the dialog appeared here
+        // before this feature existed too — and gating it would mean smoke
+        // never exercises the granted path at all.
+        //
+        // This is also the only gate that decodes the setter's envelope: the
+        // Rust tests call `set_from_json` directly and the Swift selftest
+        // injects a fake setter, so a field-name or decoder mismatch would pass
+        // both and only surface here.
+        summarize("grok-bot-keychain-consent") {
+            let granted = GrokBotKeychainConsent.answer() == true
+            let result = try TBCore.setKeychainConsent(
+                json: granted ? GrokBotKeychainConsent.grantedPayload : "{}")
+            guard result.grantedCount == (granted ? 1 : 0), result.rejected.isEmpty else {
+                throw TBCoreError.bridge(
+                    "stored answer granted=\(granted) but registered "
+                        + "\(result.grantedCount) with \(result.rejected.count) rejected")
+            }
+            return granted
+                ? "consent granted, Keychain read allowed"
+                : "no consent stored, Keychain not read"
+        }
+
         summarize("trace") {
             let buckets = try TBCore.usageTrace(windowSecs: 600)
             let rate = try TBCore.tokensPerMin()

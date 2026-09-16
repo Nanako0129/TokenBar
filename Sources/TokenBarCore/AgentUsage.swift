@@ -538,6 +538,25 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
             AgentUsageTransportDiagnostic.self, forKey: .transportDiagnostic)
     }
 
+    /// Backend `source` values that mean "this card is waiting on the user",
+    /// not "this card failed". Both arrive as a terminal provider failure with
+    /// a non-nil `error` — `source` is the only field separating them, which is
+    /// why every consumer that distinguishes them has to check it BEFORE it
+    /// checks `error`.
+    ///
+    /// `unconfigured`: no credential exists at all (Claude's setup prompt).
+    /// `keychain-consent`: a credential exists and works, but reading it would
+    /// raise a macOS authorization dialog the user has not agreed to yet.
+    static let setupPlaceholderSources: Set<String> = ["unconfigured", "keychain-consent"]
+
+    /// Whether this card is a prompt for the user rather than a malfunction.
+    /// Named once here because the answer is stated at three call sites, and
+    /// a fourth `source ==` literal added later would silently render a prompt
+    /// as a red error.
+    public var isSetupPlaceholder: Bool {
+        Self.setupPlaceholderSources.contains(source)
+    }
+
     /// Order-preserving card view shared by quota resolvers and consumers.
     /// A duplicate card ID is fail-closed after the first occurrence; labels
     /// never repair or disambiguate a card collision.
@@ -706,7 +725,7 @@ public struct AgentUsagePayload: Decodable, Sendable {
     /// Error-only snapshots stay reachable; setup placeholders do not add tabs.
     public var configuredClientIds: [String] {
         var seen = Set<String>()
-        return agents.filter { $0.source != "unconfigured" }.map(\.clientId)
+        return agents.filter { !$0.isSetupPlaceholder }.map(\.clientId)
             .filter { seen.insert($0).inserted }
     }
 }

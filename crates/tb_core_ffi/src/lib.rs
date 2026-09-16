@@ -1035,7 +1035,10 @@ pub unsafe extern "C" fn tb_set_claude_config_dirs(json: *const c_char) -> *mut 
 ///
 /// A client whose id is absent from the registry is never read from the
 /// Keychain at all, so the OS authorization dialog cannot appear before the
-/// app has asked the user for itself. The registry is in-memory and starts
+/// app has asked the user for itself. The one wired client is `grok-bot`,
+/// whose gate sits in `agent_grokbot::decode_desktop_secret` immediately
+/// before the decrypt — not at "a desktop login exists", so a plaintext-stored
+/// secret keeps working ungated. The registry is in-memory and starts
 /// empty every launch: the caller owns re-applying the user's stored answer,
 /// and a process that never calls this raises no dialog.
 ///

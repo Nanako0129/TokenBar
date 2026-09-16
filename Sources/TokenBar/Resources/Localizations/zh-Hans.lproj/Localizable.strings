@@ -144,6 +144,13 @@
 "%@ more left" = "预计多剩 %@";
 "Expected %lld%% used by now" = "到当前时刻应已用 %lld%%";
 "Set up" = "待设置";
+/* Keychain consent. Deliberately not "待设置" — the Grok Bot login already is
+   set up; what is missing is permission to read it. */
+"Allow" = "待授权";
+"Not now" = "暂时不要";
+"Waiting for macOS…" = "等待 macOS 响应…";
+"Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. Nothing is sent anywhere; the login is read on this Mac and never stored by TokenBar." = "Grok Bot 把登录信息存在你的钥匙串里。要显示每周额度，TokenBar 需要读取它——macOS 会弹出窗口请你允许。数据不会发送到任何地方，登录信息只在这台 Mac 上读取，TokenBar 不会存储。";
+"TokenBar is not reading your Grok Bot limits." = "TokenBar 没有在读取你的 Grok Bot 额度。";
 "Error" = "错误";
 "Live" = "实时";
 "No quota" = "无额度";
