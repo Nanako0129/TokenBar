@@ -14,6 +14,10 @@ struct GlassBackground: View {
     var cornerRadius: CGFloat = 0
 
     var body: some View {
+        // Availability checks cannot reference APIs absent from the SDK used
+        // by older Swift toolchains, so keep the Liquid Glass branch behind
+        // the compiler version that ships that SDK.
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             GlassEffectContainer {
                 Rectangle()
@@ -24,6 +28,10 @@ struct GlassBackground: View {
             VisualEffectBackground(material: .popover)
                 .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
         }
+#else
+        VisualEffectBackground(material: .popover)
+            .clipShape(RoundedRectangle(cornerRadius: cornerRadius))
+#endif
     }
 }
 

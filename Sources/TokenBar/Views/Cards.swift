@@ -126,6 +126,9 @@ struct GlassCardBackground: ViewModifier {
     @Environment(\.colorScheme) private var colorScheme
 
     func body(content: Content) -> some View {
+        // The macOS 26 symbols are not present in older SDKs, even when the
+        // runtime availability check would select the fallback there.
+#if compiler(>=6.2)
         if #available(macOS 26.0, *) {
             // .clear glass lets the wallpaper breathe through the cards
             // themselves (.regular reads as a dense dark slab when cards
@@ -147,6 +150,10 @@ struct GlassCardBackground: ViewModifier {
             content
                 .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
         }
+#else
+        content
+            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: cornerRadius))
+#endif
     }
 }
 

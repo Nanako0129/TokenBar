@@ -384,7 +384,7 @@ struct ContributionHeatmap: View {
     /// container reports the already-subtracted, invariant difference
     /// directly, so a vertical ancestor scroll no longer changes the
     /// tracked value, writes no state, and triggers no re-render.
-    private static let coordinateSpaceName = "heatmap-container"
+    nonisolated private static let coordinateSpaceName = "heatmap-container"
 
     var body: some View {
         VStack(spacing: 0) {
