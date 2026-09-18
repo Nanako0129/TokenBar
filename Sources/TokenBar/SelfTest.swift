@@ -5663,6 +5663,35 @@ enum SelfTest {
             ClientRegistry.withGroupMembers(Set(["antigravity"]))
                 == Set(["antigravity", "antigravity-cli"]),
             "hiding the Antigravity tab pulls the CLI row along")
+        // Upgrade path. `antigravity-cli` had its own tab before the grouping,
+        // so an existing user can have exactly that id in tokenbar.tabs.hidden.
+        // The tab row now emits "antigravity"; comparing the stored set against
+        // it raw matches nothing and hands the user back a tab they hid.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity"], hiddenRaw: "antigravity-cli", orderRaw: "").isEmpty,
+            "a tab hidden under the pre-grouping id stays hidden after the upgrade")
+        // Controls. Without the first, folding every hidden id into a group
+        // would pass while hiding unrelated tabs too; without the second, the
+        // fold could be swallowing the whole hidden set.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "codex"], hiddenRaw: "codex", orderRaw: "")
+                == ["antigravity"],
+            "an unrelated hidden id still hides only itself")
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "grok"], hiddenRaw: "", orderRaw: "")
+                == ["antigravity", "grok"],
+            "an empty hidden set hides nothing")
+        // The fold is tab-visibility only: a member's own quota card toggle
+        // must stay member-specific, which the visibility cases below assert
+        // per member. Stated here because the two sets are read from the same
+        // kind of CSV and the difference is easy to lose.
+        expect(
+            ClientRegistry.quotaExcludedClients(
+                tabHidden: [], limitsHidden: ["antigravity-cli"]) == ["antigravity-cli"],
+            "hiding the CLI's quota card does not fold into the IDE's")
         // Control: the pre-existing Grok grouping is unaffected by turning the
         // two ternaries into a table.
         expect(ClientRegistry.tabSlice("grok") == ["grok", "grok-bot"], "grok grouping unchanged")
