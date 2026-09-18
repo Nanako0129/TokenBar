@@ -723,7 +723,7 @@ struct AgentLimitsCard: View {
                 statusBadge(snapshot: snapshot, isLive: isLive)
             }
             if snapshot?.source == "unconfigured" {
-                setupPrompt()
+                setupPrompt(snapshot)
             } else if let source = snapshot?.source,
                 source == "keychain-consent" || source == "keychain-denied"
             {
@@ -788,9 +788,26 @@ struct AgentLimitsCard: View {
     private static let claudeSetupCommand =
         #"security add-generic-password -U -a "$USER" -s tokenbar-claude-oauth-token -w"#
 
-    /// Setup prompt shown for Claude when no credential is configured at all
-    /// (source "unconfigured"), instead of a red "credentials not found" error.
-    @ViewBuilder private func setupPrompt() -> some View {
+    /// Setup prompt shown when no credential is configured at all (source
+    /// "unconfigured"), instead of a red "credentials not found" error. Which
+    /// instructions to show is decided by `AgentUsageSnapshot.setupInstructions`
+    /// — a value, so SelfTest can assert it; see its doc for why it does not
+    /// live here as a branch.
+    @ViewBuilder private func setupPrompt(_ snapshot: AgentUsageSnapshot?) -> some View {
+        switch snapshot?.setupInstructions ?? .none {
+        case .claudeSetupToken:
+            claudeSetupPrompt()
+        case .providerMessage(let detail):
+            Text(detail)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        case .none:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder private func claudeSetupPrompt() -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:")
                 .font(.caption2)
