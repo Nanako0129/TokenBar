@@ -31,6 +31,8 @@ use tower_service::Service;
 const CODEX_USAGE_URL: &str = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_REFRESH_URL: &str = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES: i64 = 5;
+const CODEX_TOKEN_REFRESH_INTERVAL_DAYS: i64 = 8;
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 // The live subscription plan; the usage payload carries none.
 const CLAUDE_PROFILE_URL: &str = "https://api.anthropic.com/api/oauth/profile";
@@ -2083,7 +2085,7 @@ async fn fetch_codex_inner() -> ProviderFetchOutcome {
             return ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display));
         }
     };
-    let verified = if credentials_needs_refresh(loaded.last_refresh) {
+    let verified = if codex_credentials_needs_refresh(&loaded.access_token, loaded.last_refresh) {
         refresh_codex_credentials(&loaded.auth_path).await
     } else {
         resolve_codex_cache_binding(&loaded)
@@ -3741,12 +3743,7 @@ async fn request_codex_refresh(
         .map_err(|_| {
             ProviderFetchFailure::terminal("Codex refresh client could not be created.")
         })?;
-    let body = serde_json::json!({
-        "client_id": CODEX_CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token,
-        "scope": "openid profile email"
-    });
+    let body = codex_refresh_request_body(refresh_token);
     let response = client
         .post(CODEX_REFRESH_URL)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -3827,7 +3824,7 @@ where
     let pre_binding = resolve_codex_cache_binding_with(&credentials, refresh).map_err(|_| {
         ProviderFetchFailure::terminal("Codex account identity could not be verified.")
     })?;
-    if !credentials_needs_refresh(credentials.last_refresh) {
+    if !codex_credentials_needs_refresh(&credentials.access_token, credentials.last_refresh) {
         return Ok((credentials, pre_binding));
     }
 
@@ -5478,11 +5475,40 @@ fn claude_credentials_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".claude/.credentials.json"))
 }
 
-fn credentials_needs_refresh(last_refresh: Option<DateTime<Utc>>) -> bool {
+fn codex_refresh_request_body(refresh_token: String) -> Value {
+    serde_json::json!({
+        "client_id": CODEX_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token
+    })
+}
+
+fn codex_credentials_needs_refresh(
+    access_token: &str,
+    last_refresh: Option<DateTime<Utc>>,
+) -> bool {
+    codex_credentials_needs_refresh_at(access_token, last_refresh, Utc::now())
+}
+
+fn codex_credentials_needs_refresh_at(
+    access_token: &str,
+    last_refresh: Option<DateTime<Utc>>,
+    now: DateTime<Utc>,
+) -> bool {
+    if let Some(expires_at) = jwt_expiration(access_token) {
+        return expires_at
+            <= now + chrono::Duration::minutes(CODEX_ACCESS_TOKEN_REFRESH_WINDOW_MINUTES);
+    }
+
     let Some(last_refresh) = last_refresh else {
         return true;
     };
-    (Utc::now() - last_refresh).num_days() > 8
+    (now - last_refresh).num_days() > CODEX_TOKEN_REFRESH_INTERVAL_DAYS
+}
+
+fn jwt_expiration(token: &str) -> Option<DateTime<Utc>> {
+    let seconds = jwt_payload(token)?.get("exp")?.as_i64()?;
+    Utc.timestamp_opt(seconds, 0).single()
 }
 
 fn claude_credentials_expired(credentials: &ClaudeCredentials) -> bool {
@@ -5922,6 +5948,68 @@ mod tests {
                 "{label}"
             );
         }
+    }
+
+    fn codex_test_access_token(exp: i64) -> String {
+        use base64::Engine as _;
+
+        let payload = serde_json::to_vec(&serde_json::json!({ "exp": exp })).unwrap();
+        format!(
+            "header.{}.signature",
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+        )
+    }
+
+    #[test]
+    fn codex_refresh_prefers_access_token_expiry_over_stale_last_refresh() {
+        let now = Utc.timestamp_opt(1_758_080_400, 0).single().unwrap();
+        let stale_last_refresh = Some(now - chrono::Duration::days(9));
+
+        assert!(!codex_credentials_needs_refresh_at(
+            &codex_test_access_token((now + chrono::Duration::minutes(6)).timestamp()),
+            stale_last_refresh,
+            now,
+        ));
+        assert!(codex_credentials_needs_refresh_at(
+            &codex_test_access_token((now + chrono::Duration::minutes(5)).timestamp()),
+            stale_last_refresh,
+            now,
+        ));
+        assert!(codex_credentials_needs_refresh_at(
+            &codex_test_access_token((now - chrono::Duration::seconds(1)).timestamp()),
+            Some(now - chrono::Duration::days(1)),
+            now,
+        ));
+    }
+
+    #[test]
+    fn codex_refresh_falls_back_to_last_refresh_without_valid_expiry() {
+        let now = Utc.timestamp_opt(1_758_080_400, 0).single().unwrap();
+
+        assert!(!codex_credentials_needs_refresh_at(
+            "not-a-jwt",
+            Some(now - chrono::Duration::days(8)),
+            now,
+        ));
+        assert!(codex_credentials_needs_refresh_at(
+            "not-a-jwt",
+            Some(now - chrono::Duration::days(9)),
+            now,
+        ));
+        assert!(codex_credentials_needs_refresh_at("not-a-jwt", None, now));
+        assert!(jwt_expiration("header.eyJleHAiOiJub3QtYS1udW1iZXIifQ.signature").is_none());
+    }
+
+    #[test]
+    fn codex_refresh_request_body_matches_codex_cli_contract() {
+        assert_eq!(
+            codex_refresh_request_body("test-refresh-token".to_string()),
+            serde_json::json!({
+                "client_id": CODEX_CLIENT_ID,
+                "grant_type": "refresh_token",
+                "refresh_token": "test-refresh-token"
+            })
+        );
     }
 
     #[test]
