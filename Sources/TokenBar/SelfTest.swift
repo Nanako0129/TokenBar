@@ -5700,16 +5700,28 @@ enum SelfTest {
         """
         let antigravityQuota = try! JSONDecoder().decode(
             AgentUsagePayload.self, from: Data(antigravityQuotaJSON.utf8))
+        // THIS is the duplication guard. `baseClients`' restrict branch keeps an
+        // id when `placeholderRows[id] != nil || snapshots[primary(id)] != nil`,
+        // and `snapshots` is this dictionary — so a CLI row here is one extra
+        // rendered card under the grouped tab, drawing the IDE's quota twice.
+        // `antigravity-cli` has no placeholder row, so absence here is absence
+        // on screen.
         expect(
             AgentLimitsCard.snapshotsByRow(antigravityQuota.agents)[
                 AccountIdentity(clientId: "antigravity-cli", accountKey: nil)] == nil,
-            "no alias surfaces the IDE snapshot under the CLI's id any more")
+            "no alias surfaces the IDE snapshot under the CLI's id, so the grouped "
+                + "tab renders that quota card once rather than once per member")
+        // A different function and a weaker claim, kept apart from the guard
+        // above on purpose: `knownClientIds` derives its quota ids from the
+        // payload's `agents`, never from `snapshotsByRow`, so the alias is
+        // invisible to it and it cannot witness the duplication. What it does
+        // cover is that passing a GROUPED `present` list does not itself invent
+        // a card for the member that has no snapshot.
         expect(
             AgentLimitsCard.knownClientIds(
                 agentUsage: antigravityQuota, present: ClientRegistry.tabSlice("antigravity"))
                 == ["antigravity"],
-            "the grouped tab's known-card set holds the IDE's quota once, "
-                + "and never grows a phantom CLI entry for the same card")
+            "a grouped present list adds no known card for the member without a snapshot")
 
         // Tray totals with hidden clients excluded (issue #35). Fixture: two
         // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
