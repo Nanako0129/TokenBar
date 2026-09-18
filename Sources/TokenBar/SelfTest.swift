@@ -5527,6 +5527,79 @@ enum SelfTest {
                 .contains("grok-bot"),
             "the consent row survives in the limits card even with no tab")
 
+        // #345. Codex, Claude and Antigravity are pushed into `agents` whether
+        // or not the user has them, so an error-only card from one of them says
+        // nothing about configuration. Since v1.18.0 tab navigation includes
+        // quota sources, and a machine that has never run either provider was
+        // given both tabs. The Rust side now reports `unconfigured` when there
+        // is no credential to read at all; this is the half that turns that into
+        // "no tab".
+        let requiredCardsJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"unconfigured","updatedAt":"now",
+           "windows":[],"error":"Codex auth.json not found. Run `codex` to log in."},
+          {"clientId":"antigravity","source":"unconfigured","updatedAt":"now",
+           "windows":[],"error":"Antigravity is not logged in. Re-login in Antigravity."}
+        ]}
+        """
+        let unconfiguredRequired = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(requiredCardsJSON.utf8))
+        expect(
+            unconfiguredRequired.configuredClientIds.isEmpty,
+            "a required card with no credential at all is not a configured quota source")
+        expect(
+            ClientRegistry.tabClients(
+                present: [], quotaIds: unconfiguredRequired.configuredClientIds).isEmpty,
+            "an unconfigured required card contributes no tab")
+        // Control: the identical cards at `source: "oauth"` DO keep their tabs.
+        // Without it this block would also pass if `configuredClientIds` simply
+        // dropped every windowless card — which would take Grok Bot's
+        // signed-in-but-failing tab with it, the regression #345's fix must not
+        // trade for this one.
+        let configuredRequired = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(requiredCardsJSON
+                .replacingOccurrences(of: "\"unconfigured\"", with: "\"oauth\"").utf8))
+        expect(
+            ClientRegistry.tabClients(
+                present: [], quotaIds: configuredRequired.configuredClientIds)
+                == ["codex", "antigravity"],
+            "a configured-but-failing required card keeps its tab")
+
+        // The setup copy each unconfigured card offers. Claude's names
+        // CLAUDE_CODE_OAUTH_TOKEN and a Claude-only Keychain item; it was shown
+        // unconditionally while Claude was the only client that could reach this
+        // state, so Codex and Antigravity would have inherited it.
+        let claudeSetup = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"now","agents":[
+              {"clientId":"claude","source":"unconfigured","updatedAt":"now",
+               "windows":[],"error":"Claude OAuth credentials not found."}
+            ]}
+            """.utf8))
+        expect(
+            claudeSetup.agents[0].setupInstructions == .claudeSetupToken,
+            "Claude's unconfigured card keeps its own setup-token instructions")
+        expect(
+            unconfiguredRequired.agents.map(\.setupInstructions) == [
+                .providerMessage("Codex auth.json not found. Run `codex` to log in."),
+                .providerMessage("Antigravity is not logged in. Re-login in Antigravity."),
+            ],
+            "every other unconfigured card states its own instruction, not Claude's")
+        // Controls. A card that is not unconfigured offers no setup copy at all:
+        // without these, returning `.claudeSetupToken` for everything would still
+        // satisfy the Claude assertion, and an ordinary error card would start
+        // rendering a setup prompt instead of its error.
+        expect(
+            consentPayload.agents
+                .first { $0.source == "keychain-consent" }?.setupInstructions == SetupInstructions.none,
+            "a Keychain-consent card is a consent prompt, not a setup prompt")
+        expect(
+            erroredPayload.agents
+                .first { $0.clientId == "grok-bot" }?.setupInstructions == SetupInstructions.none,
+            "an ordinary error card offers no setup instructions")
+
         // Independent quota switches must agree in the grouped tab, overview,
         // and automatic tray source. Only hiding the tab hides both members.
         let grokQuotaJSON = """

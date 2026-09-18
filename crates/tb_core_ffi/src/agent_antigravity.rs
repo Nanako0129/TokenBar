@@ -40,6 +40,14 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// Marker error for "none of the three routes has a credential to use". The
+/// local IDE route needs a running language server, the `agy` route needs the
+/// CLI's own login, and both are tried before this failure can be returned, so
+/// reaching it means nothing is set up. `agent_usage::fetch_antigravity` pairs
+/// it with `source == "unconfigured"` — see `required_card_source` there.
+pub(crate) const ANTIGRAVITY_UNCONFIGURED_ERROR: &str =
+    "Antigravity is not logged in. Re-login in Antigravity.";
+
 const LANG_SERVICE: &str = "/exa.language_server_pb.LanguageServerService/GetUserStatus";
 const CODE_ASSIST_BASE: &str = "https://cloudcode-pa.googleapis.com/v1internal";
 const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
@@ -137,14 +145,33 @@ pub(crate) async fn fetch(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFa
         |context| fetch_oauth_secondary(context, now),
     )
     .await;
+    with_agy_fallback(primary, || fetch_agy_cli(now)).await
+}
+
+/// The `agy` route's arbitration, separated from the route itself so the
+/// property that decides the card's `source` can be tested without a CLI, a
+/// login shell or the network.
+///
+/// That property is the `Err(_)` arm: when the CLI cannot answer, the caller
+/// sees the ORIGINAL failure rather than the CLI's. It is what carries
+/// `ANTIGRAVITY_UNCONFIGURED_ERROR` out of `fetch` on a machine where nothing is
+/// set up, and it is unreachable on a machine that has Antigravity — there the
+/// CLI answers and the card is configured, which is why #345's Antigravity half
+/// is pinned here instead of by running the app.
+async fn with_agy_fallback<Agy, AgyFuture>(
+    primary: Result<Fetched, ProviderFetchFailure>,
+    agy: Agy,
+) -> Result<Fetched, ProviderFetchFailure>
+where
+    Agy: FnOnce() -> AgyFuture,
+    AgyFuture: std::future::Future<Output = Result<Fetched, ProviderFetchFailure>>,
+{
     match primary {
         Ok(fetched) => Ok(fetched),
-        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => {
-            match fetch_agy_cli(now).await {
-                Ok(fetched) => Ok(fetched),
-                Err(_) => Err(primary_failure),
-            }
-        }
+        Err(primary_failure) if should_try_agy_fallback(&primary_failure) => match agy().await {
+            Ok(fetched) => Ok(fetched),
+            Err(_) => Err(primary_failure),
+        },
         Err(primary_failure) => Err(primary_failure),
     }
 }
@@ -1057,9 +1084,7 @@ async fn prepare_remote_context(now: DateTime<Utc>) -> Result<RemoteContext, Pro
         .ok_or_else(|| {
             ProviderFetchFailure::terminal("Antigravity credential location could not be resolved.")
         })?;
-    let creds = load_remote_credentials(&creds_path).map_err(|_| {
-        ProviderFetchFailure::terminal("Antigravity is not logged in. Re-login in Antigravity.")
-    })?;
+    let creds = remote_credentials_or_unconfigured(&creds_path)?;
     let verified = if remote_credentials_need_refresh(&creds, now) {
         refresh_access_token(&creds_path, now).await.map(
             |(_, access_token, account_scope, cache_binding)| {
@@ -1136,10 +1161,51 @@ fn remote_identity(plan: Option<String>) -> AgentIdentity {
     AgentIdentity { email: None, plan }
 }
 
-fn load_remote_credentials(path: &Path) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|_| "Antigravity not logged in (no ~/.gemini/oauth_creds.json)".to_string())?;
-    serde_json::from_str(&raw).map_err(|e| format!("decode oauth_creds.json: {e}"))
+/// Why the shared Google credential could not be loaded.
+///
+/// The distinction is behaviour, not wording. Only a genuinely absent file means
+/// "nothing is configured", and only that verdict may take the card out of tab
+/// navigation (#345). A file that exists but cannot be read or parsed belongs to
+/// a configured account with a broken credential: it has to stay visible and say
+/// so, or a permission problem and a corrupt JSON both present as "you never set
+/// this up" while the card silently leaves the tab bar.
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteCredentialError {
+    Absent,
+    Unreadable,
+}
+
+/// A credential that exists but cannot be used. Distinct from
+/// `ANTIGRAVITY_UNCONFIGURED_ERROR` so `required_card_source` leaves it at
+/// `oauth`, which keeps the card and its tab.
+const ANTIGRAVITY_UNREADABLE_ERROR: &str =
+    "Antigravity credentials could not be read. Re-login in Antigravity.";
+
+/// The credential step of `prepare_remote_context`, split out so the pairing of
+/// "no credential at all" with `ANTIGRAVITY_UNCONFIGURED_ERROR` is reachable
+/// from a test without a Gemini home, a running IDE or the network. That pairing
+/// is what keeps an Antigravity card that has never been set up out of tab
+/// navigation, so it is behaviour, not a message (#345).
+fn remote_credentials_or_unconfigured(path: &Path) -> Result<Value, ProviderFetchFailure> {
+    load_remote_credentials(path).map_err(|error| match error {
+        RemoteCredentialError::Absent => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNCONFIGURED_ERROR)
+        }
+        RemoteCredentialError::Unreadable => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNREADABLE_ERROR)
+        }
+    })
+}
+
+fn load_remote_credentials(path: &Path) -> Result<Value, RemoteCredentialError> {
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RemoteCredentialError::Absent
+        } else {
+            RemoteCredentialError::Unreadable
+        }
+    })?;
+    serde_json::from_str(&raw).map_err(|_| RemoteCredentialError::Unreadable)
 }
 
 fn remote_access_token(creds: &Value) -> Result<String, String> {
@@ -2472,6 +2538,33 @@ mod tests {
         );
     }
 
+    /// An **absent** credential file must report the marker verbatim: the
+    /// snapshot's `source` is decided by comparing against it
+    /// (`agent_usage::required_card_source`), so a message edited here and not
+    /// there silently restores the phantom tab this pairing removes.
+    ///
+    /// Absent, not unreadable — the two are now different verdicts.
+    /// `RemoteCredentialError::Unreadable` deliberately does NOT reach this
+    /// marker, and `malformed_remote_credentials_are_unreadable_not_absent`
+    /// below is the assertion that keeps it out. This wording predated that
+    /// split and described the behaviour the split removed.
+    #[test]
+    fn absent_remote_credentials_report_the_unconfigured_marker() {
+        let missing = std::env::temp_dir()
+            .join("tokenbar-antigravity-unconfigured-probe")
+            .join("oauth_creds.json");
+        assert!(!missing.exists(), "the probe path must not exist");
+        let failure = remote_credentials_or_unconfigured(&missing).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNCONFIGURED_ERROR
+            ),
+            "absent credentials must carry the unconfigured marker, got {failure:?}"
+        );
+    }
+
     #[test]
     fn agy_fallback_only_runs_for_terminal_failures() {
         let transient = ProviderFetchFailure::transient(
@@ -2995,6 +3088,90 @@ mod tests {
             cache_binding: None,
             windows: Vec::new(),
         }
+    }
+
+    /// A credential that exists but cannot be parsed belongs to a configured
+    /// account, so it must NOT reach the absence marker. Before the split it
+    /// did: every `load_remote_credentials` failure became
+    /// `ANTIGRAVITY_UNCONFIGURED_ERROR`, so a corrupt `oauth_creds.json` took
+    /// the card out of tab navigation and claimed the user had never logged in.
+    #[test]
+    fn malformed_remote_credentials_are_unreadable_not_absent() {
+        let dir = std::env::temp_dir().join("tokenbar-antigravity-malformed-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oauth_creds.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Unreadable)
+        );
+        let failure = remote_credentials_or_unconfigured(&path).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNREADABLE_ERROR
+            ),
+            "a corrupt credential must not read as an absent one, got {failure:?}"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Absent),
+            "control: the same path with the file gone IS absent, so the case above \
+             is the parse and not the path"
+        );
+    }
+
+    /// The reported machine's state, which this one cannot enter: no running
+    /// IDE, no Google credential, and an `agy` that cannot answer either. The
+    /// verdict has to be the ORIGINAL marker, because that is the string
+    /// `required_card_source` keys the `unconfigured` source on — if the CLI's
+    /// own "not found" replaced it, the card would report `oauth`, stop being a
+    /// setup placeholder, and the tab #345 removes would come back.
+    #[tokio::test]
+    async fn nothing_configured_survives_the_cli_route_as_the_unconfigured_marker() {
+        let agy_runs = std::cell::Cell::new(0);
+        let failure = with_agy_fallback(
+            Err(ProviderFetchFailure::terminal(
+                ANTIGRAVITY_UNCONFIGURED_ERROR,
+            )),
+            || async {
+                agy_runs.set(agy_runs.get() + 1);
+                Err(ProviderFetchFailure::terminal(
+                    "Antigravity CLI was not found.",
+                ))
+            },
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            agy_runs.get(),
+            1,
+            "the CLI route is still tried before the verdict is taken"
+        );
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNCONFIGURED_ERROR
+            ),
+            "the CLI's failure must not replace the marker, got {failure:?}"
+        );
+
+        // Control: this machine's state. A CLI that answers makes the card
+        // configured, so the tab stays — the assertion above is about absence,
+        // not about the fallback being dead.
+        let fetched = with_agy_fallback(
+            Err(ProviderFetchFailure::terminal(
+                ANTIGRAVITY_UNCONFIGURED_ERROR,
+            )),
+            || async { Ok(orchestration_fetched("cli")) },
+        )
+        .await
+        .unwrap();
+        assert_eq!(fetched.source, "cli");
     }
 
     fn orchestration_transient(display: &str) -> ProviderFetchFailure {

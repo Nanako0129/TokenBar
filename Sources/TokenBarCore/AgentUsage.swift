@@ -505,6 +505,18 @@ public struct AgentUsageTransportDiagnostic: Decodable, Sendable {
     }
 }
 
+/// The instructions an unconfigured card shows. A value rather than a view so
+/// the choice is assertable — see `AgentUsageSnapshot.setupInstructions`.
+public enum SetupInstructions: Equatable, Sendable {
+    /// Claude's setup-token / Keychain instructions, which name Claude-only
+    /// environment and Keychain identifiers and belong to no other provider.
+    case claudeSetupToken
+    /// The provider's own one-line instruction, as it arrived in `error`.
+    case providerMessage(String)
+    /// Not an unconfigured card, or one with nothing to say.
+    case none
+}
+
 public struct AgentUsageSnapshot: Decodable, Sendable {
     public let clientId: String
     /// Which account of `clientId` this card is. Absent from the payload — and
@@ -583,6 +595,28 @@ public struct AgentUsageSnapshot: Decodable, Sendable {
         case "keychain-consent", "keychain-denied": "Allow"
         default: nil
         }
+    }
+
+    /// What an unconfigured card offers as instructions.
+    ///
+    /// Here rather than as a branch in the card's view body, for the reason
+    /// `setupBadgeKey` gives one paragraph up. Claude's copy names
+    /// `CLAUDE_CODE_OAUTH_TOKEN` and a `tokenbar-claude-oauth-token` Keychain
+    /// item, and neither exists for any other provider — but Claude was the only
+    /// client that could report `unconfigured` when that copy was written, so the
+    /// view showed it unconditionally. Codex and Antigravity now report it too
+    /// (#345), and a branch living in a `ViewBuilder` is one nothing can assert:
+    /// the next provider to reach this state would have inherited Claude's
+    /// Keychain instructions with no test to notice.
+    ///
+    /// Every other provider already states its own one-line instruction in
+    /// `error` ("Run `codex` to log in", "Re-login in Antigravity"), so it says
+    /// that instead of borrowing Claude's.
+    public var setupInstructions: SetupInstructions {
+        guard source == "unconfigured" else { return .none }
+        if clientId == "claude" { return .claudeSetupToken }
+        guard let error, !error.isEmpty else { return .none }
+        return .providerMessage(error)
     }
 
     /// Order-preserving card view shared by quota resolvers and consumers.
