@@ -305,8 +305,36 @@ public enum ClientRegistry {
     /// so a SwiftUI view that observes the @AppStorage raw re-renders when the
     /// order changes (the zero-arg variant reads UserDefaults for non-view
     /// callers and never invalidates a body on its own).
+    /// The saved order read as TAB ids — the ordering counterpart of
+    /// `hiddenTabClients`, and for the same reason.
+    ///
+    /// `tokenbar.tabs.order` can hold `antigravity-cli` from when the CLI had a
+    /// tab of its own. `orderedClients` matches entries by exact id, so that
+    /// entry supplies no position for the `antigravity` tab the row now emits
+    /// and the tab lands at the end — the user's saved arrangement quietly
+    /// rearranges itself on upgrade.
+    ///
+    /// Deliberately NOT folded inside `orderedClients`: four of its callers
+    /// order MEMBER ids rather than tab ids (the limits card's rows, the
+    /// Settings list, the tray, the Discord client list), and there both
+    /// Antigravity members must keep distinct positions. Folding there would
+    /// collapse them onto one index and leave their relative order to a
+    /// tie-break.
+    ///
+    /// Deduplicated after folding: a saved order naming both members yields the
+    /// same tab twice, and the first occurrence is the position to honour.
+    static func tabOrder(_ raw: String) -> [String] {
+        var seen = Set<String>()
+        return parseIdList(raw)
+            .map { memberToTabId[$0] ?? $0 }
+            .filter { seen.insert($0).inserted }
+    }
+
     public static func orderedClients(_ ids: [String], orderRaw: String) -> [String] {
-        let order = parseIdList(orderRaw)
+        orderedClients(ids, order: parseIdList(orderRaw))
+    }
+
+    static func orderedClients(_ ids: [String], order: [String]) -> [String] {
         guard !order.isEmpty else { return ids }
         return ids.sorted { a, b in
             let ia = order.firstIndex(of: a) ?? Int.max
@@ -325,7 +353,9 @@ public enum ClientRegistry {
     /// discovered agents become visible without breaking existing custom order).
     public static func displayClients(present: [String]) -> [String] {
         let hidden = hiddenTabClients()
-        return orderedClients(present.filter { !hidden.contains($0) })
+        return orderedClients(
+            present.filter { !hidden.contains($0) },
+            order: tabOrder(UserDefaults.standard.string(forKey: tabOrderKey) ?? ""))
     }
 
     /// The one reading of `tokenbar.tabs.hidden` every tab-visibility consumer
@@ -375,7 +405,8 @@ public enum ClientRegistry {
         present: [String], hiddenRaw: String, orderRaw: String
     ) -> [String] {
         let hidden = hiddenTabClients(parseIdSet(hiddenRaw))
-        return orderedClients(present.filter { !hidden.contains($0) }, orderRaw: orderRaw)
+        return orderedClients(
+            present.filter { !hidden.contains($0) }, order: tabOrder(orderRaw))
     }
 
     /// Direction-aware reorder helper (drag down inserts after, up before).

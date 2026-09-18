@@ -5671,6 +5671,31 @@ enum SelfTest {
             ClientRegistry.displayClients(
                 present: ["antigravity"], hiddenRaw: "antigravity-cli", orderRaw: "").isEmpty,
             "a tab hidden under the pre-grouping id stays hidden after the upgrade")
+        // The ordering half of the same upgrade path. A saved order naming
+        // `antigravity-cli` supplied no position for the `antigravity` tab, so
+        // the tab fell to the end and the user's arrangement rearranged itself.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["claude", "antigravity", "codex"], hiddenRaw: "",
+                orderRaw: "claude,antigravity-cli,codex")
+                == ["claude", "antigravity", "codex"],
+            "a saved order naming the pre-grouping id keeps the grouped tab in that position")
+        // Control: the members must NOT be folded where rows are ordered by
+        // member id. `AgentLimitsCard` and the Settings list order both
+        // Antigravity rows through `orderedClients` directly, and collapsing
+        // them onto one index would leave their order to a tie-break.
+        //
+        // The saved order puts the CLI FIRST on purpose. With the IDE first the
+        // two implementations agree by accident — a folded order drops the CLI
+        // to `Int.max` and it lands last either way — so that arrangement
+        // cannot witness the difference. Reversing it is the only case where
+        // folding inside the shared function changes the answer, and the first
+        // version of this control used the arrangement that could not fail.
+        expect(
+            ClientRegistry.orderedClients(
+                ["antigravity", "antigravity-cli"], orderRaw: "antigravity-cli,antigravity")
+                == ["antigravity-cli", "antigravity"],
+            "ordering member rows still honours each member's own saved position")
         // Controls. Without the first, folding every hidden id into a group
         // would pass while hiding unrelated tabs too; without the second, the
         // fold could be swallowing the whole hidden set.
