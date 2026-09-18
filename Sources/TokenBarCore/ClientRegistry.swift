@@ -188,23 +188,47 @@ public enum ClientRegistry {
     public static func quotaExcludedClients(
         tabHidden: Set<String>, limitsHidden: Set<String>
     ) -> Set<String> {
-        withGroupMembers(tabHidden).union(limitsHidden)
+        hiddenTabClients(tabHidden).union(limitsHidden)
     }
 
     // MARK: - Grouped tabs
 
+    /// Tabs that group more than one client id under a single top tab: one
+    /// member carries local session usage, the other only a cloud quota with
+    /// no usage of its own. Single table backing `tabSlice`, `tabClients`, and
+    /// `tabLabel` — three separate ternaries is how a second group (Antigravity
+    /// IDE + CLI, alongside Grok Build + Bot) would drift from the first.
+    private static let tabGroups: [String: (members: [String], label: String)] = [
+        "grok": (["grok", "grok-bot"], "Grok Build & Bot"),
+        // Just "Antigravity", not "Antigravity IDE & CLI": read on the running
+        // popover, the longer form crowded a tab row that already scrolls, and
+        // "IDE" is a word neither member's display name uses. Grok keeps the
+        // two-part form because "Grok Build" and "Grok Bot" are both product
+        // names a user would look for; nobody looks for "Antigravity IDE".
+        "antigravity": (["antigravity", "antigravity-cli"], "Antigravity"),
+    ]
+
+    /// Reverse lookup built once: a group member's id -> the tab id it folds
+    /// into (a group's own tab id maps to itself). Backs `tabClients`.
+    private static let memberToTabId: [String: String] = tabGroups.reduce(into: [:]) {
+        out, entry in
+        for member in entry.value.members { out[member] = entry.key }
+    }
+
     /// Client ids behind a top tab. The "grok" tab is a group: Grok Build
     /// (local CLI session logs) and Grok Bot (Cursor-billed cloud quota) are
-    /// different data sources shown as two sections under one tab.
+    /// different data sources shown as two sections under one tab. Same
+    /// arrangement for "antigravity": the CLI carries the usage, the IDE
+    /// client carries the quota.
     public static func tabSlice(_ id: String) -> [String] {
-        id == "grok" ? ["grok", "grok-bot"] : [id]
+        tabGroups[id]?.members ?? [id]
     }
 
     /// Navigation includes configured quota sources even without local usage.
     /// Group members share one tab but retain their provider identities below it.
     public static func tabClients(present: [String], quotaIds: [String]) -> [String] {
         var seen = Set<String>()
-        return (present + quotaIds).map { $0 == "grok-bot" ? "grok" : $0 }
+        return (present + quotaIds).map { memberToTabId[$0] ?? $0 }
             .filter { seen.insert($0).inserted }
     }
 
@@ -214,17 +238,17 @@ public enum ClientRegistry {
         present: [String], quotaIds: [String], tabHidden: Set<String>,
         orderRaw: String
     ) -> [String] {
-        let hidden = withGroupMembers(tabHidden)
+        let hidden = hiddenTabClients(tabHidden)
         var seen = Set<String>()
         let ids = (present.flatMap(tabSlice) + quotaIds)
             .filter { !hidden.contains($0) && seen.insert($0).inserted }
         return orderedClients(ids, orderRaw: orderRaw)
     }
 
-    /// Tab-bar and single-client-titles label. Only the grouped tab differs
+    /// Tab-bar and single-client-titles label. Only a grouped tab differs
     /// from its short name; every other tab keeps `shortName`.
     public static func tabLabel(_ id: String) -> String {
-        id == "grok" ? "Grok Build & Bot" : shortName(id)
+        tabGroups[id]?.label ?? shortName(id)
     }
 
     /// Card titles retain the full client name for ordinary tabs.
@@ -234,11 +258,14 @@ public enum ClientRegistry {
 
     /// Expand a hidden set so group members follow their tab: hiding the
     /// "grok" tab also hides the quota-only "grok-bot" row (which has no tab
-    /// of its own to hide). Explicit "grok-bot" entries pass through, so an
-    /// independent limits-toggle on the Bot row keeps working.
+    /// of its own to hide), and likewise "antigravity" / "antigravity-cli".
+    /// Explicit member entries (e.g. "grok-bot" alone) pass through unchanged,
+    /// so an independent limits-toggle on a member row keeps working.
     public static func withGroupMembers(_ ids: Set<String>) -> Set<String> {
         var out = ids
-        if out.contains("grok") { out.insert("grok-bot") }
+        for id in ids {
+            if let group = tabGroups[id] { out.formUnion(group.members) }
+        }
         return out
     }
 
@@ -278,8 +305,36 @@ public enum ClientRegistry {
     /// so a SwiftUI view that observes the @AppStorage raw re-renders when the
     /// order changes (the zero-arg variant reads UserDefaults for non-view
     /// callers and never invalidates a body on its own).
+    /// The saved order read as TAB ids — the ordering counterpart of
+    /// `hiddenTabClients`, and for the same reason.
+    ///
+    /// `tokenbar.tabs.order` can hold `antigravity-cli` from when the CLI had a
+    /// tab of its own. `orderedClients` matches entries by exact id, so that
+    /// entry supplies no position for the `antigravity` tab the row now emits
+    /// and the tab lands at the end — the user's saved arrangement quietly
+    /// rearranges itself on upgrade.
+    ///
+    /// Deliberately NOT folded inside `orderedClients`: four of its callers
+    /// order MEMBER ids rather than tab ids (the limits card's rows, the
+    /// Settings list, the tray, the Discord client list), and there both
+    /// Antigravity members must keep distinct positions. Folding there would
+    /// collapse them onto one index and leave their relative order to a
+    /// tie-break.
+    ///
+    /// Deduplicated after folding: a saved order naming both members yields the
+    /// same tab twice, and the first occurrence is the position to honour.
+    static func tabOrder(_ raw: String) -> [String] {
+        var seen = Set<String>()
+        return parseIdList(raw)
+            .map { memberToTabId[$0] ?? $0 }
+            .filter { seen.insert($0).inserted }
+    }
+
     public static func orderedClients(_ ids: [String], orderRaw: String) -> [String] {
-        let order = parseIdList(orderRaw)
+        orderedClients(ids, order: parseIdList(orderRaw))
+    }
+
+    static func orderedClients(_ ids: [String], order: [String]) -> [String] {
         guard !order.isEmpty else { return ids }
         return ids.sorted { a, b in
             let ia = order.firstIndex(of: a) ?? Int.max
@@ -297,8 +352,49 @@ public enum ClientRegistry {
     /// Clients not yet in the saved order are appended at the end (so newly
     /// discovered agents become visible without breaking existing custom order).
     public static func displayClients(present: [String]) -> [String] {
-        let hidden = hiddenClients()
-        return orderedClients(present.filter { !hidden.contains($0) })
+        let hidden = hiddenTabClients()
+        return orderedClients(
+            present.filter { !hidden.contains($0) },
+            order: tabOrder(UserDefaults.standard.string(forKey: tabOrderKey) ?? ""))
+    }
+
+    /// The one reading of `tokenbar.tabs.hidden` every tab-visibility consumer
+    /// takes, closed over both directions of the grouping.
+    ///
+    /// The stored value cannot be compared raw, because its consumers do not all
+    /// compare it against the same kind of id:
+    ///
+    /// - against TAB ids — the tab row, and the guard that drops a hidden tab
+    ///   back to Overview. These need the GROUP id present. An upgrading user
+    ///   has `antigravity-cli` stored from when the CLI had its own tab, and the
+    ///   tab row now emits `antigravity`, so a raw comparison silently returns a
+    ///   tab the user hid.
+    /// - against CLIENT ids — usage lenses, the year filter, the tray totals,
+    ///   the live rate, the trace. These need EVERY MEMBER present. A fresh hide
+    ///   stores `antigravity`, so a raw comparison leaves `antigravity-cli`'s
+    ///   tokens in totals the user has hidden the tab for.
+    ///
+    /// Folding members to their group and then expanding back to all members
+    /// satisfies both: the result carries the group id and every member id, so
+    /// either kind of lookup hits. Idempotent, and a no-op for every ungrouped
+    /// client.
+    ///
+    /// Grok has the same shape and never showed it: `grok-bot` publishes no
+    /// local usage, so no contribution row carries its id and the client-id half
+    /// had nothing to get wrong. `antigravity-cli` does publish usage, which is
+    /// what made the omission visible.
+    ///
+    /// Tab visibility only. `limitsHidden` stays member-specific in both
+    /// directions — each member keeps its own quota card under the shared tab,
+    /// so folding there would make hiding one member's card hide the other's.
+    public static func hiddenTabClients(_ raw: Set<String>) -> Set<String> {
+        withGroupMembers(Set(raw.map { memberToTabId[$0] ?? $0 }))
+    }
+
+    /// `hiddenTabClients` over the stored value, for the non-view callers that
+    /// read UserDefaults directly.
+    public static func hiddenTabClients() -> Set<String> {
+        hiddenTabClients(hiddenClients())
     }
 
     /// Reactive overload of `displayClients`: takes the observed hidden/order
@@ -308,8 +404,9 @@ public enum ClientRegistry {
     public static func displayClients(
         present: [String], hiddenRaw: String, orderRaw: String
     ) -> [String] {
-        let hidden = parseIdSet(hiddenRaw)
-        return orderedClients(present.filter { !hidden.contains($0) }, orderRaw: orderRaw)
+        let hidden = hiddenTabClients(parseIdSet(hiddenRaw))
+        return orderedClients(
+            present.filter { !hidden.contains($0) }, order: tabOrder(orderRaw))
     }
 
     /// Direction-aware reorder helper (drag down inserts after, up before).

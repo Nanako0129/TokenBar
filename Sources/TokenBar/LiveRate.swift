@@ -6,7 +6,7 @@ import TokenBarCore
 /// used unchanged.
 enum LiveRate {
     static func current(source: any UsageDataSource) async throws -> Double {
-        let hidden = ClientRegistry.hiddenClients()
+        let hidden = ClientRegistry.hiddenTabClients()
         guard !hidden.isEmpty else { return try await source.tokensPerMin() }
         let rows = try await source.usageTrace(windowSecs: 600)
         return TraceBucket.totalRate(rows, hidden: hidden)

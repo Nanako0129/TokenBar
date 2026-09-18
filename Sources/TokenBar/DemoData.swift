@@ -402,7 +402,25 @@ enum DemoData {
         }
 
         let monthlyDuration: Int64 = 2_592_000
-        let agents = ClientRegistry.allIds.enumerated().map { index, id in
+        // One quota card per SUBSCRIPTION, not per client id. A client whose
+        // `quotaOwner` is someone else draws on that account and has no
+        // allowance of its own, so handing it a snapshot here invents a card the
+        // real provider never publishes — and since #346 grouped Antigravity's
+        // IDE and CLI under one tab, that invented card renders as a second,
+        // identical quota row beside the one it borrowed from.
+        //
+        // The filter sits after `enumerated()` on purpose: the demo percentages
+        // are derived from the index, so filtering first would renumber every
+        // client after the excluded one and silently change fixtures that have
+        // nothing to do with this.
+        //
+        // Grok is unaffected and must stay that way: Grok Build and Grok Bot
+        // share a tab but not an allowance — Build is the local CLI, Bot is the
+        // Cursor-billed cloud quota — so `quotaOwner` leaves both owning
+        // themselves and both keep a card.
+        let agents = ClientRegistry.allIds.enumerated()
+            .filter { ClientRegistry.quotaOwner($0.element) == $0.element }
+            .map { index, id in
             let sessionUsed = Double(12 + (index * 7) % 76)
             let weeklyUsed = max(5, sessionUsed * 0.58)
             let windows: [[String: Any]]

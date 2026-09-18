@@ -5640,6 +5640,149 @@ enum SelfTest {
                 "Automatic tray quota: \(label)")
         }
 
+        // #346. Antigravity IDE + CLI grouped into one tab, the same shape as
+        // Grok Build & Bot: the CLI carries the local session usage, the IDE
+        // client carries the OAuth quota and no usage of its own.
+        expect(
+            ClientRegistry.tabSlice("antigravity") == ["antigravity", "antigravity-cli"],
+            "antigravity tab expands to IDE + CLI")
+        // Pins the string a reader sees, and nothing more: "Antigravity" is
+        // also what `tabLabel` returns by FALLBACK for an id absent from
+        // `tabGroups`, so unlike the Grok case this assertion cannot witness
+        // that the group exists. Deleting the antigravity entry leaves it
+        // green. The slice, fold and hide assertions around it are what catch
+        // that, and they are mutation-verified for it.
+        expect(
+            ClientRegistry.tabLabel("antigravity") == "Antigravity",
+            "antigravity tab reads as Antigravity, not a two-part group label")
+        expect(
+            ClientRegistry.tabClients(present: ["antigravity-cli"], quotaIds: ["antigravity"])
+                == ["antigravity"],
+            "CLI usage plus IDE quota still yields exactly one tab")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["antigravity"]))
+                == Set(["antigravity", "antigravity-cli"]),
+            "hiding the Antigravity tab pulls the CLI row along")
+        // Upgrade path. `antigravity-cli` had its own tab before the grouping,
+        // so an existing user can have exactly that id in tokenbar.tabs.hidden.
+        // The tab row now emits "antigravity"; comparing the stored set against
+        // it raw matches nothing and hands the user back a tab they hid.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity"], hiddenRaw: "antigravity-cli", orderRaw: "").isEmpty,
+            "a tab hidden under the pre-grouping id stays hidden after the upgrade")
+        // The ordering half of the same upgrade path. A saved order naming
+        // `antigravity-cli` supplied no position for the `antigravity` tab, so
+        // the tab fell to the end and the user's arrangement rearranged itself.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["claude", "antigravity", "codex"], hiddenRaw: "",
+                orderRaw: "claude,antigravity-cli,codex")
+                == ["claude", "antigravity", "codex"],
+            "a saved order naming the pre-grouping id keeps the grouped tab in that position")
+        // Control: the members must NOT be folded where rows are ordered by
+        // member id. `AgentLimitsCard` and the Settings list order both
+        // Antigravity rows through `orderedClients` directly, and collapsing
+        // them onto one index would leave their order to a tie-break.
+        //
+        // The saved order puts the CLI FIRST on purpose. With the IDE first the
+        // two implementations agree by accident — a folded order drops the CLI
+        // to `Int.max` and it lands last either way — so that arrangement
+        // cannot witness the difference. Reversing it is the only case where
+        // folding inside the shared function changes the answer, and the first
+        // version of this control used the arrangement that could not fail.
+        expect(
+            ClientRegistry.orderedClients(
+                ["antigravity", "antigravity-cli"], orderRaw: "antigravity-cli,antigravity")
+                == ["antigravity-cli", "antigravity"],
+            "ordering member rows still honours each member's own saved position")
+        // Controls. Without the first, folding every hidden id into a group
+        // would pass while hiding unrelated tabs too; without the second, the
+        // fold could be swallowing the whole hidden set.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "codex"], hiddenRaw: "codex", orderRaw: "")
+                == ["antigravity"],
+            "an unrelated hidden id still hides only itself")
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "grok"], hiddenRaw: "", orderRaw: "")
+                == ["antigravity", "grok"],
+            "an empty hidden set hides nothing")
+        // The fold is tab-visibility only: a member's own quota card toggle
+        // must stay member-specific, which the visibility cases below assert
+        // per member. Stated here because the two sets are read from the same
+        // kind of CSV and the difference is easy to lose.
+        expect(
+            ClientRegistry.quotaExcludedClients(
+                tabHidden: [], limitsHidden: ["antigravity-cli"]) == ["antigravity-cli"],
+            "hiding the CLI's quota card does not fold into the IDE's")
+        // Control: the pre-existing Grok grouping is unaffected by turning the
+        // two ternaries into a table.
+        expect(ClientRegistry.tabSlice("grok") == ["grok", "grok-bot"], "grok grouping unchanged")
+        expect(ClientRegistry.tabLabel("grok") == "Grok Build & Bot", "grok label unchanged")
+
+        // Independent quota-card toggle per member, mirroring the Grok case
+        // above: only tab visibility applies to the whole group, and hiding
+        // one member's own limits card must not touch the other's.
+        let antigravityVisibilityCases: [(String, Set<String>, Set<String>, [String])] = [
+            ("both visible", [], [], ["antigravity", "antigravity-cli"]),
+            ("IDE quota hidden", [], ["antigravity"], ["antigravity-cli"]),
+            ("CLI quota hidden", [], ["antigravity-cli"], ["antigravity"]),
+            ("both quotas hidden", [], ["antigravity", "antigravity-cli"], []),
+            ("Antigravity tab hidden", ["antigravity"], [], []),
+        ]
+        for (label, tabHidden, limitsHidden, expected) in antigravityVisibilityCases {
+            let members = ClientRegistry.tabSlice("antigravity")
+            expect(
+                AgentLimitsCard.visible(
+                    members, hiddenRaw: limitsHidden.sorted().joined(separator: ","),
+                    tabHidden: tabHidden, clientId: { $0 }) == expected,
+                "Antigravity tab: \(label)")
+            let excludedFromQuota = ClientRegistry.quotaExcludedClients(
+                tabHidden: tabHidden, limitsHidden: limitsHidden)
+            expect(
+                Set(members).subtracting(excludedFromQuota) == Set(expected),
+                "quotaExcludedClients agrees with the card's visible set: \(label)")
+        }
+
+        // The restricted (single-tab) limits view must render Antigravity's
+        // quota card exactly once, not once per group member. Before this fix
+        // `snapshotsByRow` aliased the IDE's snapshot under "antigravity-cli"
+        // in `restrict` mode so the CLI's lone tab could show a quota card;
+        // now both members share one tab and that alias would make BOTH ids
+        // pass the restrict-mode "known" test, duplicating the same card.
+        let antigravityQuotaJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"antigravity","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"quota.v1","label":"Quota","usedPercent":40,"remainingPercent":60}]}
+        ]}
+        """
+        let antigravityQuota = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(antigravityQuotaJSON.utf8))
+        // THIS is the duplication guard. `baseClients`' restrict branch keeps an
+        // id when `placeholderRows[id] != nil || snapshots[primary(id)] != nil`,
+        // and `snapshots` is this dictionary — so a CLI row here is one extra
+        // rendered card under the grouped tab, drawing the IDE's quota twice.
+        // `antigravity-cli` has no placeholder row, so absence here is absence
+        // on screen.
+        expect(
+            AgentLimitsCard.snapshotsByRow(antigravityQuota.agents)[
+                AccountIdentity(clientId: "antigravity-cli", accountKey: nil)] == nil,
+            "no alias surfaces the IDE snapshot under the CLI's id, so the grouped "
+                + "tab renders that quota card once rather than once per member")
+        // A different function and a weaker claim, kept apart from the guard
+        // above on purpose: `knownClientIds` derives its quota ids from the
+        // payload's `agents`, never from `snapshotsByRow`, so the alias is
+        // invisible to it and it cannot witness the duplication. What it does
+        // cover is that passing a GROUPED `present` list does not itself invent
+        // a card for the member that has no snapshot.
+        expect(
+            AgentLimitsCard.knownClientIds(
+                agentUsage: antigravityQuota, present: ClientRegistry.tabSlice("antigravity"))
+                == ["antigravity"],
+            "a grouped present list adds no known card for the member without a snapshot")
+
         // Tray totals with hidden clients excluded (issue #35). Fixture: two
         // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
         // tokens = input+output+cacheRead+cacheWrite+reasoning.
@@ -7559,10 +7702,18 @@ enum SelfTest {
         let quota = DemoData.agentUsage
         let quotaClients = Set(quota.agents.map(\.clientId))
         let registryClients = Set(ClientRegistry.allIds)
+        // Usage is per CLIENT, quota is per SUBSCRIPTION, and the two sets are
+        // not the same one. They coincided for every registered id until
+        // Antigravity's CLI made the difference visible: it publishes real
+        // session usage and draws on the IDE's allowance, so a demo card of its
+        // own asserted an allowance the provider never reports — and once #346
+        // put both members under one tab, that card rendered as a second,
+        // identical quota row beside the one it had borrowed.
+        let quotaOwners = registryClients.filter { ClientRegistry.quotaOwner($0) == $0 }
         expect(
             summaryClients == registryClients && contributionClients == registryClients
-                && quotaClients == registryClients,
-            "demo summary contributions and quota share the client set")
+                && quotaClients == quotaOwners,
+            "demo usage covers every client, demo quota covers every subscription owner")
         // The canonical card identities a demo client is expected to expose, in
         // order. The authority for each is the provider's own card-ID constant
         // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
@@ -7584,7 +7735,7 @@ enum SelfTest {
         ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
-            quota.agents.count == ClientRegistry.allIds.count
+            quota.agents.count == quotaOwners.count
                 && quota.agents.allSatisfy { agent in
                     // The raw array, not `uniqueCardWindows`: that view is
                     // fail-closed on a repeated card ID, so a fixture writing
@@ -10304,12 +10455,52 @@ enum SelfTest {
         // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
         // sets with different meanings; only tab-hidden belongs here.
         let dpDelegate = dpNormalized.first { $0.name == "AppDelegate.swift" }
-        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenClients()") == true
+        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenTabClients()") == true
             && dpDelegate?.text.contains("hidden:ClientRegistry.quotaExcludedClients()") == false
             && dpDelegate?.text.contains("hidden:ClientRegistry.hiddenLimitsClients()") == false,
             "A1: the published payload excludes the tab-hidden clients and no other set "
                 + "(mutation: swapping in quotaExcludedClients publishes a different total and "
                 + "a different top client, and every payload fixture stays green)")
+        // The subject moved from `hiddenClients()` to `hiddenTabClients()` when
+        // grouped tabs arrived (#346). Same set, canonicalized: it folds a
+        // stored member id onto its group and expands a group onto its members,
+        // so a grouped tab hidden by the user excludes every client under it.
+        // Without that, hiding the Antigravity tab left `antigravity-cli`'s
+        // tokens on the Discord profile — the exact leak this assertion exists
+        // to prevent, arriving through a set that was too NARROW rather than
+        // too wide.
+        //
+        // This is a source scan and cannot see behaviour: the payload fixtures
+        // are handed a set, so nothing here proves the wiring passes this one.
+        // What is behavioural is the other half of the claim — that the limits
+        // set never folds in — which `hiding the CLI's quota card does not fold
+        // into the IDE's` asserts against the real function.
+        expect(
+            ClientRegistry.hiddenTabClients(["antigravity"])
+                == Set(["antigravity", "antigravity-cli"])
+                && ClientRegistry.hiddenTabClients(["antigravity-cli"])
+                    == Set(["antigravity", "antigravity-cli"]),
+            "A1b: either stored form of a grouped tab excludes every client under that tab, "
+                + "so a hidden tab cannot leak one of its members' usage to the profile")
+
+        // Demo mode builds one quota snapshot per registered id, which gave
+        // `antigravity-cli` an allowance it does not have — and once the IDE and
+        // the CLI shared a tab, that invented snapshot rendered as a second,
+        // identical quota row. The rule is per subscription, not per client.
+        let demoAgentIds = Set(DemoData.agentUsage.agents.map(\.clientId))
+        expect(
+            !demoAgentIds.contains("antigravity-cli") && demoAgentIds.contains("antigravity"),
+            "demo gives the Antigravity subscription one card, under the id that owns it")
+        // Control: a grouped member that owns its OWN allowance keeps its card.
+        // Without this, excluding every grouped member would pass the assertion
+        // above while taking Grok Bot's card — a different allowance, on a
+        // different bill, that shares nothing but a tab.
+        expect(
+            demoAgentIds.contains("grok") && demoAgentIds.contains("grok-bot"),
+            "Grok Build and Grok Bot each keep a demo card, because each owns an allowance")
+        expect(
+            demoAgentIds.allSatisfy { ClientRegistry.quotaOwner($0) == $0 },
+            "no demo card belongs to a client that draws on someone else's subscription")
 
         // A8 — Discord absent. The common case, not an error: the connect
         // closure fails the way `connectToDiscord` does when there is no socket

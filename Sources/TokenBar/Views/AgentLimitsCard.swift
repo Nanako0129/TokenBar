@@ -252,29 +252,40 @@ struct AgentLimitsCard: View {
     /// dictionary collision instead of losing nothing.
     ///
     /// A static, testable pure function (SelfTest asserts against this
-    /// symbol directly — the M3-a mutation target) — the instance property
-    /// below only adds the antigravity-cli alias, which needs `restrict`.
+    /// symbol directly — the M3-a mutation target). No instance-level alias
+    /// layered on top any more — see the removal note below.
     static func snapshotsByRow(
         _ agents: [AgentUsageSnapshot]
     ) -> [AccountIdentity: AgentUsageSnapshot] {
         Dictionary(agents.map { ($0.accountIdentity, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
-    private var snapshotsByRow: [AccountIdentity: AgentUsageSnapshot] {
-        var dict = Self.snapshotsByRow(agentUsage?.agents ?? [])
-        // Antigravity CLI shares the Antigravity IDE's account and quota, so it
-        // gets no snapshot of its own. In its single-client view, surface the
-        // Antigravity snapshot under its id so the card still shows the quota.
-        // Only in `restrict` mode — the overview already renders Antigravity's
-        // own card, so aliasing there would duplicate it. Antigravity has no
-        // multi-account concept today, so this alias is primary-only.
-        let cliRow = AccountIdentity(clientId: "antigravity-cli", accountKey: nil)
-        let ideRow = AccountIdentity(clientId: "antigravity", accountKey: nil)
-        if restrict, dict[cliRow] == nil, let shared = dict[ideRow] {
-            dict[cliRow] = shared
-        }
-        return dict
-    }
+    // Removed 2026-09-19 (issue #346): Antigravity CLI used to get its own top
+    // tab with no snapshot of its own (it shares the IDE's account and quota),
+    // so `restrict` mode aliased the IDE's snapshot under the CLI's id to give
+    // that lone tab a quota card at all. Now that `ClientRegistry.tabSlice`
+    // groups "antigravity" and "antigravity-cli" under one tab, `clients` in
+    // `restrict` mode carries BOTH ids, and the alias would make BOTH pass
+    // `known(_:)` and render the same quota card twice under that one tab —
+    // exactly the duplication the old comment warned about for the overview,
+    // now reachable from restrict mode too. Dropping the alias leaves
+    // "antigravity-cli" correctly unknown here (it has no snapshot and no
+    // placeholder row): its usage still surfaces through the other Overview
+    // cards (chart/trace/model breakdown), which is what a grouped tab means.
+    //
+    // There is deliberately no instance wrapper around the static function any
+    // more. The alias lived in exactly such a wrapper, layered on top of it, so
+    // while one existed the SelfTest guard could only claim to cover the
+    // dictionary: re-adding the alias one level up would have duplicated the
+    // grouped tab's quota card with every assertion still green. Keeping the
+    // wrapper as a "bare forward" was an argument about the code as written,
+    // not a guard — and a property that can be relocated one line up will be.
+    //
+    // `baseClients` builds the dictionary once into a local, and the body
+    // builds it once and threads it into `agentSection`, so removing the
+    // wrapper costs no extra work per row. The static function is now the only
+    // place a card's snapshot can come from, which is the path SelfTest
+    // asserts against.
 
     /// Every OTHER account sharing `clientId`, in the order the payload lists
     /// them — the extra rows a primary row expands into. Empty for every
@@ -389,7 +400,7 @@ struct AgentLimitsCard: View {
     }
 
     private var baseClients: [AccountIdentity] {
-        let snapshots = self.snapshotsByRow
+        let snapshots = Self.snapshotsByRow(agentUsage?.agents ?? [])
         func primary(_ id: String) -> AccountIdentity { AccountIdentity(clientId: id, accountKey: nil) }
         func visiblePrimaries(of ids: [String]) -> Set<String> {
             Set(Self.visible(ids.map(primary), hiddenRaw: limitsHiddenRaw) { $0.clientId }.map(\.clientId))
@@ -525,6 +536,7 @@ struct AgentLimitsCard: View {
                         opencodeSubs.joined(separator: " · ")))
             }
             let visible = visibleClients
+            let snapshots = Self.snapshotsByRow(agentUsage?.agents ?? [])
             if visible.isEmpty, !usageAttempted {
                 // Say "still asking" rather than "none": claiming no supported
                 // agents while the first request is outstanding is a false
@@ -551,7 +563,7 @@ struct AgentLimitsCard: View {
             } else {
                 VStack(spacing: 12) {
                     ForEach(visible, id: \.self) { row in
-                        agentSection(row, visible: visible)
+                        agentSection(row, visible: visible, snapshots: snapshots)
                     }
                 }
                 .coordinateSpace(name: Self.dragSpace)
@@ -688,12 +700,13 @@ struct AgentLimitsCard: View {
     // MARK: - Per-agent section
 
     @ViewBuilder private func agentSection(
-        _ row: AccountIdentity, visible: [AccountIdentity]
+        _ row: AccountIdentity, visible: [AccountIdentity],
+        snapshots: [AccountIdentity: AgentUsageSnapshot]
     ) -> some View {
         let id = row.clientId
         let key = Self.rowKey(row)
         let style = ClientRegistry.style(id)
-        let snapshot = snapshotsByRow[row]
+        let snapshot = snapshots[row]
         let uniqueWindows = snapshot?.uniqueCardWindows ?? []
         let isLive = liveClients.contains(id)
         // Primary-only order for drag participation — see `dropEdge`.

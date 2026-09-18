@@ -46,7 +46,7 @@ enum TrayMode: String, CaseIterable {
         // UserDefaults write (AppDelegate's observer), and the rate/early modes
         // never touch the aggregate.
         func totals() -> TrayTotals {
-            graph.trayTotals(hidden: ClientRegistry.hiddenClients(), today: Format.todayKey())
+            graph.trayTotals(hidden: ClientRegistry.hiddenTabClients(), today: Format.todayKey())
         }
         switch self {
         case .todayTokens:
