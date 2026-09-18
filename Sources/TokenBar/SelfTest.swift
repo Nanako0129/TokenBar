@@ -10422,12 +10422,33 @@ enum SelfTest {
         // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
         // sets with different meanings; only tab-hidden belongs here.
         let dpDelegate = dpNormalized.first { $0.name == "AppDelegate.swift" }
-        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenClients()") == true
+        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenTabClients()") == true
             && dpDelegate?.text.contains("hidden:ClientRegistry.quotaExcludedClients()") == false
             && dpDelegate?.text.contains("hidden:ClientRegistry.hiddenLimitsClients()") == false,
             "A1: the published payload excludes the tab-hidden clients and no other set "
                 + "(mutation: swapping in quotaExcludedClients publishes a different total and "
                 + "a different top client, and every payload fixture stays green)")
+        // The subject moved from `hiddenClients()` to `hiddenTabClients()` when
+        // grouped tabs arrived (#346). Same set, canonicalized: it folds a
+        // stored member id onto its group and expands a group onto its members,
+        // so a grouped tab hidden by the user excludes every client under it.
+        // Without that, hiding the Antigravity tab left `antigravity-cli`'s
+        // tokens on the Discord profile — the exact leak this assertion exists
+        // to prevent, arriving through a set that was too NARROW rather than
+        // too wide.
+        //
+        // This is a source scan and cannot see behaviour: the payload fixtures
+        // are handed a set, so nothing here proves the wiring passes this one.
+        // What is behavioural is the other half of the claim — that the limits
+        // set never folds in — which `hiding the CLI's quota card does not fold
+        // into the IDE's` asserts against the real function.
+        expect(
+            ClientRegistry.hiddenTabClients(["antigravity"])
+                == Set(["antigravity", "antigravity-cli"])
+                && ClientRegistry.hiddenTabClients(["antigravity-cli"])
+                    == Set(["antigravity", "antigravity-cli"]),
+            "A1b: either stored form of a grouped tab excludes every client under that tab, "
+                + "so a hidden tab cannot leak one of its members' usage to the profile")
 
         // A8 — Discord absent. The common case, not an error: the connect
         // closure fails the way `connectToDiscord` does when there is no socket

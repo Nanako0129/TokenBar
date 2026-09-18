@@ -188,7 +188,7 @@ public enum ClientRegistry {
     public static func quotaExcludedClients(
         tabHidden: Set<String>, limitsHidden: Set<String>
     ) -> Set<String> {
-        withGroupMembers(tabHidden).union(limitsHidden)
+        hiddenTabClients(tabHidden).union(limitsHidden)
     }
 
     // MARK: - Grouped tabs
@@ -238,7 +238,7 @@ public enum ClientRegistry {
         present: [String], quotaIds: [String], tabHidden: Set<String>,
         orderRaw: String
     ) -> [String] {
-        let hidden = withGroupMembers(tabHidden)
+        let hidden = hiddenTabClients(tabHidden)
         var seen = Set<String>()
         let ids = (present.flatMap(tabSlice) + quotaIds)
             .filter { !hidden.contains($0) && seen.insert($0).inserted }
@@ -324,27 +324,47 @@ public enum ClientRegistry {
     /// Clients not yet in the saved order are appended at the end (so newly
     /// discovered agents become visible without breaking existing custom order).
     public static func displayClients(present: [String]) -> [String] {
-        let hidden = hiddenTabIds(hiddenClients())
+        let hidden = hiddenTabClients()
         return orderedClients(present.filter { !hidden.contains($0) })
     }
 
-    /// A hidden set read as TAB ids rather than client ids.
+    /// The one reading of `tokenbar.tabs.hidden` every tab-visibility consumer
+    /// takes, closed over both directions of the grouping.
     ///
-    /// `antigravity-cli` had its own tab before it was grouped, so an upgrading
-    /// user can have exactly that id sitting in `tokenbar.tabs.hidden`. The tab
-    /// row now emits the group id, and comparing the stored set against it
-    /// matches nothing — the tab the user deliberately hid comes back on
-    /// upgrade. Folding is the only reading that survives the grouping: the
-    /// member has no tab of its own any more, so "hide that tab" can only mean
-    /// the group's.
+    /// The stored value cannot be compared raw, because its consumers do not all
+    /// compare it against the same kind of id:
     ///
-    /// Tab visibility only, and deliberately the inverse of
-    /// `withGroupMembers`. `limitsHidden` stays member-specific in both
-    /// directions, because each member keeps its own quota card under the
-    /// shared tab — folding there would make hiding one member's card hide the
-    /// other's.
-    private static func hiddenTabIds(_ raw: Set<String>) -> Set<String> {
-        Set(raw.map { memberToTabId[$0] ?? $0 })
+    /// - against TAB ids — the tab row, and the guard that drops a hidden tab
+    ///   back to Overview. These need the GROUP id present. An upgrading user
+    ///   has `antigravity-cli` stored from when the CLI had its own tab, and the
+    ///   tab row now emits `antigravity`, so a raw comparison silently returns a
+    ///   tab the user hid.
+    /// - against CLIENT ids — usage lenses, the year filter, the tray totals,
+    ///   the live rate, the trace. These need EVERY MEMBER present. A fresh hide
+    ///   stores `antigravity`, so a raw comparison leaves `antigravity-cli`'s
+    ///   tokens in totals the user has hidden the tab for.
+    ///
+    /// Folding members to their group and then expanding back to all members
+    /// satisfies both: the result carries the group id and every member id, so
+    /// either kind of lookup hits. Idempotent, and a no-op for every ungrouped
+    /// client.
+    ///
+    /// Grok has the same shape and never showed it: `grok-bot` publishes no
+    /// local usage, so no contribution row carries its id and the client-id half
+    /// had nothing to get wrong. `antigravity-cli` does publish usage, which is
+    /// what made the omission visible.
+    ///
+    /// Tab visibility only. `limitsHidden` stays member-specific in both
+    /// directions — each member keeps its own quota card under the shared tab,
+    /// so folding there would make hiding one member's card hide the other's.
+    public static func hiddenTabClients(_ raw: Set<String>) -> Set<String> {
+        withGroupMembers(Set(raw.map { memberToTabId[$0] ?? $0 }))
+    }
+
+    /// `hiddenTabClients` over the stored value, for the non-view callers that
+    /// read UserDefaults directly.
+    public static func hiddenTabClients() -> Set<String> {
+        hiddenTabClients(hiddenClients())
     }
 
     /// Reactive overload of `displayClients`: takes the observed hidden/order
@@ -354,7 +374,7 @@ public enum ClientRegistry {
     public static func displayClients(
         present: [String], hiddenRaw: String, orderRaw: String
     ) -> [String] {
-        let hidden = hiddenTabIds(parseIdSet(hiddenRaw))
+        let hidden = hiddenTabClients(parseIdSet(hiddenRaw))
         return orderedClients(present.filter { !hidden.contains($0) }, orderRaw: orderRaw)
     }
 

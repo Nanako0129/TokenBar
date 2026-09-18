@@ -156,7 +156,7 @@ struct PopoverView: View {
     /// the full known list (graceful degradation). Reactive via `hiddenRaw`; the
     /// empty-hidden fast path is byte-identical to the raw known list.
     private var visibleYears: [String] {
-        let hidden = ClientRegistry.parseIdSet(hiddenRaw)
+        let hidden = ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw))
         guard !hidden.isEmpty, model.year == nil,
               let contributions = model.payload?.contributions, !contributions.isEmpty
         else { return model.knownYears }
@@ -275,7 +275,7 @@ struct PopoverView: View {
         // (generatedAt). The model no-ops unless the scoped payload has no
         // visible activity, and clears to All years via setYear.
         .task(id: "\(hiddenRaw)|\(model.payload?.meta.generatedAt ?? "")") {
-            await model.clearYearIfHiddenOnly(hidden: ClientRegistry.parseIdSet(hiddenRaw))
+            await model.clearYearIfHiddenOnly(hidden: ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)))
         }
         // Keyed on the hidden raw so a hide toggle restarts the loop and
         // re-fetches the filtered rate immediately (badge would otherwise lag
@@ -438,7 +438,7 @@ struct PopoverView: View {
     private func resetTabIfHidden() {
         // Wait for both discoveries before discarding a saved quota-only tab.
         // An explicit hide still takes effect immediately.
-        guard ClientRegistry.parseIdSet(hiddenRaw).contains(activeTab)
+        guard ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)).contains(activeTab)
             || (model.stats != nil && model.agentUsageAttempted) else { return }
         if activeTab != ClientTray.overviewTab, !displayClients.contains(activeTab) {
             clientTab.wrappedValue = ClientTray.overviewTab
@@ -709,7 +709,7 @@ struct PopoverView: View {
                     singleClient: singleClient,
                     hasLocalUsage: clientIds.contains { model.stats?.presentClients.contains($0) == true },
                     year: model.year,
-                    hidden: ClientRegistry.parseIdSet(hiddenRaw),
+                    hidden: ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)),
                     // The user's own pace mode, not the fold's default. Leaving
                     // it out meant the summary always projected Historically
                     // while the card beside it obeyed the setting — and with
