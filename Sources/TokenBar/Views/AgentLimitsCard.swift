@@ -401,7 +401,14 @@ struct AgentLimitsCard: View {
 
     private var baseClients: [AccountIdentity] {
         let snapshots = Self.snapshotsByRow(agentUsage?.agents ?? [])
+        /// The primary account's row for a client. `accountKey: nil` IS the
+        /// primary — an extra Claude config directory carries its own key, and
+        /// the two must not collapse onto one identity.
         func primary(_ id: String) -> AccountIdentity { AccountIdentity(clientId: id, accountKey: nil) }
+        /// Which of `ids` still show a quota card, by the per-client limits
+        /// toggle. Reads `limitsHiddenRaw`, never the tab-hidden set: a client
+        /// whose card is hidden keeps its tab, and a hidden tab is one this
+        /// restricted view cannot be showing in the first place.
         func visiblePrimaries(of ids: [String]) -> Set<String> {
             Set(Self.visible(ids.map(primary), hiddenRaw: limitsHiddenRaw) { $0.clientId }.map(\.clientId))
         }
@@ -699,6 +706,16 @@ struct AgentLimitsCard: View {
 
     // MARK: - Per-agent section
 
+    /// One client's row: header, badge, and either a setup prompt, a consent
+    /// prompt or its window cards.
+    ///
+    /// `snapshots` is a parameter rather than something this reads for itself,
+    /// and that is load-bearing. The dictionary used to come from an instance
+    /// wrapper, which is where the Antigravity CLI alias lived; with both
+    /// members of a grouped tab in `clients`, that alias rendered the same quota
+    /// card twice. Passing the dictionary in leaves `snapshotsByRow(_:)` as the
+    /// single place a row's snapshot can come from — the one SelfTest asserts
+    /// against — and the body builds it once for every row rather than per row.
     @ViewBuilder private func agentSection(
         _ row: AccountIdentity, visible: [AccountIdentity],
         snapshots: [AccountIdentity: AgentUsageSnapshot]
