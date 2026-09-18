@@ -5640,6 +5640,77 @@ enum SelfTest {
                 "Automatic tray quota: \(label)")
         }
 
+        // #346. Antigravity IDE + CLI grouped into one tab, the same shape as
+        // Grok Build & Bot: the CLI carries the local session usage, the IDE
+        // client carries the OAuth quota and no usage of its own.
+        expect(
+            ClientRegistry.tabSlice("antigravity") == ["antigravity", "antigravity-cli"],
+            "antigravity tab expands to IDE + CLI")
+        expect(
+            ClientRegistry.tabLabel("antigravity") == "Antigravity IDE & CLI",
+            "antigravity tab carries the group label")
+        expect(
+            ClientRegistry.tabClients(present: ["antigravity-cli"], quotaIds: ["antigravity"])
+                == ["antigravity"],
+            "CLI usage plus IDE quota still yields exactly one tab")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["antigravity"]))
+                == Set(["antigravity", "antigravity-cli"]),
+            "hiding the Antigravity tab pulls the CLI row along")
+        // Control: the pre-existing Grok grouping is unaffected by turning the
+        // two ternaries into a table.
+        expect(ClientRegistry.tabSlice("grok") == ["grok", "grok-bot"], "grok grouping unchanged")
+        expect(ClientRegistry.tabLabel("grok") == "Grok Build & Bot", "grok label unchanged")
+
+        // Independent quota-card toggle per member, mirroring the Grok case
+        // above: only tab visibility applies to the whole group, and hiding
+        // one member's own limits card must not touch the other's.
+        let antigravityVisibilityCases: [(String, Set<String>, Set<String>, [String])] = [
+            ("both visible", [], [], ["antigravity", "antigravity-cli"]),
+            ("IDE quota hidden", [], ["antigravity"], ["antigravity-cli"]),
+            ("CLI quota hidden", [], ["antigravity-cli"], ["antigravity"]),
+            ("both quotas hidden", [], ["antigravity", "antigravity-cli"], []),
+            ("Antigravity tab hidden", ["antigravity"], [], []),
+        ]
+        for (label, tabHidden, limitsHidden, expected) in antigravityVisibilityCases {
+            let members = ClientRegistry.tabSlice("antigravity")
+            expect(
+                AgentLimitsCard.visible(
+                    members, hiddenRaw: limitsHidden.sorted().joined(separator: ","),
+                    tabHidden: tabHidden, clientId: { $0 }) == expected,
+                "Antigravity tab: \(label)")
+            let excludedFromQuota = ClientRegistry.quotaExcludedClients(
+                tabHidden: tabHidden, limitsHidden: limitsHidden)
+            expect(
+                Set(members).subtracting(excludedFromQuota) == Set(expected),
+                "quotaExcludedClients agrees with the card's visible set: \(label)")
+        }
+
+        // The restricted (single-tab) limits view must render Antigravity's
+        // quota card exactly once, not once per group member. Before this fix
+        // `snapshotsByRow` aliased the IDE's snapshot under "antigravity-cli"
+        // in `restrict` mode so the CLI's lone tab could show a quota card;
+        // now both members share one tab and that alias would make BOTH ids
+        // pass the restrict-mode "known" test, duplicating the same card.
+        let antigravityQuotaJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"antigravity","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"quota.v1","label":"Quota","usedPercent":40,"remainingPercent":60}]}
+        ]}
+        """
+        let antigravityQuota = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(antigravityQuotaJSON.utf8))
+        expect(
+            AgentLimitsCard.snapshotsByRow(antigravityQuota.agents)[
+                AccountIdentity(clientId: "antigravity-cli", accountKey: nil)] == nil,
+            "no alias surfaces the IDE snapshot under the CLI's id any more")
+        expect(
+            AgentLimitsCard.knownClientIds(
+                agentUsage: antigravityQuota, present: ClientRegistry.tabSlice("antigravity"))
+                == ["antigravity"],
+            "the grouped tab's known-card set holds the IDE's quota once, "
+                + "and never grows a phantom CLI entry for the same card")
+
         // Tray totals with hidden clients excluded (issue #35). Fixture: two
         // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
         // tokens = input+output+cacheRead+cacheWrite+reasoning.

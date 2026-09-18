@@ -252,28 +252,35 @@ struct AgentLimitsCard: View {
     /// dictionary collision instead of losing nothing.
     ///
     /// A static, testable pure function (SelfTest asserts against this
-    /// symbol directly — the M3-a mutation target) — the instance property
-    /// below only adds the antigravity-cli alias, which needs `restrict`.
+    /// symbol directly — the M3-a mutation target). No instance-level alias
+    /// layered on top any more — see the removal note below.
     static func snapshotsByRow(
         _ agents: [AgentUsageSnapshot]
     ) -> [AccountIdentity: AgentUsageSnapshot] {
         Dictionary(agents.map { ($0.accountIdentity, $0) }, uniquingKeysWith: { first, _ in first })
     }
 
+    // Removed 2026-09-19 (issue #346): Antigravity CLI used to get its own top
+    // tab with no snapshot of its own (it shares the IDE's account and quota),
+    // so `restrict` mode aliased the IDE's snapshot under the CLI's id to give
+    // that lone tab a quota card at all. Now that `ClientRegistry.tabSlice`
+    // groups "antigravity" and "antigravity-cli" under one tab, `clients` in
+    // `restrict` mode carries BOTH ids, and the alias would make BOTH pass
+    // `known(_:)` and render the same quota card twice under that one tab —
+    // exactly the duplication the old comment warned about for the overview,
+    // now reachable from restrict mode too. Dropping the alias leaves
+    // "antigravity-cli" correctly unknown here (it has no snapshot and no
+    // placeholder row): its usage still surfaces through the other Overview
+    // cards (chart/trace/model breakdown), which is what a grouped tab means.
+    //
+    // No instance-level wrapper left around `Self.snapshotsByRow(_:)` any
+    // more, on purpose: the alias used to live in exactly that wrapper, so
+    // every call site now reads the static, testable function directly —
+    // there is no remaining seam for a re-added alias to hide in that
+    // `AgentLimitsCard.snapshotsByRow(_:)`'s own SelfTest coverage would not
+    // immediately catch.
     private var snapshotsByRow: [AccountIdentity: AgentUsageSnapshot] {
-        var dict = Self.snapshotsByRow(agentUsage?.agents ?? [])
-        // Antigravity CLI shares the Antigravity IDE's account and quota, so it
-        // gets no snapshot of its own. In its single-client view, surface the
-        // Antigravity snapshot under its id so the card still shows the quota.
-        // Only in `restrict` mode — the overview already renders Antigravity's
-        // own card, so aliasing there would duplicate it. Antigravity has no
-        // multi-account concept today, so this alias is primary-only.
-        let cliRow = AccountIdentity(clientId: "antigravity-cli", accountKey: nil)
-        let ideRow = AccountIdentity(clientId: "antigravity", accountKey: nil)
-        if restrict, dict[cliRow] == nil, let shared = dict[ideRow] {
-            dict[cliRow] = shared
-        }
-        return dict
+        Self.snapshotsByRow(agentUsage?.agents ?? [])
     }
 
     /// Every OTHER account sharing `clientId`, in the order the payload lists

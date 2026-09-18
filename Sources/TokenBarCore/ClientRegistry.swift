@@ -193,18 +193,37 @@ public enum ClientRegistry {
 
     // MARK: - Grouped tabs
 
+    /// Tabs that group more than one client id under a single top tab: one
+    /// member carries local session usage, the other only a cloud quota with
+    /// no usage of its own. Single table backing `tabSlice`, `tabClients`, and
+    /// `tabLabel` — three separate ternaries is how a second group (Antigravity
+    /// IDE + CLI, alongside Grok Build + Bot) would drift from the first.
+    private static let tabGroups: [String: (members: [String], label: String)] = [
+        "grok": (["grok", "grok-bot"], "Grok Build & Bot"),
+        "antigravity": (["antigravity", "antigravity-cli"], "Antigravity IDE & CLI"),
+    ]
+
+    /// Reverse lookup built once: a group member's id -> the tab id it folds
+    /// into (a group's own tab id maps to itself). Backs `tabClients`.
+    private static let memberToTabId: [String: String] = tabGroups.reduce(into: [:]) {
+        out, entry in
+        for member in entry.value.members { out[member] = entry.key }
+    }
+
     /// Client ids behind a top tab. The "grok" tab is a group: Grok Build
     /// (local CLI session logs) and Grok Bot (Cursor-billed cloud quota) are
-    /// different data sources shown as two sections under one tab.
+    /// different data sources shown as two sections under one tab. Same
+    /// arrangement for "antigravity": the CLI carries the usage, the IDE
+    /// client carries the quota.
     public static func tabSlice(_ id: String) -> [String] {
-        id == "grok" ? ["grok", "grok-bot"] : [id]
+        tabGroups[id]?.members ?? [id]
     }
 
     /// Navigation includes configured quota sources even without local usage.
     /// Group members share one tab but retain their provider identities below it.
     public static func tabClients(present: [String], quotaIds: [String]) -> [String] {
         var seen = Set<String>()
-        return (present + quotaIds).map { $0 == "grok-bot" ? "grok" : $0 }
+        return (present + quotaIds).map { memberToTabId[$0] ?? $0 }
             .filter { seen.insert($0).inserted }
     }
 
@@ -221,10 +240,10 @@ public enum ClientRegistry {
         return orderedClients(ids, orderRaw: orderRaw)
     }
 
-    /// Tab-bar and single-client-titles label. Only the grouped tab differs
+    /// Tab-bar and single-client-titles label. Only a grouped tab differs
     /// from its short name; every other tab keeps `shortName`.
     public static func tabLabel(_ id: String) -> String {
-        id == "grok" ? "Grok Build & Bot" : shortName(id)
+        tabGroups[id]?.label ?? shortName(id)
     }
 
     /// Card titles retain the full client name for ordinary tabs.
@@ -234,11 +253,14 @@ public enum ClientRegistry {
 
     /// Expand a hidden set so group members follow their tab: hiding the
     /// "grok" tab also hides the quota-only "grok-bot" row (which has no tab
-    /// of its own to hide). Explicit "grok-bot" entries pass through, so an
-    /// independent limits-toggle on the Bot row keeps working.
+    /// of its own to hide), and likewise "antigravity" / "antigravity-cli".
+    /// Explicit member entries (e.g. "grok-bot" alone) pass through unchanged,
+    /// so an independent limits-toggle on a member row keeps working.
     public static func withGroupMembers(_ ids: Set<String>) -> Set<String> {
         var out = ids
-        if out.contains("grok") { out.insert("grok-bot") }
+        for id in ids {
+            if let group = tabGroups[id] { out.formUnion(group.members) }
+        }
         return out
     }
 
