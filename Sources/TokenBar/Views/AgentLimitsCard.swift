@@ -273,12 +273,14 @@ struct AgentLimitsCard: View {
     // placeholder row): its usage still surfaces through the other Overview
     // cards (chart/trace/model breakdown), which is what a grouped tab means.
     //
-    // No instance-level wrapper left around `Self.snapshotsByRow(_:)` any
-    // more, on purpose: the alias used to live in exactly that wrapper, so
-    // every call site now reads the static, testable function directly —
-    // there is no remaining seam for a re-added alias to hide in that
-    // `AgentLimitsCard.snapshotsByRow(_:)`'s own SelfTest coverage would not
-    // immediately catch.
+    // The instance property below stays — `baseClients` and `agentSection`
+    // both read it — but it is now a bare forward that adds nothing. That is
+    // the point: the alias used to live in exactly this wrapper, as a
+    // per-instance transformation layered on top of the static function, and a
+    // wrapper that transforms nothing has nowhere to hide one. The static
+    // `AgentLimitsCard.snapshotsByRow(_:)` is therefore the single place the
+    // dictionary is built, which is what SelfTest asserts against and what a
+    // re-added alias would have to pass through to reach a card.
     private var snapshotsByRow: [AccountIdentity: AgentUsageSnapshot] {
         Self.snapshotsByRow(agentUsage?.agents ?? [])
     }
