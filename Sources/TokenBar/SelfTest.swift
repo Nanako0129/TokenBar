@@ -7677,10 +7677,18 @@ enum SelfTest {
         let quota = DemoData.agentUsage
         let quotaClients = Set(quota.agents.map(\.clientId))
         let registryClients = Set(ClientRegistry.allIds)
+        // Usage is per CLIENT, quota is per SUBSCRIPTION, and the two sets are
+        // not the same one. They coincided for every registered id until
+        // Antigravity's CLI made the difference visible: it publishes real
+        // session usage and draws on the IDE's allowance, so a demo card of its
+        // own asserted an allowance the provider never reports — and once #346
+        // put both members under one tab, that card rendered as a second,
+        // identical quota row beside the one it had borrowed.
+        let quotaOwners = registryClients.filter { ClientRegistry.quotaOwner($0) == $0 }
         expect(
             summaryClients == registryClients && contributionClients == registryClients
-                && quotaClients == registryClients,
-            "demo summary contributions and quota share the client set")
+                && quotaClients == quotaOwners,
+            "demo usage covers every client, demo quota covers every subscription owner")
         // The canonical card identities a demo client is expected to expose, in
         // order. The authority for each is the provider's own card-ID constant
         // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
@@ -7702,7 +7710,7 @@ enum SelfTest {
         ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
-            quota.agents.count == ClientRegistry.allIds.count
+            quota.agents.count == quotaOwners.count
                 && quota.agents.allSatisfy { agent in
                     // The raw array, not `uniqueCardWindows`: that view is
                     // fail-closed on a repeated card ID, so a fixture writing
@@ -10449,6 +10457,25 @@ enum SelfTest {
                     == Set(["antigravity", "antigravity-cli"]),
             "A1b: either stored form of a grouped tab excludes every client under that tab, "
                 + "so a hidden tab cannot leak one of its members' usage to the profile")
+
+        // Demo mode builds one quota snapshot per registered id, which gave
+        // `antigravity-cli` an allowance it does not have — and once the IDE and
+        // the CLI shared a tab, that invented snapshot rendered as a second,
+        // identical quota row. The rule is per subscription, not per client.
+        let demoAgentIds = Set(DemoData.agentUsage.agents.map(\.clientId))
+        expect(
+            !demoAgentIds.contains("antigravity-cli") && demoAgentIds.contains("antigravity"),
+            "demo gives the Antigravity subscription one card, under the id that owns it")
+        // Control: a grouped member that owns its OWN allowance keeps its card.
+        // Without this, excluding every grouped member would pass the assertion
+        // above while taking Grok Bot's card — a different allowance, on a
+        // different bill, that shares nothing but a tab.
+        expect(
+            demoAgentIds.contains("grok") && demoAgentIds.contains("grok-bot"),
+            "Grok Build and Grok Bot each keep a demo card, because each owns an allowance")
+        expect(
+            demoAgentIds.allSatisfy { ClientRegistry.quotaOwner($0) == $0 },
+            "no demo card belongs to a client that draws on someone else's subscription")
 
         // A8 — Discord absent. The common case, not an error: the connect
         // closure fails the way `connectToDiscord` does when there is no socket
