@@ -20,11 +20,6 @@ reviews:
       # failed on #330, #349 and #350 without once naming a real defect.
       mode: off
 
-  path_filters:
-    # The shared engine is owned by tokscale-core and reviewed there. Reviewing
-    # it here spends rate limit re-reading another repository's code.
-    - "!vendor/**"
-
   path_instructions:
     - path: "Sources/CTB/include/ctb.h"
       instructions: |
@@ -34,7 +29,7 @@ reviews:
         parity or smoke evidence. Flag a change that moves one side without the
         others.
 
-        Successful heap JSON pointers must retain the documented `tb_free`
+        Successful heap JSON pointers must retain the documented tb_free
         ownership path.
 
     - path: "Sources/**/*.swift"
@@ -45,7 +40,7 @@ reviews:
         filter is mathematically incapable of removing the contribution, so a
         fix at the display layer is the wrong seam even when it looks smaller.
 
-        Preserve the documented `nil` and empty-list semantics across Swift, C
+        Preserve the documented nil and empty-list semantics across Swift, C
         and Rust; they are not interchangeable.
 
         UI lifecycle: a change here needs evidence that closing the popover or
@@ -75,4 +70,4 @@ knowledge_base:
     filePatterns:
       - "AGENTS.md"
       - "CONTRIBUTING.md"
-      - "docs/knowledge/*.md"
+      - "docs/knowledge/**/*.md"
