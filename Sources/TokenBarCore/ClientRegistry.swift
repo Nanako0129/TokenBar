@@ -200,7 +200,12 @@ public enum ClientRegistry {
     /// IDE + CLI, alongside Grok Build + Bot) would drift from the first.
     private static let tabGroups: [String: (members: [String], label: String)] = [
         "grok": (["grok", "grok-bot"], "Grok Build & Bot"),
-        "antigravity": (["antigravity", "antigravity-cli"], "Antigravity IDE & CLI"),
+        // Just "Antigravity", not "Antigravity IDE & CLI": read on the running
+        // popover, the longer form crowded a tab row that already scrolls, and
+        // "IDE" is a word neither member's display name uses. Grok keeps the
+        // two-part form because "Grok Build" and "Grok Bot" are both product
+        // names a user would look for; nobody looks for "Antigravity IDE".
+        "antigravity": (["antigravity", "antigravity-cli"], "Antigravity"),
     ]
 
     /// Reverse lookup built once: a group member's id -> the tab id it folds

@@ -5646,9 +5646,15 @@ enum SelfTest {
         expect(
             ClientRegistry.tabSlice("antigravity") == ["antigravity", "antigravity-cli"],
             "antigravity tab expands to IDE + CLI")
+        // Pins the string a reader sees, and nothing more: "Antigravity" is
+        // also what `tabLabel` returns by FALLBACK for an id absent from
+        // `tabGroups`, so unlike the Grok case this assertion cannot witness
+        // that the group exists. Deleting the antigravity entry leaves it
+        // green. The slice, fold and hide assertions around it are what catch
+        // that, and they are mutation-verified for it.
         expect(
-            ClientRegistry.tabLabel("antigravity") == "Antigravity IDE & CLI",
-            "antigravity tab carries the group label")
+            ClientRegistry.tabLabel("antigravity") == "Antigravity",
+            "antigravity tab reads as Antigravity, not a two-part group label")
         expect(
             ClientRegistry.tabClients(present: ["antigravity-cli"], quotaIds: ["antigravity"])
                 == ["antigravity"],
