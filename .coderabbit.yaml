@@ -1,0 +1,78 @@
+# CodeRabbit configuration.
+# Schema: https://storage.googleapis.com/coderabbit_public_assets/schema.v2.json
+#
+# Every instruction below restates a rule this repository already writes down in
+# AGENTS.md, CONTRIBUTING.md or docs/knowledge/. Nothing here is a new policy.
+
+reviews:
+  auto_review:
+    # Default is 5: after five reviewed commits CodeRabbit silently stops
+    # auto-reviewing, and a poller then reads that as a timeout rather than a
+    # pause. A fix loop on a contested PR passes five rounds easily.
+    auto_pause_after_reviewed_commits: 20
+
+  pre_merge_checks:
+    docstrings:
+      # Off, measured rather than assumed. The coverage denominator is every
+      # function the diff TOUCHED, not the functions it added, so on #330 a
+      # contributor's five-line change inherited three pre-existing
+      # undocumented functions and scored 57% against an 80% threshold. It has
+      # failed on #330, #349 and #350 without once naming a real defect.
+      mode: off
+
+  path_filters:
+    # The shared engine is owned by tokscale-core and reviewed there. Reviewing
+    # it here spends rate limit re-reading another repository's code.
+    - "!vendor/**"
+
+  path_instructions:
+    - path: "Sources/CTB/include/ctb.h"
+      instructions: |
+        Cross-language contract (CONTRIBUTING.md, "Change-specific guardrails").
+        A boundary change must check all four sides: the C declarations here,
+        the Rust FFI entry point or mapper, the Swift decoder or model, and
+        parity or smoke evidence. Flag a change that moves one side without the
+        others.
+
+        Successful heap JSON pointers must retain the documented `tb_free`
+        ownership path.
+
+    - path: "Sources/**/*.swift"
+      instructions: |
+        Pre-aggregation (AGENTS.md invariants). Do not subtract a contribution
+        after a mixed aggregate has been computed. Pass a non-empty filter to
+        the producer while client identity is still available. A downstream
+        filter is mathematically incapable of removing the contribution, so a
+        fix at the display layer is the wrong seam even when it looks smaller.
+
+        Preserve the documented `nil` and empty-list semantics across Swift, C
+        and Rust; they are not interchangeable.
+
+        UI lifecycle: a change here needs evidence that closing the popover or
+        settings window stops polling and background rendering.
+
+    - path: "vendor/**"
+      instructions: |
+        Shared-engine boundary (AGENTS.md invariants). Shared Rust changes land
+        in tokscale-core with their ledger update; this repository advances only
+        a reviewed gitlink. App-owned FFI, the C ABI, Swift and build wiring stay
+        here. Flag a patch that edits vendored engine source in place.
+
+    - path: "docs/**/*.md"
+      instructions: |
+        docs/knowledge/ is the canonical source for architecture, verification,
+        workflow, vendor, release and maintenance decisions. Keep links
+        repository-relative. Never add private paths, credentials,
+        machine-specific tooling details, or unpublished security work to
+        tracked docs.
+
+        If a guide and an execution source disagree, the execution source is
+        verified and the canonical knowledge updated, rather than a second
+        version being copied into the guide.
+
+knowledge_base:
+  code_guidelines:
+    filePatterns:
+      - "AGENTS.md"
+      - "CONTRIBUTING.md"
+      - "docs/knowledge/*.md"
