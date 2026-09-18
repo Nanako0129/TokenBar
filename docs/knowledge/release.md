@@ -4,7 +4,7 @@ id: kb-release
 kind: canonical
 scope: repository
 read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, or post-release notes
-last_verified: 2026-09-10
+last_verified: 2026-09-16
 sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "public release history"]
 ---
 
@@ -47,6 +47,14 @@ flowchart LR
 ## Application release
 
 The release workflow is tag-driven. It validates and bundles the native app, produces the archive and update metadata, creates the GitHub Release, publishes the appcast update, updates the Homebrew cask, and dispatches the install-count refresh. Stable and prerelease behavior is decided from the tag and release workflow, not from a hand-edited README.
+
+**Tags are annotated, named `TokenBar <version>` without the `v`** — `git tag -a v1.18.0 <sha> -m "TokenBar 1.18.0"` — matching the GitHub Release title. An annotated tag carries its own author, date and message; a lightweight one is a bare pointer, so who cut a release and when is only answerable from the commit it happens to point at.
+
+This is a decision, not a description. Of the 44 tags before it, 29 were lightweight and 15 annotated, alternating in runs — v1.1.0–v1.1.1 annotated, v1.1.2–v1.1.4 not, v1.5.0–v1.11.0 annotated, v1.12.0–v1.16.0 not, v1.17.0 annotated again. The message format varied too (`TokenBar 1.17.0`, `TokenBar v1.11.0`, `TokenBar v1.14.2 — Antigravity quota when the IDE is closed`). Reading a habit off the last two or three tags produces a different answer depending on which two or three, which is exactly what happened while cutting v1.18.0.
+
+**Existing tags are left alone.** Retagging rewrites the object that 43 GitHub Releases, their appcast items and the Homebrew cask all resolve through. The inconsistency above stops at v1.18.0 rather than being tidied away.
+
+Either form triggers the workflow identically — `push: tags: ["v*"]`, with the version read from `GITHUB_REF_NAME` — so this changes nothing about what ships. It changes what a tag can be asked afterwards.
 
 | Artifact or action | Source of truth | Verification |
 |---|---|---|
