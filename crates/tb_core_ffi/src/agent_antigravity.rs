@@ -1161,20 +1161,51 @@ fn remote_identity(plan: Option<String>) -> AgentIdentity {
     AgentIdentity { email: None, plan }
 }
 
+/// Why the shared Google credential could not be loaded.
+///
+/// The distinction is behaviour, not wording. Only a genuinely absent file means
+/// "nothing is configured", and only that verdict may take the card out of tab
+/// navigation (#345). A file that exists but cannot be read or parsed belongs to
+/// a configured account with a broken credential: it has to stay visible and say
+/// so, or a permission problem and a corrupt JSON both present as "you never set
+/// this up" while the card silently leaves the tab bar.
+#[derive(Debug, PartialEq, Eq)]
+enum RemoteCredentialError {
+    Absent,
+    Unreadable,
+}
+
+/// A credential that exists but cannot be used. Distinct from
+/// `ANTIGRAVITY_UNCONFIGURED_ERROR` so `required_card_source` leaves it at
+/// `oauth`, which keeps the card and its tab.
+const ANTIGRAVITY_UNREADABLE_ERROR: &str =
+    "Antigravity credentials could not be read. Re-login in Antigravity.";
+
 /// The credential step of `prepare_remote_context`, split out so the pairing of
-/// "no readable credential" with `ANTIGRAVITY_UNCONFIGURED_ERROR` is reachable
+/// "no credential at all" with `ANTIGRAVITY_UNCONFIGURED_ERROR` is reachable
 /// from a test without a Gemini home, a running IDE or the network. That pairing
 /// is what keeps an Antigravity card that has never been set up out of tab
 /// navigation, so it is behaviour, not a message (#345).
 fn remote_credentials_or_unconfigured(path: &Path) -> Result<Value, ProviderFetchFailure> {
-    load_remote_credentials(path)
-        .map_err(|_| ProviderFetchFailure::terminal(ANTIGRAVITY_UNCONFIGURED_ERROR))
+    load_remote_credentials(path).map_err(|error| match error {
+        RemoteCredentialError::Absent => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNCONFIGURED_ERROR)
+        }
+        RemoteCredentialError::Unreadable => {
+            ProviderFetchFailure::terminal(ANTIGRAVITY_UNREADABLE_ERROR)
+        }
+    })
 }
 
-fn load_remote_credentials(path: &Path) -> Result<Value, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|_| "Antigravity not logged in (no ~/.gemini/oauth_creds.json)".to_string())?;
-    serde_json::from_str(&raw).map_err(|e| format!("decode oauth_creds.json: {e}"))
+fn load_remote_credentials(path: &Path) -> Result<Value, RemoteCredentialError> {
+    let raw = std::fs::read_to_string(path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            RemoteCredentialError::Absent
+        } else {
+            RemoteCredentialError::Unreadable
+        }
+    })?;
+    serde_json::from_str(&raw).map_err(|_| RemoteCredentialError::Unreadable)
 }
 
 fn remote_access_token(creds: &Value) -> Result<String, String> {
@@ -3051,6 +3082,40 @@ mod tests {
             cache_binding: None,
             windows: Vec::new(),
         }
+    }
+
+    /// A credential that exists but cannot be parsed belongs to a configured
+    /// account, so it must NOT reach the absence marker. Before the split it
+    /// did: every `load_remote_credentials` failure became
+    /// `ANTIGRAVITY_UNCONFIGURED_ERROR`, so a corrupt `oauth_creds.json` took
+    /// the card out of tab navigation and claimed the user had never logged in.
+    #[test]
+    fn malformed_remote_credentials_are_unreadable_not_absent() {
+        let dir = std::env::temp_dir().join("tokenbar-antigravity-malformed-probe");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("oauth_creds.json");
+        std::fs::write(&path, b"{ this is not json").unwrap();
+
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Unreadable)
+        );
+        let failure = remote_credentials_or_unconfigured(&path).unwrap_err();
+        assert!(
+            matches!(
+                failure,
+                ProviderFetchFailure::Terminal { ref display }
+                    if display == ANTIGRAVITY_UNREADABLE_ERROR
+            ),
+            "a corrupt credential must not read as an absent one, got {failure:?}"
+        );
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(
+            load_remote_credentials(&path),
+            Err(RemoteCredentialError::Absent),
+            "control: the same path with the file gone IS absent, so the case above \
+             is the parse and not the path"
+        );
     }
 
     /// The reported machine's state, which this one cannot enter: no running
