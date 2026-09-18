@@ -2538,10 +2538,16 @@ mod tests {
         );
     }
 
-    /// An unreadable credential file must report the marker verbatim: the
+    /// An **absent** credential file must report the marker verbatim: the
     /// snapshot's `source` is decided by comparing against it
     /// (`agent_usage::required_card_source`), so a message edited here and not
     /// there silently restores the phantom tab this pairing removes.
+    ///
+    /// Absent, not unreadable — the two are now different verdicts.
+    /// `RemoteCredentialError::Unreadable` deliberately does NOT reach this
+    /// marker, and `malformed_remote_credentials_are_unreadable_not_absent`
+    /// below is the assertion that keeps it out. This wording predated that
+    /// split and described the behaviour the split removed.
     #[test]
     fn absent_remote_credentials_report_the_unconfigured_marker() {
         let missing = std::env::temp_dir()
