@@ -330,10 +330,31 @@ public enum ClientRegistry {
             .filter { seen.insert($0).inserted }
     }
 
+    /// Reactive overload: sorts against an explicitly-passed saved order string
+    /// so a SwiftUI view that observes the @AppStorage raw re-renders when the
+    /// order changes (the zero-arg variant reads UserDefaults for non-view
+    /// callers and never invalidates a body on its own).
+    ///
+    /// Takes the saved ids as stored. Callers ordering TAB ids want
+    /// `tabOrder(_:)` folded in first, which `displayClients` does; callers
+    /// ordering MEMBER ids — the limits card's rows, the Settings list, the
+    /// tray, the Discord client list — must not, because each member holds its
+    /// own saved position there.
     public static func orderedClients(_ ids: [String], orderRaw: String) -> [String] {
         orderedClients(ids, order: parseIdList(orderRaw))
     }
 
+    /// The sort itself, over an already-parsed order.
+    ///
+    /// Split from the string form so a caller can transform the saved list
+    /// before it is applied without paying a re-parse or re-joining it into a
+    /// CSV. `displayClients` is that caller: it folds grouped members onto
+    /// their tab id first, and folding a string would mean splitting it, mapping
+    /// it, joining it, and splitting it again.
+    ///
+    /// Ids absent from `order` sort last and keep their incoming relative
+    /// order, so a newly discovered client appears at the end rather than at an
+    /// arbitrary position.
     static func orderedClients(_ ids: [String], order: [String]) -> [String] {
         guard !order.isEmpty else { return ids }
         return ids.sorted { a, b in

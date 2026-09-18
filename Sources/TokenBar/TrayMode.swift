@@ -40,11 +40,11 @@ enum TrayMode: String, CaseIterable {
             return "\(Int(min(100, max(0, quotaRemaining)).rounded()))%"
         }
         guard self != .hidden, let graph else { return "" }
-        // Hidden clients must not appear in any tray figure. An empty hidden
-        // set is byte-identical to the pre-hide summary/today totals. Computed
-        // lazily only in the branches that read it — title() runs on every
-        // UserDefaults write (AppDelegate's observer), and the rate/early modes
-        // never touch the aggregate.
+        /// Hidden clients must not appear in any tray figure. An empty hidden
+        /// set is byte-identical to the pre-hide summary/today totals. Computed
+        /// lazily only in the branches that read it — title() runs on every
+        /// UserDefaults write (AppDelegate's observer), and the rate/early modes
+        /// never touch the aggregate.
         func totals() -> TrayTotals {
             graph.trayTotals(hidden: ClientRegistry.hiddenTabClients(), today: Format.todayKey())
         }
