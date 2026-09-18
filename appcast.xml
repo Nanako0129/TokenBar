@@ -3,6 +3,27 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.19.0</title>
+            <pubDate>Fri, 18 Sep 2026 23:19:23 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.19.0</link>
+            <sparkle:version>1125</sparkle:version>
+            <sparkle:shortVersionString>1.19.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Before you update:</b>
+<ul>
+<li>Tabs for providers you never set up disappear. v1.18.0 began including configured quota sources in the tab bar alongside local usage, which is right for a provider you use and wrong for one you don't. Codex, Claude and Antigravity are built as cards that always exist, so the presence of a card said nothing about whether anything had been set up, and Codex and Antigravity took a tab on every install. A provider with no credential at all now has no tab. One whose credential exists and cannot be read - a permission problem, a corrupt file - keeps its tab and shows what went wrong.</li>
+<li>Antigravity's two tabs become one. Its IDE and CLI clients draw on one subscription and had a tab each. They now share one, labelled Antigravity, the arrangement Grok Build and Grok Bot already use: the CLI's usage and the IDE's quota card sit under it together. Your own settings survive the merge - a hidden Antigravity CLI tab stays hidden, and its place in your saved tab order becomes the merged tab's.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>An agy installed after TokenBar started was never found. Antigravity's CLI discovery cached its answer for the life of the process, including the answer that there was nothing to find. Installing agy while TokenBar was running therefore changed nothing until the next launch, and the card went on reporting the error it had been given before. An empty result is now retried on a later refresh.</li>
+</ul>
+<p>Thanks: @iF2007</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.19.0/TokenBar.app.tar.gz" length="10545746" type="application/octet-stream" sparkle:edSignature="BmOkd8y0RjfPP+tN6OESrLoJ8lQpGcN7pIJo82nV2HhGTaCT7956WwBx2yLJaJBoN8s0O1/3XqBFXY1GMwdvDg=="/>
+        </item>
+        <item>
             <title>1.18.0</title>
             <pubDate>Wed, 16 Sep 2026 13:21:55 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.18.0</link>
@@ -107,27 +128,6 @@
 <p>Thanks: @Agugu-official</p>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.15.0/TokenBar.app.tar.gz" length="10155107" type="application/octet-stream" sparkle:edSignature="iEkLUx39Wu1L88is0YwWamAkATgbE0rb1IZw35Kt+GuCedfDVfbu2xRPxaEyU0+df7VXHRY5Deh4iHMm85N5Bw=="/>
-        </item>
-        <item>
-            <title>1.14.4</title>
-            <pubDate>Sun, 30 Aug 2026 11:21:49 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.14.4</link>
-            <sparkle:version>892</sparkle:version>
-            <sparkle:shortVersionString>1.14.4</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Fixes:</b>
-<ul>
-<li>Codex quota windows that ended before their advertised reset were deleted instead of recorded. Codex moves its reported weekly reset ahead of schedule, and a window that ended early was neither complete nor the one in progress, so the next save dropped it. On one account's raw sample log the reset moved on 11.6% of consecutive readings, which is why Codex window history stayed near empty while other providers filled in normally. Such a window is now closed at the length it actually ran, and appears in Window history like any other.</li>
-</ul>
-<b>Three limits worth knowing:</b>
-<ul>
-<li>Closing a window does not lower the bar for recording one. It still needs readings spread from near its start to near its end without a long gap, so a window seen only in patches is dropped exactly as before. If TokenBar was not running for much of a window, that window is still lost.</li>
-<li>History lost before this update does not come back. Those samples were deleted at the time, so nothing remains to rebuild from.</li>
-<li>A window cut short by more than a tenth of its length stays out of the pace projection, since one that stopped at 34% used would teach the run-out forecast that a full cycle ends there. A window that still ran nine tenths of its length counts as finished and feeds the projection as before.</li>
-</ul>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.14.4/TokenBar.app.tar.gz" length="10048231" type="application/octet-stream" sparkle:edSignature="69h5qmXt6u+GD86iVzNiz9OEtkOrzBeSIu5wfrar6AshIxMDxFP11C11ilUbuaPj7rxQdZNWhUdJNMys22z5DA=="/>
         </item>
         <item>
             <title>1.1.1</title>
