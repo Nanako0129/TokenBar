@@ -12162,6 +12162,120 @@ enum SelfTest {
             expect(passed, "#359: \(label)")
         }
 
+        // Strip restore across a popover reopen. `DashboardSnapshot` carries
+        // the payload, the stats and the agent usage, so everything else in
+        // the lens is drawn the instant a rebuilt model exists — and carried
+        // neither history card, so those two started from `[]` and re-read
+        // every window's curve before they could draw. They were the only two
+        // surfaces spinning on a reopen, which is what named the gap.
+        let stripReopen: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            // `lastSnapshot` is process-wide and the restore at `init` does NOT
+            // check `cachesSnapshot` — only writing it does. So a model seeded
+            // here is read by every later model built with the same
+            // `initialYear`, and this is the first case in the file to write
+            // one. Leaving it set broke four scan assertions further down
+            // before this defer existed; they were reading this fixture's
+            // quota cards as their own restored state.
+            DashboardModel.invalidateScanDerivedCaches()
+            defer { DashboardModel.invalidateScanDerivedCaches() }
+            let src = WindowScanCountingSource(payload: buildAndBot)
+            src.curveByClient = ["grok-bot": botCurve, "grok": buildCurve]
+            // `cachesSnapshot: true` is what puts a model in the shared reopen
+            // cache at all — the default is false, so every other case in this
+            // file runs outside the lifecycle this one is about.
+            let seed = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            seed.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            await seed.load()
+            let poll = Task { await seed.pollAgentUsage() }
+            var spins = 0
+            while seed.quotaWindowSummaries.isEmpty, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            var out: [String: Bool] = [:]
+            let published = Set(seed.quotaWindowSummaries.map(\.id))
+            // Control: the seed really published something to restore. Without
+            // it, "the reopen restored what the seed had" is satisfied by two
+            // empty strips.
+            out["control: the seeding model published a strip"] = !published.isEmpty
+
+            // The reopen. A rebuilt model reads the shared cache in `init`,
+            // before any refresh has run.
+            // The window card and its sparkline are the other two surfaces on
+            // this lens that a rebuilt model recomputed from nothing.
+            //
+            // The history card is built for the SELECTED client. Without this
+            // line `quotaHistory` stays empty and the assertion on it compares
+            // 0 to 0 — which is exactly what its control caught.
+            seed.windowUsageClient = "grok"
+            await seed.refreshWindowUsage()
+            out["control: the seeding model published a window card and a curve"] =
+                !seed.windowCards.isEmpty && !seed.windowCurves.isEmpty
+            out["control: the seeding model published history rows"] =
+                !seed.quotaHistory.isEmpty
+
+            let reopened = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            out["a reopened model draws the strip before any refresh"] =
+                Set(reopened.quotaWindowSummaries.map(\.id)) == published
+            out["and the heatmap with it"] =
+                Set(reopened.quotaHeatmaps.keys) == Set(seed.quotaHeatmaps.keys)
+                && !reopened.quotaHeatmaps.isEmpty
+            out["and the window card and its sparkline"] =
+                Set(reopened.windowCards.keys) == Set(seed.windowCards.keys)
+                && Set(reopened.windowCurves.keys) == Set(seed.windowCurves.keys)
+            out["and the window-history rows"] =
+                reopened.quotaHistory.count == seed.quotaHistory.count
+            // A restored strip counts as published, or the #356 guard treats
+            // these rows as "never published" and lets an unanswered refresh
+            // replace them with an empty set.
+            src.curveByClient = [:]
+            src.curve = nil
+            reopened.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            reopened.refreshWindowQuotaHalves()
+            out["a restored strip is protected from an unanswered refresh"] =
+                Set(reopened.quotaWindowSummaries.map(\.id)) == published
+
+            // A restored model whose FIRST curve read throws. That is the
+            // #359 case, and it takes a different branch from the one above:
+            // `refreshWindowQuotaHalves`'s failure path clears `quotaHistory`
+            // when `quotaCyclesCardId` does not match the selected window, and
+            // on a restored model that id is whatever the restore seeded. The
+            // per-client success path this fixture drove first cannot reach it.
+            let throwing = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            let restoredHistory = throwing.quotaHistory.count
+            out["control: the reopened model restored history rows to lose"] =
+                restoredHistory > 0
+            src.failCurveRead = true
+            throwing.windowUsageClient = "grok"
+            throwing.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            throwing.refreshWindowQuotaHalves()
+            out["a throwing first curve read does not drop the restored history"] =
+                throwing.quotaHistory.count == restoredHistory
+            src.failCurveRead = false
+
+            // NOT asserted here, deliberately, and this comment is the
+            // hand-over rather than a footnote: `refreshWindowUsage()`'s
+            // all-agent branch (`windowUsageClient == nil`) now writes the
+            // reopen cache through its own two early returns, because they
+            // never reach the call at the foot of that function. Covering it
+            // needs a fixture that feeds `messagesByAccount` with rows landing
+            // inside this curve's cycles, since `rebuildQuotaEquivalences()`
+            // folds scan spans and produces nothing without them. The first
+            // version of this case asserted it anyway and compared two empty
+            // sets; its control caught that, and a vacuous assertion is worse
+            // than a stated gap because it reads as coverage.
+            return out
+        }
+        expect(stripReopen != nil, "strip-reopen fixture completes")
+        for (label, passed) in (stripReopen ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "strip reopen: \(label)")
+        }
+
         // L1a. `quotaHalf` takes no UsageDataSource at all, so the network is
         // unreachable by signature rather than by discipline — the assertion
         // below is that it produces a placed window from memory alone.
