@@ -460,6 +460,14 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// is "no history", a throw is "could not be read". Conflating them is the
     /// defect the case using this drives.
     var failCurveRead = false
+    /// Which clients throw, as opposed to `failCurveRead` making every client
+    /// throw at once. #359 is a defect that only exists when ONE provider fails
+    /// permanently while others answer: `antigravity` returns "quota curve
+    /// binding is unavailable" on every read, and a single shared failure flag
+    /// let that suppress Claude's, Grok's and Copilot's history too. A double
+    /// that can only fail globally cannot express that payload, which is why
+    /// the suite went green over it.
+    var failCurveReadClients: Set<String> = []
     struct QuotaUnavailable: Error {}
 
     init(payload: AgentUsagePayload) { self.payload = payload }
@@ -475,7 +483,7 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
         clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         curveReads.append((clientId, generation))
-        if failCurveRead { throw QuotaUnavailable() }
+        if failCurveRead || failCurveReadClients.contains(clientId) { throw QuotaUnavailable() }
         if let byAccount = curveByAccount[accountKey] { return byAccount }
         if let byClient = curveByClient[clientId] { return byClient }
         return curve
@@ -12005,6 +12013,153 @@ enum SelfTest {
         expect(quotaOnlyFlow != nil, "Grok Bot quota-only integration fixture completes")
         for (label, passed) in (quotaOnlyFlow ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "Grok Bot: \(label)")
+        }
+
+        // #359. One provider failing permanently must not erase every other
+        // provider's history.
+        //
+        // `refreshWindowQuotaHalves` carried ONE `readFailed` flag for the
+        // whole two-level loop, and any throw suppressed the entire
+        // publication. The comment there called a throw "a transient
+        // generation expiry", and for `antigravity` it is not: measured with
+        // `--window-probe --generation-drift` on a real install, every
+        // `antigravity` read answers "quota curve binding is unavailable" with
+        // the CURRENT generation. So the suppression never lifted, and a
+        // process that launched with an empty strip reported "no completed
+        // windows recorded yet" for as long as it ran — about 132 Claude
+        // cycles that the same binary resolves when asked directly.
+        //
+        // No case in this suite could see it: the double could only fail every
+        // client at once (`failCurveRead`), so "one provider down, the rest
+        // healthy" was not a payload the fixtures could express.
+        let stripPartialFailure: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: buildAndBot)
+            // Grok gets a FOUR-cycle curve rather than the shared single-cycle
+            // `buildCurve`, because `qualifyingCycles` holds nothing until
+            // `WindowEquivalence.minimumCycles` (3) cycles are admitted. With
+            // one cycle the retention assertion below compares an empty set to
+            // an empty set — which is exactly what its control caught on the
+            // first run. `buildCurve` is left alone; the Bot/Build cases above
+            // assert on its exact percentages.
+            let fourCycleBuild: QuotaCurve = {
+                var pts: [String] = []
+                var sampledAts: [Int64] = []
+                // Oldest cycle first: the decoder validates `coverage` against
+                // the points it covers and rejects a mismatch outright, which
+                // it did — with a `try!` trap, so the run reached no verdict
+                // and printed no FAIL line. Coverage is derived below rather
+                // than written by hand for that reason.
+                for cycle in (0..<4).reversed() {
+                    // Samples span 500_000s of a 604_800s window, clearing
+                    // `minimumObservedFraction` (0.5), and rise 55 points over
+                    // two rising runs, clearing `deltaQualifies`.
+                    let reset = wReset - Int64(cycle) * 604_800
+                    for (offset, pct) in [(-600_000, 5.0), (-350_000, 30.0), (-100_000, 60.0)] {
+                        let at = reset + Int64(offset)
+                        sampledAts.append(at)
+                        pts.append("""
+                        {"sampledAt":\(at),"usedPercent":\(pct),
+                         "resetAt":\(reset),"durationSeconds":604800,
+                         "durationSource":"provider","origin":"liveV3",
+                         "isActiveGroup":false}
+                        """)
+                    }
+                }
+                let json = """
+                {"points":[\(pts.joined(separator: ","))],
+                 "coverage":{"oldestSampledAt":\(sampledAts.min() ?? 0),
+                             "newestSampledAt":\(sampledAts.max() ?? 0),
+                             "sampleCount":\(pts.count)},
+                 "activeResetAt":null,"generation":7}
+                """
+                return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+            }()
+            src.curveByClient = ["grok-bot": botCurve, "grok": fourCycleBuild]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage?.publicationGeneration != 8, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            var out: [String: Bool] = [:]
+            let botKey = "grok-bot|weekly.v1"
+            let buildKey = "grok|billing.weekly.v1"
+            // Control. Without it, every assertion below is satisfied by a
+            // fixture that never produced two rows in the first place.
+            out["control: both providers publish while both can be read"] =
+                Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+
+            // Retention, driven from a POPULATED strip — the empty-start case
+            // below cannot show it, because a window with nothing published
+            // has nothing to hold over. `qualifyingCycles` is the one not
+            // drawn directly: `rebuildQuotaEquivalences()` rebuilds
+            // `quotaEquivalences` from it, so a window dropped here loses the
+            // API-value estimate on its history rows while its strip and grid
+            // stay drawn, and never regains it if the read never recovers.
+            let qualifyingBefore = Set(m.qualifyingCycleKeysForTesting)
+            // Control: without it the retention assertion is satisfied by a
+            // fixture whose cycles never qualified in the first place.
+            out["control: the healthy pass produced qualifying cycles"] =
+                !qualifyingBefore.isEmpty
+            src.failCurveReadClients = ["grok"]
+            m.refreshWindowQuotaHalves()
+            out["a failed window keeps its summary, grid and qualifying cycles"] =
+                m.quotaWindowSummaries.contains { $0.id == buildKey }
+                && m.quotaHeatmaps[buildKey] != nil
+                && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
+            src.failCurveReadClients = []
+            m.refreshWindowQuotaHalves()
+
+            // The state the defect actually needs, and the one the first
+            // version of this case got wrong: the strip must be EMPTY when the
+            // failure begins. Suppressing the whole publication also preserves
+            // a strip that already has rows, so with rows already published
+            // both behaviours look identical — mutation showed that version
+            // surviving the global-suppression mutation intact. A launched app
+            // starts with nothing published, which is why it never recovered.
+            m.configureQuotaVisibility(tabHidden: ["grok", "grok-bot"], limitsHidden: [], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            out["control: the strip really is empty before the failure begins"] =
+                m.quotaWindowSummaries.isEmpty
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+
+            // Grok's binding is permanently unreadable from the first read on;
+            // Bot is untouched and still answers.
+            src.failCurveReadClients = ["grok"]
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            out["a permanently unreadable provider does not block a healthy one from publishing"] =
+                m.quotaWindowSummaries.contains { $0.id == botKey }
+            out["the heatmap publishes the same way"] = m.quotaHeatmaps[botKey] != nil
+            // The window that threw is absent rather than asserted empty: it
+            // had nothing published to hold over, and inventing a row for it
+            // would be the same "absence we did not observe" the retention
+            // exists to prevent.
+            out["the unreadable window is not invented"] =
+                !m.quotaWindowSummaries.contains { $0.id == buildKey }
+            // Proves the throw reached the model rather than the fixture
+            // quietly serving a cached curve: both were still asked.
+            out["both providers were still asked"] =
+                Set(src.curveReads.map(\.client)) == ["grok", "grok-bot"]
+
+            // Not a latch: the moment the binding answers again the strip
+            // follows, without a relaunch.
+            src.failCurveReadClients = []
+            m.refreshWindowQuotaHalves()
+            out["recovery republishes both without a relaunch"] =
+                Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+            return out
+        }
+        expect(stripPartialFailure != nil, "#359 partial-failure fixture completes")
+        for (label, passed) in (stripPartialFailure ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "#359: \(label)")
         }
 
         // L1a. `quotaHalf` takes no UsageDataSource at all, so the network is

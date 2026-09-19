@@ -1366,7 +1366,10 @@ private struct DashboardSnapshot {
             // "absent because we could not ask" mistake, arriving through a
             // partial result rather than an empty one. A successful nil is
             // still genuinely no history and still skips.
-            var readFailed = false
+            /// Which windows threw, keyed as `QuotaWindowSummary.id` and as the
+            /// `quotaHeatmaps` dictionary is keyed — `WindowCardLoader.curveKey`
+            /// is `AccountIdentity.windowKey`, so one set addresses both.
+            var failedWindowIds: Set<String> = []
             // Windows this pass actually had a key to read. Separates "the
             // payload stopped offering an allowance", where clearing the strip
             // is correct, from "the payload still offers windows and not one of
@@ -1380,7 +1383,22 @@ private struct DashboardSnapshot {
                     windowsToRead += 1
                     let attempt: QuotaCurve?
                     do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
-                    catch { readFailed = true; continue }
+                    catch {
+                        // #359. WHICH window could not be read, not merely that
+                        // one could not. A single flag made every provider share
+                        // one provider's failure: `antigravity` answers
+                        // "quota curve binding is unavailable" permanently — not
+                        // the transient generation expiry this branch was
+                        // written for — and that one throw suppressed the whole
+                        // publication, so Claude's 132 recorded cycles never
+                        // reached the strip and the card reported that nothing
+                        // had ever been recorded. Measured with `--window-probe
+                        // --generation-drift`, not inferred.
+                        failedWindowIds.insert(WindowCardLoader.curveKey(
+                            clientId: agent.clientId, accountKey: agent.accountKey,
+                            cardId: window.cardId))
+                        continue
+                    }
                     guard let curve = attempt else { continue }
                     let points = curve.points
                     let grid = QuotaHeatmapFold.build(points: points)
@@ -1410,17 +1428,17 @@ private struct DashboardSnapshot {
                             points: points)))
                 }
             }
-            // Skip this publication rather than replace a complete set with a
-            // partial one. Deliberately not an early `return`: the per-client
-            // cycles below are read through a different path and have their own
-            // error handling, and suppressing them here would trade one stale
-            // surface for another.
+            // Deliberately not an early `return`: the per-client cycles below
+            // are read through a different path and have their own error
+            // handling, and suppressing them here would trade one stale surface
+            // for another.
+            //
             // Windows were offered, none answered, and this process has held a
             // set before: that is this pass failing to answer, not the user's
-            // history ceasing to exist — see `publishedWindowSummaries`.
-            // Skipped the same way a thrown read is, rather than replacing a
-            // complete set with an empty one and reporting it as "nothing
-            // recorded yet".
+            // history ceasing to exist — see `publishedWindowSummaries`. The
+            // whole publication is skipped for that one, because there is
+            // nothing to publish; a thrown read is no longer handled this way
+            // and is retained per window instead (#359, below).
             //
             // `windowsToRead > 0` separates this from the legitimate clear:
             // when the payload stops offering an allowance there is nothing to
@@ -1437,13 +1455,52 @@ private struct DashboardSnapshot {
             // published, is the case it is for; if that state turns out to be
             // unreachable, delete the term rather than leaving a condition
             // nothing can exercise.
+            //
+            // #359 changes what a thrown read costs. It used to suppress the
+            // WHOLE publication: one `readFailed` and no window reached any
+            // surface. That treats every throw as transient, which the comment
+            // above says outright — and `antigravity` throws permanently
+            // ("quota curve binding is unavailable", measured, not inferred),
+            // so the suppression never lifted and the strip a process launched
+            // empty stayed empty until relaunch, about history that resolves
+            // fine when asked directly.
+            //
+            // Now a throw costs only its own window: the windows that answered
+            // publish, and each window that threw keeps whatever it already
+            // had. Both halves of the original intent survive — a window is
+            // never dropped because we could not ask about it, and a window is
+            // never replaced by an absence we did not observe — without one
+            // provider's permanent failure standing in for everyone else's.
             let answeredNothing = windowsToRead > 0 && collected.isEmpty
-            if !readFailed, !(answeredNothing && publishedWindowSummaries) {
-                quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
-                publishedWindowSummaries = publishedWindowSummaries || !collected.isEmpty
-                quotaHeatmaps = heatmaps
-                quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
-                qualifyingCycles = Dictionary(
+            if !(answeredNothing && publishedWindowSummaries) {
+                let fresh = QuotaOverviewFold.summaries(windows: collected)
+                let freshIds = Set(fresh.map(\.id))
+                // Only windows that THREW are retained. A window that answered
+                // nil answered, and `answeredNothing` above is what covers the
+                // case where none of them did.
+                let heldOver = quotaWindowSummaries.filter {
+                    failedWindowIds.contains($0.id) && !freshIds.contains($0.id)
+                }
+                quotaWindowSummaries = fresh + heldOver
+                publishedWindowSummaries =
+                    publishedWindowSummaries || !quotaWindowSummaries.isEmpty
+                quotaHeatmaps = Self.retainingFailed(
+                    fresh: heatmaps, previous: quotaHeatmaps, failed: failedWindowIds)
+                let heldOverHeatmapWindows = quotaHeatmapWindows.filter { old in
+                    failedWindowIds.contains(old.id) && !heatmapWindows.contains { $0.id == old.id }
+                }
+                quotaHeatmapWindows = (heatmapWindows + heldOverHeatmapWindows)
+                    .sorted { $0.total > $1.total }
+                // Retained for a failed window exactly as the summaries and the
+                // heatmaps above are, and for a sharper reason: this dictionary
+                // is what `rebuildQuotaEquivalences()` rebuilds
+                // `quotaEquivalences` from, so dropping a window here removes
+                // its API-value estimate from the history rows while its strip
+                // and grid stay drawn. Before #359 the whole block was skipped
+                // on any throw, which kept this value by accident; rebuilding
+                // from `collected` alone would have turned that accident into a
+                // permanent loss for a window that never reads again.
+                let freshQualifying = Dictionary(
                     uniqueKeysWithValues: collected.compactMap {
                         window -> (String, QualifyingWindow)? in
                         // Capped BEFORE admitting, which is what the probe
@@ -1470,6 +1527,8 @@ private struct DashboardSnapshot {
                                 accountKey: window.accountKey, cycles: admitted)
                         )
                     })
+                qualifyingCycles = Self.retainingFailed(
+                    fresh: freshQualifying, previous: qualifyingCycles, failed: failedWindowIds)
             }
         }
 
@@ -1674,7 +1733,39 @@ private struct DashboardSnapshot {
     var quotaLensAllAgents = false
     /// Cycles per qualifying window, kept from stage 1 so the scan can be
     /// scoped to exactly what an estimate needs and no further.
+    /// One statement of #359's retention rule for every dictionary-keyed quota
+    /// surface: a window that threw keeps the value it already had, and only
+    /// when this pass produced nothing for it.
+    ///
+    /// Shared rather than written twice. The rule was stated separately for
+    /// `quotaHeatmaps` and `qualifyingCycles`, in the same shape, and a rule
+    /// with two homes is a rule that a later change applies to one of them —
+    /// the failure this codebase has already paid for elsewhere.
+    ///
+    /// `quotaWindowSummaries` and `quotaHeatmapWindows` are arrays keyed by an
+    /// `id` rather than dictionaries, so they cannot use this and state the
+    /// same rule in their own shape. That is the remaining duplication and it
+    /// is deliberate: unifying it would mean rekeying two published surfaces to
+    /// make a four-line filter shorter.
+    private static func retainingFailed<Value>(
+        fresh: [String: Value], previous: [String: Value], failed: Set<String>
+    ) -> [String: Value] {
+        fresh.merging(previous.filter { failed.contains($0.key) && fresh[$0.key] == nil }) {
+            fresh, _ in fresh
+        }
+    }
+
     @ObservationIgnored private var qualifyingCycles: [String: QualifyingWindow] = [:]
+
+    /// Test seam. `qualifyingCycles` stays private because nothing outside this
+    /// type may write it, but #359's retention is only observable here: the
+    /// window it protects is the one whose curve cannot be read, so the
+    /// equivalence estimate it feeds cannot be rebuilt to check it indirectly.
+    ///
+    /// Deliberately NOT behind `#if DEBUG`. The bundled selftest builds in
+    /// release, and a seam compiled out there is a main-red release workflow
+    /// rather than a skipped assertion — see the same note on `DiscordIPC`.
+    var qualifyingCycleKeysForTesting: [String] { qualifyingCycles.keys.sorted() }
 
     /// One window that has enough admitted history to produce an estimate,
     /// plus the account it belongs to.
