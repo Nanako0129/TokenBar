@@ -1367,11 +1367,17 @@ private struct DashboardSnapshot {
             // partial result rather than an empty one. A successful nil is
             // still genuinely no history and still skips.
             var readFailed = false
+            // Windows this pass actually had a key to read. Separates "the
+            // payload stopped offering an allowance", where clearing the strip
+            // is correct, from "the payload still offers windows and not one of
+            // them answered", where it is not.
+            var windowsToRead = 0
             for agent in visibleAgents {
                 for window in agent.uniqueCardWindows {
                     guard let key = window.paceStatus.windowKey,
                           let generation = payload.publicationGeneration
                     else { continue }
+                    windowsToRead += 1
                     let attempt: QuotaCurve?
                     do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
                     catch { readFailed = true; continue }
@@ -1409,8 +1415,32 @@ private struct DashboardSnapshot {
             // cycles below are read through a different path and have their own
             // error handling, and suppressing them here would trade one stale
             // surface for another.
-            if !readFailed {
+            // Windows were offered, none answered, and this process has held a
+            // set before: that is this pass failing to answer, not the user's
+            // history ceasing to exist — see `publishedWindowSummaries`.
+            // Skipped the same way a thrown read is, rather than replacing a
+            // complete set with an empty one and reporting it as "nothing
+            // recorded yet".
+            //
+            // `windowsToRead > 0` separates this from the legitimate clear:
+            // when the payload stops offering an allowance there is nothing to
+            // read, and the strip should empty rather than hold the last set
+            // until relaunch.
+            //
+            // Stated, not verified. Removing that term leaves every assertion
+            // in this suite green — mutation-checked, not assumed — because the
+            // no-allowance fixture is cleared through the `windowCardClients`
+            // path above before reaching here. So the term is reasoning about a
+            // case the fixtures do not reach, and it is kept for that reason
+            // rather than because a test defends it. A payload that offers a
+            // configured client with no readable window, after a set has been
+            // published, is the case it is for; if that state turns out to be
+            // unreachable, delete the term rather than leaving a condition
+            // nothing can exercise.
+            let answeredNothing = windowsToRead > 0 && collected.isEmpty
+            if !readFailed, !(answeredNothing && publishedWindowSummaries) {
                 quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
+                publishedWindowSummaries = publishedWindowSummaries || !collected.isEmpty
                 quotaHeatmaps = heatmaps
                 quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
@@ -1603,6 +1633,27 @@ private struct DashboardSnapshot {
     /// usage half already draws with `windowScanFailedClients`; the quota half
     /// had no way to say it.
     private(set) var quotaCurveUnreadable = false
+
+    /// Whether a non-empty strip set has ever been published in this process.
+    ///
+    /// Quota history accumulates; it does not vanish between two refreshes. So
+    /// once these summaries have held windows, a later refresh that produces
+    /// none is not the user having no history — it is this pass failing to
+    /// answer, through a route that raised nothing. `readFailed` covers a
+    /// thrown read; a read that succeeds and returns nil does not set it,
+    /// deliberately, because a genuinely new window has no curve yet.
+    ///
+    /// Both readings are correct and they are indistinguishable at the read
+    /// itself. What separates them is whether there was ever anything to lose,
+    /// which only this flag knows. A fresh install has never published, so an
+    /// empty result publishes and the card says nothing is recorded, which is
+    /// true there.
+    ///
+    /// The cost is bounded and stated: if a store really is emptied while the
+    /// app runs, the strip keeps showing the last good set until relaunch. That
+    /// is a stale reading of something that existed, against a false claim that
+    /// it never did.
+    private var publishedWindowSummaries = false
 
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
