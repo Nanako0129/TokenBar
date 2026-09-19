@@ -11951,6 +11951,25 @@ enum SelfTest {
             result["Build and Bot retain independent curves in the same tab"] =
                 m.windowCurves[buildKey]?.contains(where: { $0.usedPercent == 5 }) == true
                 && m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == true
+            // #355. Every read succeeds and answers nil while the payload still
+            // offers both windows. That is not the user's history ceasing to
+            // exist — history accumulates — so the strip must keep the set it
+            // has rather than publish an empty one and report "nothing recorded
+            // yet" about windows it was recording a second earlier.
+            let summariesBeforeSilentReads = m.quotaWindowSummaries.map(\.id).sorted()
+            let curvesByClientBackup = src.curveByClient
+            src.curveByClient = [:]
+            src.curve = nil
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            result["reads that answer nothing keep the history already published"] =
+                !summariesBeforeSilentReads.isEmpty
+                && m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
+                && !src.curveReads.isEmpty
+            src.curveByClient = curvesByClientBackup
+            m.refreshWindowQuotaHalves()
+            result["restoring the curves restores the strip without a relaunch"] =
+                m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
             src.curveReads = []
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
             m.refreshWindowQuotaHalves()
