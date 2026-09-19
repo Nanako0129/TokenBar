@@ -409,6 +409,15 @@ private struct DashboardSnapshot {
             quotaHistory = snap.quotaCards.history
             quotaEquivalences = snap.quotaCards.equivalences
             quotaHistoryCardId = snap.quotaCards.historyCardId
+            // Seeded from the SAME id, because two separate checks compare
+            // against it and both read a nil as "a different window". A
+            // restored model whose first curve read throws takes the failure
+            // branch in `refreshWindowQuotaHalves`, which clears `quotaHistory`
+            // when `quotaCyclesCardId != selected` — nil always differs, so the
+            // rows this restore just put on screen were dropped by the very
+            // case the retention was added for. `rebuildQuotaHistory`'s own
+            // check has the same shape.
+            quotaCyclesCardId = snap.quotaCards.historyCardId
             // A restored non-empty strip HAS been published in this process,
             // by the model that cached it. Without this the #356 guard reads
             // the restored rows as "never published" and an unanswered refresh
@@ -1928,6 +1937,11 @@ private struct DashboardSnapshot {
                 // presented as current. The normal path below ends in the same
                 // call for the same reason.
                 rebuildQuotaEquivalences()
+                // The all-agent lens completes here and never reaches the call
+                // at the foot of this function, so without this its rebuilt
+                // equivalences never enter the reopen cache — the per-client
+                // path was fixed and this one was not.
+                refreshSnapshotLiveData()
                 return
             }
             // One scan per account with a qualifying window, not one scan for
@@ -1969,6 +1983,8 @@ private struct DashboardSnapshot {
             // reached this branch because something wants the estimate now.
             _ = scanned
             rebuildQuotaEquivalences()
+            // Second all-agent completion path, same reason as the first.
+            refreshSnapshotLiveData()
             return
         }
         // The history's oldest cycle CONTAINS the active window, so this widens

@@ -12239,6 +12239,36 @@ enum SelfTest {
             reopened.refreshWindowQuotaHalves()
             out["a restored strip is protected from an unanswered refresh"] =
                 Set(reopened.quotaWindowSummaries.map(\.id)) == published
+
+            // A restored model whose FIRST curve read throws. That is the
+            // #359 case, and it takes a different branch from the one above:
+            // `refreshWindowQuotaHalves`'s failure path clears `quotaHistory`
+            // when `quotaCyclesCardId` does not match the selected window, and
+            // on a restored model that id is whatever the restore seeded. The
+            // per-client success path this fixture drove first cannot reach it.
+            let throwing = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            let restoredHistory = throwing.quotaHistory.count
+            out["control: the reopened model restored history rows to lose"] =
+                restoredHistory > 0
+            src.failCurveRead = true
+            throwing.windowUsageClient = "grok"
+            throwing.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            throwing.refreshWindowQuotaHalves()
+            out["a throwing first curve read does not drop the restored history"] =
+                throwing.quotaHistory.count == restoredHistory
+            src.failCurveRead = false
+
+            // NOT asserted here, deliberately, and this comment is the
+            // hand-over rather than a footnote: `refreshWindowUsage()`'s
+            // all-agent branch (`windowUsageClient == nil`) now writes the
+            // reopen cache through its own two early returns, because they
+            // never reach the call at the foot of that function. Covering it
+            // needs a fixture that feeds `messagesByAccount` with rows landing
+            // inside this curve's cycles, since `rebuildQuotaEquivalences()`
+            // folds scan spans and produces nothing without them. The first
+            // version of this case asserted it anyway and compared two empty
+            // sets; its control caught that, and a vacuous assertion is worse
+            // than a stated gap because it reads as coverage.
             return out
         }
         expect(stripReopen != nil, "strip-reopen fixture completes")
