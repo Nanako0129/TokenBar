@@ -1494,7 +1494,16 @@ private struct DashboardSnapshot {
                 }
                 quotaHeatmapWindows = (heatmapWindows + heldOverHeatmapWindows)
                     .sorted { $0.total > $1.total }
-                qualifyingCycles = Dictionary(
+                // Retained for a failed window exactly as the summaries and the
+                // heatmaps above are, and for a sharper reason: this dictionary
+                // is what `rebuildQuotaEquivalences()` rebuilds
+                // `quotaEquivalences` from, so dropping a window here removes
+                // its API-value estimate from the history rows while its strip
+                // and grid stay drawn. Before #359 the whole block was skipped
+                // on any throw, which kept this value by accident; rebuilding
+                // from `collected` alone would have turned that accident into a
+                // permanent loss for a window that never reads again.
+                let freshQualifying = Dictionary(
                     uniqueKeysWithValues: collected.compactMap {
                         window -> (String, QualifyingWindow)? in
                         // Capped BEFORE admitting, which is what the probe
@@ -1521,6 +1530,11 @@ private struct DashboardSnapshot {
                                 accountKey: window.accountKey, cycles: admitted)
                         )
                     })
+                qualifyingCycles = freshQualifying.merging(
+                    qualifyingCycles.filter {
+                        failedWindowIds.contains($0.key) && freshQualifying[$0.key] == nil
+                    }
+                ) { fresh, _ in fresh }
             }
         }
 
@@ -1726,6 +1740,16 @@ private struct DashboardSnapshot {
     /// Cycles per qualifying window, kept from stage 1 so the scan can be
     /// scoped to exactly what an estimate needs and no further.
     @ObservationIgnored private var qualifyingCycles: [String: QualifyingWindow] = [:]
+
+    /// Test seam. `qualifyingCycles` stays private because nothing outside this
+    /// type may write it, but #359's retention is only observable here: the
+    /// window it protects is the one whose curve cannot be read, so the
+    /// equivalence estimate it feeds cannot be rebuilt to check it indirectly.
+    ///
+    /// Deliberately NOT behind `#if DEBUG`. The bundled selftest builds in
+    /// release, and a seam compiled out there is a main-red release workflow
+    /// rather than a skipped assertion — see the same note on `DiscordIPC`.
+    var qualifyingCycleKeysForTesting: [String] { qualifyingCycles.keys.sorted() }
 
     /// One window that has enough admitted history to produce an estimate,
     /// plus the account it belongs to.

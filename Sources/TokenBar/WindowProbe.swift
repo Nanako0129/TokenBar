@@ -113,7 +113,7 @@ enum WindowProbe {
                             print("    \(client)/\(key) 用\(label)：\(c == nil ? "nil（無歷史）" : "\(c!.points.count) 點")")
                         } catch {
                             print("    \(client)/\(key) 用\(label)：**丟錯** \(error)"
-                                  + "   ← readFailed=true，整個發佈被跳過")
+                                  + "   ← 這個窗保留上次的值，其他窗照常發佈")
                         }
                     }
                 }

@@ -12036,7 +12036,47 @@ enum SelfTest {
             AgentUsagePublicationCoordinator.resetForTesting()
             defer { AgentUsagePublicationCoordinator.resetForTesting() }
             let src = WindowScanCountingSource(payload: buildAndBot)
-            src.curveByClient = ["grok-bot": botCurve, "grok": buildCurve]
+            // Grok gets a FOUR-cycle curve rather than the shared single-cycle
+            // `buildCurve`, because `qualifyingCycles` holds nothing until
+            // `WindowEquivalence.minimumCycles` (3) cycles are admitted. With
+            // one cycle the retention assertion below compares an empty set to
+            // an empty set — which is exactly what its control caught on the
+            // first run. `buildCurve` is left alone; the Bot/Build cases above
+            // assert on its exact percentages.
+            let fourCycleBuild: QuotaCurve = {
+                var pts: [String] = []
+                var sampledAts: [Int64] = []
+                // Oldest cycle first: the decoder validates `coverage` against
+                // the points it covers and rejects a mismatch outright, which
+                // it did — with a `try!` trap, so the run reached no verdict
+                // and printed no FAIL line. Coverage is derived below rather
+                // than written by hand for that reason.
+                for cycle in (0..<4).reversed() {
+                    // Samples span 500_000s of a 604_800s window, clearing
+                    // `minimumObservedFraction` (0.5), and rise 55 points over
+                    // two rising runs, clearing `deltaQualifies`.
+                    let reset = wReset - Int64(cycle) * 604_800
+                    for (offset, pct) in [(-600_000, 5.0), (-350_000, 30.0), (-100_000, 60.0)] {
+                        let at = reset + Int64(offset)
+                        sampledAts.append(at)
+                        pts.append("""
+                        {"sampledAt":\(at),"usedPercent":\(pct),
+                         "resetAt":\(reset),"durationSeconds":604800,
+                         "durationSource":"provider","origin":"liveV3",
+                         "isActiveGroup":false}
+                        """)
+                    }
+                }
+                let json = """
+                {"points":[\(pts.joined(separator: ","))],
+                 "coverage":{"oldestSampledAt":\(sampledAts.min() ?? 0),
+                             "newestSampledAt":\(sampledAts.max() ?? 0),
+                             "sampleCount":\(pts.count)},
+                 "activeResetAt":null,"generation":7}
+                """
+                return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+            }()
+            src.curveByClient = ["grok-bot": botCurve, "grok": fourCycleBuild]
             let m = DashboardModel(source: src, initialYear: nil)
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
             let poll = Task { await m.pollAgentUsage() }
@@ -12055,6 +12095,27 @@ enum SelfTest {
             // fixture that never produced two rows in the first place.
             out["control: both providers publish while both can be read"] =
                 Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+
+            // Retention, driven from a POPULATED strip — the empty-start case
+            // below cannot show it, because a window with nothing published
+            // has nothing to hold over. `qualifyingCycles` is the one not
+            // drawn directly: `rebuildQuotaEquivalences()` rebuilds
+            // `quotaEquivalences` from it, so a window dropped here loses the
+            // API-value estimate on its history rows while its strip and grid
+            // stay drawn, and never regains it if the read never recovers.
+            let qualifyingBefore = Set(m.qualifyingCycleKeysForTesting)
+            // Control: without it the retention assertion is satisfied by a
+            // fixture whose cycles never qualified in the first place.
+            out["control: the healthy pass produced qualifying cycles"] =
+                !qualifyingBefore.isEmpty
+            src.failCurveReadClients = ["grok"]
+            m.refreshWindowQuotaHalves()
+            out["a failed window keeps its summary, grid and qualifying cycles"] =
+                m.quotaWindowSummaries.contains { $0.id == buildKey }
+                && m.quotaHeatmaps[buildKey] != nil
+                && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
+            src.failCurveReadClients = []
+            m.refreshWindowQuotaHalves()
 
             // The state the defect actually needs, and the one the first
             // version of this case got wrong: the strip must be EMPTY when the
