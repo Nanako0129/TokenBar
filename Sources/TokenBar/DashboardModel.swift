@@ -1484,11 +1484,8 @@ private struct DashboardSnapshot {
                 quotaWindowSummaries = fresh + heldOver
                 publishedWindowSummaries =
                     publishedWindowSummaries || !quotaWindowSummaries.isEmpty
-                quotaHeatmaps = heatmaps.merging(
-                    quotaHeatmaps.filter {
-                        failedWindowIds.contains($0.key) && heatmaps[$0.key] == nil
-                    }
-                ) { fresh, _ in fresh }
+                quotaHeatmaps = Self.retainingFailed(
+                    fresh: heatmaps, previous: quotaHeatmaps, failed: failedWindowIds)
                 let heldOverHeatmapWindows = quotaHeatmapWindows.filter { old in
                     failedWindowIds.contains(old.id) && !heatmapWindows.contains { $0.id == old.id }
                 }
@@ -1530,11 +1527,8 @@ private struct DashboardSnapshot {
                                 accountKey: window.accountKey, cycles: admitted)
                         )
                     })
-                qualifyingCycles = freshQualifying.merging(
-                    qualifyingCycles.filter {
-                        failedWindowIds.contains($0.key) && freshQualifying[$0.key] == nil
-                    }
-                ) { fresh, _ in fresh }
+                qualifyingCycles = Self.retainingFailed(
+                    fresh: freshQualifying, previous: qualifyingCycles, failed: failedWindowIds)
             }
         }
 
@@ -1739,6 +1733,28 @@ private struct DashboardSnapshot {
     var quotaLensAllAgents = false
     /// Cycles per qualifying window, kept from stage 1 so the scan can be
     /// scoped to exactly what an estimate needs and no further.
+    /// One statement of #359's retention rule for every dictionary-keyed quota
+    /// surface: a window that threw keeps the value it already had, and only
+    /// when this pass produced nothing for it.
+    ///
+    /// Shared rather than written twice. The rule was stated separately for
+    /// `quotaHeatmaps` and `qualifyingCycles`, in the same shape, and a rule
+    /// with two homes is a rule that a later change applies to one of them —
+    /// the failure this codebase has already paid for elsewhere.
+    ///
+    /// `quotaWindowSummaries` and `quotaHeatmapWindows` are arrays keyed by an
+    /// `id` rather than dictionaries, so they cannot use this and state the
+    /// same rule in their own shape. That is the remaining duplication and it
+    /// is deliberate: unifying it would mean rekeying two published surfaces to
+    /// make a four-line filter shorter.
+    private static func retainingFailed<Value>(
+        fresh: [String: Value], previous: [String: Value], failed: Set<String>
+    ) -> [String: Value] {
+        fresh.merging(previous.filter { failed.contains($0.key) && fresh[$0.key] == nil }) {
+            fresh, _ in fresh
+        }
+    }
+
     @ObservationIgnored private var qualifyingCycles: [String: QualifyingWindow] = [:]
 
     /// Test seam. `qualifyingCycles` stays private because nothing outside this
