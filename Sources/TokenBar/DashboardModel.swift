@@ -1366,7 +1366,10 @@ private struct DashboardSnapshot {
             // "absent because we could not ask" mistake, arriving through a
             // partial result rather than an empty one. A successful nil is
             // still genuinely no history and still skips.
-            var readFailed = false
+            /// Which windows threw, keyed as `QuotaWindowSummary.id` and as the
+            /// `quotaHeatmaps` dictionary is keyed — `WindowCardLoader.curveKey`
+            /// is `AccountIdentity.windowKey`, so one set addresses both.
+            var failedWindowIds: Set<String> = []
             // Windows this pass actually had a key to read. Separates "the
             // payload stopped offering an allowance", where clearing the strip
             // is correct, from "the payload still offers windows and not one of
@@ -1380,7 +1383,22 @@ private struct DashboardSnapshot {
                     windowsToRead += 1
                     let attempt: QuotaCurve?
                     do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
-                    catch { readFailed = true; continue }
+                    catch {
+                        // #359. WHICH window could not be read, not merely that
+                        // one could not. A single flag made every provider share
+                        // one provider's failure: `antigravity` answers
+                        // "quota curve binding is unavailable" permanently — not
+                        // the transient generation expiry this branch was
+                        // written for — and that one throw suppressed the whole
+                        // publication, so Claude's 132 recorded cycles never
+                        // reached the strip and the card reported that nothing
+                        // had ever been recorded. Measured with `--window-probe
+                        // --generation-drift`, not inferred.
+                        failedWindowIds.insert(WindowCardLoader.curveKey(
+                            clientId: agent.clientId, accountKey: agent.accountKey,
+                            cardId: window.cardId))
+                        continue
+                    }
                     guard let curve = attempt else { continue }
                     let points = curve.points
                     let grid = QuotaHeatmapFold.build(points: points)
@@ -1410,17 +1428,17 @@ private struct DashboardSnapshot {
                             points: points)))
                 }
             }
-            // Skip this publication rather than replace a complete set with a
-            // partial one. Deliberately not an early `return`: the per-client
-            // cycles below are read through a different path and have their own
-            // error handling, and suppressing them here would trade one stale
-            // surface for another.
+            // Deliberately not an early `return`: the per-client cycles below
+            // are read through a different path and have their own error
+            // handling, and suppressing them here would trade one stale surface
+            // for another.
+            //
             // Windows were offered, none answered, and this process has held a
             // set before: that is this pass failing to answer, not the user's
-            // history ceasing to exist — see `publishedWindowSummaries`.
-            // Skipped the same way a thrown read is, rather than replacing a
-            // complete set with an empty one and reporting it as "nothing
-            // recorded yet".
+            // history ceasing to exist — see `publishedWindowSummaries`. The
+            // whole publication is skipped for that one, because there is
+            // nothing to publish; a thrown read is no longer handled this way
+            // and is retained per window instead (#359, below).
             //
             // `windowsToRead > 0` separates this from the legitimate clear:
             // when the payload stops offering an allowance there is nothing to
@@ -1437,12 +1455,45 @@ private struct DashboardSnapshot {
             // published, is the case it is for; if that state turns out to be
             // unreachable, delete the term rather than leaving a condition
             // nothing can exercise.
+            //
+            // #359 changes what a thrown read costs. It used to suppress the
+            // WHOLE publication: one `readFailed` and no window reached any
+            // surface. That treats every throw as transient, which the comment
+            // above says outright — and `antigravity` throws permanently
+            // ("quota curve binding is unavailable", measured, not inferred),
+            // so the suppression never lifted and the strip a process launched
+            // empty stayed empty until relaunch, about history that resolves
+            // fine when asked directly.
+            //
+            // Now a throw costs only its own window: the windows that answered
+            // publish, and each window that threw keeps whatever it already
+            // had. Both halves of the original intent survive — a window is
+            // never dropped because we could not ask about it, and a window is
+            // never replaced by an absence we did not observe — without one
+            // provider's permanent failure standing in for everyone else's.
             let answeredNothing = windowsToRead > 0 && collected.isEmpty
-            if !readFailed, !(answeredNothing && publishedWindowSummaries) {
-                quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
-                publishedWindowSummaries = publishedWindowSummaries || !collected.isEmpty
-                quotaHeatmaps = heatmaps
-                quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
+            if !(answeredNothing && publishedWindowSummaries) {
+                let fresh = QuotaOverviewFold.summaries(windows: collected)
+                let freshIds = Set(fresh.map(\.id))
+                // Only windows that THREW are retained. A window that answered
+                // nil answered, and `answeredNothing` above is what covers the
+                // case where none of them did.
+                let heldOver = quotaWindowSummaries.filter {
+                    failedWindowIds.contains($0.id) && !freshIds.contains($0.id)
+                }
+                quotaWindowSummaries = fresh + heldOver
+                publishedWindowSummaries =
+                    publishedWindowSummaries || !quotaWindowSummaries.isEmpty
+                quotaHeatmaps = heatmaps.merging(
+                    quotaHeatmaps.filter {
+                        failedWindowIds.contains($0.key) && heatmaps[$0.key] == nil
+                    }
+                ) { fresh, _ in fresh }
+                let heldOverHeatmapWindows = quotaHeatmapWindows.filter { old in
+                    failedWindowIds.contains(old.id) && !heatmapWindows.contains { $0.id == old.id }
+                }
+                quotaHeatmapWindows = (heatmapWindows + heldOverHeatmapWindows)
+                    .sorted { $0.total > $1.total }
                 qualifyingCycles = Dictionary(
                     uniqueKeysWithValues: collected.compactMap {
                         window -> (String, QualifyingWindow)? in
