@@ -176,6 +176,49 @@ private struct DashboardSnapshot {
     let year: String?
     let agentUsage: AgentUsagePayload?
     let trace: [TraceBucket]
+    /// The two history cards as last published.
+    ///
+    /// Everything else in this struct exists so a reopen does not repay work
+    /// the process already did; these two were the exception, and it showed.
+    /// `payload`, `stats` and `agentUsage` restore instantly, so the rest of
+    /// the lens is drawn while "Past windows" and "When the allowance goes"
+    /// still spin — they start from `[]` on every rebuilt model and have to
+    /// re-read every window's curve and re-fold its cycles first (131 of them
+    /// on the install that prompted this).
+    ///
+    /// `qualifyingCycles` is deliberately NOT carried. It is not drawn; it
+    /// bounds the message scan, and restoring a stale range would start a scan
+    /// over the wrong span to save a redraw nobody sees.
+    ///
+    /// `quotaHistory` and `quotaEquivalences` ARE carried although they are
+    /// scan-derived, because they are drawn and they are the slowest of the
+    /// four cards to arrive. That is safe only because
+    /// `invalidateScanDerivedCaches()` already drops `lastSnapshot` along with
+    /// the union scan and the hourly fold — so a scan-root change evicts these
+    /// by the same path it evicts everything else derived from a scan. If that
+    /// ever stops being true, these two fields have to leave with it.
+    let quotaCards: QuotaCards
+
+    /// Every quota surface a rebuilt model would otherwise recompute before it
+    /// could draw anything.
+    struct QuotaCards {
+        /// "Past windows".
+        let summaries: [QuotaWindowSummary]
+        /// "When the allowance goes".
+        let heatmaps: [String: QuotaHeatmap]
+        let heatmapWindows: [QuotaHeatmapWindow]
+        /// The window card at the top of the lens, and its sparkline.
+        let windowCards: [String: WindowCardState]
+        let windowCurves: [String: [QuotaSample]]
+        /// "Window history" at the foot of the lens, and the API-value
+        /// estimates its rows are annotated with.
+        let history: [QuotaHistoryRow]
+        let equivalences: [String: WindowEquivalence.Row]
+        /// Which window `history` was built for. Restored with it so the first
+        /// rebuild on a reopened model can tell "the same window, scan not back
+        /// yet" from "a different window", and retain only the former.
+        let historyCardId: String?
+    }
 }
 
 /// Shared dashboard data for every lens. Base data (graph + model report)
@@ -351,6 +394,27 @@ private struct DashboardSnapshot {
             modelReport = snap.modelReport
             colors = snap.colors
             knownYears = snap.knownYears
+            // Draw the history cards from the last publication rather than
+            // from nothing, then let the refresh below replace them in place.
+            // `refreshWindowQuotaHalves()` runs synchronously on every open
+            // (`PopoverView`), so what is restored here is visible only until
+            // that pass lands — the same trade `payload` and `stats` above
+            // already make, over data that is append-only and barely moves
+            // between two opens.
+            quotaWindowSummaries = snap.quotaCards.summaries
+            quotaHeatmaps = snap.quotaCards.heatmaps
+            quotaHeatmapWindows = snap.quotaCards.heatmapWindows
+            windowCards = snap.quotaCards.windowCards
+            windowCurves = snap.quotaCards.windowCurves
+            quotaHistory = snap.quotaCards.history
+            quotaEquivalences = snap.quotaCards.equivalences
+            quotaHistoryCardId = snap.quotaCards.historyCardId
+            // A restored non-empty strip HAS been published in this process,
+            // by the model that cached it. Without this the #356 guard reads
+            // the restored rows as "never published" and an unanswered refresh
+            // is free to replace them with an empty set — which is the state
+            // that guard exists to prevent, reintroduced through the restore.
+            publishedWindowSummaries = !snap.quotaCards.summaries.isEmpty
             acceptedPayloadYear = Self.identityYear(initialYear)
             // Restore the model's own slice identity alongside it, or the first
             // model-dependent lens would re-request a report the snapshot
@@ -1012,7 +1076,13 @@ private struct DashboardSnapshot {
             modelReport: modelReport,
             modelGeneratedAt: modelPayloadGeneratedAt,
             colors: colors, knownYears: knownYears, year: year,
-            agentUsage: agentUsage, trace: trace))
+            agentUsage: agentUsage, trace: trace,
+            quotaCards: DashboardSnapshot.QuotaCards(
+                summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
+                heatmapWindows: quotaHeatmapWindows,
+                windowCards: windowCards, windowCurves: windowCurves,
+                history: quotaHistory, equivalences: quotaEquivalences,
+                historyCardId: quotaHistoryCardId)))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -1069,7 +1139,17 @@ private struct DashboardSnapshot {
             modelReport: snap.modelReport,
             modelGeneratedAt: snap.modelGeneratedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
-            agentUsage: agentUsage, trace: trace))
+            agentUsage: agentUsage, trace: trace,
+            // From the model, not from `snap`: this path republishes the cache
+            // with live data, and the strip is live data. Copying `snap`'s
+            // would pin the cache to whatever the strip held when the graph
+            // was committed and undo every refresh since.
+            quotaCards: DashboardSnapshot.QuotaCards(
+                summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
+                heatmapWindows: quotaHeatmapWindows,
+                windowCards: windowCards, windowCurves: windowCurves,
+                history: quotaHistory, equivalences: quotaEquivalences,
+                historyCardId: quotaHistoryCardId)))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
@@ -1628,14 +1708,37 @@ private struct DashboardSnapshot {
         quotaEquivalences = built
     }
 
+    /// Which window `quotaHistory` was built for, so a retained set is never
+    /// shown against a different window's chart.
+    @ObservationIgnored private var quotaHistoryCardId: String?
+
     private func rebuildQuotaHistory() {
-        guard let client = windowUsageClient,
-              let scan = unionScan(for: Self.cardAccountKey),
-              let oldest = quotaCycles.last, scan.covers(start: oldest.evidenceStartMs)
-        else {
+        // Genuinely nothing to show: no window selected, or the window has no
+        // cycles. Clearing is the right answer to both.
+        guard let client = windowUsageClient, let oldest = quotaCycles.last else {
             quotaHistory = []
+            quotaHistoryCardId = nil
             return
         }
+        // The scan has not landed, or does not reach far enough back yet. That
+        // is "cannot answer", not "nothing recorded" — the same distinction
+        // #359 turned on. Writing `[]` here is what made the restored rows
+        // vanish on a reopen and put the card back on its placeholder, because
+        // the synchronous refresh runs long before the scan returns.
+        //
+        // Retained only for the SAME window: the rows are annotated against
+        // one window's cycles, so showing them under another is a wrong answer
+        // rather than a slow one.
+        guard let scan = unionScan(for: Self.cardAccountKey),
+              scan.covers(start: oldest.evidenceStartMs)
+        else {
+            if quotaHistoryCardId != quotaCyclesCardId {
+                quotaHistory = []
+                quotaHistoryCardId = nil
+            }
+            return
+        }
+        quotaHistoryCardId = quotaCyclesCardId
         quotaHistory = QuotaHistoryFold.rows(
             cycles: quotaCycles, messages: scan.messages,
             // The attribution target for a subscription's own quota is that
@@ -1953,6 +2056,13 @@ private struct DashboardSnapshot {
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()
+        // The scan-derived half of the lens lands here and nowhere earlier, so
+        // the reopen cache has to be written after it or it carries the three
+        // cards this pass just rebuilt from before they were rebuilt. The poll
+        // loop's own call cannot cover this: that one runs on the quota
+        // payload, and this runs on the scan — the slower of the two, and the
+        // reason the history card was the last thing on screen to fill.
+        refreshSnapshotLiveData()
     }
 
     /// The clients whose stage-two scan settled with an error.
@@ -2044,11 +2154,18 @@ private struct DashboardSnapshot {
                 let resolved = AgentUsagePublicationCoordinator.resolve(payload)
                 agentUsage = resolved
                 reconcileQuotaRemaining(with: resolved)
-                refreshSnapshotLiveData() // keep the reopen cache's quota cards current
                 // Stage 1 is synchronous and lands with the payload; stage 2
                 // is kicked off without being awaited, so the poll loop never
                 // holds the card behind a scan.
                 refreshWindowQuotaHalves()
+                // AFTER the refresh, not before it. The cache now carries the
+                // published strip as well as the payload, and capturing it
+                // first stored the PREVIOUS pass's strip every time — empty on
+                // a model's first poll, so the reopen this restore exists for
+                // would still have drawn nothing. Both values this writes are
+                // ready by here: `agentUsage` is assigned above, and the strip
+                // is what the line before just published.
+                refreshSnapshotLiveData() // keep the reopen cache's quota cards current
                 Task { await refreshWindowUsage() }
             }
             // Set on failure too: `agentUsage == nil` alone cannot distinguish
