@@ -40,6 +40,86 @@ enum WindowProbe {
     static func run() -> Never {
         do {
             let payload = try TBCore.agentUsage()
+
+            // #359. Everything from the history file up through
+            // `QuotaOverviewFold` measures clean, so what is left unmeasured is
+            // the strip's own inputs. These are the exact expressions
+            // `refreshWindowQuotaHalves` evaluates before it collects anything:
+            // an empty `windowCardClients`, or a `visibleAgents` with no
+            // windows, skips the collect and leaves the card reporting
+            // "nothing recorded" about history that resolved a section below.
+            print("=== #359 STRIP INPUTS ===")
+            let d = UserDefaults.standard
+            let tabHiddenRaw = d.string(forKey: ClientRegistry.tabHiddenKey) ?? ""
+            let limitsHiddenRaw = d.string(forKey: ClientRegistry.limitsHiddenKey) ?? ""
+            let orderRaw = d.string(forKey: ClientRegistry.tabOrderKey) ?? ""
+            print("  defaults domain      \(Bundle.main.bundleIdentifier ?? "(裸執行檔)")")
+            print("  tabs.hidden          \(tabHiddenRaw.isEmpty ? "(空)" : tabHiddenRaw)")
+            print("  limits.hidden        \(limitsHiddenRaw.isEmpty ? "(空)" : limitsHiddenRaw)")
+            print("  tabs.order           \(orderRaw.isEmpty ? "(空)" : orderRaw)")
+            print("  configuredClientIds  \(payload.configuredClientIds)")
+            for a in payload.agents {
+                print("    \(a.clientId)  source=\(a.source)"
+                      + "  account=\(a.accountKey ?? "—")"
+                      + "  windows=\(a.uniqueCardWindows.count)")
+            }
+            let tabHidden = ClientRegistry.parseIdSet(tabHiddenRaw)
+            let limitsHidden = ClientRegistry.parseIdSet(limitsHiddenRaw)
+            // `present` comes from the graph, which this lane does not load.
+            // The production call unions it in, so this is a lower bound:
+            // `windowCardClients` is at least whatever this yields.
+            let cardClients = ClientRegistry.quotaClients(
+                present: [], quotaIds: payload.configuredClientIds,
+                tabHidden: tabHidden, orderRaw: orderRaw)
+            print("  windowCardClients    \(cardClients)   ← 空的話 strip 不會被填")
+            let visible = payload.agents.filter { agent in
+                cardClients.contains(agent.clientId)
+                    && (agent.accountKey != nil || !limitsHidden.contains(agent.clientId))
+            }
+            print("  visibleAgents        \(visible.map(\.clientId))")
+            print("  其中有窗的           \(visible.filter { !$0.uniqueCardWindows.isEmpty }.map(\.clientId))"
+                  + "   ← 空的話 collected 是空的")
+
+            // #359. The one variable a long-lived process has and a fresh one
+            // does not: publication generation drift. `refreshWindowQuotaHalves`
+            // reads curves with `payload.publicationGeneration`, and the engine
+            // answers a mismatch with an ERROR, not nil. That throw sets
+            // `readFailed`, which skips the whole publish — so a process whose
+            // generation has moved past the payload its refresh is holding
+            // never publishes a strip at all, and one that launched empty stays
+            // empty until relaunch. Measured rather than argued: take the
+            // generation now, take it again after a poll interval, and try a
+            // read with the older one.
+            if CommandLine.arguments.contains("--generation-drift") {
+                print("\n  --- generation drift ---")
+                let gen0 = payload.publicationGeneration
+                print("  第一次 publicationGeneration = \(gen0.map(String.init) ?? "nil")")
+                let probeTargets = visible.flatMap { a in
+                    a.uniqueCardWindows.compactMap { w in
+                        w.paceStatus.windowKey.map { (a.clientId, a.accountKey, $0) }
+                    }
+                }
+                Thread.sleep(forTimeInterval: 70)
+                let again = try TBCore.agentUsage()
+                let gen1 = again.publicationGeneration
+                print("  70 秒後             = \(gen1.map(String.init) ?? "nil")"
+                      + (gen0 == gen1 ? "   （沒有漂）" : "   ← 漂了"))
+                for (client, account, key) in probeTargets.prefix(4) {
+                    for (label, g) in [("舊 generation", gen0), ("新 generation", gen1)] {
+                        guard let g else { continue }
+                        do {
+                            let c = try TBCore.quotaCurve(
+                                clientId: client, accountKey: account, windowKey: key, generation: g)
+                            print("    \(client)/\(key) 用\(label)：\(c == nil ? "nil（無歷史）" : "\(c!.points.count) 點")")
+                        } catch {
+                            print("    \(client)/\(key) 用\(label)：**丟錯** \(error)"
+                                  + "   ← 這個窗保留上次的值，其他窗照常發佈")
+                        }
+                    }
+                }
+            }
+            print("")
+
             let now = Int64(Date().timeIntervalSince1970 * 1000)
             let fmt = ISO8601DateFormatter()
             fmt.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

@@ -51,7 +51,7 @@ Durable architecture, verification, workflow, and release facts belong in `docs/
 
 ## Development environment
 
-The supported application target is Apple Silicon on macOS 14 or later. The package uses Swift tools 6.0, and CI uses stable Rust. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` before building. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
+The supported application target is Apple Silicon on macOS 14 or later. Building it needs Swift 6.2 or newer (Xcode 26+), which is a separate thing from that target and stricter than it: the Liquid Glass surfaces are compiled against the macOS 26 SDK, and `if #available(macOS 26.0, *)` guards them at runtime rather than at compile time, so an older toolchain cannot type-check them at all. `Package.swift` declares `swift-tools-version: 6.0`, which is the manifest format and not the floor — `Sources/TokenBar/GlassBackground.swift` states the floor with a `#error` so an older toolchain fails on that line instead of on the symbols it cannot see. CI uses stable Rust. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` before building. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
 
 Build the Rust static library first, link the Swift package, and run the UI-free contract checks:
 

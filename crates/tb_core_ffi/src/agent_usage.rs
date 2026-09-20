@@ -1783,13 +1783,45 @@ async fn fetch_antigravity() -> AgentUsageSnapshot {
         },
         Err(failure) => ProviderFetchOutcome::Failure(failure),
     };
-    apply_provider_outcome("antigravity", None, "oauth", outcome)
+    let source = required_card_source(&outcome, agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR);
+    apply_provider_outcome("antigravity", None, source, outcome)
         .expect("Antigravity is a required provider card")
 }
 
 async fn fetch_codex() -> AgentUsageSnapshot {
-    apply_provider_outcome("codex", None, "oauth", fetch_codex_inner().await)
+    let outcome = fetch_codex_inner().await;
+    let source = required_card_source(&outcome, CODEX_UNCONFIGURED_ERROR);
+    apply_provider_outcome("codex", None, source, outcome)
         .expect("Codex is a required provider card")
+}
+
+/// The `source` a required provider card reports for a failed fetch.
+///
+/// Codex, Claude and Antigravity are pushed into `agents` whether or not the
+/// user has them — `run` only filters the optional providers by whether a login
+/// exists. So for these three, "a card is present" says nothing about whether
+/// anything is configured, and the payload has to carry the difference: the Swift
+/// side reads `isSetupPlaceholder`, and through it `configuredClientIds`, to
+/// decide which quota sources earn a tab. Reporting `oauth` for a card that has
+/// never had a credential gave every install an Antigravity tab and a Codex tab
+/// from v1.18.0, when tab navigation started including quota-only providers
+/// (#345).
+///
+/// Claude reaches the same verdict structurally, through `ClaudeLoginResolution`.
+/// Codex and Antigravity each conclude "nothing is configured" at exactly one
+/// place, so each pairs its own message with this decision rather than growing a
+/// variant on the shared failure type that every other provider would carry.
+/// A transient failure is never `unconfigured`: it means the credential could not
+/// be reached, not that it is absent.
+fn required_card_source(outcome: &ProviderFetchOutcome, unconfigured: &str) -> &'static str {
+    match outcome {
+        ProviderFetchOutcome::Failure(ProviderFetchFailure::Terminal { display })
+            if display == unconfigured =>
+        {
+            "unconfigured"
+        }
+        _ => "oauth",
+    }
 }
 
 /// Claude's `/api/oauth/usage` rate-limits aggressively. The gate stores only
@@ -3127,8 +3159,19 @@ fn load_codex_credentials() -> Result<CodexCredentials, String> {
 }
 
 fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, String> {
-    let raw = fs::read_to_string(auth_path)
-        .map_err(|_| "Codex auth.json not found. Run `codex` to log in.".to_string())?;
+    // Only an absent file means "not set up". `read_to_string` also fails for a
+    // permission problem, a directory at this path, or invalid UTF-8, and every
+    // one of those belongs to a configured account whose credential is broken:
+    // mapping them to the marker would hand them `source: "unconfigured"`, which
+    // takes the card out of tab navigation and tells the user to log in again
+    // (#345).
+    let raw = fs::read_to_string(auth_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::NotFound {
+            CODEX_UNCONFIGURED_ERROR.to_string()
+        } else {
+            CODEX_CREDENTIALS_UNREADABLE_ERROR.to_string()
+        }
+    })?;
     let raw_json: Value =
         serde_json::from_str(&raw).map_err(|e| format!("decode Codex auth.json: {}", e))?;
 
@@ -3180,6 +3223,15 @@ fn load_codex_credentials_from(auth_path: &Path) -> Result<CodexCredentials, Str
 /// with `source == "unconfigured"`, so the UI shows a setup prompt rather than a
 /// red error.
 const CLAUDE_UNCONFIGURED_ERROR: &str = "Claude OAuth credentials not found. Run `claude` to authenticate, or set CLAUDE_CODE_OAUTH_TOKEN / add a `tokenbar-claude-oauth-token` Keychain item to use a setup-token.";
+/// The Codex sibling of `CLAUDE_UNCONFIGURED_ERROR`: there is no `auth.json` to
+/// read at all. Paired with `source == "unconfigured"` by
+/// `required_card_source`; see that function for why the distinction has to
+/// reach the payload rather than staying a message.
+const CODEX_UNCONFIGURED_ERROR: &str = "Codex auth.json not found. Run `codex` to log in.";
+/// `auth.json` exists but could not be read. Deliberately not the marker above:
+/// `required_card_source` leaves this at `oauth`, so the card keeps its tab and
+/// shows the failure instead of claiming the user never logged in.
+const CODEX_CREDENTIALS_UNREADABLE_ERROR: &str = "Codex auth.json could not be read.";
 const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loaded.";
 /// An extra config directory is configured but its Keychain item holds no
 /// usable login. Distinct from the primary's unconfigured message: there is no
@@ -5657,6 +5709,107 @@ where
 mod tests {
     use super::*;
     use crate::agent_account_scope::test_support::TestRefreshScope;
+
+    /// The Codex half of the #345 pairing, driven through the real loader rather
+    /// than against the constant: a missing `auth.json` has to produce the exact
+    /// message `required_card_source` matches on, or the card reports `oauth`,
+    /// stops being a setup placeholder, and a machine that has never run Codex
+    /// gets a Codex tab again.
+    #[test]
+    fn absent_codex_auth_json_maps_to_an_unconfigured_card() {
+        let scope = TestRefreshScope::new("codex", "unconfigured-source");
+        let missing = scope.root().join("codex/auth.json");
+        assert!(!missing.exists(), "the probe path must not exist");
+
+        let display = load_codex_credentials_from(&missing).unwrap_err();
+        assert_eq!(display, CODEX_UNCONFIGURED_ERROR);
+        assert_eq!(
+            required_card_source(
+                &ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
+                CODEX_UNCONFIGURED_ERROR,
+            ),
+            "unconfigured"
+        );
+    }
+
+    /// The inverse of the assertion above, and the one that keeps this fix from
+    /// becoming the bug it removes. `read_to_string` fails for a permission
+    /// problem, a directory at the path, or invalid UTF-8 as well as for an
+    /// absent file. Those belong to an account that IS configured, so they must
+    /// not reach the marker: `required_card_source` would hand them
+    /// `unconfigured`, and the Codex card would leave the tab bar while telling
+    /// the user to run `codex` — the silent disappearance, with the reason
+    /// replaced by a wrong one. A directory is the reliably reproducible member
+    /// of that set.
+    #[test]
+    fn a_codex_auth_json_that_exists_but_cannot_be_read_keeps_its_card() {
+        let scope = TestRefreshScope::new("codex", "unreadable-source");
+        let unreadable = scope.root().join("codex/auth.json");
+        fs::create_dir_all(&unreadable).unwrap();
+        assert!(
+            unreadable.is_dir(),
+            "the fixture must not be a regular file"
+        );
+
+        let display = load_codex_credentials_from(&unreadable).unwrap_err();
+        assert_eq!(display, CODEX_CREDENTIALS_UNREADABLE_ERROR);
+        assert_ne!(display, CODEX_UNCONFIGURED_ERROR);
+        assert_eq!(
+            required_card_source(
+                &ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(display)),
+                CODEX_UNCONFIGURED_ERROR,
+            ),
+            "oauth",
+            "an unreadable credential is a configured account, and keeps its tab"
+        );
+    }
+
+    /// The control the `unconfigured` arm needs: everything that is not "there is
+    /// no credential" stays `oauth`, so a configured-but-failing card keeps its
+    /// tab. The transient case is the one that would hurt most — a card that
+    /// could not be reached must not read as one that was never set up, and the
+    /// display alone cannot tell them apart, which is why the arm matches the
+    /// variant too.
+    #[test]
+    fn required_card_source_keeps_oauth_for_everything_except_absence() {
+        let marker = CODEX_UNCONFIGURED_ERROR;
+        let transient_with_marker = ProviderFetchOutcome::Failure(ProviderFetchFailure::transient(
+            marker,
+            None,
+            SafeTransportDiagnostic::server_error(503),
+        ));
+        let other_terminal = ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+            "Codex auth.json exists but contains no OAuth tokens.",
+        ));
+        for outcome in [
+            transient_with_marker,
+            other_terminal,
+            ProviderFetchOutcome::Absent,
+        ] {
+            assert_eq!(required_card_source(&outcome, marker), "oauth");
+        }
+    }
+
+    /// The two required cards must not share a marker: matching Antigravity's
+    /// absence against Codex's message (or the reverse) would hand one provider
+    /// the other's verdict.
+    #[test]
+    fn required_card_markers_are_not_interchangeable() {
+        let antigravity = ProviderFetchOutcome::Failure(ProviderFetchFailure::terminal(
+            agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR,
+        ));
+        assert_eq!(
+            required_card_source(
+                &antigravity,
+                agent_antigravity::ANTIGRAVITY_UNCONFIGURED_ERROR
+            ),
+            "unconfigured"
+        );
+        assert_eq!(
+            required_card_source(&antigravity, CODEX_UNCONFIGURED_ERROR),
+            "oauth"
+        );
+    }
 
     /// The two properties `join_local_ordered` exists for, on futures that
     /// finish in the opposite order to the one they were given in — which is

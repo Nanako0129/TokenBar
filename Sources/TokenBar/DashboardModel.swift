@@ -176,6 +176,56 @@ private struct DashboardSnapshot {
     let year: String?
     let agentUsage: AgentUsagePayload?
     let trace: [TraceBucket]
+    /// The two history cards as last published.
+    ///
+    /// Everything else in this struct exists so a reopen does not repay work
+    /// the process already did; these two were the exception, and it showed.
+    /// `payload`, `stats` and `agentUsage` restore instantly, so the rest of
+    /// the lens is drawn while "Past windows" and "When the allowance goes"
+    /// still spin — they start from `[]` on every rebuilt model and have to
+    /// re-read every window's curve and re-fold its cycles first (131 of them
+    /// on the install that prompted this).
+    ///
+    /// `qualifyingCycles` is deliberately NOT carried. It is not drawn; it
+    /// bounds the message scan, and restoring a stale range would start a scan
+    /// over the wrong span to save a redraw nobody sees.
+    ///
+    /// `quotaHistory` and `quotaEquivalences` ARE carried although they are
+    /// scan-derived, because they are drawn and they are the slowest of the
+    /// four cards to arrive. That is safe only because
+    /// `invalidateScanDerivedCaches()` already drops `lastSnapshot` along with
+    /// the union scan and the hourly fold — so a scan-root change evicts these
+    /// by the same path it evicts everything else derived from a scan. If that
+    /// ever stops being true, these two fields have to leave with it.
+    let quotaCards: QuotaCards
+
+    /// Every quota surface a rebuilt model would otherwise recompute before it
+    /// could draw anything.
+    struct QuotaCards {
+        /// "Past windows".
+        let summaries: [QuotaWindowSummary]
+        /// "When the allowance goes".
+        let heatmaps: [String: QuotaHeatmap]
+        let heatmapWindows: [QuotaHeatmapWindow]
+        /// The window card at the top of the lens, and its sparkline.
+        let windowCards: [String: WindowCardState]
+        let windowCurves: [String: [QuotaSample]]
+        /// "Window history" at the foot of the lens, and the API-value
+        /// estimates its rows are annotated with.
+        let history: [QuotaHistoryRow]
+        let equivalences: [String: WindowEquivalence.Row]
+        /// The cycles the history card draws. `QuotaHistoryCard` branches on
+        /// `cycles.isEmpty` and iterates them; `history` only annotates them.
+        /// Restoring the annotation without the list left the card on its
+        /// placeholder with the rows sitting behind it unused — the assertion
+        /// that missed it compared `quotaHistory.count`, which is a model
+        /// property and not what the card draws from.
+        let cycles: [QuotaCycle]
+        /// Which window `history` was built for. Restored with it so the first
+        /// rebuild on a reopened model can tell "the same window, scan not back
+        /// yet" from "a different window", and retain only the former.
+        let historyCardId: String?
+    }
 }
 
 /// Shared dashboard data for every lens. Base data (graph + model report)
@@ -351,6 +401,37 @@ private struct DashboardSnapshot {
             modelReport = snap.modelReport
             colors = snap.colors
             knownYears = snap.knownYears
+            // Draw the history cards from the last publication rather than
+            // from nothing, then let the refresh below replace them in place.
+            // `refreshWindowQuotaHalves()` runs synchronously on every open
+            // (`PopoverView`), so what is restored here is visible only until
+            // that pass lands — the same trade `payload` and `stats` above
+            // already make, over data that is append-only and barely moves
+            // between two opens.
+            quotaWindowSummaries = snap.quotaCards.summaries
+            quotaHeatmaps = snap.quotaCards.heatmaps
+            quotaHeatmapWindows = snap.quotaCards.heatmapWindows
+            windowCards = snap.quotaCards.windowCards
+            windowCurves = snap.quotaCards.windowCurves
+            quotaHistory = snap.quotaCards.history
+            quotaEquivalences = snap.quotaCards.equivalences
+            quotaCycles = snap.quotaCards.cycles
+            quotaHistoryCardId = snap.quotaCards.historyCardId
+            // Seeded from the SAME id, because two separate checks compare
+            // against it and both read a nil as "a different window". A
+            // restored model whose first curve read throws takes the failure
+            // branch in `refreshWindowQuotaHalves`, which clears `quotaHistory`
+            // when `quotaCyclesCardId != selected` — nil always differs, so the
+            // rows this restore just put on screen were dropped by the very
+            // case the retention was added for. `rebuildQuotaHistory`'s own
+            // check has the same shape.
+            quotaCyclesCardId = snap.quotaCards.historyCardId
+            // A restored non-empty strip HAS been published in this process,
+            // by the model that cached it. Without this the #356 guard reads
+            // the restored rows as "never published" and an unanswered refresh
+            // is free to replace them with an empty set — which is the state
+            // that guard exists to prevent, reintroduced through the restore.
+            publishedWindowSummaries = !snap.quotaCards.summaries.isEmpty
             acceptedPayloadYear = Self.identityYear(initialYear)
             // Restore the model's own slice identity alongside it, or the first
             // model-dependent lens would re-request a report the snapshot
@@ -1012,7 +1093,13 @@ private struct DashboardSnapshot {
             modelReport: modelReport,
             modelGeneratedAt: modelPayloadGeneratedAt,
             colors: colors, knownYears: knownYears, year: year,
-            agentUsage: agentUsage, trace: trace))
+            agentUsage: agentUsage, trace: trace,
+            quotaCards: DashboardSnapshot.QuotaCards(
+                summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
+                heatmapWindows: quotaHeatmapWindows,
+                windowCards: windowCards, windowCurves: windowCurves,
+                history: quotaHistory, equivalences: quotaEquivalences,
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -1069,7 +1156,17 @@ private struct DashboardSnapshot {
             modelReport: snap.modelReport,
             modelGeneratedAt: snap.modelGeneratedAt,
             colors: snap.colors, knownYears: snap.knownYears, year: snap.year,
-            agentUsage: agentUsage, trace: trace))
+            agentUsage: agentUsage, trace: trace,
+            // From the model, not from `snap`: this path republishes the cache
+            // with live data, and the strip is live data. Copying `snap`'s
+            // would pin the cache to whatever the strip held when the graph
+            // was committed and undo every refresh since.
+            quotaCards: DashboardSnapshot.QuotaCards(
+                summaries: quotaWindowSummaries, heatmaps: quotaHeatmaps,
+                heatmapWindows: quotaHeatmapWindows,
+                windowCards: windowCards, windowCurves: windowCurves,
+                history: quotaHistory, equivalences: quotaEquivalences,
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while
@@ -1366,15 +1463,39 @@ private struct DashboardSnapshot {
             // "absent because we could not ask" mistake, arriving through a
             // partial result rather than an empty one. A successful nil is
             // still genuinely no history and still skips.
-            var readFailed = false
+            /// Which windows threw, keyed as `QuotaWindowSummary.id` and as the
+            /// `quotaHeatmaps` dictionary is keyed — `WindowCardLoader.curveKey`
+            /// is `AccountIdentity.windowKey`, so one set addresses both.
+            var failedWindowIds: Set<String> = []
+            // Windows this pass actually had a key to read. Separates "the
+            // payload stopped offering an allowance", where clearing the strip
+            // is correct, from "the payload still offers windows and not one of
+            // them answered", where it is not.
+            var windowsToRead = 0
             for agent in visibleAgents {
                 for window in agent.uniqueCardWindows {
                     guard let key = window.paceStatus.windowKey,
                           let generation = payload.publicationGeneration
                     else { continue }
+                    windowsToRead += 1
                     let attempt: QuotaCurve?
                     do { attempt = try readCurve(agent.clientId, agent.accountKey, key, generation) }
-                    catch { readFailed = true; continue }
+                    catch {
+                        // #359. WHICH window could not be read, not merely that
+                        // one could not. A single flag made every provider share
+                        // one provider's failure: `antigravity` answers
+                        // "quota curve binding is unavailable" permanently — not
+                        // the transient generation expiry this branch was
+                        // written for — and that one throw suppressed the whole
+                        // publication, so Claude's 132 recorded cycles never
+                        // reached the strip and the card reported that nothing
+                        // had ever been recorded. Measured with `--window-probe
+                        // --generation-drift`, not inferred.
+                        failedWindowIds.insert(WindowCardLoader.curveKey(
+                            clientId: agent.clientId, accountKey: agent.accountKey,
+                            cardId: window.cardId))
+                        continue
+                    }
                     guard let curve = attempt else { continue }
                     let points = curve.points
                     let grid = QuotaHeatmapFold.build(points: points)
@@ -1404,16 +1525,79 @@ private struct DashboardSnapshot {
                             points: points)))
                 }
             }
-            // Skip this publication rather than replace a complete set with a
-            // partial one. Deliberately not an early `return`: the per-client
-            // cycles below are read through a different path and have their own
-            // error handling, and suppressing them here would trade one stale
-            // surface for another.
-            if !readFailed {
-                quotaWindowSummaries = QuotaOverviewFold.summaries(windows: collected)
-                quotaHeatmaps = heatmaps
-                quotaHeatmapWindows = heatmapWindows.sorted { $0.total > $1.total }
-                qualifyingCycles = Dictionary(
+            // Deliberately not an early `return`: the per-client cycles below
+            // are read through a different path and have their own error
+            // handling, and suppressing them here would trade one stale surface
+            // for another.
+            //
+            // Windows were offered, none answered, and this process has held a
+            // set before: that is this pass failing to answer, not the user's
+            // history ceasing to exist — see `publishedWindowSummaries`. The
+            // whole publication is skipped for that one, because there is
+            // nothing to publish; a thrown read is no longer handled this way
+            // and is retained per window instead (#359, below).
+            //
+            // `windowsToRead > 0` separates this from the legitimate clear:
+            // when the payload stops offering an allowance there is nothing to
+            // read, and the strip should empty rather than hold the last set
+            // until relaunch.
+            //
+            // Stated, not verified. Removing that term leaves every assertion
+            // in this suite green — mutation-checked, not assumed — because the
+            // no-allowance fixture is cleared through the `windowCardClients`
+            // path above before reaching here. So the term is reasoning about a
+            // case the fixtures do not reach, and it is kept for that reason
+            // rather than because a test defends it. A payload that offers a
+            // configured client with no readable window, after a set has been
+            // published, is the case it is for; if that state turns out to be
+            // unreachable, delete the term rather than leaving a condition
+            // nothing can exercise.
+            //
+            // #359 changes what a thrown read costs. It used to suppress the
+            // WHOLE publication: one `readFailed` and no window reached any
+            // surface. That treats every throw as transient, which the comment
+            // above says outright — and `antigravity` throws permanently
+            // ("quota curve binding is unavailable", measured, not inferred),
+            // so the suppression never lifted and the strip a process launched
+            // empty stayed empty until relaunch, about history that resolves
+            // fine when asked directly.
+            //
+            // Now a throw costs only its own window: the windows that answered
+            // publish, and each window that threw keeps whatever it already
+            // had. Both halves of the original intent survive — a window is
+            // never dropped because we could not ask about it, and a window is
+            // never replaced by an absence we did not observe — without one
+            // provider's permanent failure standing in for everyone else's.
+            let answeredNothing = windowsToRead > 0 && collected.isEmpty
+            if !(answeredNothing && publishedWindowSummaries) {
+                let fresh = QuotaOverviewFold.summaries(windows: collected)
+                let freshIds = Set(fresh.map(\.id))
+                // Only windows that THREW are retained. A window that answered
+                // nil answered, and `answeredNothing` above is what covers the
+                // case where none of them did.
+                let heldOver = quotaWindowSummaries.filter {
+                    failedWindowIds.contains($0.id) && !freshIds.contains($0.id)
+                }
+                quotaWindowSummaries = fresh + heldOver
+                publishedWindowSummaries =
+                    publishedWindowSummaries || !quotaWindowSummaries.isEmpty
+                quotaHeatmaps = Self.retainingFailed(
+                    fresh: heatmaps, previous: quotaHeatmaps, failed: failedWindowIds)
+                let heldOverHeatmapWindows = quotaHeatmapWindows.filter { old in
+                    failedWindowIds.contains(old.id) && !heatmapWindows.contains { $0.id == old.id }
+                }
+                quotaHeatmapWindows = (heatmapWindows + heldOverHeatmapWindows)
+                    .sorted { $0.total > $1.total }
+                // Retained for a failed window exactly as the summaries and the
+                // heatmaps above are, and for a sharper reason: this dictionary
+                // is what `rebuildQuotaEquivalences()` rebuilds
+                // `quotaEquivalences` from, so dropping a window here removes
+                // its API-value estimate from the history rows while its strip
+                // and grid stay drawn. Before #359 the whole block was skipped
+                // on any throw, which kept this value by accident; rebuilding
+                // from `collected` alone would have turned that accident into a
+                // permanent loss for a window that never reads again.
+                let freshQualifying = Dictionary(
                     uniqueKeysWithValues: collected.compactMap {
                         window -> (String, QualifyingWindow)? in
                         // Capped BEFORE admitting, which is what the probe
@@ -1440,6 +1624,8 @@ private struct DashboardSnapshot {
                                 accountKey: window.accountKey, cycles: admitted)
                         )
                     })
+                qualifyingCycles = Self.retainingFailed(
+                    fresh: freshQualifying, previous: qualifyingCycles, failed: failedWindowIds)
             }
         }
 
@@ -1539,14 +1725,37 @@ private struct DashboardSnapshot {
         quotaEquivalences = built
     }
 
+    /// Which window `quotaHistory` was built for, so a retained set is never
+    /// shown against a different window's chart.
+    @ObservationIgnored private var quotaHistoryCardId: String?
+
     private func rebuildQuotaHistory() {
-        guard let client = windowUsageClient,
-              let scan = unionScan(for: Self.cardAccountKey),
-              let oldest = quotaCycles.last, scan.covers(start: oldest.evidenceStartMs)
-        else {
+        // Genuinely nothing to show: no window selected, or the window has no
+        // cycles. Clearing is the right answer to both.
+        guard let client = windowUsageClient, let oldest = quotaCycles.last else {
             quotaHistory = []
+            quotaHistoryCardId = nil
             return
         }
+        // The scan has not landed, or does not reach far enough back yet. That
+        // is "cannot answer", not "nothing recorded" — the same distinction
+        // #359 turned on. Writing `[]` here is what made the restored rows
+        // vanish on a reopen and put the card back on its placeholder, because
+        // the synchronous refresh runs long before the scan returns.
+        //
+        // Retained only for the SAME window: the rows are annotated against
+        // one window's cycles, so showing them under another is a wrong answer
+        // rather than a slow one.
+        guard let scan = unionScan(for: Self.cardAccountKey),
+              scan.covers(start: oldest.evidenceStartMs)
+        else {
+            if quotaHistoryCardId != quotaCyclesCardId {
+                quotaHistory = []
+                quotaHistoryCardId = nil
+            }
+            return
+        }
+        quotaHistoryCardId = quotaCyclesCardId
         quotaHistory = QuotaHistoryFold.rows(
             cycles: quotaCycles, messages: scan.messages,
             // The attribution target for a subscription's own quota is that
@@ -1604,6 +1813,27 @@ private struct DashboardSnapshot {
     /// had no way to say it.
     private(set) var quotaCurveUnreadable = false
 
+    /// Whether a non-empty strip set has ever been published in this process.
+    ///
+    /// Quota history accumulates; it does not vanish between two refreshes. So
+    /// once these summaries have held windows, a later refresh that produces
+    /// none is not the user having no history — it is this pass failing to
+    /// answer, through a route that raised nothing. `readFailed` covers a
+    /// thrown read; a read that succeeds and returns nil does not set it,
+    /// deliberately, because a genuinely new window has no curve yet.
+    ///
+    /// Both readings are correct and they are indistinguishable at the read
+    /// itself. What separates them is whether there was ever anything to lose,
+    /// which only this flag knows. A fresh install has never published, so an
+    /// empty result publishes and the card says nothing is recorded, which is
+    /// true there.
+    ///
+    /// The cost is bounded and stated: if a store really is emptied while the
+    /// app runs, the strip keeps showing the last good set until relaunch. That
+    /// is a stale reading of something that existed, against a false claim that
+    /// it never did.
+    private var publishedWindowSummaries = false
+
     private(set) var quotaWindowSummaries: [QuotaWindowSummary] = []
     /// One weekday-by-hour grid per window, keyed as `QuotaWindowSummary.id`.
     /// Written in the same guarded block as the summaries, so it cannot be
@@ -1623,7 +1853,39 @@ private struct DashboardSnapshot {
     var quotaLensAllAgents = false
     /// Cycles per qualifying window, kept from stage 1 so the scan can be
     /// scoped to exactly what an estimate needs and no further.
+    /// One statement of #359's retention rule for every dictionary-keyed quota
+    /// surface: a window that threw keeps the value it already had, and only
+    /// when this pass produced nothing for it.
+    ///
+    /// Shared rather than written twice. The rule was stated separately for
+    /// `quotaHeatmaps` and `qualifyingCycles`, in the same shape, and a rule
+    /// with two homes is a rule that a later change applies to one of them —
+    /// the failure this codebase has already paid for elsewhere.
+    ///
+    /// `quotaWindowSummaries` and `quotaHeatmapWindows` are arrays keyed by an
+    /// `id` rather than dictionaries, so they cannot use this and state the
+    /// same rule in their own shape. That is the remaining duplication and it
+    /// is deliberate: unifying it would mean rekeying two published surfaces to
+    /// make a four-line filter shorter.
+    private static func retainingFailed<Value>(
+        fresh: [String: Value], previous: [String: Value], failed: Set<String>
+    ) -> [String: Value] {
+        fresh.merging(previous.filter { failed.contains($0.key) && fresh[$0.key] == nil }) {
+            fresh, _ in fresh
+        }
+    }
+
     @ObservationIgnored private var qualifyingCycles: [String: QualifyingWindow] = [:]
+
+    /// Test seam. `qualifyingCycles` stays private because nothing outside this
+    /// type may write it, but #359's retention is only observable here: the
+    /// window it protects is the one whose curve cannot be read, so the
+    /// equivalence estimate it feeds cannot be rebuilt to check it indirectly.
+    ///
+    /// Deliberately NOT behind `#if DEBUG`. The bundled selftest builds in
+    /// release, and a seam compiled out there is a main-red release workflow
+    /// rather than a skipped assertion — see the same note on `DiscordIPC`.
+    var qualifyingCycleKeysForTesting: [String] { qualifyingCycles.keys.sorted() }
 
     /// One window that has enough admitted history to produce an estimate,
     /// plus the account it belongs to.
@@ -1683,6 +1945,11 @@ private struct DashboardSnapshot {
                 // presented as current. The normal path below ends in the same
                 // call for the same reason.
                 rebuildQuotaEquivalences()
+                // The all-agent lens completes here and never reaches the call
+                // at the foot of this function, so without this its rebuilt
+                // equivalences never enter the reopen cache — the per-client
+                // path was fixed and this one was not.
+                refreshSnapshotLiveData()
                 return
             }
             // One scan per account with a qualifying window, not one scan for
@@ -1724,6 +1991,8 @@ private struct DashboardSnapshot {
             // reached this branch because something wants the estimate now.
             _ = scanned
             rebuildQuotaEquivalences()
+            // Second all-agent completion path, same reason as the first.
+            refreshSnapshotLiveData()
             return
         }
         // The history's oldest cycle CONTAINS the active window, so this widens
@@ -1811,6 +2080,13 @@ private struct DashboardSnapshot {
         refreshWindowQuotaHalves()
         rebuildQuotaHistory()
         rebuildQuotaEquivalences()
+        // The scan-derived half of the lens lands here and nowhere earlier, so
+        // the reopen cache has to be written after it or it carries the three
+        // cards this pass just rebuilt from before they were rebuilt. The poll
+        // loop's own call cannot cover this: that one runs on the quota
+        // payload, and this runs on the scan — the slower of the two, and the
+        // reason the history card was the last thing on screen to fill.
+        refreshSnapshotLiveData()
     }
 
     /// The clients whose stage-two scan settled with an error.
@@ -1902,11 +2178,18 @@ private struct DashboardSnapshot {
                 let resolved = AgentUsagePublicationCoordinator.resolve(payload)
                 agentUsage = resolved
                 reconcileQuotaRemaining(with: resolved)
-                refreshSnapshotLiveData() // keep the reopen cache's quota cards current
                 // Stage 1 is synchronous and lands with the payload; stage 2
                 // is kicked off without being awaited, so the poll loop never
                 // holds the card behind a scan.
                 refreshWindowQuotaHalves()
+                // AFTER the refresh, not before it. The cache now carries the
+                // published strip as well as the payload, and capturing it
+                // first stored the PREVIOUS pass's strip every time — empty on
+                // a model's first poll, so the reopen this restore exists for
+                // would still have drawn nothing. Both values this writes are
+                // ready by here: `agentUsage` is assigned above, and the strip
+                // is what the line before just published.
+                refreshSnapshotLiveData() // keep the reopen cache's quota cards current
                 Task { await refreshWindowUsage() }
             }
             // Set on failure too: `agentUsage == nil` alone cannot distinguish

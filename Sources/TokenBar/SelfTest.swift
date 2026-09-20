@@ -460,6 +460,14 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
     /// is "no history", a throw is "could not be read". Conflating them is the
     /// defect the case using this drives.
     var failCurveRead = false
+    /// Which clients throw, as opposed to `failCurveRead` making every client
+    /// throw at once. #359 is a defect that only exists when ONE provider fails
+    /// permanently while others answer: `antigravity` returns "quota curve
+    /// binding is unavailable" on every read, and a single shared failure flag
+    /// let that suppress Claude's, Grok's and Copilot's history too. A double
+    /// that can only fail globally cannot express that payload, which is why
+    /// the suite went green over it.
+    var failCurveReadClients: Set<String> = []
     struct QuotaUnavailable: Error {}
 
     init(payload: AgentUsagePayload) { self.payload = payload }
@@ -475,7 +483,7 @@ private final class WindowScanCountingSource: UsageDataSource, @unchecked Sendab
         clientId: String, accountKey: String?, windowKey: String, generation: UInt64
     ) throws -> QuotaCurve? {
         curveReads.append((clientId, generation))
-        if failCurveRead { throw QuotaUnavailable() }
+        if failCurveRead || failCurveReadClients.contains(clientId) { throw QuotaUnavailable() }
         if let byAccount = curveByAccount[accountKey] { return byAccount }
         if let byClient = curveByClient[clientId] { return byClient }
         return curve
@@ -2842,6 +2850,41 @@ enum SelfTest {
         expect(
             reopenPoints??.map(\.date) == ["2024-03-01"],
             "attributed series draws the previous open's rows instead of respinning")
+
+        // The assertion above takes its reading AFTER `load()` has been
+        // awaited, so it passes whether the rows are published before the first
+        // frame or after it. Measured on a real install: `load` republished 147
+        // rows with `republish=true` on every single reopen, and the card still
+        // flashed its empty state — because `load` runs from a `.task`, a
+        // `.task` does not start until the view has been laid out once, and
+        // `PopoverView` maps a nil `points` into an absent trend. The gap is
+        // one frame wide and invisible to any assertion that awaits first.
+        let firstFrame: (seeded: [String]?, atBuild: [String]?, wrongZone: [String]?)?
+            = awaitMainActorValue {
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            // The case above left `failGraph` set on this shared source, and a
+            // seed that acquires nothing makes every reading below vacuous.
+            // Its control caught exactly that.
+            reopenSource.failGraph = false
+            let seed = AttributedSeriesModel(timeZone: "Zone/A")
+            await seed.load(source: reopenSource, confirmed: [], timeZone: "Zone/A")
+            // Read BEFORE any load. This is the frame the card is drawn on.
+            let rebuilt = AttributedSeriesModel(timeZone: "Zone/A")
+            // Provenance the fold has no honest answer for: every day key the
+            // cache holds was bucketed under another zone.
+            let mismatched = AttributedSeriesModel(timeZone: "Zone/B")
+            return (seed.points?.map(\.date), rebuilt.points?.map(\.date),
+                    mismatched.points?.map(\.date))
+        }
+        // Control: without it the assertion below is satisfied by a fixture
+        // that never produced a series for the rebuilt model to inherit.
+        expect(firstFrame?.seeded == ["2024-03-01"],
+               "AS-FRAME control: the seeding load produced a series to inherit")
+        expect(firstFrame?.atBuild == ["2024-03-01"],
+               "AS-FRAME a rebuilt model has the previous open's series before any load runs")
+        expect(firstFrame?.wrongZone == nil,
+               "AS-FRAME and folds nothing when the cache was acquired under another timezone")
 
         // AS-REFOLD. The other thing that restarts this load is a declaration
         // change — `PopoverView` keys its task on the attribution string — and
@@ -5527,6 +5570,79 @@ enum SelfTest {
                 .contains("grok-bot"),
             "the consent row survives in the limits card even with no tab")
 
+        // #345. Codex, Claude and Antigravity are pushed into `agents` whether
+        // or not the user has them, so an error-only card from one of them says
+        // nothing about configuration. Since v1.18.0 tab navigation includes
+        // quota sources, and a machine that has never run either provider was
+        // given both tabs. The Rust side now reports `unconfigured` when there
+        // is no credential to read at all; this is the half that turns that into
+        // "no tab".
+        let requiredCardsJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"codex","source":"unconfigured","updatedAt":"now",
+           "windows":[],"error":"Codex auth.json not found. Run `codex` to log in."},
+          {"clientId":"antigravity","source":"unconfigured","updatedAt":"now",
+           "windows":[],"error":"Antigravity is not logged in. Re-login in Antigravity."}
+        ]}
+        """
+        let unconfiguredRequired = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(requiredCardsJSON.utf8))
+        expect(
+            unconfiguredRequired.configuredClientIds.isEmpty,
+            "a required card with no credential at all is not a configured quota source")
+        expect(
+            ClientRegistry.tabClients(
+                present: [], quotaIds: unconfiguredRequired.configuredClientIds).isEmpty,
+            "an unconfigured required card contributes no tab")
+        // Control: the identical cards at `source: "oauth"` DO keep their tabs.
+        // Without it this block would also pass if `configuredClientIds` simply
+        // dropped every windowless card — which would take Grok Bot's
+        // signed-in-but-failing tab with it, the regression #345's fix must not
+        // trade for this one.
+        let configuredRequired = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data(requiredCardsJSON
+                .replacingOccurrences(of: "\"unconfigured\"", with: "\"oauth\"").utf8))
+        expect(
+            ClientRegistry.tabClients(
+                present: [], quotaIds: configuredRequired.configuredClientIds)
+                == ["codex", "antigravity"],
+            "a configured-but-failing required card keeps its tab")
+
+        // The setup copy each unconfigured card offers. Claude's names
+        // CLAUDE_CODE_OAUTH_TOKEN and a Claude-only Keychain item; it was shown
+        // unconditionally while Claude was the only client that could reach this
+        // state, so Codex and Antigravity would have inherited it.
+        let claudeSetup = try! JSONDecoder().decode(
+            AgentUsagePayload.self,
+            from: Data("""
+            {"generatedAt":"now","agents":[
+              {"clientId":"claude","source":"unconfigured","updatedAt":"now",
+               "windows":[],"error":"Claude OAuth credentials not found."}
+            ]}
+            """.utf8))
+        expect(
+            claudeSetup.agents[0].setupInstructions == .claudeSetupToken,
+            "Claude's unconfigured card keeps its own setup-token instructions")
+        expect(
+            unconfiguredRequired.agents.map(\.setupInstructions) == [
+                .providerMessage("Codex auth.json not found. Run `codex` to log in."),
+                .providerMessage("Antigravity is not logged in. Re-login in Antigravity."),
+            ],
+            "every other unconfigured card states its own instruction, not Claude's")
+        // Controls. A card that is not unconfigured offers no setup copy at all:
+        // without these, returning `.claudeSetupToken` for everything would still
+        // satisfy the Claude assertion, and an ordinary error card would start
+        // rendering a setup prompt instead of its error.
+        expect(
+            consentPayload.agents
+                .first { $0.source == "keychain-consent" }?.setupInstructions == SetupInstructions.none,
+            "a Keychain-consent card is a consent prompt, not a setup prompt")
+        expect(
+            erroredPayload.agents
+                .first { $0.clientId == "grok-bot" }?.setupInstructions == SetupInstructions.none,
+            "an ordinary error card offers no setup instructions")
+
         // Independent quota switches must agree in the grouped tab, overview,
         // and automatic tray source. Only hiding the tab hides both members.
         let grokQuotaJSON = """
@@ -5566,6 +5682,149 @@ enum SelfTest {
                     .clientId == expectedSource,
                 "Automatic tray quota: \(label)")
         }
+
+        // #346. Antigravity IDE + CLI grouped into one tab, the same shape as
+        // Grok Build & Bot: the CLI carries the local session usage, the IDE
+        // client carries the OAuth quota and no usage of its own.
+        expect(
+            ClientRegistry.tabSlice("antigravity") == ["antigravity", "antigravity-cli"],
+            "antigravity tab expands to IDE + CLI")
+        // Pins the string a reader sees, and nothing more: "Antigravity" is
+        // also what `tabLabel` returns by FALLBACK for an id absent from
+        // `tabGroups`, so unlike the Grok case this assertion cannot witness
+        // that the group exists. Deleting the antigravity entry leaves it
+        // green. The slice, fold and hide assertions around it are what catch
+        // that, and they are mutation-verified for it.
+        expect(
+            ClientRegistry.tabLabel("antigravity") == "Antigravity",
+            "antigravity tab reads as Antigravity, not a two-part group label")
+        expect(
+            ClientRegistry.tabClients(present: ["antigravity-cli"], quotaIds: ["antigravity"])
+                == ["antigravity"],
+            "CLI usage plus IDE quota still yields exactly one tab")
+        expect(
+            ClientRegistry.withGroupMembers(Set(["antigravity"]))
+                == Set(["antigravity", "antigravity-cli"]),
+            "hiding the Antigravity tab pulls the CLI row along")
+        // Upgrade path. `antigravity-cli` had its own tab before the grouping,
+        // so an existing user can have exactly that id in tokenbar.tabs.hidden.
+        // The tab row now emits "antigravity"; comparing the stored set against
+        // it raw matches nothing and hands the user back a tab they hid.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity"], hiddenRaw: "antigravity-cli", orderRaw: "").isEmpty,
+            "a tab hidden under the pre-grouping id stays hidden after the upgrade")
+        // The ordering half of the same upgrade path. A saved order naming
+        // `antigravity-cli` supplied no position for the `antigravity` tab, so
+        // the tab fell to the end and the user's arrangement rearranged itself.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["claude", "antigravity", "codex"], hiddenRaw: "",
+                orderRaw: "claude,antigravity-cli,codex")
+                == ["claude", "antigravity", "codex"],
+            "a saved order naming the pre-grouping id keeps the grouped tab in that position")
+        // Control: the members must NOT be folded where rows are ordered by
+        // member id. `AgentLimitsCard` and the Settings list order both
+        // Antigravity rows through `orderedClients` directly, and collapsing
+        // them onto one index would leave their order to a tie-break.
+        //
+        // The saved order puts the CLI FIRST on purpose. With the IDE first the
+        // two implementations agree by accident — a folded order drops the CLI
+        // to `Int.max` and it lands last either way — so that arrangement
+        // cannot witness the difference. Reversing it is the only case where
+        // folding inside the shared function changes the answer, and the first
+        // version of this control used the arrangement that could not fail.
+        expect(
+            ClientRegistry.orderedClients(
+                ["antigravity", "antigravity-cli"], orderRaw: "antigravity-cli,antigravity")
+                == ["antigravity-cli", "antigravity"],
+            "ordering member rows still honours each member's own saved position")
+        // Controls. Without the first, folding every hidden id into a group
+        // would pass while hiding unrelated tabs too; without the second, the
+        // fold could be swallowing the whole hidden set.
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "codex"], hiddenRaw: "codex", orderRaw: "")
+                == ["antigravity"],
+            "an unrelated hidden id still hides only itself")
+        expect(
+            ClientRegistry.displayClients(
+                present: ["antigravity", "grok"], hiddenRaw: "", orderRaw: "")
+                == ["antigravity", "grok"],
+            "an empty hidden set hides nothing")
+        // The fold is tab-visibility only: a member's own quota card toggle
+        // must stay member-specific, which the visibility cases below assert
+        // per member. Stated here because the two sets are read from the same
+        // kind of CSV and the difference is easy to lose.
+        expect(
+            ClientRegistry.quotaExcludedClients(
+                tabHidden: [], limitsHidden: ["antigravity-cli"]) == ["antigravity-cli"],
+            "hiding the CLI's quota card does not fold into the IDE's")
+        // Control: the pre-existing Grok grouping is unaffected by turning the
+        // two ternaries into a table.
+        expect(ClientRegistry.tabSlice("grok") == ["grok", "grok-bot"], "grok grouping unchanged")
+        expect(ClientRegistry.tabLabel("grok") == "Grok Build & Bot", "grok label unchanged")
+
+        // Independent quota-card toggle per member, mirroring the Grok case
+        // above: only tab visibility applies to the whole group, and hiding
+        // one member's own limits card must not touch the other's.
+        let antigravityVisibilityCases: [(String, Set<String>, Set<String>, [String])] = [
+            ("both visible", [], [], ["antigravity", "antigravity-cli"]),
+            ("IDE quota hidden", [], ["antigravity"], ["antigravity-cli"]),
+            ("CLI quota hidden", [], ["antigravity-cli"], ["antigravity"]),
+            ("both quotas hidden", [], ["antigravity", "antigravity-cli"], []),
+            ("Antigravity tab hidden", ["antigravity"], [], []),
+        ]
+        for (label, tabHidden, limitsHidden, expected) in antigravityVisibilityCases {
+            let members = ClientRegistry.tabSlice("antigravity")
+            expect(
+                AgentLimitsCard.visible(
+                    members, hiddenRaw: limitsHidden.sorted().joined(separator: ","),
+                    tabHidden: tabHidden, clientId: { $0 }) == expected,
+                "Antigravity tab: \(label)")
+            let excludedFromQuota = ClientRegistry.quotaExcludedClients(
+                tabHidden: tabHidden, limitsHidden: limitsHidden)
+            expect(
+                Set(members).subtracting(excludedFromQuota) == Set(expected),
+                "quotaExcludedClients agrees with the card's visible set: \(label)")
+        }
+
+        // The restricted (single-tab) limits view must render Antigravity's
+        // quota card exactly once, not once per group member. Before this fix
+        // `snapshotsByRow` aliased the IDE's snapshot under "antigravity-cli"
+        // in `restrict` mode so the CLI's lone tab could show a quota card;
+        // now both members share one tab and that alias would make BOTH ids
+        // pass the restrict-mode "known" test, duplicating the same card.
+        let antigravityQuotaJSON = """
+        {"generatedAt":"now","agents":[
+          {"clientId":"antigravity","source":"oauth","updatedAt":"now",
+           "windows":[{"cardId":"quota.v1","label":"Quota","usedPercent":40,"remainingPercent":60}]}
+        ]}
+        """
+        let antigravityQuota = try! JSONDecoder().decode(
+            AgentUsagePayload.self, from: Data(antigravityQuotaJSON.utf8))
+        // THIS is the duplication guard. `baseClients`' restrict branch keeps an
+        // id when `placeholderRows[id] != nil || snapshots[primary(id)] != nil`,
+        // and `snapshots` is this dictionary — so a CLI row here is one extra
+        // rendered card under the grouped tab, drawing the IDE's quota twice.
+        // `antigravity-cli` has no placeholder row, so absence here is absence
+        // on screen.
+        expect(
+            AgentLimitsCard.snapshotsByRow(antigravityQuota.agents)[
+                AccountIdentity(clientId: "antigravity-cli", accountKey: nil)] == nil,
+            "no alias surfaces the IDE snapshot under the CLI's id, so the grouped "
+                + "tab renders that quota card once rather than once per member")
+        // A different function and a weaker claim, kept apart from the guard
+        // above on purpose: `knownClientIds` derives its quota ids from the
+        // payload's `agents`, never from `snapshotsByRow`, so the alias is
+        // invisible to it and it cannot witness the duplication. What it does
+        // cover is that passing a GROUPED `present` list does not itself invent
+        // a card for the member that has no snapshot.
+        expect(
+            AgentLimitsCard.knownClientIds(
+                agentUsage: antigravityQuota, present: ClientRegistry.tabSlice("antigravity"))
+                == ["antigravity"],
+            "a grouped present list adds no known card for the member without a snapshot")
 
         // Tray totals with hidden clients excluded (issue #35). Fixture: two
         // days, two clients (claude/codex), "today" = 2026-07-01. Client stripe
@@ -7486,10 +7745,18 @@ enum SelfTest {
         let quota = DemoData.agentUsage
         let quotaClients = Set(quota.agents.map(\.clientId))
         let registryClients = Set(ClientRegistry.allIds)
+        // Usage is per CLIENT, quota is per SUBSCRIPTION, and the two sets are
+        // not the same one. They coincided for every registered id until
+        // Antigravity's CLI made the difference visible: it publishes real
+        // session usage and draws on the IDE's allowance, so a demo card of its
+        // own asserted an allowance the provider never reports — and once #346
+        // put both members under one tab, that card rendered as a second,
+        // identical quota row beside the one it had borrowed.
+        let quotaOwners = registryClients.filter { ClientRegistry.quotaOwner($0) == $0 }
         expect(
             summaryClients == registryClients && contributionClients == registryClients
-                && quotaClients == registryClients,
-            "demo summary contributions and quota share the client set")
+                && quotaClients == quotaOwners,
+            "demo usage covers every client, demo quota covers every subscription owner")
         // The canonical card identities a demo client is expected to expose, in
         // order. The authority for each is the provider's own card-ID constant
         // in `crates/tb_core_ffi`; this mirrors it so a demo fixture cannot
@@ -7511,7 +7778,7 @@ enum SelfTest {
         ]
         let defaultDemoCardIds = ["session.v1", "weekly.v1"]
         expect(
-            quota.agents.count == ClientRegistry.allIds.count
+            quota.agents.count == quotaOwners.count
                 && quota.agents.allSatisfy { agent in
                     // The raw array, not `uniqueCardWindows`: that view is
                     // fail-closed on a repeated card ID, so a fixture writing
@@ -10231,12 +10498,52 @@ enum SelfTest {
         // `quotaExcludedClients()` and `hiddenLimitsClients()` are different
         // sets with different meanings; only tab-hidden belongs here.
         let dpDelegate = dpNormalized.first { $0.name == "AppDelegate.swift" }
-        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenClients()") == true
+        expect(dpDelegate?.text.contains("hidden:ClientRegistry.hiddenTabClients()") == true
             && dpDelegate?.text.contains("hidden:ClientRegistry.quotaExcludedClients()") == false
             && dpDelegate?.text.contains("hidden:ClientRegistry.hiddenLimitsClients()") == false,
             "A1: the published payload excludes the tab-hidden clients and no other set "
                 + "(mutation: swapping in quotaExcludedClients publishes a different total and "
                 + "a different top client, and every payload fixture stays green)")
+        // The subject moved from `hiddenClients()` to `hiddenTabClients()` when
+        // grouped tabs arrived (#346). Same set, canonicalized: it folds a
+        // stored member id onto its group and expands a group onto its members,
+        // so a grouped tab hidden by the user excludes every client under it.
+        // Without that, hiding the Antigravity tab left `antigravity-cli`'s
+        // tokens on the Discord profile — the exact leak this assertion exists
+        // to prevent, arriving through a set that was too NARROW rather than
+        // too wide.
+        //
+        // This is a source scan and cannot see behaviour: the payload fixtures
+        // are handed a set, so nothing here proves the wiring passes this one.
+        // What is behavioural is the other half of the claim — that the limits
+        // set never folds in — which `hiding the CLI's quota card does not fold
+        // into the IDE's` asserts against the real function.
+        expect(
+            ClientRegistry.hiddenTabClients(["antigravity"])
+                == Set(["antigravity", "antigravity-cli"])
+                && ClientRegistry.hiddenTabClients(["antigravity-cli"])
+                    == Set(["antigravity", "antigravity-cli"]),
+            "A1b: either stored form of a grouped tab excludes every client under that tab, "
+                + "so a hidden tab cannot leak one of its members' usage to the profile")
+
+        // Demo mode builds one quota snapshot per registered id, which gave
+        // `antigravity-cli` an allowance it does not have — and once the IDE and
+        // the CLI shared a tab, that invented snapshot rendered as a second,
+        // identical quota row. The rule is per subscription, not per client.
+        let demoAgentIds = Set(DemoData.agentUsage.agents.map(\.clientId))
+        expect(
+            !demoAgentIds.contains("antigravity-cli") && demoAgentIds.contains("antigravity"),
+            "demo gives the Antigravity subscription one card, under the id that owns it")
+        // Control: a grouped member that owns its OWN allowance keeps its card.
+        // Without this, excluding every grouped member would pass the assertion
+        // above while taking Grok Bot's card — a different allowance, on a
+        // different bill, that shares nothing but a tab.
+        expect(
+            demoAgentIds.contains("grok") && demoAgentIds.contains("grok-bot"),
+            "Grok Build and Grok Bot each keep a demo card, because each owns an allowance")
+        expect(
+            demoAgentIds.allSatisfy { ClientRegistry.quotaOwner($0) == $0 },
+            "no demo card belongs to a client that draws on someone else's subscription")
 
         // A8 — Discord absent. The common case, not an error: the connect
         // closure fails the way `connectToDiscord` does when there is no socket
@@ -11687,6 +11994,25 @@ enum SelfTest {
             result["Build and Bot retain independent curves in the same tab"] =
                 m.windowCurves[buildKey]?.contains(where: { $0.usedPercent == 5 }) == true
                 && m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == true
+            // #355. Every read succeeds and answers nil while the payload still
+            // offers both windows. That is not the user's history ceasing to
+            // exist — history accumulates — so the strip must keep the set it
+            // has rather than publish an empty one and report "nothing recorded
+            // yet" about windows it was recording a second earlier.
+            let summariesBeforeSilentReads = m.quotaWindowSummaries.map(\.id).sorted()
+            let curvesByClientBackup = src.curveByClient
+            src.curveByClient = [:]
+            src.curve = nil
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            result["reads that answer nothing keep the history already published"] =
+                !summariesBeforeSilentReads.isEmpty
+                && m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
+                && !src.curveReads.isEmpty
+            src.curveByClient = curvesByClientBackup
+            m.refreshWindowQuotaHalves()
+            result["restoring the curves restores the strip without a relaunch"] =
+                m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
             src.curveReads = []
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
             m.refreshWindowQuotaHalves()
@@ -11722,6 +12048,275 @@ enum SelfTest {
         expect(quotaOnlyFlow != nil, "Grok Bot quota-only integration fixture completes")
         for (label, passed) in (quotaOnlyFlow ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "Grok Bot: \(label)")
+        }
+
+        // #359. One provider failing permanently must not erase every other
+        // provider's history.
+        //
+        // `refreshWindowQuotaHalves` carried ONE `readFailed` flag for the
+        // whole two-level loop, and any throw suppressed the entire
+        // publication. The comment there called a throw "a transient
+        // generation expiry", and for `antigravity` it is not: measured with
+        // `--window-probe --generation-drift` on a real install, every
+        // `antigravity` read answers "quota curve binding is unavailable" with
+        // the CURRENT generation. So the suppression never lifted, and a
+        // process that launched with an empty strip reported "no completed
+        // windows recorded yet" for as long as it ran — about 132 Claude
+        // cycles that the same binary resolves when asked directly.
+        //
+        // No case in this suite could see it: the double could only fail every
+        // client at once (`failCurveRead`), so "one provider down, the rest
+        // healthy" was not a payload the fixtures could express.
+        let stripPartialFailure: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: buildAndBot)
+            // Grok gets a FOUR-cycle curve rather than the shared single-cycle
+            // `buildCurve`, because `qualifyingCycles` holds nothing until
+            // `WindowEquivalence.minimumCycles` (3) cycles are admitted. With
+            // one cycle the retention assertion below compares an empty set to
+            // an empty set — which is exactly what its control caught on the
+            // first run. `buildCurve` is left alone; the Bot/Build cases above
+            // assert on its exact percentages.
+            let fourCycleBuild: QuotaCurve = {
+                var pts: [String] = []
+                var sampledAts: [Int64] = []
+                // Oldest cycle first: the decoder validates `coverage` against
+                // the points it covers and rejects a mismatch outright, which
+                // it did — with a `try!` trap, so the run reached no verdict
+                // and printed no FAIL line. Coverage is derived below rather
+                // than written by hand for that reason.
+                for cycle in (0..<4).reversed() {
+                    // Samples span 500_000s of a 604_800s window, clearing
+                    // `minimumObservedFraction` (0.5), and rise 55 points over
+                    // two rising runs, clearing `deltaQualifies`.
+                    let reset = wReset - Int64(cycle) * 604_800
+                    for (offset, pct) in [(-600_000, 5.0), (-350_000, 30.0), (-100_000, 60.0)] {
+                        let at = reset + Int64(offset)
+                        sampledAts.append(at)
+                        pts.append("""
+                        {"sampledAt":\(at),"usedPercent":\(pct),
+                         "resetAt":\(reset),"durationSeconds":604800,
+                         "durationSource":"provider","origin":"liveV3",
+                         "isActiveGroup":false}
+                        """)
+                    }
+                }
+                let json = """
+                {"points":[\(pts.joined(separator: ","))],
+                 "coverage":{"oldestSampledAt":\(sampledAts.min() ?? 0),
+                             "newestSampledAt":\(sampledAts.max() ?? 0),
+                             "sampleCount":\(pts.count)},
+                 "activeResetAt":null,"generation":7}
+                """
+                return try! JSONDecoder().decode(QuotaCurve.self, from: Data(json.utf8))
+            }()
+            src.curveByClient = ["grok-bot": botCurve, "grok": fourCycleBuild]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            let poll = Task { await m.pollAgentUsage() }
+            var spins = 0
+            while m.agentUsage?.publicationGeneration != 8, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            var out: [String: Bool] = [:]
+            let botKey = "grok-bot|weekly.v1"
+            let buildKey = "grok|billing.weekly.v1"
+            // Control. Without it, every assertion below is satisfied by a
+            // fixture that never produced two rows in the first place.
+            out["control: both providers publish while both can be read"] =
+                Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+
+            // Retention, driven from a POPULATED strip — the empty-start case
+            // below cannot show it, because a window with nothing published
+            // has nothing to hold over. `qualifyingCycles` is the one not
+            // drawn directly: `rebuildQuotaEquivalences()` rebuilds
+            // `quotaEquivalences` from it, so a window dropped here loses the
+            // API-value estimate on its history rows while its strip and grid
+            // stay drawn, and never regains it if the read never recovers.
+            let qualifyingBefore = Set(m.qualifyingCycleKeysForTesting)
+            // Control: without it the retention assertion is satisfied by a
+            // fixture whose cycles never qualified in the first place.
+            out["control: the healthy pass produced qualifying cycles"] =
+                !qualifyingBefore.isEmpty
+            src.failCurveReadClients = ["grok"]
+            m.refreshWindowQuotaHalves()
+            out["a failed window keeps its summary, grid and qualifying cycles"] =
+                m.quotaWindowSummaries.contains { $0.id == buildKey }
+                && m.quotaHeatmaps[buildKey] != nil
+                && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
+            src.failCurveReadClients = []
+            m.refreshWindowQuotaHalves()
+
+            // The state the defect actually needs, and the one the first
+            // version of this case got wrong: the strip must be EMPTY when the
+            // failure begins. Suppressing the whole publication also preserves
+            // a strip that already has rows, so with rows already published
+            // both behaviours look identical — mutation showed that version
+            // surviving the global-suppression mutation intact. A launched app
+            // starts with nothing published, which is why it never recovered.
+            m.configureQuotaVisibility(tabHidden: ["grok", "grok-bot"], limitsHidden: [], orderRaw: "")
+            m.refreshWindowQuotaHalves()
+            out["control: the strip really is empty before the failure begins"] =
+                m.quotaWindowSummaries.isEmpty
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+
+            // Grok's binding is permanently unreadable from the first read on;
+            // Bot is untouched and still answers.
+            src.failCurveReadClients = ["grok"]
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            out["a permanently unreadable provider does not block a healthy one from publishing"] =
+                m.quotaWindowSummaries.contains { $0.id == botKey }
+            out["the heatmap publishes the same way"] = m.quotaHeatmaps[botKey] != nil
+            // The window that threw is absent rather than asserted empty: it
+            // had nothing published to hold over, and inventing a row for it
+            // would be the same "absence we did not observe" the retention
+            // exists to prevent.
+            out["the unreadable window is not invented"] =
+                !m.quotaWindowSummaries.contains { $0.id == buildKey }
+            // Proves the throw reached the model rather than the fixture
+            // quietly serving a cached curve: both were still asked.
+            out["both providers were still asked"] =
+                Set(src.curveReads.map(\.client)) == ["grok", "grok-bot"]
+
+            // Not a latch: the moment the binding answers again the strip
+            // follows, without a relaunch.
+            src.failCurveReadClients = []
+            m.refreshWindowQuotaHalves()
+            out["recovery republishes both without a relaunch"] =
+                Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
+            return out
+        }
+        expect(stripPartialFailure != nil, "#359 partial-failure fixture completes")
+        for (label, passed) in (stripPartialFailure ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "#359: \(label)")
+        }
+
+        // Strip restore across a popover reopen. `DashboardSnapshot` carries
+        // the payload, the stats and the agent usage, so everything else in
+        // the lens is drawn the instant a rebuilt model exists — and carried
+        // neither history card, so those two started from `[]` and re-read
+        // every window's curve before they could draw. They were the only two
+        // surfaces spinning on a reopen, which is what named the gap.
+        let stripReopen: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            // `lastSnapshot` is process-wide and the restore at `init` does NOT
+            // check `cachesSnapshot` — only writing it does. So a model seeded
+            // here is read by every later model built with the same
+            // `initialYear`, and this is the first case in the file to write
+            // one. Leaving it set broke four scan assertions further down
+            // before this defer existed; they were reading this fixture's
+            // quota cards as their own restored state.
+            DashboardModel.invalidateScanDerivedCaches()
+            defer { DashboardModel.invalidateScanDerivedCaches() }
+            let src = WindowScanCountingSource(payload: buildAndBot)
+            src.curveByClient = ["grok-bot": botCurve, "grok": buildCurve]
+            // `cachesSnapshot: true` is what puts a model in the shared reopen
+            // cache at all — the default is false, so every other case in this
+            // file runs outside the lifecycle this one is about.
+            let seed = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            seed.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            await seed.load()
+            let poll = Task { await seed.pollAgentUsage() }
+            var spins = 0
+            while seed.quotaWindowSummaries.isEmpty, spins < 2_000 {
+                try? await Task.sleep(for: .milliseconds(1))
+                spins += 1
+            }
+            poll.cancel()
+            ClaudeExtraRoots.RegistryChange.signal()
+            await poll.value
+            var out: [String: Bool] = [:]
+            let published = Set(seed.quotaWindowSummaries.map(\.id))
+            // Control: the seed really published something to restore. Without
+            // it, "the reopen restored what the seed had" is satisfied by two
+            // empty strips.
+            out["control: the seeding model published a strip"] = !published.isEmpty
+
+            // The reopen. A rebuilt model reads the shared cache in `init`,
+            // before any refresh has run.
+            // The window card and its sparkline are the other two surfaces on
+            // this lens that a rebuilt model recomputed from nothing.
+            //
+            // The history card is built for the SELECTED client. Without this
+            // line `quotaHistory` stays empty and the assertion on it compares
+            // 0 to 0 — which is exactly what its control caught.
+            seed.windowUsageClient = "grok"
+            await seed.refreshWindowUsage()
+            out["control: the seeding model published a window card and a curve"] =
+                !seed.windowCards.isEmpty && !seed.windowCurves.isEmpty
+            out["control: the seeding model published history rows"] =
+                !seed.quotaHistory.isEmpty
+
+            let reopened = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            out["a reopened model draws the strip before any refresh"] =
+                Set(reopened.quotaWindowSummaries.map(\.id)) == published
+            out["and the heatmap with it"] =
+                Set(reopened.quotaHeatmaps.keys) == Set(seed.quotaHeatmaps.keys)
+                && !reopened.quotaHeatmaps.isEmpty
+            out["and the window card and its sparkline"] =
+                Set(reopened.windowCards.keys) == Set(seed.windowCards.keys)
+                && Set(reopened.windowCurves.keys) == Set(seed.windowCurves.keys)
+            // `QuotaHistoryCard` branches on `cycles.isEmpty` and iterates
+            // them; `rows` only annotate them. Asserting the row count alone
+            // passed while the card drew its placeholder, because the rows were
+            // restored and the list that drives them was not. Assert both, and
+            // put the cycles first — that is the one the card asks about.
+            out["and the window-history cycles the card draws from"] =
+                !seed.quotaCycles.isEmpty
+                && reopened.quotaCycles.map(\.resetAtMs) == seed.quotaCycles.map(\.resetAtMs)
+            out["and the window-history rows that annotate them"] =
+                reopened.quotaHistory.count == seed.quotaHistory.count
+            // A restored strip counts as published, or the #356 guard treats
+            // these rows as "never published" and lets an unanswered refresh
+            // replace them with an empty set.
+            src.curveByClient = [:]
+            src.curve = nil
+            reopened.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            reopened.refreshWindowQuotaHalves()
+            out["a restored strip is protected from an unanswered refresh"] =
+                Set(reopened.quotaWindowSummaries.map(\.id)) == published
+
+            // A restored model whose FIRST curve read throws. That is the
+            // #359 case, and it takes a different branch from the one above:
+            // `refreshWindowQuotaHalves`'s failure path clears `quotaHistory`
+            // when `quotaCyclesCardId` does not match the selected window, and
+            // on a restored model that id is whatever the restore seeded. The
+            // per-client success path this fixture drove first cannot reach it.
+            let throwing = DashboardModel(cachesSnapshot: true, source: src, initialYear: nil)
+            let restoredHistory = throwing.quotaHistory.count
+            out["control: the reopened model restored history rows to lose"] =
+                restoredHistory > 0
+            src.failCurveRead = true
+            throwing.windowUsageClient = "grok"
+            throwing.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            throwing.refreshWindowQuotaHalves()
+            out["a throwing first curve read does not drop the restored history"] =
+                throwing.quotaHistory.count == restoredHistory
+            src.failCurveRead = false
+
+            // NOT asserted here, deliberately, and this comment is the
+            // hand-over rather than a footnote: `refreshWindowUsage()`'s
+            // all-agent branch (`windowUsageClient == nil`) now writes the
+            // reopen cache through its own two early returns, because they
+            // never reach the call at the foot of that function. Covering it
+            // needs a fixture that feeds `messagesByAccount` with rows landing
+            // inside this curve's cycles, since `rebuildQuotaEquivalences()`
+            // folds scan spans and produces nothing without them. The first
+            // version of this case asserted it anyway and compared two empty
+            // sets; its control caught that, and a vacuous assertion is worse
+            // than a stated gap because it reads as coverage.
+            return out
+        }
+        expect(stripReopen != nil, "strip-reopen fixture completes")
+        for (label, passed) in (stripReopen ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "strip reopen: \(label)")
         }
 
         // L1a. `quotaHalf` takes no UsageDataSource at all, so the network is

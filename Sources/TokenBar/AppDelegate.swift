@@ -201,8 +201,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         selection: DiscordPresence.ClientSelection = .mostUsed,
         contributors: Set<String>? = nil
     ) -> DiscordIPC.VisibilityChange {
-        let previousHidden = ClientRegistry.parseIdSet(previousHiddenRaw)
-        let currentHidden = ClientRegistry.parseIdSet(hiddenRaw)
+        let previousHidden = ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(previousHiddenRaw))
+        let currentHidden = ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw))
         let wasPublished = effectivePublished(
             selection: previousSelection, hidden: previousHidden, contributors: contributors)
         let isPublished = effectivePublished(
@@ -349,7 +349,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         guard let lastGraph else { return nil }
         return DiscordPresence.payload(
             graph: lastGraph,
-            hidden: ClientRegistry.hiddenClients(),
+            hidden: ClientRegistry.hiddenTabClients(),
             today: Format.todayKey(),
             // Read here and passed down. `DiscordPresence` performs no
             // preference lookup of its own, so the privacy assertions cannot
@@ -433,7 +433,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                         previous: previousComponents, current: components))
                     .combined(with: AppDelegate.selectionChange(
                         previous: previousSelection, current: selection,
-                        hidden: ClientRegistry.parseIdSet(hiddenRaw)))
+                        hidden: ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw))))
                 self.lastDiscordEnabled = discordEnabled
                 self.lastCostStyle = costStyle
                 self.lastComponents = components
@@ -515,7 +515,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             payload: trayAnimator?.quota,
             enabled: ClientTray.enabled(),
             selections: ClientTray.selections(),
-            hidden: ClientRegistry.hiddenClients(),
+            hidden: ClientRegistry.hiddenTabClients(),
             officialClients: AgentIconView.availableOfficialClientIDs()))
     }
 

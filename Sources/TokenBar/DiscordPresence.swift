@@ -243,7 +243,7 @@ enum DiscordPresence {
         guard let present else {
             return ClientRegistry.orderedClients(
                 ClientRegistry.allIds.filter {
-                    !ClientRegistry.parseIdSet(hiddenRaw).contains($0)
+                    !ClientRegistry.hiddenTabClients(ClientRegistry.parseIdSet(hiddenRaw)).contains($0)
                 }, orderRaw: orderRaw)
         }
         var out = ClientRegistry
