@@ -256,7 +256,9 @@ struct WindowUsageCard: View {
                     // the @State we just wrote: within one closure run that
                     // still holds the previous value, and the anchor would lag
                     // a zone behind the cursor.
-                    let anchorX = zone.map { ($0.x + $0.width) * w } ?? p.x
+                    let anchorX: CGFloat = zone.map {
+                        CGFloat($0.x + $0.width) * w
+                    } ?? p.x
                     hoverAnchorInCard = CGPoint(
                         x: anchorX + chart.minX - cardFrame.minX,
                         y: p.y + chart.minY - cardFrame.minY)
