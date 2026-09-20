@@ -199,6 +199,11 @@ public struct QuotaHistoryModel: Equatable, Sendable, Identifiable {
     public let providerId: String
     public let modelId: String
     public let tokens: Int64
+    /// `tokens` split by class, on the same five lanes as the row's. A model
+    /// line and the row above it are the same question at two scopes, so a
+    /// reader who can break one down and not the other is being told the
+    /// detail exists only sometimes.
+    public let breakdown: TokenBreakdown
     public let cost: Double
 
     public var id: String { "\(providerId)|\(modelId)" }
@@ -376,7 +381,7 @@ public enum QuotaHistoryFold {
                          cacheWrite: Int64(0), reasoning: Int64(0))
             var other = (tokens: Int64(0), cost: 0.0, hasAssigned: false,
                          hasExcluded: false, hasUnattributed: false)
-            var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
+            var byModel: [ModelKey: (tokens: Int64, cost: Double, split: TokenBreakdown)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
                 let state = UsageAttribution.resolve(
@@ -398,10 +403,20 @@ public enum QuotaHistoryFold {
                     mine.cost += message.cost
                     let key = ModelKey(
                         providerId: message.providerId, modelId: message.modelId)
-                    let current = byModel[key] ?? (0, 0)
+                    let current = byModel[key] ?? (0, 0, TokenBreakdown())
                     byModel[key] = (
                         current.tokens.saturatingAdding(message.tokens),
-                        current.cost + message.cost)
+                        current.cost + message.cost,
+                        // Per class here too, accumulated rather than derived,
+                        // for the reason the row's own split states.
+                        TokenBreakdown(
+                            input: current.split.input.saturatingAdding(message.input),
+                            output: current.split.output.saturatingAdding(message.output),
+                            cacheRead: current.split.cacheRead.saturatingAdding(message.cacheRead),
+                            cacheWrite: current.split.cacheWrite
+                                .saturatingAdding(message.cacheWrite),
+                            reasoning: current.split.reasoning
+                                .saturatingAdding(message.reasoning)))
                 } else {
                     // Three states reach here, and they mean three different
                     // things to the person reading the line: someone else's
@@ -434,7 +449,8 @@ public enum QuotaHistoryFold {
                     .map {
                         QuotaHistoryModel(
                             providerId: $0.key.providerId, modelId: $0.key.modelId,
-                            tokens: $0.value.tokens, cost: $0.value.cost)
+                            tokens: $0.value.tokens, breakdown: $0.value.split,
+                            cost: $0.value.cost)
                     }
                     // Tokens, then cost, then the model key. Ordering on
                     // tokens alone leaves every cost-only model tied at zero,

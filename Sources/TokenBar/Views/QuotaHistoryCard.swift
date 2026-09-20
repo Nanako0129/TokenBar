@@ -44,6 +44,33 @@ struct QuotaHistoryCard: View {
     /// this line stale until something unrelated rebuilt the body.
     @AppStorage(UsageAttribution.confirmedKey) private var attributionRaw = ""
 
+    /// Hover breakdown on the token column. The five lanes the tooltip prints
+    /// are the five `mineTokens` is summed from, so they reconcile with the
+    /// figure the pointer is on rather than explaining a different number.
+    @Environment(\.popoverScrollViewport) private var viewport
+    @State private var cardFrame: CGRect = .zero
+    /// What the tooltip is describing. A window row and one of its model
+    /// lines are the same question at two scopes, so one target type serves
+    /// both rather than two nearly-identical hover paths.
+    private struct HoverTarget: Equatable {
+        let key: String
+        /// What the breakdown is of: a model's name on a model line, and the
+        /// window's span on a row. The row prints only its start, so the span
+        /// is the part a reader cannot otherwise get without opening it.
+        let title: String?
+        let breakdown: TokenBreakdown
+    }
+    @State private var hovered: HoverTarget?
+    @State private var hoverAnchorInCard: CGPoint = .zero
+    @State private var tooltipSize: CGSize = .zero
+    private static let tooltipWidth: CGFloat = 176
+    /// The card's own coordinate space. Asking `onContinuousHover` for a
+    /// point in it yields exactly what `PopoverTooltipPlacement.offset`
+    /// wants for `anchor`, so there is no conversion between spaces left to
+    /// get wrong - which is the bug the trend card's comment says the window
+    /// card took three attempts to fix.
+    private static let cardSpace = "quota-history-card"
+
     @State private var expanded: Int64?
 
     /// How many rows are drawn right now. Grows by `visibleRows` per press of
@@ -120,6 +147,110 @@ struct QuotaHistoryCard: View {
                 footnote
             }
         }
+        .coordinateSpace(name: Self.cardSpace)
+        .overlay(alignment: .topLeading) { tooltipLayer }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { cardFrame = $0 }
+    }
+
+    /// The token column's breakdown. Five lanes, all of them, including the
+    /// zeroes: a lane omitted because it is zero leaves the reader unable to
+    /// tell "none of this kind" from "this kind is not counted here", and the
+    /// card already spends two comments on that distinction in the columns
+    /// this tooltip explains.
+    ///
+    /// The total is printed beneath them because it is the number the pointer
+    /// is on, and showing it here is what makes the five lanes checkable
+    /// against it by eye. `QH-SPLIT` asserts the same identity mechanically.
+    @ViewBuilder
+    private var tooltipLayer: some View {
+        if let hovered, cardFrame != .zero {
+            let total = hovered.breakdown.total
+            let lanes = zip(
+                TokenKindPalette.all,
+                [hovered.breakdown.input, hovered.breakdown.output,
+                 hovered.breakdown.cacheRead, hovered.breakdown.cacheWrite,
+                 hovered.breakdown.reasoning])
+            VStack(alignment: .leading, spacing: 3) {
+                if let title = hovered.title {
+                    Text(title)
+                        .font(.system(size: 9).weight(.semibold))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Divider().padding(.vertical, 1)
+                }
+                ForEach(Array(lanes), id: \.0.label) { kind, value in
+                    HStack(spacing: 5) {
+                        RoundedRectangle(cornerRadius: 1.5)
+                            .fill(Color(hex: kind.color))
+                            .frame(width: 6, height: 6)
+                        Text(kind.label.localized)
+                            .font(.system(size: 9))
+                            .foregroundStyle(.secondary)
+                        Spacer(minLength: 6)
+                        // Share of the total beside the count. A lane is easier
+                        // to place against the others as a proportion, and the
+                        // count is what reconciles with the figure on the row.
+                        // Dash rather than "0%" when there is nothing to take a
+                        // share of, the same rule the columns this explains use
+                        // for a total nobody measured.
+                        Text(total > 0
+                             ? "%@%%".localized(String(Int((Double(value) / Double(total) * 100).rounded())))
+                             : "—")
+                            .font(.system(size: 9).monospacedDigit())
+                            .foregroundStyle(.tertiary)
+                            .frame(width: 30, alignment: .trailing)
+                        Text(Format.compactTokens(value))
+                            .font(.system(size: 9).monospacedDigit())
+                            .frame(width: 44, alignment: .trailing)
+                    }
+                }
+                Divider().padding(.vertical, 1)
+                HStack(spacing: 5) {
+                    Text("Total".localized)
+                        .font(.system(size: 9).weight(.semibold))
+                    Spacer(minLength: 6)
+                    Text(Format.compactTokens(total))
+                        .font(.system(size: 9).weight(.semibold).monospacedDigit())
+                        .frame(width: 44, alignment: .trailing)
+                }
+            }
+            .padding(8)
+            .frame(width: Self.tooltipWidth, alignment: .leading)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
+            .offset(
+                PopoverTooltipPlacement.offset(
+                    anchor: hoverAnchorInCard,
+                    tooltipSize: tooltipSize == .zero
+                        ? CGSize(width: Self.tooltipWidth, height: 92) : tooltipSize,
+                    containerFrame: cardFrame, viewport: viewport) ?? .zero)
+            .allowsHitTesting(false)
+        }
+    }
+
+    /// A window's span, for the row tooltip's heading.
+    ///
+    /// The end date is dropped when both ends fall on the same day, which is
+    /// every session-length window: printing "09-20 22:39 - 09-20 03:39" puts
+    /// the reader through the date twice to learn nothing. It is kept when they
+    /// differ, because a window that crosses midnight is exactly when the
+    /// second date carries information.
+    private static func windowRange(_ cycle: QuotaCycle) -> String {
+        let startDate = Date(timeIntervalSince1970: Double(cycle.startMs) / 1000)
+        let endDate = Date(timeIntervalSince1970: Double(cycle.resetAtMs) / 1000)
+        let start = Format.windowStamp(ms: cycle.startMs)
+        // The day comparison is on the dates, not on the formatted strings.
+        // Slicing "MM-dd" off the front would work only while `windowStamp`
+        // keeps that exact layout, and a format that moves is a comparison
+        // that silently starts answering a different question.
+        guard Calendar.current.isDate(startDate, inSameDayAs: endDate) else {
+            return "\(start) – \(Format.windowStamp(ms: cycle.resetAtMs))"
+        }
+        let time = DateFormatter()
+        time.locale = Locale(identifier: "en_US_POSIX")
+        time.dateFormat = "HH:mm"
+        return "\(start) – \(time.string(from: endDate))"
     }
 
     /// The cycles drawn as rows. One statement of it, because three things read
@@ -204,6 +335,26 @@ struct QuotaHistoryCard: View {
             }
             .contentShape(Rectangle())
             .onTapGesture { expanded = isOpen ? nil : cycle.resetAtMs }
+            // The whole line, not the token column alone: the breakdown is
+            // about this window, and a target the width of one number is a
+            // target you have to find. `contentShape` above already makes the
+            // row a single hit region for the tap, so the hover follows it.
+            //
+            // The anchor is the POINTER. The shared placement dodges whatever
+            // anchor it is handed, so anchoring to a frame left it with no idea
+            // where the cursor was and the tooltip sat under it.
+            .onContinuousHover(coordinateSpace: .named(Self.cardSpace)) { phase in
+                switch phase {
+                case let .active(point):
+                    guard let row else { hovered = nil; break }
+                    hovered = HoverTarget(
+                        key: "row-\(row.id)", title: Self.windowRange(cycle),
+                        breakdown: row.mineBreakdown)
+                    hoverAnchorInCard = point
+                case .ended:
+                    if hovered?.key == "row-\(cycle.resetAtMs)" { hovered = nil }
+                }
+            }
             if isOpen { detail(cycle, row: row) }
         }
         .padding(.vertical, 5)
@@ -318,6 +469,22 @@ struct QuotaHistoryCard: View {
                             .frame(width: 54, alignment: .trailing)
                     }
                     .font(.system(size: 10).monospacedDigit())
+                    // Each model line carries its own breakdown. The row's
+                    // hover would otherwise cover these, leaving the per-model
+                    // split reachable nowhere -- and a model line and the row
+                    // above it are the same question at two scopes.
+                    .contentShape(Rectangle())
+                    .onContinuousHover(coordinateSpace: .named(Self.cardSpace)) { phase in
+                        let key = "model-\(row.id)-\(model.id)"
+                        switch phase {
+                        case let .active(point):
+                            hovered = HoverTarget(
+                                key: key, title: model.modelId, breakdown: model.breakdown)
+                            hoverAnchorInCard = point
+                        case .ended:
+                            if hovered?.key == key { hovered = nil }
+                        }
+                    }
                 }
                 if row.models.isEmpty {
                     Text("Nothing in this window was charged to this subscription.")
