@@ -5,6 +5,40 @@ import TokenBarCore
 @MainActor @Observable final class AttributedSeriesModel {
     private(set) var points: [AttributedDailySeries.Point]?
 
+    /// Folds the previous open's rows at construction, so the card draws on the
+    /// FIRST frame of a reopen instead of after one.
+    ///
+    /// `load()` has always republished `lastRows` before awaiting anything, and
+    /// measurement on a real install showed it doing exactly that — 147 rows,
+    /// `republish=true`, on every reopen. The card still flashed its empty
+    /// state, because `load()` runs from a `.task` and a `.task` does not start
+    /// until the view has been laid out once. `points` was therefore nil for
+    /// that first frame every time, and nil is what `PopoverView` maps into the
+    /// card's absent trend. The data was never missing; it arrived one frame
+    /// after it was drawn.
+    ///
+    /// This does NOT cache the finished points, which the note on `lastRows`
+    /// rejects and still rejects: rows are folded here against the declarations
+    /// as they are RIGHT NOW, exactly as `load()` folds them, so a
+    /// classification the user changed while the popover was closed is applied
+    /// rather than replayed. The only thing that moved is when the fold runs.
+    ///
+    /// Gated on the same provenance `load()` gates its republish on. A zone
+    /// that does not match what the cache was acquired under makes every day
+    /// key wrong, and `cacheTrustLost` means a transition is pending; in either
+    /// case there is nothing honest to draw yet and the card waits, as before.
+    init(timeZone: String = TimeZone.current.identifier) {
+        guard !Self.cacheTrustLost, Self.acquiredTimeZone == timeZone,
+              let rows = Self.lastRows
+        else { return }
+        contributions = rows
+        points = AttributedDailySeries.points(
+            contributions: rows,
+            // The same single reader `load`'s caller uses, not a second parse
+            // of the same defaults key. One statement of what "declared" means.
+            confirmed: UsageAttribution.confirmed().records)
+    }
+
     /// The timezone whatever is in the graph cache was produced under, scoped
     /// to the process rather than to one model. Everything it tracks is
     /// process-scoped: the staticlib's graph cache is a process-lifetime static,

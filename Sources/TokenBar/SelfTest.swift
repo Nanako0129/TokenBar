@@ -2851,6 +2851,41 @@ enum SelfTest {
             reopenPoints??.map(\.date) == ["2024-03-01"],
             "attributed series draws the previous open's rows instead of respinning")
 
+        // The assertion above takes its reading AFTER `load()` has been
+        // awaited, so it passes whether the rows are published before the first
+        // frame or after it. Measured on a real install: `load` republished 147
+        // rows with `republish=true` on every single reopen, and the card still
+        // flashed its empty state — because `load` runs from a `.task`, a
+        // `.task` does not start until the view has been laid out once, and
+        // `PopoverView` maps a nil `points` into an absent trend. The gap is
+        // one frame wide and invisible to any assertion that awaits first.
+        let firstFrame: (seeded: [String]?, atBuild: [String]?, wrongZone: [String]?)?
+            = awaitMainActorValue {
+            AttributedSeriesModel.resetForTesting()
+            AttributedSeriesModel.captureLaunchTimeZone("Zone/A")
+            // The case above left `failGraph` set on this shared source, and a
+            // seed that acquires nothing makes every reading below vacuous.
+            // Its control caught exactly that.
+            reopenSource.failGraph = false
+            let seed = AttributedSeriesModel(timeZone: "Zone/A")
+            await seed.load(source: reopenSource, confirmed: [], timeZone: "Zone/A")
+            // Read BEFORE any load. This is the frame the card is drawn on.
+            let rebuilt = AttributedSeriesModel(timeZone: "Zone/A")
+            // Provenance the fold has no honest answer for: every day key the
+            // cache holds was bucketed under another zone.
+            let mismatched = AttributedSeriesModel(timeZone: "Zone/B")
+            return (seed.points?.map(\.date), rebuilt.points?.map(\.date),
+                    mismatched.points?.map(\.date))
+        }
+        // Control: without it the assertion below is satisfied by a fixture
+        // that never produced a series for the rebuilt model to inherit.
+        expect(firstFrame?.seeded == ["2024-03-01"],
+               "AS-FRAME control: the seeding load produced a series to inherit")
+        expect(firstFrame?.atBuild == ["2024-03-01"],
+               "AS-FRAME a rebuilt model has the previous open's series before any load runs")
+        expect(firstFrame?.wrongZone == nil,
+               "AS-FRAME and folds nothing when the cache was acquired under another timezone")
+
         // AS-REFOLD. The other thing that restarts this load is a declaration
         // change — `PopoverView` keys its task on the attribution string — and
         // then the model already HAS points: the split the user just moved away
