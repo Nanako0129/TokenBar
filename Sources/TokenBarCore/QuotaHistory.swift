@@ -256,14 +256,48 @@ public enum QuotaHistoryFold {
     public static func cycles(points: [QuotaCurvePoint]) -> [QuotaCycle] {
         var grouped: [Int64: [QuotaCurvePoint]] = [:]
         for point in points where !point.isActiveGroup {
-            grouped[point.resetAt, default: []].append(point)
+            // Keyed on the canonical reset, not the stored one. The engine
+            // normalises a stored `resetAt` onto a quantum before writing it
+            // (`normalize_reset`), which is what makes an exact key workable at
+            // all — but that normalisation is clamped to `[sampled_at, ...]`
+            // afterwards, and for the poll that lands AT a reset the clamp
+            // pushes the value back off the quantum. Measured on a real store:
+            // resets 1789897140 and 1789897145 five seconds apart, the second
+            // carrying one sample whose `sampledAt` equals its `resetAt`. That
+            // sample is the tail of the cycle it was excluded from, so the
+            // reader saw one window twice — once correct, once at 0% consumed
+            // with the whole span's tokens beside it.
+            //
+            // Reapplying the quantum here is not a second rule. It is the same
+            // rule, applied where the clamp cannot undo it, and it is a read of
+            // data already written: nothing is migrated and no store is
+            // rewritten. The engine's own normalisation stays the producer's
+            // job; this only stops a value that escaped it from splitting a
+            // cycle in the one consumer that groups by it.
+            grouped[canonicalReset(point.resetAt, point.durationSeconds), default: []]
+                .append(point)
         }
 
-        return grouped.compactMap { resetAt, raw -> QuotaCycle? in
+        return grouped.compactMap { _, raw -> QuotaCycle? in
             let sorted = raw.sorted { $0.sampledAt < $1.sampledAt }
             guard let last = sorted.last, let first = sorted.first,
                   last.durationSeconds > 0
             else { return nil }
+            // The group's own reset, not the quantised key it was grouped
+            // under. The key exists to decide WHICH points belong together;
+            // reporting it would move every window this fold returns by up to
+            // half a quantum, including the overwhelming majority that never
+            // drifted at all.
+            //
+            // The mode, because a drifted reading is by construction the rare
+            // one: the split this repairs was 47 samples against 1. Ties go to
+            // the smaller value so the result cannot depend on dictionary
+            // order.
+            var tally: [Int64: Int] = [:]
+            for point in sorted { tally[point.resetAt, default: 0] += 1 }
+            guard let resetAt = tally.max(by: {
+                $0.value != $1.value ? $0.value < $1.value : $0.key > $1.key
+            })?.key else { return nil }
             let used = sorted.map(\.usedPercent)
             let start = resetAt - last.durationSeconds
             return QuotaCycle(
@@ -279,6 +313,29 @@ public enum QuotaHistoryFold {
                 risingRuns: risingRuns(used))
         }
         .sorted { $0.resetAtMs > $1.resetAtMs }
+    }
+
+    /// The quantum a stored `resetAt` is meant to sit on.
+    ///
+    /// Mirrors `normalize_reset` in `agent_quota_history.rs` deliberately and
+    /// must move with it: `clamp(duration / 100, 60, 300)`, rounded half up.
+    /// Stated here rather than inferred, because a tolerance that drifts from
+    /// the producer's would either merge two real windows or stop merging the
+    /// split this exists for, and neither failure announces itself.
+    ///
+    /// Well below any window length by construction — a hundredth of it,
+    /// capped at five minutes — so two adjacent cycles can never collapse into
+    /// one. The five-hour session window quantises at 180 seconds against an
+    /// 18000-second spacing.
+    static func canonicalReset(_ resetAt: Int64, _ durationSeconds: Int64) -> Int64 {
+        let quantum = max(min(max(durationSeconds / 100, 0), 300), 60)
+        guard quantum > 0 else { return resetAt }
+        let quotient = resetAt / quantum
+        let remainder = resetAt % quantum
+        // Round half up, matching the Rust side's `remainder * 2 >= quantum`.
+        // `%` and `/` agree with `rem_euclid`/`div_euclid` for a positive
+        // quantum and a non-negative epoch, which every stored reset is.
+        return (remainder * 2 >= quantum ? quotient + 1 : quotient) * quantum
     }
 
     /// The newest cycles a scan-paying surface may look at.
