@@ -13316,6 +13316,20 @@ enum SelfTest {
         expect(qhjCycles.first?.sampleCount == 3 && qhjCycles.first?.peakUsedPercent == 80,
                "QH-JITTER all three readings land in one cycle, so the drifted "
                    + "one counts toward the peak instead of forming a 0% window")
+        // QH-JITTER-TIE. An exact 1-1 tie on count. The mode has no majority to
+        // find, so only the tie-break decides, and without a case here flipping
+        // that comparator would change which reset is reported with nothing
+        // turning red — while making the answer depend on dictionary order,
+        // which is the failure the comparator exists to rule out.
+        let qhjTie = [
+            heatPoint(qhjMain - 600, 77, reset: qhjMain),
+            heatPoint(qhjDrifted, 80, reset: qhjDrifted),
+        ]
+        let qhjTieCycles = QuotaHistoryFold.cycles(points: qhjTie)
+        expect(qhjTieCycles.count == 1 && qhjTieCycles.first?.resetAtMs == qhjMain * 1000,
+               "QH-JITTER-TIE a one-to-one tie reports the smaller reset, so the "
+                   + "answer cannot depend on dictionary order")
+
         // Control. Without it the three above are satisfied by a fold that
         // merges everything it is handed.
         let qhjAdjacent = [
