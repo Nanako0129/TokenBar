@@ -122,6 +122,14 @@ public struct QuotaHistoryRow: Equatable, Sendable, Identifiable {
     /// discrimination). A figure printed beside the bars should be countable
     /// in them.
     public let mineTokensExCacheRead: Int64
+    /// `mineTokens` split by token class, for the row's hover breakdown.
+    ///
+    /// Five classes, because `WindowMessage.tokens` sums exactly five and
+    /// `mineTokens` is its running total: a four-way split would not add up to
+    /// the number printed beside it, and a breakdown that does not reconcile
+    /// with the figure it explains is worse than none. `TokenBreakdown.total`
+    /// exists so that identity can be asserted rather than assumed.
+    public let mineBreakdown: TokenBreakdown
     public let mineCost: Double
     /// The same two quantities restricted to the cycle's OBSERVED span, which
     /// is the only interval the quota delta describes. The whole-window figures
@@ -191,6 +199,11 @@ public struct QuotaHistoryModel: Equatable, Sendable, Identifiable {
     public let providerId: String
     public let modelId: String
     public let tokens: Int64
+    /// `tokens` split by class, on the same five lanes as the row's. A model
+    /// line and the row above it are the same question at two scopes, so a
+    /// reader who can break one down and not the other is being told the
+    /// detail exists only sometimes.
+    public let breakdown: TokenBreakdown
     public let cost: Double
 
     public var id: String { "\(providerId)|\(modelId)" }
@@ -361,9 +374,14 @@ public enum QuotaHistoryFold {
             let lo = lowerBound(stamps, cycle.evidenceStartMs)
             let hi = lowerBound(stamps, cycle.resetAtMs)
             var mine = (tokens: Int64(0), exCacheRead: Int64(0), cost: 0.0)
+            // Per class, alongside the totals rather than derived from them:
+            // `message.tokens` is already a sum, and a split recovered by
+            // subtraction is the mistake `tokensExCacheRead` documents.
+            var split = (input: Int64(0), output: Int64(0), cacheRead: Int64(0),
+                         cacheWrite: Int64(0), reasoning: Int64(0))
             var other = (tokens: Int64(0), cost: 0.0, hasAssigned: false,
                          hasExcluded: false, hasUnattributed: false)
-            var byModel: [ModelKey: (tokens: Int64, cost: Double)] = [:]
+            var byModel: [ModelKey: (tokens: Int64, cost: Double, split: TokenBreakdown)] = [:]
 
             for message in sorted[lo..<max(lo, hi)] {
                 let state = UsageAttribution.resolve(
@@ -377,13 +395,28 @@ public enum QuotaHistoryFold {
                     let exCacheRead = message.tokensExCacheRead
                     mine.tokens = mine.tokens.saturatingAdding(message.tokens)
                     mine.exCacheRead = mine.exCacheRead.saturatingAdding(exCacheRead)
+                    split.input = split.input.saturatingAdding(message.input)
+                    split.output = split.output.saturatingAdding(message.output)
+                    split.cacheRead = split.cacheRead.saturatingAdding(message.cacheRead)
+                    split.cacheWrite = split.cacheWrite.saturatingAdding(message.cacheWrite)
+                    split.reasoning = split.reasoning.saturatingAdding(message.reasoning)
                     mine.cost += message.cost
                     let key = ModelKey(
                         providerId: message.providerId, modelId: message.modelId)
-                    let current = byModel[key] ?? (0, 0)
+                    let current = byModel[key] ?? (0, 0, TokenBreakdown())
                     byModel[key] = (
                         current.tokens.saturatingAdding(message.tokens),
-                        current.cost + message.cost)
+                        current.cost + message.cost,
+                        // Per class here too, accumulated rather than derived,
+                        // for the reason the row's own split states.
+                        TokenBreakdown(
+                            input: current.split.input.saturatingAdding(message.input),
+                            output: current.split.output.saturatingAdding(message.output),
+                            cacheRead: current.split.cacheRead.saturatingAdding(message.cacheRead),
+                            cacheWrite: current.split.cacheWrite
+                                .saturatingAdding(message.cacheWrite),
+                            reasoning: current.split.reasoning
+                                .saturatingAdding(message.reasoning)))
                 } else {
                     // Three states reach here, and they mean three different
                     // things to the person reading the line: someone else's
@@ -402,6 +435,10 @@ public enum QuotaHistoryFold {
             return QuotaHistoryRow(
                 cycle: cycle,
                 mineTokens: mine.tokens, mineTokensExCacheRead: mine.exCacheRead,
+                mineBreakdown: TokenBreakdown(
+                    input: split.input, output: split.output,
+                    cacheRead: split.cacheRead, cacheWrite: split.cacheWrite,
+                    reasoning: split.reasoning),
                 mineCost: mine.cost,
                 spanTokens: span.tokens, spanCost: span.cost,
                 otherTokens: other.tokens, otherCost: other.cost,
@@ -412,7 +449,8 @@ public enum QuotaHistoryFold {
                     .map {
                         QuotaHistoryModel(
                             providerId: $0.key.providerId, modelId: $0.key.modelId,
-                            tokens: $0.value.tokens, cost: $0.value.cost)
+                            tokens: $0.value.tokens, breakdown: $0.value.split,
+                            cost: $0.value.cost)
                     }
                     // Tokens, then cost, then the model key. Ordering on
                     // tokens alone leaves every cost-only model tied at zero,

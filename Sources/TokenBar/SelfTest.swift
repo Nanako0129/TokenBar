@@ -13531,6 +13531,43 @@ enum SelfTest {
             confirmed: qhsRecords)
         expect(qhspRows.first?.mineTokensExCacheRead == 800,
                "QH-SPAN the cycle column counts everything charged to the window")
+
+        // QH-SPLIT. The row's hover breakdown. Five classes with five DISTINCT
+        // values, so a fold that adds a message's `cacheWrite` into `cacheRead`
+        // -- or reads the same field twice -- cannot pass by arithmetic
+        // coincidence, which equal values would allow.
+        //
+        // Every expected number below is a literal written here, never a
+        // quantity the production fold also computes.
+        let qhSplitMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data("""
+            [{"timestamp":\((qhsReset - 500_000) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":100,"output":20,"cacheRead":3000,"cacheWrite":400,
+              "reasoning":50,"cost":0.25,"isTurnStart":true},
+             {"timestamp":\((qhsReset - 3_600) * 1000),"client":"c","providerId":"p",
+              "modelId":"m","input":1,"output":2,"cacheRead":3,"cacheWrite":4,
+              "reasoning":5,"cost":1.75,"isTurnStart":true}]
+            """.utf8))
+        let qhSplitRow = QuotaHistoryFold.rows(
+            cycles: qhsCycles, messages: qhSplitMessages, subscription: "c",
+            modelScope: nil,
+            confirmed: qhsRecords).first
+        // Control: without it every comparison below is satisfied by a fold
+        // that produced no row at all.
+        expect(qhSplitRow != nil && (qhSplitRow?.mineTokens ?? 0) > 0,
+               "QH-SPLIT control: the fixture produces a row with tokens in it")
+        expect(qhSplitRow?.mineBreakdown == TokenBreakdown(
+                   input: 101, output: 22, cacheRead: 3003, cacheWrite: 404, reasoning: 55),
+               "QH-SPLIT each token class accumulates into its own lane")
+        // The identity the hover breakdown exists to keep. The row prints
+        // `mineTokens` beside the bar; a breakdown that does not add up to it
+        // explains a different number from the one the reader is looking at.
+        expect(qhSplitRow?.mineBreakdown.total == qhSplitRow?.mineTokens,
+               "QH-SPLIT and the five lanes sum to the total the row prints")
+        expect(qhSplitRow?.mineTokens == 3585,
+               "QH-SPLIT which is the literal sum of the fixture, so the identity "
+                   + "above is not two derived values agreeing with each other")
         // AL-HIDDEN. Every exit from `baseClients` goes through one filter.
         // The rule was got wrong three times — inside `reorderable`, then above
         // only the restricted return, then above both while the opencode branch

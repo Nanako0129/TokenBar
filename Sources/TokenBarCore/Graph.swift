@@ -18,7 +18,12 @@ extension Int64 {
     }
 }
 
-public struct TokenBreakdown: Codable, Sendable {
+// `Equatable` is synthesised. Unlike the `Encodable` conformance below it
+// carries no persistence hazard - a field added later changes equality,
+// which is what a caller comparing two breakdowns wants, and touches no
+// stored representation. Added so `QuotaHistoryRow` can hold one and stay
+// `Equatable` without a second copy of this type.
+public struct TokenBreakdown: Codable, Sendable, Equatable {
         // Explicit rather than synthesised: LP3 writes these values to disk, and a
         // synthesised `Encodable` would silently persist any field added later.
         // Adding a property here without deciding its persistence fails the
@@ -35,6 +40,21 @@ public struct TokenBreakdown: Codable, Sendable {
     public let cacheRead: Int64
     public let cacheWrite: Int64
     public let reasoning: Int64
+
+    /// Public so callers outside this module can build one. The synthesised
+    /// memberwise initialiser is internal, which left the type constructible
+    /// only by decoding - fine while it arrived from disk, not once a fold
+    /// produces one.
+    public init(
+        input: Int64 = 0, output: Int64 = 0, cacheRead: Int64 = 0,
+        cacheWrite: Int64 = 0, reasoning: Int64 = 0
+    ) {
+        self.input = input
+        self.output = output
+        self.cacheRead = cacheRead
+        self.cacheWrite = cacheWrite
+        self.reasoning = reasoning
+    }
 
     /// Sum of every token lane — the single definition shared by the tray
     /// totals, DayBars, and UsageStats aggregations. Saturating so an
