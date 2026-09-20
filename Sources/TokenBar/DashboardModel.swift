@@ -214,6 +214,13 @@ private struct DashboardSnapshot {
         /// estimates its rows are annotated with.
         let history: [QuotaHistoryRow]
         let equivalences: [String: WindowEquivalence.Row]
+        /// The cycles the history card draws. `QuotaHistoryCard` branches on
+        /// `cycles.isEmpty` and iterates them; `history` only annotates them.
+        /// Restoring the annotation without the list left the card on its
+        /// placeholder with the rows sitting behind it unused — the assertion
+        /// that missed it compared `quotaHistory.count`, which is a model
+        /// property and not what the card draws from.
+        let cycles: [QuotaCycle]
         /// Which window `history` was built for. Restored with it so the first
         /// rebuild on a reopened model can tell "the same window, scan not back
         /// yet" from "a different window", and retain only the former.
@@ -408,6 +415,7 @@ private struct DashboardSnapshot {
             windowCurves = snap.quotaCards.windowCurves
             quotaHistory = snap.quotaCards.history
             quotaEquivalences = snap.quotaCards.equivalences
+            quotaCycles = snap.quotaCards.cycles
             quotaHistoryCardId = snap.quotaCards.historyCardId
             // Seeded from the SAME id, because two separate checks compare
             // against it and both read a nil as "a different window". A
@@ -1091,7 +1099,7 @@ private struct DashboardSnapshot {
                 heatmapWindows: quotaHeatmapWindows,
                 windowCards: windowCards, windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
 
     /// Submit the DISK capture. Deliberately separate from `cacheSnapshot()`
@@ -1158,7 +1166,7 @@ private struct DashboardSnapshot {
                 heatmapWindows: quotaHeatmapWindows,
                 windowCards: windowCards, windowCurves: windowCurves,
                 history: quotaHistory, equivalences: quotaEquivalences,
-                historyCardId: quotaHistoryCardId)))
+                cycles: quotaCycles, historyCardId: quotaHistoryCardId)))
     }
 
     /// Periodically re-derive every loaded lens so the popover advances while

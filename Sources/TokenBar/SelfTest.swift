@@ -12263,7 +12263,15 @@ enum SelfTest {
             out["and the window card and its sparkline"] =
                 Set(reopened.windowCards.keys) == Set(seed.windowCards.keys)
                 && Set(reopened.windowCurves.keys) == Set(seed.windowCurves.keys)
-            out["and the window-history rows"] =
+            // `QuotaHistoryCard` branches on `cycles.isEmpty` and iterates
+            // them; `rows` only annotate them. Asserting the row count alone
+            // passed while the card drew its placeholder, because the rows were
+            // restored and the list that drives them was not. Assert both, and
+            // put the cycles first — that is the one the card asks about.
+            out["and the window-history cycles the card draws from"] =
+                !seed.quotaCycles.isEmpty
+                && reopened.quotaCycles.map(\.resetAtMs) == seed.quotaCycles.map(\.resetAtMs)
+            out["and the window-history rows that annotate them"] =
                 reopened.quotaHistory.count == seed.quotaHistory.count
             // A restored strip counts as published, or the #356 guard treats
             // these rows as "never published" and lets an unanswered refresh
