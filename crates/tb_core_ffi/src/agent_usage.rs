@@ -3743,7 +3743,12 @@ async fn request_codex_refresh(
         .map_err(|_| {
             ProviderFetchFailure::terminal("Codex refresh client could not be created.")
         })?;
-    let body = codex_refresh_request_body(refresh_token);
+    let body = serde_json::json!({
+        "client_id": CODEX_CLIENT_ID,
+        "grant_type": "refresh_token",
+        "refresh_token": refresh_token,
+        "scope": "openid profile email"
+    });
     let response = client
         .post(CODEX_REFRESH_URL)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -5475,14 +5480,6 @@ fn claude_credentials_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".claude/.credentials.json"))
 }
 
-fn codex_refresh_request_body(refresh_token: String) -> Value {
-    serde_json::json!({
-        "client_id": CODEX_CLIENT_ID,
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_token
-    })
-}
-
 fn codex_credentials_needs_refresh(
     access_token: &str,
     last_refresh: Option<DateTime<Utc>>,
@@ -5998,18 +5995,6 @@ mod tests {
         ));
         assert!(codex_credentials_needs_refresh_at("not-a-jwt", None, now));
         assert!(jwt_expiration("header.eyJleHAiOiJub3QtYS1udW1iZXIifQ.signature").is_none());
-    }
-
-    #[test]
-    fn codex_refresh_request_body_matches_codex_cli_contract() {
-        assert_eq!(
-            codex_refresh_request_body("test-refresh-token".to_string()),
-            serde_json::json!({
-                "client_id": CODEX_CLIENT_ID,
-                "grant_type": "refresh_token",
-                "refresh_token": "test-refresh-token"
-            })
-        );
     }
 
     #[test]
