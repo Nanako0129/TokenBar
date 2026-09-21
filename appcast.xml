@@ -3,6 +3,33 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.20.0</title>
+            <pubDate>Mon, 21 Sep 2026 06:30:01 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.0</link>
+            <sparkle:version>1159</sparkle:version>
+            <sparkle:shortVersionString>1.20.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Before you update:</b>
+<ul>
+<li>Repairing an unwritable history file drops a few stored samples, once. A history file the engine could no longer write is now repaired on the first poll rather than refused, and the repair drops the samples that were making it fail validation. Measured on one real store: 39 samples of 5815 in one series, 0.67%. The polls after it needed no repair.</li>
+</ul>
+<b>Features:</b>
+<ul>
+<li>Hovering a row in a window's history shows what its tokens were. Input, output, cache read and cache write, each with its share as a percentage, under a heading naming the window's date and time span. The whole row is the hover target rather than the token count alone, and each model line carries its own breakdown.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>Pace and history read "unavailable" for every provider, and stayed that way. A write the engine refused wrote nothing and quarantined nothing, so the next poll met the same file and refused it identically. The refusal was permanent rather than transient, and it takes every window in the batch with it: one series stopped the whole lens reporting pace. The write is now repaired inside a bounded allowance instead of refused. The cost was worse than a blank field - while writes were refused the window in progress stopped gaining readings, and a window that ends with no readings near its end was deleted outright, so a refused write destroyed the window it had been unable to extend. This does not close #370: a separate defect still deletes a window whose reset the provider later revises.</li>
+<li>One provider's unreadable credential erased every other provider's history. A read that fails now costs only its own window. A card whose read failed keeps what it already had, instead of the failure emptying the lens.</li>
+<li>A few seconds of drift in a provider's reset time split one window into two. The second of the pair read 0% against the full span's tokens. Readings a few seconds apart are grouped as one window again, and the group reports the reset time most of its readings agree on.</li>
+<li>The quota cards were recomputed from scratch every time the popover opened. The history strip, the heatmap and the equivalences are drawn from the reopen cache, so they are present when the popover appears rather than arriving a moment after it.</li>
+<li>The daily chart flashed empty for a frame when the popover opened. A series' rows are folded when the view is constructed, not on its first task tick.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.0/TokenBar.app.tar.gz" length="10610821" type="application/octet-stream" sparkle:edSignature="P9kS8vrH7N/19zH+ByASROcXK2O7I8WPBBOIrzBN6yZncYxF9Ekhlodn89OpBefVvvi998lWnGkJoADh+r8kAw=="/>
+        </item>
+        <item>
             <title>1.19.1</title>
             <pubDate>Sat, 19 Sep 2026 02:29:09 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.19.1</link>
@@ -95,27 +122,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.17.0/TokenBar.app.tar.gz" length="10302414" type="application/octet-stream" sparkle:edSignature="sVoaxNg1eNQvImZMZnxcJKIFJ43T3lx/vvUl1MCmwR+G+D8abwJsBWmBkeJwoMbKn0eTuYuMGB+kIITn/rUsBw=="/>
-        </item>
-        <item>
-            <title>1.16.0</title>
-            <pubDate>Sat, 05 Sep 2026 19:19:32 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.16.0</link>
-            <sparkle:version>935</sparkle:version>
-            <sparkle:shortVersionString>1.16.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Features:</b>
-<ul>
-<li>TokenBar speaks Simplified Chinese. 简体中文 joins English and 繁體中文 under Settings > Language. The catalog covers 488 strings: tabs, dashboard cards, quota windows, statistics, charts, contribution tooltips, settings, and the menu-bar item. As with the other two languages, the choice takes effect on the next launch, because macOS resolves the interface language once at startup. It is reviewed copy rather than a character conversion of the Traditional Chinese catalog: terminology, counters and word order were adapted, and a sentence Chinese reorders is translated as one unit rather than assembled from parts. Some values are built while the app runs - window titles, the pagination line, token totals, streak lengths, the usage-loading error - and those never reached the translation table at all. They do now, in every language.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>Each menu-bar color swatch now opens its own editor. The Font color section that arrived in 1.15.0 shows three swatches - normal, low, very low - and all three shared a single popover anchored to the row containing them. Whichever swatch you clicked, the editor's arrow pointed at the middle one. Each swatch now anchors its own.</li>
-<li>Three Traditional Chinese strings were still falling back to English. The usage-loading error, the "show more" pagination line and the OAuth quota label had no Traditional Chinese entries. Both Chinese catalogs now carry the same 488 keys.</li>
-</ul>
-<p>Thanks: @Agugu-official</p>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.16.0/TokenBar.app.tar.gz" length="10186129" type="application/octet-stream" sparkle:edSignature="Dkux+tyVDNs2ZL6d7l/7ISp3QozMP6uvzbMMOziJH47HGFPWrSPhqn+khj7g7s0VnEFdaREgJJgPFI5tdexUDA=="/>
         </item>
         <item>
             <title>1.1.1</title>
