@@ -49,6 +49,28 @@ pub(crate) const PHASE_BUCKET_MULTIPLE: usize = 4;
 /// Ceiling for `phase_bucket_count`, and what a long window actually gets.
 pub(crate) const MAX_PHASE_BUCKET_COUNT: usize = PHASE_BUCKET_COUNT * PHASE_BUCKET_MULTIPLE;
 pub(crate) const GRID_POINT_COUNT: usize = 169;
+/// How many samples one transaction may drop to make a store writable again.
+///
+/// A store can become invalid through no fault of the sample being recorded:
+/// `normalize_reset` and `sample_key` derive their quantum from a sample's own
+/// `duration_seconds`, so a series holding both a contract duration and a
+/// learned one is bucketed two ways, and a set that was valid can stop being
+/// valid the moment eviction changes it. Refusing the write leaves the history
+/// permanently unwritable and every window reporting "history unavailable",
+/// which is what #370 measured.
+///
+/// The floor of the allowance, not the whole of it: `repair_drop_allowance`
+/// takes the larger of this and `MAX_REPAIR_DROP_PERCENT` of the series. It
+/// exists so a short series, where a percentage rounds to nothing, still has a
+/// workable allowance.
+pub(crate) const MAX_REPAIR_DROPS_PER_TRANSACTION: usize = 8;
+
+/// The share of one series a repair may drop. 2% keeps the measured #370 case
+/// inside the allowance (39 of 5815 samples, 0.67%) while still refusing the
+/// failure this bound exists for: shredding a history to force a write through.
+/// Raise it only against a measurement, never to make a particular store pass.
+pub(crate) const MAX_REPAIR_DROP_PERCENT: usize = 2;
+
 pub(crate) const MAX_SERIES: usize = 512;
 pub(crate) const MAX_SAMPLES: usize = 65_536;
 pub(crate) const MAX_SAMPLES_PER_CYCLE: usize = PHASE_BUCKET_COUNT;
@@ -1872,6 +1894,74 @@ fn validate_store(store: &Store) -> bool {
         && store.series.iter().all(validate_series)
 }
 
+/// Drop the fewest samples that make every series valid again, or report that
+/// it cannot be done within the bound.
+///
+/// Every rule applied here is the one `validate_series` enforces, read through
+/// the same functions: a duplicate `sample_key`, and a cycle carrying more
+/// samples than `phase_bucket_count` allows. Oldest first, so the reading that
+/// has been stored longest is the one kept and the newest observation — the
+/// one this transaction exists to record — is never the casualty.
+///
+/// Returns `None` when the repair would exceed one series' `repair_drop_allowance`
+/// or when the result still fails validation, leaving the caller to refuse the
+/// write as it did before. Silence is not an option either way: a store that
+/// needs more than a handful of drops is a different problem, and this must not
+/// be the thing that hides it.
+fn repair_invalid_series(store: &mut Store, now: i64) -> Option<usize> {
+    let mut dropped = 0usize;
+    for series in &mut store.series {
+        if validate_series(series) {
+            continue;
+        }
+        let mut ordered = series.samples.clone();
+        ordered.sort_by(sample_order);
+        let mut keys: BTreeSet<(i64, usize)> = BTreeSet::new();
+        let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+        let mut kept: Vec<QuotaSample> = Vec::with_capacity(ordered.len());
+        let mut series_dropped = 0usize;
+        for sample in ordered {
+            if !keys.insert(sample_key(&sample)) {
+                series_dropped += 1;
+                continue;
+            }
+            let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+            let count = counts.entry(reset).or_default();
+            if *count + 1 > phase_bucket_count(sample.duration_seconds) {
+                series_dropped += 1;
+                continue;
+            }
+            *count += 1;
+            kept.push(sample);
+        }
+        // The allowance is a share of the series, not a flat count, because the
+        // two quantities it has to separate scale with the series. Measured on
+        // the store that produced #370: `claude/session.v1` needed 39 drops out
+        // of 5815 samples (0.67%) after ten different `duration_seconds` values
+        // bucketed one window ten ways, while the case this must still refuse —
+        // a history being shredded — takes most of the series with it. A flat
+        // bound cannot hold both ends: 8 refused the real repair and left every
+        // provider's card dark for ever, and a flat 64 would be no bound at all
+        // on a series of 80.
+        if series_dropped > repair_drop_allowance(series.samples.len()) {
+            return None;
+        }
+        dropped += series_dropped;
+        series.samples = kept;
+        if let Some(newest) = series.samples.iter().map(|s| s.sampled_at).max() {
+            series.last_activity_at = series.last_activity_at.max(newest);
+        }
+    }
+    validate_store_at(store, now).then_some(dropped)
+}
+
+/// How many samples a repair may drop from one series: `MAX_REPAIR_DROP_PERCENT`
+/// of it, never fewer than `MAX_REPAIR_DROPS_PER_TRANSACTION` so that a short
+/// series still has a workable allowance.
+fn repair_drop_allowance(samples: usize) -> usize {
+    (samples * MAX_REPAIR_DROP_PERCENT / 100).max(MAX_REPAIR_DROPS_PER_TRANSACTION)
+}
+
 fn validate_store_at(store: &Store, now: i64) -> bool {
     validate_store(store)
         && store
@@ -3329,7 +3419,18 @@ fn with_locked_transaction_with_save_and_mode<T>(
             let result = body(&mut loaded.store);
             match result {
                 Ok(value) => {
-                    if !validate_store_at(&loaded.store, upper_bound) {
+                    // Repair before refusing. The body can leave a store the
+                    // validator rejects without the recorded sample being at
+                    // fault -- see `repair_invalid_series` -- and refusing here
+                    // writes nothing, so the same failure repeats on every
+                    // poll for ever while the card reports "history
+                    // unavailable" for every provider (#370). A bounded repair
+                    // that makes the store valid is worth a handful of samples;
+                    // an unbounded one is not, and above the bound this refuses
+                    // exactly as it did before.
+                    if !validate_store_at(&loaded.store, upper_bound)
+                        && repair_invalid_series(&mut loaded.store, upper_bound).is_none()
+                    {
                         Err(HistoryError::Serialize)
                     } else if loaded.store == before {
                         Ok(value)
@@ -3960,6 +4061,209 @@ mod recovery {
 
     fn path_from(var: &str) -> PathBuf {
         PathBuf::from(std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set")))
+    }
+
+    /// Build a series holding `count` samples that all collide on one
+    /// `sample_key`, which is what a duration change can leave behind: the
+    /// quantum comes from each sample's own `duration_seconds`, so a series
+    /// carrying both a contract duration and a learned one is bucketed two
+    /// ways and a set that was valid stops being valid.
+    fn series_with_colliding_samples(count: usize) -> SeriesState {
+        let reset = 1_789_933_140_i64;
+        let duration = 18_000_i64;
+        let mut series = SeriesState {
+            provider_id: "claude".to_string(),
+            account_scope: "scope".to_string(),
+            window_key: "session.v1".to_string(),
+            active_reset_at: None,
+            last_activity_at: reset,
+            rollover: None,
+            samples: Vec::new(),
+        };
+        for index in 0..count {
+            series.samples.push(QuotaSample {
+                reset_at: reset,
+                duration_seconds: duration,
+                duration_source: DurationSource::Observed,
+                used_percent: index as f64,
+                // The same phase bucket for every one of them, so each is a
+                // duplicate key rather than a new bucket.
+                sampled_at: reset - 10,
+                origin: SampleOrigin::LiveV3,
+                plan: None,
+            });
+        }
+        series
+    }
+
+    #[test]
+    fn repair_drops_the_duplicates_that_make_a_series_invalid() {
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(3)],
+        };
+        let now = 1_789_933_200_i64;
+        // Control: the fixture really is invalid, or the repair below is
+        // reported as a success over a store that never needed one.
+        assert!(
+            !validate_store_at(&store, now),
+            "fixture must start invalid"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(dropped, Some(2), "two of the three collide and go");
+        assert!(
+            validate_store_at(&store, now),
+            "the repaired store must validate"
+        );
+        assert_eq!(store.series[0].samples.len(), 1);
+    }
+
+    #[test]
+    fn repair_refuses_rather_than_shredding_a_history() {
+        let over = MAX_REPAIR_DROPS_PER_TRANSACTION + 2;
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(over + 1)],
+        };
+        let before = store.series[0].samples.len();
+        let now = 1_789_933_200_i64;
+        assert!(
+            !validate_store_at(&store, now),
+            "fixture must start invalid"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(dropped, None, "past the bound the repair must refuse");
+        assert_eq!(
+            store.series[0].samples.len(),
+            before,
+            "a refused repair must leave every sample where it was"
+        );
+    }
+
+    #[test]
+    fn the_allowance_scales_with_the_series_and_never_falls_below_the_floor() {
+        // A flat bound is what #370 shipped and what refused the real repair,
+        // so the scaling half needs an assertion of its own: without it,
+        // `MAX_REPAIR_DROP_PERCENT` could go to 0 and every test above would
+        // still pass.
+        assert_eq!(repair_drop_allowance(0), MAX_REPAIR_DROPS_PER_TRANSACTION);
+        assert_eq!(
+            repair_drop_allowance(100),
+            MAX_REPAIR_DROPS_PER_TRANSACTION,
+            "2% of 100 is under the floor, so the floor answers"
+        );
+        // The measured #370 series: 5815 samples needing 39 drops. 116 is the
+        // allowance it gets, which is why the repair now runs instead of
+        // leaving every provider's card dark.
+        assert_eq!(repair_drop_allowance(5815), 116);
+        assert!(repair_drop_allowance(5815) > 39);
+    }
+
+    #[test]
+    fn repair_keeps_the_oldest_reading_of_a_colliding_pair() {
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![series_with_colliding_samples(2)],
+        };
+        // `used_percent` doubles as an identity here: the fixture numbers them
+        // 0, 1, ... in insertion order and `sample_order` sorts oldest first,
+        // so keeping index 0 is keeping the reading stored longest.
+        let now = 1_789_933_200_i64;
+        assert_eq!(repair_invalid_series(&mut store, now), Some(1));
+        assert_eq!(store.series[0].samples[0].used_percent, 0.0);
+    }
+
+    /// Drop the samples that make a stored series fail `validate_series`,
+    /// keeping everything else.
+    ///
+    /// A store can hold a duplicate `sample_key`, or a cycle carrying more
+    /// samples than its phase buckets allow, and still load — `load_store`
+    /// repairs what it can. What it cannot do is make the next WRITE succeed:
+    /// `with_locked_transaction_with_save_and_mode` validates after the body
+    /// runs, the series is still invalid, and the whole transaction returns
+    /// `HistoryError::Serialize`. The caller then reports every window in the
+    /// batch as `unavailable("history")`, so one old sample silently disables
+    /// pace for every provider, indefinitely, with nothing written and nothing
+    /// quarantined to show for it.
+    ///
+    /// Every rule here is the engine's. `sample_key`, `phase_bucket_count` and
+    /// `validate_series` decide what goes; `save_store_atomic_with_mode`
+    /// orders and writes; `load_store` gives the verdict. This lane only
+    /// chooses the ORDER samples are offered in — oldest first, so the reading
+    /// that has been in the store longest is the one kept.
+    #[test]
+    #[ignore = "run by hand with REPAIR_IN / REPAIR_OUT"]
+    fn drop_samples_that_make_a_series_invalid() {
+        let in_path = path_from("REPAIR_IN");
+        let out_path = path_from("REPAIR_OUT");
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+
+        let raw = std::fs::read_to_string(&in_path).expect("read store");
+        let mut store: Store = serde_json::from_str(&raw).expect("parse store");
+        let before: usize = store.series.iter().map(|s| s.samples.len()).sum();
+
+        let mut dropped_dup = 0usize;
+        let mut dropped_cap = 0usize;
+        for series in &mut store.series {
+            let mut ordered = series.samples.clone();
+            ordered.sort_by(sample_order);
+            let mut keys: BTreeSet<(i64, usize)> = BTreeSet::new();
+            let mut counts: BTreeMap<i64, usize> = BTreeMap::new();
+            let mut kept: Vec<QuotaSample> = Vec::with_capacity(ordered.len());
+            for sample in ordered {
+                if !keys.insert(sample_key(&sample)) {
+                    dropped_dup += 1;
+                    continue;
+                }
+                let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
+                let cap = phase_bucket_count(sample.duration_seconds);
+                let count = counts.entry(reset).or_default();
+                if *count + 1 > cap {
+                    dropped_cap += 1;
+                    continue;
+                }
+                *count += 1;
+                kept.push(sample);
+            }
+            series.samples = kept;
+            if let Some(newest) = series.samples.iter().map(|s| s.sampled_at).max() {
+                series.last_activity_at = series.last_activity_at.max(newest);
+            }
+        }
+
+        save_store_atomic_with_mode(StorageMode::Generic, &out_path, &store).expect("save");
+        let loaded = load_store(&out_path, now).expect("load back");
+        let after: usize = loaded.store.series.iter().map(|s| s.samples.len()).sum();
+        let still_invalid = loaded
+            .store
+            .series
+            .iter()
+            .filter(|s| !validate_series(s))
+            .count();
+
+        eprintln!(
+            "repaired: samples {before} -> {after} (dropped dup {dropped_dup}, over-cap {dropped_cap}), \
+             series still invalid {still_invalid}"
+        );
+        assert!(
+            !loaded.quarantined,
+            "the engine quarantined the repaired store"
+        );
+        assert_eq!(
+            still_invalid, 0,
+            "a series is still invalid after the repair"
+        );
+        assert!(
+            validate_store_at(&loaded.store, now),
+            "the repaired store still fails the check that blocks every write"
+        );
     }
 
     #[test]
@@ -5934,7 +6238,9 @@ mod tests {
                 "under 28h the fraction is below the quantum, so the floor must govern"
             );
             let base = 10_080_000;
-            for gap in [0, 1, 29, 30, 31, 89, 90, 91, 179, 180, 181, 300, 359, 360, 900, 3600] {
+            for gap in [
+                0, 1, 29, 30, 31, 89, 90, 91, 179, 180, 181, 300, 359, 360, 900, 3600,
+            ] {
                 assert_eq!(
                     reset_superseded(base, base + gap, duration),
                     resets_differ_beyond_quantum(base, base + gap, duration),
@@ -6007,7 +6313,9 @@ mod tests {
         // would prove nothing.
         let mut series = SeriesState::new(&key("acct"), base);
         series.samples = complete_cycle(base, nominal, 80.0);
-        series.samples.extend(observed_cycle(successor, cut_short, 12.0));
+        series
+            .samples
+            .extend(observed_cycle(successor, cut_short, 12.0));
         series.samples.sort_by(sample_order);
         assert!(
             !reset_superseded(base, successor, nominal),

@@ -118,6 +118,27 @@ enum WindowProbe {
                     }
                 }
             }
+
+            // #370. What the ENGINE says about pace, per window, read straight
+            // off the payload rather than inferred from the card's wording.
+            // The card prints one reason string; this prints every field the
+            // decision is carried in, so a refusal can be attributed to a
+            // condition instead of guessed at. It is how the cause was found:
+            // `reason=history` with `durationSeconds` and `completeCycles`
+            // empty everywhere says the refusal happened before any of them
+            // was computed.
+            print("=== #370 PACE STATUS (the engine's own verdict) ===")
+            for a in payload.agents {
+                for w in a.uniqueCardWindows {
+                    let p = w.paceStatus
+                    print("  \(a.clientId)/\(w.cardId)")
+                    print("      state=\(p.state)  reason=\(p.reason.map(String.init(describing:)) ?? "—")")
+                    print("      completeCycles=\(p.completeCycles)"
+                          + "  durationSeconds=\(p.durationSeconds.map(String.init) ?? "—")"
+                          + "  durationSource=\(p.durationSource.map(String.init(describing:)) ?? "—")")
+                    print("      windowKey=\(p.windowKey ?? "—")")
+                }
+            }
             print("")
 
             let now = Int64(Date().timeIntervalSince1970 * 1000)
