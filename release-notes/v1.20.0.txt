@@ -1,0 +1,12 @@
+Before you update:
+- Repairing an unwritable history file drops a few stored samples, once. A history file the engine could no longer write is now repaired on the first poll rather than refused, and the repair drops the samples that were making it fail validation. Measured on one real store: 39 samples of 5815 in one series, 0.67%. The polls after it needed no repair.
+
+Features:
+- Hovering a row in a window's history shows what its tokens were. Input, output, cache read and cache write, each with its share as a percentage, under a heading naming the window's date and time span. The whole row is the hover target rather than the token count alone, and each model line carries its own breakdown.
+
+Fixes:
+- Pace and history read "unavailable" for every provider, and stayed that way. A write the engine refused wrote nothing and quarantined nothing, so the next poll met the same file and refused it identically. The refusal was permanent rather than transient, and it takes every window in the batch with it: one series stopped the whole lens reporting pace. The write is now repaired inside a bounded allowance instead of refused. The cost was worse than a blank field - while writes were refused the window in progress stopped gaining readings, and a window that ends with no readings near its end was deleted outright, so a refused write destroyed the window it had been unable to extend. This does not close #370: a separate defect still deletes a window whose reset the provider later revises.
+- One provider's unreadable credential erased every other provider's history. A read that fails now costs only its own window. A card whose read failed keeps what it already had, instead of the failure emptying the lens.
+- A few seconds of drift in a provider's reset time split one window into two. The second of the pair read 0% against the full span's tokens. Readings a few seconds apart are grouped as one window again, and the group reports the reset time most of its readings agree on.
+- The quota cards were recomputed from scratch every time the popover opened. The history strip, the heatmap and the equivalences are drawn from the reopen cache, so they are present when the popover appears rather than arriving a moment after it.
+- The daily chart flashed empty for a frame when the popover opened. A series' rows are folded when the view is constructed, not on its first task tick.
