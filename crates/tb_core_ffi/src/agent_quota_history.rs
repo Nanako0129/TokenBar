@@ -3938,6 +3938,123 @@ fn rollback_quarantine_link(path: &Path, source: &File) {
 }
 
 #[cfg(test)]
+mod recovery {
+    //! A one-off recovery lane for a store that was quarantined, run by hand.
+    //!
+    //! `#[ignore]`, so it never runs in CI, and it reads its paths from the
+    //! environment so no user path is compiled in. It exists because the first
+    //! attempt at this merge was validated by a REIMPLEMENTATION of the
+    //! engine's rules in another language, that copy was missing
+    //! `validate_store`'s "series must be sorted by key" clause, and the result
+    //! was a store the engine quarantined on sight — a history wiped by a
+    //! check that said it had passed.
+    //!
+    //! So nothing here restates a rule. The merge goes through
+    //! `add_sample_if_new`, which owns the sample key and the per-cycle cap;
+    //! the write goes through `save_store_atomic_with_mode`, which owns the
+    //! series ordering; and the verdict comes from `load_store`, which is the
+    //! same function the app calls. The only thing this file contributes is
+    //! deciding WHICH samples to offer.
+    use super::*;
+    use std::path::PathBuf;
+
+    fn path_from(var: &str) -> PathBuf {
+        PathBuf::from(std::env::var(var).unwrap_or_else(|_| panic!("{var} must be set")))
+    }
+
+    #[test]
+    #[ignore = "run by hand with RECOVER_LIVE / RECOVER_QUARANTINE / RECOVER_OUT"]
+    fn merge_quarantined_history_and_prove_the_engine_accepts_it() {
+        let live_path = path_from("RECOVER_LIVE");
+        let quarantine_path = path_from("RECOVER_QUARANTINE");
+        let out_path = path_from("RECOVER_OUT");
+        let now = std::env::var("RECOVER_NOW")
+            .ok()
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or_else(|| {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs() as i64
+            });
+
+        let live_raw = std::fs::read_to_string(&live_path).expect("read live");
+        let quarantine_raw = std::fs::read_to_string(&quarantine_path).expect("read quarantine");
+        let mut live: Store = serde_json::from_str(&live_raw).expect("parse live");
+        let quarantined: Store =
+            serde_json::from_str(&quarantine_raw).expect("parse quarantined");
+        let before = live.series.iter().map(|s| s.samples.len()).sum::<usize>();
+
+        let mut added = 0usize;
+        let mut refused = 0usize;
+        for source in &quarantined.series {
+            let key = SeriesKey::from_stored_parts(
+                &source.provider_id,
+                &source.account_scope,
+                &source.window_key,
+            );
+            let index = match live.series.iter().position(|s| s.key() == key) {
+                Some(i) => i,
+                None => {
+                    live.series.push(SeriesState::new(&key, now));
+                    live.series.len() - 1
+                }
+            };
+            let target = &mut live.series[index];
+            let mut ordered = source.samples.clone();
+            ordered.sort_by(sample_order);
+            for sample in ordered {
+                // `add_sample_if_new` owns every admission rule. A false here
+                // is the engine refusing, not this lane deciding.
+                if add_sample_if_new(
+                    target,
+                    sample.reset_at,
+                    sample.duration_seconds,
+                    sample.duration_source,
+                    sample.used_percent,
+                    sample.sampled_at,
+                ) {
+                    added += 1;
+                    // `validate_series` requires `last_activity_at` to be at
+                    // or after every sample's `sampled_at`, and
+                    // `add_sample_if_new` only touches `samples`. Appending
+                    // without this leaves a store the loader quarantines --
+                    // the outcome this lane exists to avoid. It did not fire
+                    // on the store it was written for, because every merged
+                    // sample predated the live series' activity, which is the
+                    // kind of luck that hides a defect rather than removing
+                    // it.
+                    target.last_activity_at =
+                        target.last_activity_at.max(sample.sampled_at);
+                } else {
+                    refused += 1;
+                }
+            }
+        }
+
+        save_store_atomic_with_mode(StorageMode::Generic, &out_path, &live).expect("save");
+        let loaded = load_store(&out_path, now).expect("load back");
+        let after = loaded
+            .store
+            .series
+            .iter()
+            .map(|s| s.samples.len())
+            .sum::<usize>();
+
+        eprintln!(
+            "merged: series {} -> {}, samples {before} -> {after} (offered-added {added}, refused {refused})",
+            quarantined.series.len(),
+            loaded.store.series.len()
+        );
+        assert!(
+            !loaded.quarantined,
+            "the engine quarantined the merged store; it is NOT safe to install"
+        );
+        assert!(after >= before, "the merge must not lose samples");
+    }
+}
+
+#[cfg(test)]
 mod tests {
 
     /// Mechanical bridge for fixtures that only need a distinct scope identity.

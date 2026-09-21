@@ -13282,6 +13282,63 @@ enum SelfTest {
                 + "still excluded, because the producer said so rather than the "
                 + "consumer inferring it")
 
+        // QH-JITTER. A reset that drifts a few seconds must not become a second
+        // window. Values taken from a real store: two resets five seconds
+        // apart, the second carrying one sample whose `sampledAt` EQUALS its
+        // `resetAt` -- the poll that landed at the rollover. The engine
+        // quantises a stored reset before writing it, then clamps the result to
+        // `[sampled_at, ...]`, and for that sample the clamp pushes the value
+        // back off the quantum, so the store really does hold two.
+        //
+        // What the reader saw: one window twice, the duplicate at 0% consumed
+        // (its min and max are the same single reading) with the whole span's
+        // tokens beside it and a "only 0% of this window was observed" warning
+        // on a window that was sampled 47 times.
+        let qhjMain: Int64 = 1_789_897_140
+        let qhjDrifted: Int64 = qhjMain + 5
+        let qhjPoints = [
+            heatPoint(qhjMain - 17_000, 1, reset: qhjMain),
+            heatPoint(qhjMain - 600, 77, reset: qhjMain),
+            heatPoint(qhjDrifted, 80, reset: qhjDrifted),
+        ]
+        let qhjCycles = QuotaHistoryFold.cycles(points: qhjPoints)
+        expect(qhjCycles.count == 1,
+               "QH-JITTER five seconds of reset drift is one window, not two")
+        expect(qhjCycles.first?.resetAtMs == qhjMain * 1000,
+               "QH-JITTER and it reports the reset the samples agree on, not the "
+                   + "quantised key they were grouped under")
+        // On sampleCount, not on the peak. The peak alone survived the
+        // mutation back to exact grouping: with two cycles the drifted one
+        // sorts first and its peak IS 80, so the reading agreed by accident.
+        // Counting the samples says all three landed in one cycle, which is
+        // the property, and 0%% cannot be produced from three readings that
+        // span 1 to 80.
+        expect(qhjCycles.first?.sampleCount == 3 && qhjCycles.first?.peakUsedPercent == 80,
+               "QH-JITTER all three readings land in one cycle, so the drifted "
+                   + "one counts toward the peak instead of forming a 0% window")
+        // QH-JITTER-TIE. An exact 1-1 tie on count. The mode has no majority to
+        // find, so only the tie-break decides, and without a case here flipping
+        // that comparator would change which reset is reported with nothing
+        // turning red — while making the answer depend on dictionary order,
+        // which is the failure the comparator exists to rule out.
+        let qhjTie = [
+            heatPoint(qhjMain - 600, 77, reset: qhjMain),
+            heatPoint(qhjDrifted, 80, reset: qhjDrifted),
+        ]
+        let qhjTieCycles = QuotaHistoryFold.cycles(points: qhjTie)
+        expect(qhjTieCycles.count == 1 && qhjTieCycles.first?.resetAtMs == qhjMain * 1000,
+               "QH-JITTER-TIE a one-to-one tie reports the smaller reset, so the "
+                   + "answer cannot depend on dictionary order")
+
+        // Control. Without it the three above are satisfied by a fold that
+        // merges everything it is handed.
+        let qhjAdjacent = [
+            heatPoint(qhjMain - 600, 77, reset: qhjMain),
+            heatPoint(qhjMain + 600, 4, reset: qhjMain + 18_000),
+        ]
+        expect(QuotaHistoryFold.cycles(points: qhjAdjacent).count == 2,
+               "QH-JITTER control: two genuinely adjacent windows stay two")
+
         // QH-CAP. The fold used to return everything the engine retained (128
         // cycles per series). Nothing draws that many — the history card shows
         // 12 rows and the overview strip 16 — but the OLDEST cycle is what
