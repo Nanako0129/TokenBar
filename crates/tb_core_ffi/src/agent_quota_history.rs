@@ -4015,6 +4015,17 @@ mod recovery {
                     sample.sampled_at,
                 ) {
                     added += 1;
+                    // `validate_series` requires `last_activity_at` to be at
+                    // or after every sample's `sampled_at`, and
+                    // `add_sample_if_new` only touches `samples`. Appending
+                    // without this leaves a store the loader quarantines --
+                    // the outcome this lane exists to avoid. It did not fire
+                    // on the store it was written for, because every merged
+                    // sample predated the live series' activity, which is the
+                    // kind of luck that hides a defect rather than removing
+                    // it.
+                    target.last_activity_at =
+                        target.last_activity_at.max(sample.sampled_at);
                 } else {
                     refused += 1;
                 }
