@@ -79,6 +79,18 @@ pub(crate) const MAX_PHASE_GAP: f64 = 0.30;
 pub(crate) const RETENTION_MIN_SECONDS: i64 = 56 * 86_400;
 pub(crate) const RETENTION_MAX_SECONDS: i64 = 400 * 86_400;
 pub(crate) const RETENTION_MIN_CYCLES: usize = 8;
+
+/// How many groups retention keeps purely as a record — ones
+/// `retention_cycle_descriptor` refuses, so no curve will ever be fitted to
+/// them.
+///
+/// Its own budget, separate from `retention_limits`' cycle count, so a record
+/// can never evict a cycle the model would have used. The floor rather than
+/// the cap: a record earns its place by being recent and substantial, not by
+/// being one of a long history, and the cases this exists for — a reset the
+/// provider revised, a window whose tail a write outage swallowed — arrive one
+/// or two at a time.
+pub(crate) const RETENTION_RECORD_GROUPS: usize = RETENTION_MIN_CYCLES;
 pub(crate) const RETENTION_MAX_CYCLES: usize = 128;
 pub(crate) const RUNOUT_THRESHOLD_PERCENT: f64 = 100.0 - 1e-9;
 pub(crate) const EPSILON: f64 = 1e-9;
@@ -2463,24 +2475,48 @@ fn retain_series(series: &mut SeriesState, now: i64) {
     let nominal = series_nominal_duration(series, now);
     let (retained_cycles, horizon) = retention_limits(nominal);
     let cutoff = now.saturating_sub(horizon);
-    // Every group, not only the ones a pace curve can be fitted to. A window
-    // whose samples stop short of its end, or whose reset the provider later
-    // revised so the recorded one now sits in the future, fails
+    // Two budgets, because the groups have two jobs. `retained_cycles` is the
+    // modelling budget and only cycles a curve can be fitted to may spend it;
+    // a group kept purely as a record gets its own, so it cannot cost
+    // `historical_cycles` a cycle it would have drawn from. Sharing one budget
+    // looks harmless until it is full, which is where a real store lives:
+    // `claude/session.v1` on the store behind #370 holds 133 groups against a
+    // cap of 128.
+    let modelable = retention_cycles(series, now)
+        .into_iter()
+        .map(|cycle| cycle.reset_at)
+        .collect::<BTreeSet<_>>();
+    let mut keep_completed = modelable
+        .iter()
+        .copied()
+        .filter(|reset_at| *reset_at >= cutoff)
+        .collect::<Vec<_>>();
+    keep_completed.sort_unstable_by(|left, right| right.cmp(left));
+    keep_completed.truncate(retained_cycles);
+
+    // A window whose samples stop short of its end, or whose reset the
+    // provider later revised so the recorded one now sits in the future, fails
     // `retention_cycle_descriptor` and used to be deleted outright — the
     // history card then reported no history for a window that had been sampled
     // for days. Measured on the store behind #370: two weekly groups of 51
     // samples each, and a session group of 38 whose last reading landed at
-    // phase 0.796 against the 0.90 the coverage test wants. The horizon and
-    // the cycle cap below still bound what is kept; modelling eligibility is
-    // `retention_cycles`' question and is asked where curves are fitted.
-    let mut keep_completed = retainable_groups(series, now)
+    // phase 0.796 against the 0.90 the coverage test wants.
+    let mut keep_records = retainable_groups(series, now)
         .into_iter()
-        .filter(|(reset_at, samples)| *reset_at >= cutoff && group_holds_substance(samples))
+        .filter(|(reset_at, samples)| {
+            !modelable.contains(reset_at)
+                && *reset_at >= cutoff
+                && group_holds_substance(samples)
+        })
         .map(|(reset_at, _)| reset_at)
         .collect::<Vec<_>>();
-    keep_completed.sort_unstable_by(|left, right| right.cmp(left));
-    keep_completed.truncate(retained_cycles);
-    let keep_completed = keep_completed.into_iter().collect::<BTreeSet<_>>();
+    keep_records.sort_unstable_by(|left, right| right.cmp(left));
+    keep_records.truncate(RETENTION_RECORD_GROUPS);
+
+    let keep_completed = keep_completed
+        .into_iter()
+        .chain(keep_records)
+        .collect::<BTreeSet<_>>();
     let active_reset = series.active_reset_at;
     series.samples.retain(|sample| {
         let reset = normalize_reset(sample.reset_at, sample.duration_seconds);
@@ -9794,6 +9830,60 @@ mod tests {
             })
             .collect::<Vec<_>>();
         assert!(cycle_profile(reset, &middle_only, reset + 1).is_none());
+    }
+
+    #[test]
+    fn a_record_group_cannot_spend_the_cycle_budget() {
+        let duration = 7 * DAY;
+        let now = 3_000_000_000;
+        let current_reset = now + duration;
+        // Twelve cycles against a budget of eight, so the budget is saturated.
+        // That is the only state where the two budgets differ, and it is where
+        // a real store lives: `claude/session.v1` on the store behind #370
+        // holds 133 groups against a cap of 128.
+        let mut without = seeded_series("provider", "scope", "window.v1", current_reset, duration, 12);
+        let mut with = without.clone();
+
+        // Newer than the oldest cycle the budget keeps, so a shared budget
+        // would have let it evict that cycle. Substantial — six distinct
+        // buckets — and unmodellable, because it stops at phase 0.75 and
+        // `cycle_meets_retention_coverage` wants the last reading past 0.90.
+        let partial_reset = current_reset - duration * 3 / 2;
+        with.samples.extend([0.01, 0.10, 0.25, 0.40, 0.60, 0.75].into_iter().map(|phase| {
+            quota_sample(
+                partial_reset,
+                duration,
+                phase,
+                40.0 * phase + 1.0,
+                SampleOrigin::LiveV3,
+            )
+        }));
+
+        retain_series(&mut without, now);
+        retain_series(&mut with, now);
+
+        // Control: the record survives. Without this the equality below is
+        // satisfied by retention having thrown the record away, which is the
+        // behaviour this change exists to stop.
+        let partial_group = normalize_reset(partial_reset, duration);
+        assert!(
+            with.samples.iter().any(|sample| {
+                normalize_reset(sample.reset_at, sample.duration_seconds) == partial_group
+            }),
+            "the record group must survive, or this proves nothing"
+        );
+        // Control: the cycle budget really is full, so a displacement had
+        // somewhere to happen.
+        assert_eq!(
+            retention_cycles(&without, now).len(),
+            RETENTION_MIN_CYCLES,
+            "fixture must saturate the cycle budget"
+        );
+        assert_eq!(
+            retention_cycles(&with, now).len(),
+            retention_cycles(&without, now).len(),
+            "a record must not cost the model a cycle"
+        );
     }
 
     #[test]
