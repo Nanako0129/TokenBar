@@ -1921,7 +1921,16 @@ fn repair_invalid_series(store: &mut Store, now: i64) -> Option<usize> {
         let mut kept: Vec<QuotaSample> = Vec::with_capacity(ordered.len());
         let mut series_dropped = 0usize;
         for sample in ordered {
-            if !keys.insert(sample_key(&sample)) {
+            // Reserve the key only for a sample that is kept. Both the key and
+            // the cap are derived from `duration_seconds`, and `sample_order`
+            // sorts by `reset_at` before `duration_seconds`, so a short sample
+            // (cap 48) can be cap-rejected ahead of a long one (cap 192) that
+            // shares its key and is under its own cap. Inserting first made
+            // that long sample a duplicate of a sample nobody kept, costing a
+            // drop that was not needed -- and drops are what the allowance
+            // spends before it refuses the write entirely.
+            let key = sample_key(&sample);
+            if keys.contains(&key) {
                 series_dropped += 1;
                 continue;
             }
@@ -1931,6 +1940,7 @@ fn repair_invalid_series(store: &mut Store, now: i64) -> Option<usize> {
                 series_dropped += 1;
                 continue;
             }
+            keys.insert(key);
             *count += 1;
             kept.push(sample);
         }
@@ -4161,6 +4171,92 @@ mod recovery {
         // leaving every provider's card dark.
         assert_eq!(repair_drop_allowance(5815), 116);
         assert!(repair_drop_allowance(5815) > 39);
+    }
+
+    #[test]
+    fn a_cap_rejected_sample_does_not_reserve_the_key_a_later_one_needs() {
+        // `sample_order` compares `reset_at` before `duration_seconds`, so a
+        // short sample can be processed ahead of a long one that shares its
+        // key. Reserving the key for the short one — which the cap then
+        // rejects — made the long one a duplicate of a sample nobody kept.
+        //
+        // R is a multiple of 900, so both `normalize_reset` quanta (180 for
+        // 18000s, 300 for 300000s) round every raw reset below to exactly R.
+        const R: i64 = 1_789_933_500;
+        const SHORT: i64 = 18_000; // quantum 180, cap 48
+        const LONG: i64 = 300_000; // quantum 300, cap 192
+
+        let sample = |raw_reset: i64, duration: i64, sampled_at: i64, used: f64| QuotaSample {
+            reset_at: raw_reset,
+            duration_seconds: duration,
+            duration_source: DurationSource::Observed,
+            used_percent: used,
+            sampled_at,
+            origin: SampleOrigin::LiveV3,
+            plan: None,
+        };
+
+        let mut samples = Vec::new();
+        // Buckets 48..=95 of the long window, filling the reset group to 48 —
+        // the short cap — without touching any bucket a short sample can take.
+        for bucket in 48..96i64 {
+            samples.push(sample(
+                R - 100,
+                LONG,
+                R - 300_000 + 1562 * bucket + 781,
+                bucket as f64,
+            ));
+        }
+        // Bucket 0, short: a unique key, but the group already holds 48.
+        samples.push(sample(R - 50, SHORT, R - 17_800, 99.0));
+        // Bucket 0, long: the same key, and 49 is well inside its own cap.
+        samples.push(sample(R - 20, LONG, R - 299_000, 98.0));
+
+        let mut store = Store {
+            schema_version: HISTORY_SCHEMA_VERSION,
+            series: vec![SeriesState {
+                provider_id: "claude".to_string(),
+                account_scope: "scope".to_string(),
+                window_key: "session.v1".to_string(),
+                active_reset_at: None,
+                last_activity_at: R,
+                rollover: None,
+                samples,
+            }],
+        };
+        let now = R + 60;
+
+        // Controls: the fixture is invalid for the reason claimed, and the two
+        // bucket-0 samples really do collide, or the assertion below passes on
+        // a fixture that never exercised the path.
+        assert!(!validate_store_at(&store, now), "fixture must start invalid");
+        let short = sample(R - 50, SHORT, R - 17_800, 99.0);
+        let long = sample(R - 20, LONG, R - 299_000, 98.0);
+        assert_eq!(
+            sample_key(&short),
+            sample_key(&long),
+            "the fixture's two bucket-0 samples must share a key"
+        );
+        assert!(
+            phase_bucket_count(LONG) > phase_bucket_count(SHORT),
+            "the later sample must have the larger cap"
+        );
+
+        let dropped = repair_invalid_series(&mut store, now);
+
+        assert_eq!(
+            dropped,
+            Some(1),
+            "only the cap-rejected short sample goes; reserving its key cost a second drop"
+        );
+        assert_eq!(store.series[0].samples.len(), 49);
+        assert!(
+            store.series[0]
+                .samples
+                .iter()
+                .any(|kept| kept.used_percent == 98.0),
+            "the long bucket-0 sample is under its own cap and must survive"
+        );
     }
 
     #[test]
