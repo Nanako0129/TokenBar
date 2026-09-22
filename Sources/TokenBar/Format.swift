@@ -57,16 +57,12 @@ enum Format {
     /// right for a total and wrong for a price nobody could compute — where a
     /// token count sits beside the amount, use `money(tokens:cost:)` instead.
     ///
-    /// Surfaces outside the quota lens still call `usd` directly and can print
-    /// the same false zero. Deliberately left alone: they predate this work and
-    /// changing them touches views nothing here tests. Deliberately not
-    /// enumerated either — a list of view names in a comment goes stale and
-    /// then misdescribes what it defers, which is worse than no list.
-    ///
-    /// `grep -rn 'Format\.usd(' Sources/` finds them, plus one result that is
-    /// not a surface at all and must keep calling `usd`: `CrossCheckHarness`,
-    /// which exists to check `usd` itself against the shared `format.json`
-    /// fixtures.
+    /// Every amount rendered beside its own token count goes through `money`;
+    /// a model the pricing sources do not list yet (Opus 5.5 before LiteLLM
+    /// and OpenRouter added it) would otherwise read as free. The remaining
+    /// `usd` callers are headline totals with no token count to test against,
+    /// plus `CrossCheckHarness`, which exists to check `usd` itself against
+    /// the shared `format.json` fixtures and must keep calling it.
     static func usdOrBelowCent(_ amount: Double) -> String {
         // `amount == 0` catches -0.0 too, which `usd` alone renders "$-0.00".
         if amount == 0 { return usd(0) }

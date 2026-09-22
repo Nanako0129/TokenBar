@@ -73,7 +73,7 @@ struct AgentsView: View {
                     .lineLimit(1)
                     .help(sources)
                 Spacer()
-                Text("%@ msgs".localized(entry.messages.formatted()) + " · \(Format.compactTokens(entry.total)) · \(Format.usd(entry.cost))")
+                Text("%@ msgs".localized(entry.messages.formatted()) + " · \(Format.compactTokens(entry.total)) · \(Format.money(tokens: entry.total, cost: entry.cost))")
                     .foregroundStyle(.secondary)
                     .layoutPriority(1)
             }

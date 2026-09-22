@@ -181,7 +181,7 @@ struct MonthlyView: View {
                     Text(Format.compactTokens(row.tokens))
                         .font(.caption.monospacedDigit())
                         .foregroundStyle(.secondary)
-                    Text(Format.usd(row.cost))
+                    Text(Format.money(tokens: row.tokens, cost: row.cost))
                         .font(.caption.monospacedDigit())
                         .frame(minWidth: 56, alignment: .trailing)
                 }
@@ -215,7 +215,7 @@ struct MonthlyView: View {
                             Text(Format.compactTokens(slice.tokens))
                                 .font(.caption2.monospacedDigit())
                                 .foregroundStyle(.secondary)
-                            Text(Format.usd(slice.cost))
+                            Text(Format.money(tokens: slice.tokens, cost: slice.cost))
                                 .font(.caption2.monospacedDigit())
                                 .frame(minWidth: 50, alignment: .trailing)
                         }

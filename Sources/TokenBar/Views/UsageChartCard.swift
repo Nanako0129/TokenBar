@@ -336,7 +336,7 @@ struct UsageChartCard: View {
             HStack {
                 Text("%@ tokens".localized(Format.exactTokens(bar.totalTokens)))
                 Spacer()
-                Text(Format.usd(bar.totalCost))
+                Text(Format.money(tokens: bar.totalTokens, cost: bar.totalCost))
             }
             .font(.caption2)
             .foregroundStyle(.secondary)
@@ -347,7 +347,7 @@ struct UsageChartCard: View {
                     Circle().fill(Color(hex: segment.color)).frame(width: 5, height: 5)
                     Text(segment.label).lineLimit(1)
                     Spacer()
-                    Text("\(Format.compactTokens(segment.tokens)) · \(Format.usd(segment.cost))")
+                    Text("\(Format.compactTokens(segment.tokens)) · \(Format.money(tokens: segment.tokens, cost: segment.cost))")
                         .foregroundStyle(.secondary)
                 }
                 .font(.caption2)

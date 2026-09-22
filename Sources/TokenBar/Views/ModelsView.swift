@@ -149,7 +149,7 @@ struct ModelsView: View {
                             .accessibilityLabel(
                                 CostPlausibility.warningText(ratio))
                     }
-                    Text(Format.usd(entry.cost))
+                    Text(Format.money(tokens: entry.total, cost: entry.cost))
                         .foregroundStyle(Color(hex: "#22c55e"))
                 }
                 .font(.caption2.monospacedDigit())

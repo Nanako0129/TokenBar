@@ -776,7 +776,7 @@ struct SettingsPanel: View {
                         row.providerLabel.localized))
                         .font(.caption.weight(.medium))
                     Text(UsageAttributionSettings.Copy.observed.localized(
-                        Format.compactTokens(row.tokens), Format.usd(row.cost)))
+                        Format.compactTokens(row.tokens), Format.money(tokens: row.tokens, cost: row.cost)))
                         .font(.caption2.monospacedDigit())
                         .foregroundStyle(.secondary)
                 }
