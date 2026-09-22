@@ -50,7 +50,7 @@ struct ModelsView: View {
                     Text((rows.count == 1 ? "%lld model · %@ · %@" : "%lld models · %@ · %@")
                         .localized(
                             rows.count, Format.compactTokens(totalTokens),
-                            Format.usd(totalCost)))
+                            Format.money(tokens: totalTokens, cost: totalCost)))
                         .foregroundStyle(.secondary)
                     if let updatedAt = report?.pricingUpdatedAt {
                         Text("Prices updated %@".localized(Format.relativeTime(updatedAt)))
