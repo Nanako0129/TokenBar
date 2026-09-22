@@ -163,7 +163,7 @@ struct UsageAttributionBreakdownCard: View {
             Text(Format.compactTokens(row.tokens))
                 .font(.caption.monospacedDigit())
                 .frame(minWidth: 52, alignment: .trailing)
-            Text(Format.usd(row.cost))
+            Text(Format.money(tokens: row.tokens, cost: row.cost))
                 .font(.caption.monospacedDigit())
                 .foregroundStyle(tint.amount)
                 .frame(minWidth: 76, alignment: .trailing)

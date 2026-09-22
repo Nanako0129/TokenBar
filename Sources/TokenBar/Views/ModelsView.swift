@@ -50,7 +50,7 @@ struct ModelsView: View {
                     Text((rows.count == 1 ? "%lld model · %@ · %@" : "%lld models · %@ · %@")
                         .localized(
                             rows.count, Format.compactTokens(totalTokens),
-                            Format.usd(totalCost)))
+                            Format.money(tokens: totalTokens, cost: totalCost)))
                         .foregroundStyle(.secondary)
                     if let updatedAt = report?.pricingUpdatedAt {
                         Text("Prices updated %@".localized(Format.relativeTime(updatedAt)))
@@ -149,7 +149,7 @@ struct ModelsView: View {
                             .accessibilityLabel(
                                 CostPlausibility.warningText(ratio))
                     }
-                    Text(Format.usd(entry.cost))
+                    Text(Format.money(tokens: entry.total, cost: entry.cost))
                         .foregroundStyle(Color(hex: "#22c55e"))
                 }
                 .font(.caption2.monospacedDigit())

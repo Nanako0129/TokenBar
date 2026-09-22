@@ -181,7 +181,7 @@ struct ModelBreakdownCard: View {
                             .accessibilityLabel(
                                 CostPlausibility.warningText(ratio))
                     }
-                    Text(Format.usd(entry.cost))
+                    Text(Format.money(tokens: entry.total, cost: entry.cost))
                         .foregroundStyle(Color(hex: "#22c55e"))
                 }
                 .font(.caption2.monospacedDigit())
@@ -316,7 +316,7 @@ struct ModelUsageTooltip: View {
             HStack {
                 Text("%@ tokens".localized(Format.compactTokens(total)))
                 Spacer()
-                Text(Format.usd(cost))
+                Text(Format.money(tokens: total, cost: cost))
             }
             .font(.caption2)
             .foregroundStyle(.secondary)

@@ -576,7 +576,7 @@ struct ContributionHeatmap: View {
             Text("%@ tokens".localized(Format.exactTokens(cell.tokens)))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
-            Text(Format.usd(cell.cost))
+            Text(Format.money(tokens: cell.tokens, cost: cell.cost))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
         }
