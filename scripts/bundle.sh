@@ -104,6 +104,11 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <string>14.0</string>
     <key>LSUIElement</key>
     <true/>
+    <!-- Provider quota HTTPS can cross a VPN interface macOS treats as a
+         local network. Conditional on purpose: not every VPN prompts, and
+         the sentence does not claim the traffic stays on this machine. -->
+    <key>NSLocalNetworkUsageDescription</key>
+    <string>TokenBar connects to your providers to read quota information. When your VPN routes this traffic through a local network, macOS may ask for local network access.</string>
     <key>NSHumanReadableCopyright</key>
     <string>MIT License</string>
     <key>SUEnableInstallerLauncherService</key>

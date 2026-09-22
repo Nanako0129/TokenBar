@@ -3,9 +3,9 @@ status: active
 id: kb-release
 kind: canonical
 scope: repository
-read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, or post-release notes
-last_verified: 2026-09-16
-sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "public release history"]
+read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, packaged Info.plist, or post-release notes
+last_verified: 2026-09-21
+sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/TokenBar/SelfTest.swift", "public release history"]
 ---
 
 # Release and delivery
@@ -18,6 +18,7 @@ sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/
 
 - [Delivery map](#delivery-map)
 - [Application release](#application-release)
+- [Local network usage description](#local-network-usage-description)
 - [Code signing and local secret storage](#code-signing-and-local-secret-storage)
 - [Sparkle and appcast](#sparkle-and-appcast)
 - [Sparkle is compiled here, not taken from the prebuilt artifact](#sparkle-is-compiled-here-not-taken-from-the-prebuilt-artifact)
@@ -69,6 +70,14 @@ Either form triggers the workflow identically — `push: tags: ["v*"]`, with the
 | Discord presence consent | This repo | The opt-in switch and everything the disclosure beside it describes must reach users in the SAME release. The switch has never shipped — v1.12.0 carries the payload builder but no key, no transport and no Settings section — so today every user's first sight of it is with the current disclosure. Shipping an addition to the published surface (the repository button was the first) in a LATER release than the switch would resume publishing for anyone already opted in, under copy they never read. Either ship them together or reset the key |
 
 > **授權邊界：** 發版是不可逆的公開狀態變更。除非使用者明確要求，不能自行 tag、push appcast、改 Release body、更新 cask 或發佈 asset。
+
+## Local network usage description
+
+`scripts/bundle.sh` writes `NSLocalNetworkUsageDescription` into the packaged `Info.plist`. That script is the production packaging path for the release workflow and for `make selftest-bundled`. The string says TokenBar connects to providers to read quota information, and that macOS may ask for local network access when a VPN routes that traffic through a local network. The wording stays conditional: it does not say that every VPN prompts, and it does not say that the traffic stays on the machine.
+
+Whether a tunnel-free path prompts was not measured. This document records the packaging requirement only; it does not treat a VPN as a proven cause of the dialog in every configuration.
+
+When `SelfTest.run` is executing inside an `.app`, it reads `Bundle.main`'s actual `NSLocalNetworkUsageDescription` and requires a nonempty `String`. A missing key, a blank string, and a non-string value fail that run. A bare SwiftPM executable has no app `Info.plist`, so the same check does not apply there and `make selftest` stays valid. The check keys off the bundle being an `.app`, not the shipping bundle identifier, and it is part of the release binary rather than a `#if DEBUG` block. It reads `Bundle.main` directly, with no production helper added for the test. `make selftest-bundled` is what exercises it.
 
 ## Code signing and local secret storage
 
