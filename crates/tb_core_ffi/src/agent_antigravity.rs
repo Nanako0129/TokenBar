@@ -223,33 +223,198 @@ async fn oauth_endpoint_resolves() -> bool {
 /// to the browser. Anything that manages the child after spawning it is subject
 /// to the same freeze; only not spawning it is not.
 ///
-/// Taking the runner as a parameter is what lets a test assert the child is
-/// never spawned, rather than inferring it from the returned error.
+/// The same freeze applies to the logged-out case below: with `agy` signed out,
+/// `agy --print /usage --output-format json --print-timeout 30s </dev/null` was
+/// measured on macOS to open a browser tab on Google's OAuth consent page and
+/// wait there. That is exactly the command this route runs unattended, so the
+/// login check also has to happen before the spawn, not after it.
+///
+/// Taking the runner, the login marker and the latch as parameters is what
+/// lets a test assert the child is never spawned, rather than inferring it
+/// from the returned error.
+///
+/// The latch trade-off: once a real attempt has spawned `agy` and failed, the
+/// route stays off for as long as the login marker is unchanged. A transient
+/// failure after a real spawn therefore disables the `agy` route until the
+/// Keychain item is rewritten (a re-login) or the app restarts, and meanwhile
+/// the card shows the primary route's error, because `with_agy_fallback`
+/// discards this route's failure. Expiring the latch on a timer is
+/// deliberately not implemented: a spawned attempt that failed may be one that
+/// opened the browser, and the failure seen here does not say which, so a
+/// timed retry could repeat it every period.
 async fn fetch_agy_cli_gated<Run, RunFuture>(
     now: DateTime<Utc>,
     endpoint_resolves: bool,
+    marker: Option<String>,
+    latch: &std::sync::Mutex<AgyLatch>,
     run: Run,
 ) -> Result<Fetched, ProviderFetchFailure>
 where
     Run: FnOnce(DateTime<Utc>) -> RunFuture,
-    RunFuture: std::future::Future<Output = Result<Fetched, ProviderFetchFailure>>,
+    RunFuture: std::future::Future<Output = Result<Fetched, AgyRunError>>,
 {
     if !endpoint_resolves {
         return Err(ProviderFetchFailure::terminal(
             "Antigravity quota is unavailable while the network is unreachable.",
         ));
     }
-    run(now).await
+    let Some(marker) = marker else {
+        return Err(ProviderFetchFailure::terminal(
+            "Antigravity CLI is not signed in.",
+        ));
+    };
+    {
+        // Scoped so the guard is released before the await below: polls can
+        // overlap (there is no per-provider single-flight upstream), and a
+        // std mutex held across an await would block the other poll's thread.
+        let mut state = lock_agy_latch(latch);
+        match &*state {
+            AgyLatch::InFlight => {
+                return Err(ProviderFetchFailure::terminal(
+                    "Antigravity CLI usage is already running.",
+                ));
+            }
+            AgyLatch::Failed(failed) if *failed == marker => {
+                return Err(ProviderFetchFailure::terminal(
+                    "Antigravity CLI usage is paused after a failed attempt.",
+                ));
+            }
+            AgyLatch::Idle | AgyLatch::Failed(_) => *state = AgyLatch::InFlight,
+        }
+    }
+    // Created with no await between it and the InFlight write, so a panic in
+    // `run` or a drop of this future mid-flight still leaves the latch Idle.
+    let mut release = AgyLatchRelease {
+        latch,
+        next: AgyLatch::Idle,
+    };
+    match run(now).await {
+        Ok(fetched) => Ok(fetched),
+        Err(AgyRunError { failure, spawned }) => {
+            if spawned {
+                release.next = AgyLatch::Failed(marker);
+            }
+            Err(failure)
+        }
+    }
+}
+
+/// Whether the `agy` route may spawn the CLI. `Failed` carries the login
+/// marker that was current when a spawned attempt failed; a different marker
+/// (the Keychain item was rewritten by a re-login) re-arms the route.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AgyLatch {
+    Idle,
+    InFlight,
+    Failed(String),
+}
+
+#[cfg(target_os = "macos")]
+static AGY_LATCH: std::sync::Mutex<AgyLatch> = std::sync::Mutex::new(AgyLatch::Idle);
+
+/// A failed `agy` run, with whether any CLI process was actually attempted.
+/// Only an attempted run may latch the route off; "no CLI installed" must not.
+#[derive(Debug)]
+struct AgyRunError {
+    failure: ProviderFetchFailure,
+    spawned: bool,
+}
+
+/// Writes `next` into the latch when dropped, so `InFlight` cannot outlive the
+/// attempt that set it, whether that attempt returns, panics or is cancelled.
+struct AgyLatchRelease<'a> {
+    latch: &'a std::sync::Mutex<AgyLatch>,
+    next: AgyLatch,
+}
+
+impl Drop for AgyLatchRelease<'_> {
+    fn drop(&mut self) {
+        let next = std::mem::replace(&mut self.next, AgyLatch::Idle);
+        *lock_agy_latch(self.latch) = next;
+    }
+}
+
+/// The latch holds no invariant a panic could break halfway, so a poisoned
+/// lock is recovered rather than propagated; propagating would panic inside
+/// `AgyLatchRelease::drop` during an unwind.
+fn lock_agy_latch(latch: &std::sync::Mutex<AgyLatch>) -> std::sync::MutexGuard<'_, AgyLatch> {
+    latch
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// The Keychain lookup that answers "is `agy` signed in" — the login keychain
+/// generic-password item `gemini` / `antigravity`. Measured on macOS: exit 0
+/// while signed in, exit 44 after `agy`'s `/logout`, with no access prompt.
+///
+/// Attributes only. Neither `-w` nor `-g` is passed, so the secret is never
+/// requested; a test pins this exact slice so neither can be added silently.
+#[cfg(any(target_os = "macos", test))]
+const AGY_KEYCHAIN_QUERY: &[&str] = &["find-generic-password", "-s", "gemini", "-a", "antigravity"];
+
+/// The value of the `"mdat"<timedate>=` attribute line (modification date) in
+/// `security find-generic-password` output, trimmed. A re-login rewrites the
+/// item, which is what lets it re-arm a latched-off route.
+#[cfg(any(target_os = "macos", test))]
+fn parse_keychain_mdat(stdout: &str) -> Option<String> {
+    stdout.lines().find_map(|line| {
+        let value = line
+            .trim_start()
+            .strip_prefix("\"mdat\"<timedate>=")?
+            .trim();
+        (!value.is_empty()).then(|| value.to_string())
+    })
+}
+
+/// `Some(marker)` when `agy`'s Keychain login item exists, `None` otherwise
+/// (exit 44, any other exit, spawn failure or timeout — all read as "do not
+/// spawn `agy`"). The marker is the item's modification date, or the fixed
+/// `"present"` when that cannot be parsed, so the latch still applies; with the
+/// sentinel only an app restart re-arms a latched route.
+///
+/// stdout is parsed and dropped here, never logged.
+#[cfg(target_os = "macos")]
+async fn agy_login_marker() -> Option<String> {
+    let future = tokio::process::Command::new("/usr/bin/security")
+        .args(AGY_KEYCHAIN_QUERY)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(std::time::Duration::from_secs(3), future)
+        .await
+        .ok()?
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let marker = parse_keychain_mdat(&String::from_utf8_lossy(&output.stdout));
+    Some(marker.unwrap_or_else(|| "present".to_string()))
 }
 
 #[cfg(target_os = "macos")]
 async fn fetch_agy_cli(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
     let endpoint_resolves = oauth_endpoint_resolves().await;
-    fetch_agy_cli_gated(now, endpoint_resolves, run_agy_cli_candidates).await
+    // The Keychain is not consulted when the gate has already closed.
+    let marker = if endpoint_resolves {
+        agy_login_marker().await
+    } else {
+        None
+    };
+    fetch_agy_cli_gated(
+        now,
+        endpoint_resolves,
+        marker,
+        &AGY_LATCH,
+        run_agy_cli_candidates,
+    )
+    .await
 }
 
+/// `spawned` is false only when there was no candidate to run; any call into
+/// `fetch_agy_cli_from` counts as an attempt.
 #[cfg(target_os = "macos")]
-async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, ProviderFetchFailure> {
+async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, AgyRunError> {
     let candidates = agy_cli_artifact_candidates().await;
     let mut last_failure = None;
     for executable in candidates {
@@ -258,8 +423,16 @@ async fn run_agy_cli_candidates(now: DateTime<Utc>) -> Result<Fetched, ProviderF
             Err(failure) => last_failure = Some(failure),
         }
     }
-    Err(last_failure
-        .unwrap_or_else(|| ProviderFetchFailure::terminal("Antigravity CLI was not found.")))
+    Err(match last_failure {
+        Some(failure) => AgyRunError {
+            failure,
+            spawned: true,
+        },
+        None => AgyRunError {
+            failure: ProviderFetchFailure::terminal("Antigravity CLI was not found."),
+            spawned: false,
+        },
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -3803,8 +3976,9 @@ mod tests {
     async fn an_unresolvable_token_endpoint_does_not_spawn_the_cli() {
         let now = DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap();
         let runs = std::cell::Cell::new(0);
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
 
-        let blocked = fetch_agy_cli_gated(now, false, |now| {
+        let blocked = fetch_agy_cli_gated(now, false, marker("m1"), &latch, |now| {
             runs.set(runs.get() + 1);
             async move { Ok(unreachable_probe_fetched(now)) }
         })
@@ -3815,13 +3989,168 @@ mod tests {
         // Control. Without it, `runs == 0` above would also hold if the gate
         // rejected every call for an unrelated reason, or if the runner were
         // never wired in at all.
-        let allowed = fetch_agy_cli_gated(now, true, |now| {
+        let allowed = fetch_agy_cli_gated(now, true, marker("m1"), &latch, |now| {
             runs.set(runs.get() + 1);
             async move { Ok(unreachable_probe_fetched(now)) }
         })
         .await;
         assert_eq!(runs.get(), 1, "a resolvable endpoint must still spawn agy");
         assert!(allowed.is_ok());
+    }
+
+    fn marker(value: &str) -> Option<String> {
+        Some(value.to_string())
+    }
+
+    fn agy_now() -> DateTime<Utc> {
+        DateTime::<Utc>::from_timestamp(1_700_000_000, 0).unwrap()
+    }
+
+    /// Runs the gate once with a counting runner that answers `outcome`.
+    async fn run_gate(
+        latch: &std::sync::Mutex<AgyLatch>,
+        marker: Option<String>,
+        runs: &std::cell::Cell<usize>,
+        outcome: Result<(), bool>,
+    ) -> Result<Fetched, ProviderFetchFailure> {
+        fetch_agy_cli_gated(agy_now(), true, marker, latch, |now| {
+            runs.set(runs.get() + 1);
+            async move {
+                match outcome {
+                    Ok(()) => Ok(unreachable_probe_fetched(now)),
+                    Err(spawned) => Err(AgyRunError {
+                        failure: ProviderFetchFailure::terminal("Antigravity CLI usage failed."),
+                        spawned,
+                    }),
+                }
+            }
+        })
+        .await
+    }
+
+    fn latch_state(latch: &std::sync::Mutex<AgyLatch>) -> AgyLatch {
+        latch.lock().unwrap().clone()
+    }
+
+    /// Signed out, `agy --print /usage` opens a browser for OAuth (measured on
+    /// macOS). No Keychain login item must mean no spawn and no latch write.
+    #[tokio::test]
+    async fn a_missing_login_marker_does_not_spawn_the_cli() {
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
+        let runs = std::cell::Cell::new(0);
+
+        let blocked = run_gate(&latch, None, &runs, Ok(())).await;
+        assert_eq!(runs.get(), 0, "a signed-out agy must not be spawned");
+        assert!(matches!(blocked, Err(ProviderFetchFailure::Terminal { .. })));
+        assert_eq!(latch_state(&latch), AgyLatch::Idle);
+
+        // Control: the same gate with a marker does run.
+        assert!(run_gate(&latch, marker("m1"), &runs, Ok(())).await.is_ok());
+        assert_eq!(runs.get(), 1);
+        assert_eq!(latch_state(&latch), AgyLatch::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_spawned_failure_latches_until_the_marker_changes() {
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
+        let runs = std::cell::Cell::new(0);
+
+        assert!(run_gate(&latch, marker("m1"), &runs, Err(true))
+            .await
+            .is_err());
+        assert_eq!(runs.get(), 1);
+        assert_eq!(latch_state(&latch), AgyLatch::Failed("m1".to_string()));
+
+        let paused = run_gate(&latch, marker("m1"), &runs, Ok(())).await;
+        assert_eq!(
+            runs.get(),
+            1,
+            "the same login must not respawn a failed agy"
+        );
+        assert!(matches!(paused, Err(ProviderFetchFailure::Terminal { .. })));
+        assert_eq!(latch_state(&latch), AgyLatch::Failed("m1".to_string()));
+
+        // A rewritten Keychain item (re-login) re-arms the route.
+        assert!(run_gate(&latch, marker("m2"), &runs, Ok(())).await.is_ok());
+        assert_eq!(runs.get(), 2, "a new login must spawn agy again");
+        assert_eq!(latch_state(&latch), AgyLatch::Idle);
+    }
+
+    #[tokio::test]
+    async fn a_failure_without_a_spawn_does_not_latch() {
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
+        let runs = std::cell::Cell::new(0);
+
+        assert!(run_gate(&latch, marker("m1"), &runs, Err(false))
+            .await
+            .is_err());
+        assert_eq!(runs.get(), 1);
+        assert_eq!(latch_state(&latch), AgyLatch::Idle);
+
+        assert!(run_gate(&latch, marker("m1"), &runs, Ok(())).await.is_ok());
+        assert_eq!(runs.get(), 2, "a CLI that was never found must not latch");
+    }
+
+    #[tokio::test]
+    async fn an_in_flight_attempt_blocks_an_overlapping_poll() {
+        let latch = std::sync::Mutex::new(AgyLatch::InFlight);
+        let runs = std::cell::Cell::new(0);
+
+        let blocked = run_gate(&latch, marker("m1"), &runs, Ok(())).await;
+        assert_eq!(
+            runs.get(),
+            0,
+            "an overlapping poll must not spawn a second agy"
+        );
+        assert!(matches!(blocked, Err(ProviderFetchFailure::Terminal { .. })));
+        assert_eq!(latch_state(&latch), AgyLatch::InFlight);
+    }
+
+    /// A poll cancelled mid-run (the future dropped) must not leave the route
+    /// stuck in `InFlight` for the rest of the process.
+    #[tokio::test]
+    async fn a_cancelled_attempt_releases_the_latch() {
+        let latch = std::sync::Mutex::new(AgyLatch::Idle);
+        let runs = std::cell::Cell::new(0);
+
+        let cancelled = tokio::time::timeout(
+            std::time::Duration::from_millis(10),
+            fetch_agy_cli_gated(agy_now(), true, marker("m1"), &latch, |_| {
+                runs.set(runs.get() + 1);
+                std::future::pending::<Result<Fetched, AgyRunError>>()
+            }),
+        )
+        .await;
+        assert!(cancelled.is_err(), "the runner must still be pending");
+        assert_eq!(runs.get(), 1, "the runner must have started");
+        assert_eq!(latch_state(&latch), AgyLatch::Idle);
+
+        assert!(run_gate(&latch, marker("m1"), &runs, Ok(())).await.is_ok());
+        assert_eq!(runs.get(), 2);
+    }
+
+    // Pins that neither `-w` nor `-g` (which would request the secret) is added.
+    #[test]
+    fn keychain_query_requests_attributes_only() {
+        assert_eq!(
+            AGY_KEYCHAIN_QUERY,
+            &["find-generic-password", "-s", "gemini", "-a", "antigravity"]
+        );
+    }
+
+    #[test]
+    fn keychain_mdat_is_parsed_from_attribute_output() {
+        let with_mdat = "keychain: \"/Users/x/Library/Keychains/login.keychain-db\"\n\
+            attributes:\n    \"acct\"<blob>=\"antigravity\"\n    \
+            \"mdat\"<timedate>=0x32303236303932333137343035365A00  \"20260923174056Z\\000\"\n    \
+            \"svce\"<blob>=\"gemini\"\n";
+        assert_eq!(
+            parse_keychain_mdat(with_mdat).as_deref(),
+            Some("0x32303236303932333137343035365A00  \"20260923174056Z\\000\"")
+        );
+
+        let without_mdat = "attributes:\n    \"acct\"<blob>=\"antigravity\"\n";
+        assert_eq!(parse_keychain_mdat(without_mdat), None);
     }
 
     fn unreachable_probe_fetched(now: DateTime<Utc>) -> Fetched {
