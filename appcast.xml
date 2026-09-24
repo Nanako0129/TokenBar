@@ -3,6 +3,21 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>1.20.2</title>
+            <pubDate>Thu, 24 Sep 2026 02:27:15 +0000</pubDate>
+            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.2</link>
+            <sparkle:version>1171</sparkle:version>
+            <sparkle:shortVersionString>1.20.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Fixes:</b>
+<ul>
+<li>With the Antigravity CLI signed out, TokenBar could open a Google sign-in page on every refresh. When the Antigravity IDE is closed and no Gemini CLI login is available, TokenBar asks the agy CLI for quota instead. Signed out, that command opens a browser tab for Google sign-in and waits, and TokenBar ran it on every refresh: once a minute with the popover open. TokenBar now checks that agy's login item exists in the Keychain before running it, and skips the CLI when it does not. Only the item's presence and modification date are read, never the token. If agy runs and still fails, it is not run again until you sign in to agy again or restart TokenBar; until then the Antigravity card shows the error from the other routes.</li>
+</ul>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.20.2/TokenBar.app.tar.gz" length="10610828" type="application/octet-stream" sparkle:edSignature="V5Ad7443omy3/TpUJ0aszZFaMZV55rDFI5BcX3mbNPVtS43C3ROaCyzlyFmGJhDvxog8jD+nKHtnKkCrNsfqBQ=="/>
+        </item>
+        <item>
             <title>1.20.1</title>
             <pubDate>Tue, 22 Sep 2026 20:17:43 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.1</link>
@@ -79,38 +94,6 @@
 <p>Thanks: @iF2007</p>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.19.0/TokenBar.app.tar.gz" length="10545746" type="application/octet-stream" sparkle:edSignature="BmOkd8y0RjfPP+tN6OESrLoJ8lQpGcN7pIJo82nV2HhGTaCT7956WwBx2yLJaJBoN8s0O1/3XqBFXY1GMwdvDg=="/>
-        </item>
-        <item>
-            <title>1.18.0</title>
-            <pubDate>Wed, 16 Sep 2026 13:21:55 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.18.0</link>
-            <sparkle:version>1099</sparkle:version>
-            <sparkle:shortVersionString>1.18.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Before you update:</b>
-<ul>
-<li>Codex turn counts jump from zero to thousands, and the first launch rescans Codex transcripts once. Codex used to announce a human turn one way and around version 0.145 changed to another; TokenBar recognised only the old shape, so the Daily and Monthly cards read 0 turns for Codex on essentially every day. Nothing was recounted: on every day with Codex activity every other figure is byte-identical before and after - tokens, cost, messages, models - and only the turn column moves. Reading turns out of the old cache is not possible, so the Codex parser version moves 5 to 6 and every Codex shard is rebuilt once on first launch. No other client's cache is touched, and the launch after it is normal speed.</li>
-</ul>
-<b>Features:</b>
-<ul>
-<li>The paid OpenCode Go plan now has a quota card. OpenCode stores the Go plan under a separate api key, and TokenBar read only the Copilot quota that lives in the same file. Its rolling, weekly and monthly windows now appear under the existing opencode client rather than as a new tab.</li>
-<li>Kiro's monthly allowance now appears as a quota card. Kiro was already recognised as a subscription for attribution, but no quota was ever fetched for it, so the plan had no usage bar.</li>
-<li>Grok Bot's weekly allowance now appears alongside Grok Build's. The two are separate allowances and only Grok Build's was read. Both now appear together under a Grok Build &amp; Bot tab in Overview and Quota, including on machines with no local Grok usage records.</li>
-<li>Reading that allowance needs your permission once. Grok Bot keeps its login in your Keychain and the weekly limit cannot be read without decrypting it, so the card says what it needs and waits rather than letting macOS ask out of nowhere. Allow proceeds and the system dialog follows a second or two later; Not now leaves the card as a single grey line, with Allow still there whenever you change your mind. If macOS itself refuses or never answers, the card says so and TokenBar stops asking rather than raising the dialog again every cycle - Allow tries once more when you want it to. The login is used for one thing: asking Grok Bot's usage endpoint what your weekly limit is. TokenBar does not store it, does not log it, and sends it nowhere else. Declining affects that card and nothing else, and once macOS holds the grant only macOS can withdraw it. Having Grok Bot signed in already does not change this: the card still asks, and macOS may still want to confirm - this release is the first time TokenBar reads that item, so there is no prior grant to rely on.</li>
-<li>Window history grows past twelve rows. The card still opens at twelve, and a link under the list adds twelve more per press until every cycle is on screen. Pressing to exhaustion reaches 32, which is where the engine's fold stops.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>A quota poll could open a browser tab you never asked for. The quota CLI is documented as non-interactive and is not: with an expired token and no DNS it treats the network failure as an authentication failure and starts an interactive sign-in. TokenBar now resolves the endpoint first and gives up without invoking the CLI when that fails.</li>
-<li>A window-history card said usage was never recorded, about usage sitting in the same scan. Two different statements were collapsed into one flag - the machine recorded nothing, and the machine recorded it and you have not said which subscription it belongs to - so a client you had not classified was reported as having no records at all. The flag is now decided per subscription.</li>
-<li>One long model name stretched a whole usage card past the edge of the popover. The layout measured every legend item at its ideal width and took the widest row as the card's own width, so a single entry wider than the popover stretched everything around it. Locally-served model names reach that length easily. Items are now measured against the row they sit on, which lets the label's single-line truncation do the job it was already there to do.</li>
-<li>An OpenCode Go window could be dated to a cycle that had already reset. The clock was read before the request and held across it, so a reset that expired while the request was in flight still compared as being in the future. It is now read after the response arrives.</li>
-<li>A cancelled quota poller kept running for the rest of its minute. Closing the popover cancels it, but the sleep it was parked in observed only its own timeout, so the task stayed alive for up to a minute after the window it served had gone.</li>
-</ul>
-<p>Thanks: @binhonglee, @savourylie</p>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.18.0/TokenBar.app.tar.gz" length="10536531" type="application/octet-stream" sparkle:edSignature="ZK0cOUlWFB53u1QVgpogEuGO0Q4ogJAIaGQEtLb6bMMCrzjufecECdEfK3gohdFFynDqHWPCsGymtoulmQdnBg=="/>
         </item>
         <item>
             <title>1.1.1</title>
