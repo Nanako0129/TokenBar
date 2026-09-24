@@ -1189,6 +1189,75 @@ enum SelfTest {
             popoverResizeResult.1,
             "final popover resize commits published height")
 
+        // Glass panel (macOS 27+ dashboard shell). The menu-bar session itself
+        // needs a real status item and a click, so it is accepted live; these
+        // cover the placement math and the close routing around it.
+        do {
+            let visible = NSRect(x: 0, y: 0, width: 1_000, height: 800)
+            let gap = GlassPanelStyle.menuBarGap
+            let margin = GlassPanelStyle.screenMargin
+            let centered = GlassPanelPresenter.frame(
+                anchor: NSRect(x: 490, y: 800, width: 20, height: 24),
+                visible: visible, width: 400, height: 500)
+            expect(
+                centered == NSRect(x: 300, y: 800 - gap - 500, width: 400, height: 500),
+                "glass panel centers under its anchor with its top edge just below it")
+            let right = GlassPanelPresenter.frame(
+                anchor: NSRect(x: 980, y: 800, width: 20, height: 24),
+                visible: visible, width: 400, height: 500)
+            expect(right.maxX == 1_000 - margin, "glass panel clamps to the right screen edge")
+            let left = GlassPanelPresenter.frame(
+                anchor: NSRect(x: 0, y: 800, width: 20, height: 24),
+                visible: visible, width: 400, height: 500)
+            expect(left.minX == margin, "glass panel clamps to the left screen edge")
+            let unclamped = GlassPanelPresenter.frame(
+                anchor: NSRect(x: 0, y: 800, width: 20, height: 24),
+                visible: nil, width: 400, height: 500)
+            expect(unclamped.minX == -190, "glass panel is not clamped without a screen")
+        }
+        let glassCloseResult = MainActor.assumeIsolated { () -> (Int, Bool, Bool, Bool) in
+            let panel = GlassPanel()
+            var performCloseCalls = 0
+            panel.onPerformClose = { performCloseCalls += 1 }
+            panel.performClose(nil)
+
+            let content = NSViewController()
+            content.view = NSView()
+            let presenter = GlassPanelPresenter(contentViewController: content)
+            defer { presenter.tearDown() }
+            var hidden = 0
+            var cancelled = 0
+            presenter.onHidden = { hidden += 1 }
+            let oldItem = NSObject()
+            let newItem = NSObject()
+            presenter.adopt(oldItem, cancelSession: { cancelled += 1 })
+            presenter.close()
+            let sessionEndsFirst = cancelled == 1 && hidden == 0
+
+            // Hand-over: the new item's begin arrives before the old item's
+            // end. The late end must not drop the new session.
+            presenter.adopt(newItem, cancelSession: { cancelled += 10 })
+            presenter.sessionDidEnd(for: oldItem)
+            let lateEndIgnored = hidden == 0 && presenter.hasSession
+
+            presenter.sessionDidEnd(for: newItem)
+            presenter.close() // no session left: hides directly
+            return (performCloseCalls, sessionEndsFirst, lateEndIgnored,
+                    cancelled == 1 && hidden == 2)
+        }
+        expect(
+            glassCloseResult.0 == 1,
+            "glass panel routes performClose (settings button, Esc) to its owner")
+        expect(
+            glassCloseResult.1,
+            "glass panel close ends the menu-bar session instead of hiding behind it")
+        expect(
+            glassCloseResult.2,
+            "glass panel ignores a session end from an item that no longer owns it")
+        expect(
+            glassCloseResult.3,
+            "glass panel hides directly once no session is open")
+
         // Tray animation timing: preserve the shipping integer-millisecond
         // cadence while mapping the runner rate from 2 to 40 fps.
         let idleLoad = TrayAnimator.animationLoad(tokensPerMinute: 0)

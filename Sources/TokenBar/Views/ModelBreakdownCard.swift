@@ -344,8 +344,7 @@ struct ModelUsageTooltip: View {
         }
         .padding(8)
         .frame(width: Self.width, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+        .tooltipSurface()
         .onGeometryChange(for: CGSize.self) { $0.size } action: { measuredSize = $0 }
         .allowsHitTesting(false)
     }

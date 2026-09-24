@@ -582,6 +582,9 @@ struct AgentLimitsCard: View {
             trendCardFrame = $0
         }
         .zIndex(hoverTrend == nil ? 0 : 1)
+        // The remaining/used toggle lives on the window card but flips these
+        // bars too (shared preference).
+        .panelSwitchAnimation(asUsed)
     }
 
     /// Card-level so the placement helper clamps and lays out in one space —
@@ -614,8 +617,7 @@ struct AgentLimitsCard: View {
             }
             .padding(8)
             .frame(width: Self.trendTooltipWidth, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .tooltipSurface()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { trendTooltipSize = $0 }
             .offset(
                 PopoverTooltipPlacement.offset(

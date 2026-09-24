@@ -124,6 +124,7 @@ struct GlassCardBackground: ViewModifier {
     var cornerRadius: CGFloat = 10
 
     @Environment(\.colorScheme) private var colorScheme
+    @Environment(\.inGlassPanel) private var inGlassPanel
 
     func body(content: Content) -> some View {
         if #available(macOS 26.0, *) {
@@ -140,7 +141,7 @@ struct GlassCardBackground: ViewModifier {
                 .background(
                     colorScheme == .dark
                         ? Color.black.opacity(0.32)
-                        : Color.white.opacity(0.10),
+                        : inGlassPanel ? GlassPanelStyle.lightCardScrim : Color.white.opacity(0.10),
                     in: RoundedRectangle(cornerRadius: cornerRadius))
                 .glassEffect(.clear, in: .rect(cornerRadius: cornerRadius))
         } else {
@@ -331,28 +332,71 @@ struct SegmentedPicker<Value: Hashable>: View {
     @Binding var selection: Value
     let options: [(value: Value, label: String)]
 
+    @Environment(\.inGlassPanel) private var inGlassPanel
+    @Environment(\.colorScheme) private var colorScheme
+    @Namespace private var thumb
+
     var body: some View {
-        HStack(spacing: 2) {
+        if inGlassPanel {
+            panelBody
+        } else {
+            HStack(spacing: 2) {
+                ForEach(options, id: \.value) { option in
+                    let on = selection == option.value
+                    Button { selection = option.value } label: {
+                        label(option.label, on: on)
+                            .background(
+                                on ? AnyShapeStyle(Color.primary.opacity(0.16))
+                                   : AnyShapeStyle(.clear),
+                                in: RoundedRectangle(cornerRadius: 4))
+                            .contentShape(RoundedRectangle(cornerRadius: 4))
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(1)
+            .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+        }
+    }
+
+    /// Under the glass panel: the macOS 26 segmented shape — a capsule track
+    /// with a raised thumb that slides to the selection. Still plain fills,
+    /// not glass, for the nesting reason above.
+    private var panelBody: some View {
+        let dark = colorScheme == .dark
+        return HStack(spacing: 2) {
             ForEach(options, id: \.value) { option in
                 let on = selection == option.value
                 Button { selection = option.value } label: {
-                    Text(option.label.localized)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .font(.caption2.weight(on ? .semibold : .regular))
-                        .foregroundStyle(on ? .primary : .secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(
-                            on ? AnyShapeStyle(Color.primary.opacity(0.16))
-                               : AnyShapeStyle(.clear),
-                            in: RoundedRectangle(cornerRadius: 4))
-                        .contentShape(RoundedRectangle(cornerRadius: 4))
+                    label(option.label, on: on)
+                        .padding(.horizontal, 2)
+                        .background {
+                            if on {
+                                Capsule()
+                                    .fill(dark ? GlassPanelStyle.segmentThumbDark
+                                               : GlassPanelStyle.segmentThumbLight)
+                                    .shadow(color: .black.opacity(GlassPanelStyle.segmentThumbShadow),
+                                            radius: 1, y: 0.5)
+                                    .matchedGeometryEffect(id: "thumb", in: thumb)
+                            }
+                        }
+                        .contentShape(Capsule())
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(1)
-        .background(Color.primary.opacity(0.07), in: RoundedRectangle(cornerRadius: 6))
+        .padding(2)
+        .background(Color.primary.opacity(GlassPanelStyle.segmentTrack), in: Capsule())
+        .panelSelectionSlide(selection)
+    }
+
+    private func label(_ text: String, on: Bool) -> some View {
+        Text(text.localized)
+            .lineLimit(1)
+            .fixedSize()
+            .font(.caption2.weight(on ? .semibold : .regular))
+            .foregroundStyle(on ? .primary : .secondary)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
     }
 }

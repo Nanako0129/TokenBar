@@ -5,6 +5,8 @@ struct ViewSwitch: View {
     @Binding var active: AppView
     let views: [AppView]
 
+    @Namespace private var thumb
+
     var body: some View {
         HStack(spacing: 2) {
             ForEach(views, id: \.self) { view in
@@ -19,9 +21,9 @@ struct ViewSwitch: View {
                         .padding(.horizontal, 4)
                         .padding(.vertical, 4)
                         .frame(maxWidth: .infinity)
-                        .background(
-                            active == view ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
-                            in: RoundedRectangle(cornerRadius: 6))
+                        .modifier(SelectionBackground(
+                            isSelected: active == view,
+                            shape: RoundedRectangle(cornerRadius: 6), namespace: thumb))
                         .contentShape(RoundedRectangle(cornerRadius: 6))
                 }
                 .buttonStyle(.plain)
@@ -29,5 +31,6 @@ struct ViewSwitch: View {
         }
         .padding(2)
         .glassCard(cornerRadius: 8)
+        .panelSelectionSlide(active)
     }
 }
