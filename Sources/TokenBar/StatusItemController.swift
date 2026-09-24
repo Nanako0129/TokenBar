@@ -510,6 +510,10 @@ final class StatusItemController: NSObject {
     }
 }
 
+// Needs the macOS 27 SDK (Xcode 27) to compile, and CI and release build with
+// it. Do not wrap this in a compile-time check to build on an older SDK: that
+// builds and runs, and ships an app without the glass panel — the #343 trap
+// described in GlassBackground.swift.
 @available(macOS 27.0, *)
 extension StatusItemController: @preconcurrency NSStatusItemExpandedInterfaceDelegate {
     func statusItem(_ item: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {

@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence">
   <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-success?style=flat-square" alt="Apple Silicon">
-  <img src="https://img.shields.io/badge/Swift-6.2%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6.2+">
+  <img src="https://img.shields.io/badge/Swift-6.4%2B-F05138?style=flat-square&logo=swift&logoColor=white" alt="Swift 6.4+">
   <img src="https://img.shields.io/badge/Liquid%20Glass-macOS%2026-7c6cff?style=flat-square" alt="Liquid Glass">
 </p>
 
@@ -33,7 +33,7 @@ back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.
 
 ## The dashboard
 
-Click the icon and a Liquid Glass popover opens. A row of **app tabs** filters
+Click the icon and a Liquid Glass panel opens (a popover before macOS 27). A row of **app tabs** filters
 _which_ agents you're looking at; a **view switch** picks _how_ that data is
 broken down — seven lenses, plus the same year of usage as an orbitable 3D graph.
 
@@ -73,8 +73,9 @@ brew install --cask nanako0129/tokenbar/tokenbar
 In-app updates arrive via Sparkle; betas ride an opt-in channel
 (Settings → "Receive beta updates"). The app is ad-hoc signed (not notarized) —
 the cask clears the quarantine attribute on install, as disclosed. Requires an
-Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26; earlier systems get
-a vibrancy fallback). Still on macOS 11–13? The final Tauri build stays as
+Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26 and the glass panel
+macOS 27; earlier systems get a vibrancy fallback). Building from source needs
+Xcode 27. Still on macOS 11–13? The final Tauri build stays as
 [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri).
 
 ## How it works

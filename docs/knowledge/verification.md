@@ -73,7 +73,7 @@ PT0 的 hermetic authorities are Rust last-good and binding decisions, refresh s
 
 ## Runtime and FFI gates
 
-The current CI runtime source is [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml). CI builds the Rust static library, builds Swift, runs the core selftest, and runs the FFI smoke binary. Those are CI build and smoke checks, not the complete local code-change gate. The local build order comes from [`Makefile`](../../Makefile) and the linker contract comes from [`Package.swift`](../../Package.swift).
+The current CI runtime source is [`.github/workflows/ci.yml`](../../.github/workflows/ci.yml). CI builds the Rust static library, builds Swift, runs the core selftest, and runs the FFI smoke binary. Both `ci.yml` and `release.yml` run on GitHub's `xcode-27` image, and a local build needs Xcode 27 too: the macOS 27+ glass panel is built on an API only the macOS 27 SDK has (see [`history/liquid-glass-experiments.md`](history/liquid-glass-experiments.md#macos-27-glass-panel)). Those are CI build and smoke checks, not the complete local code-change gate. The local build order comes from [`Makefile`](../../Makefile) and the linker contract comes from [`Package.swift`](../../Package.swift).
 
 ```bash
 cargo build --release

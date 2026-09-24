@@ -56,7 +56,7 @@ A hover-tooltip z-order bug independently exposed the same behavior: the Streaks
 | Variant | Behavior in this context | Decision |
 |---|---|---|
 | `.clear` | Ultra-transparent. Over a transparent window with no backing material it renders to almost nothing, so the card vanishes. It is too thin and lets the background read sharply without frost. | Not suitable as the panel base. |
-| `.regular` | Frosts and blurs the background in the system-panel direction. It is the right visible base, although dark mode renders a dark frost. | Use as the base for the future panel structure. |
+| `.regular` | Frosts and blurs the background in the system-panel direction. It is the right visible base, although dark mode renders a dark frost. | Shipping panel base on macOS 27+ (see [macOS 27 glass panel](#macos-27-glass-panel)). |
 
 ## Approaches tried
 
@@ -66,7 +66,7 @@ A hover-tooltip z-order bug independently exposed the same behavior: the Streaks
 | 2 | Synthetic aurora gradient behind the cards inside the window | Works technically because the glass refracts it, but it is painted content rather than the real background the product needs. Rejected. |
 | 3 | Transparent `NSPanel` replacing `NSPopover`, with cards using `.glassEffect(.clear)` | Cards are invisible because `.clear` over a transparent window is nearly nothing. Rejected. |
 | 4 | The same transparent panel, with cards using `.glassEffect(.regular)` | Cards become visible and refract the desktop, but the panel chrome—header, footer, and gaps—becomes transparent. Raw desktop bleeds through and the result is messy. Rejected. |
-| 5 | One `.regular` glass surface filling the panel, with cards as plain fills | Closest to the Wi-Fi-dropdown model: a cohesive frosted panel, readable base, and edge refraction. Keep as the winning future structure, not shipping code. |
+| 5 | One `.regular` glass surface filling the panel, with cards as plain fills | Closest to the Wi-Fi-dropdown model: a cohesive frosted panel, readable base, and edge refraction. The panel surface shipped on macOS 27+; the plain card fills did not — cards keep the `.clear` recipe (see [macOS 27 glass panel](#macos-27-glass-panel)). |
 | 6 | Flat white overlay, tuned from `0.18` to `0.07` | A flat white veil makes the surface too white and foggy; it fogs rather than brightens. Rejected. |
 | 7 | White `.plusLighter` glow layer, even at `0.05` | It still fogs. An overlay is the wrong tool for brightness. Rejected. |
 | 8 | Force the light material with `.environment(\.colorScheme, .light)` | It becomes a light-theme white surface instead of the theme-independent look of system panels. Rejected. |
@@ -100,6 +100,8 @@ The backdrop remains `PopoverBackdrop` backed by `NSVisualEffectView(.hudWindow,
 The 2026-09 resumption checked the macOS 27.0 SDK against both walls. `Glass` still offers only `.regular`, `.clear`, and `.identity` plus `tint` and `interactive`, and `NSGlassEffectView.Style` still has Regular and Clear (the only addition is `effectIsInteractive`), so the second wall stands. The first wall fell to a new API: `NSStatusItem.expandedInterfaceDelegate` and `NSStatusItemExpandedInterfaceSession` let a status item that shows its own window participate in menu-bar tracking. The earlier spike's unsolved edge — a picker inside the panel resigning key and closing it through `windowDidResignKey` — no longer exists, because the session, not key status, decides when the panel closes.
 
 `GlassPanelPresenter` (`Sources/TokenBar/GlassPanelPresenter.swift`) owns the panel; `StatusItemController` sets itself as the delegate of the main item and every client item on macOS 27+ and routes each session to the presenter.
+
+The API exists only in the macOS 27 SDK, so the app now builds with Xcode 27: `ci.yml` and `release.yml` run on GitHub's `xcode-27` image (a public preview as of 2026-09), which carries Xcode 27.0 build 27A266a. The previous `macos-26` image carries Xcode 26.6 and cannot compile the delegate. Compiling the panel out for an older SDK is not an option: it builds, runs, and ships a release without the panel, the #343 trap described in `GlassBackground.swift`.
 
 | Concern | Shipping behavior | Evidence |
 |---|---|---|
