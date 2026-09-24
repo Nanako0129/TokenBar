@@ -32,8 +32,15 @@ STAMP="$OUT/.built-from"
 
 [ -d "$SRC" ] || { echo "build-sparkle: $SRC missing — run 'swift build' first" >&2; exit 1; }
 REV="$(git -C "$SRC" rev-parse HEAD)"
-# Universal, matching the official xcframework slice the app used to ship.
-WANT="$REV arm64 x86_64 normalize=1"
+# Sparkle's project targets macOS 10.13, which Xcode 27 refuses outright
+# ("supported deployment target versions is 12.0 to 27.0.x"), failing every
+# target. Build for the app's own floor instead (Package.swift: .macOS(.v14)):
+# the framework ships inside the app and never runs on anything older.
+DEPLOYMENT_TARGET="14.0"
+# Universal, matching the official xcframework slice the app used to ship. The
+# deployment target is part of the stamp so a framework cached under the old
+# setting is rebuilt rather than reused.
+WANT="$REV arm64 x86_64 normalize=1 macos=$DEPLOYMENT_TARGET"
 
 if [ -d "$FRAMEWORK" ] && [ "$(cat "$STAMP" 2>/dev/null)" = "$WANT" ]; then
   echo "$FRAMEWORK"
@@ -53,6 +60,7 @@ xcodebuild -project "$SRC/Sparkle.xcodeproj" -scheme Sparkle -configuration Rele
   -clonedSourcePackagesDirPath "$OUT/spm" \
   SPARKLE_NORMALIZE_INSTALLED_APPLICATION_NAME=1 \
   ONLY_ACTIVE_ARCH=NO ARCHS="arm64 x86_64" \
+  MACOSX_DEPLOYMENT_TARGET="$DEPLOYMENT_TARGET" \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual DEVELOPMENT_TEAM="" \
   build >"$OUT/build.log" 2>&1 || { tail -40 "$OUT/build.log" >&2; exit 1; }
 
