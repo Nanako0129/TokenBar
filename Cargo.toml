@@ -15,3 +15,15 @@ strip = "debuginfo"
 # `.expect()` — degrades that one card to an error and leaves the rest of the
 # app running. Unwinding also makes the Mutex poison-recovery in lib.rs /
 # agent_usage.rs meaningful again (a Mutex is only poisoned on unwind).
+
+# Proc-macros and build scripts only run at build time, and stripping them
+# breaks the build on Xcode 27: dyld refuses to load a stripped proc-macro
+# dylib ("mis-aligned LINKEDIT string pool"), so every crate using
+# serde_derive, tokio-macros and the like fails with E0463. Measured on macOS
+# 27.0 with Xcode's ld-27037.1 and Homebrew rustc 1.97.1: the same
+# serde_derive build loads with strip off and fails with it on, identically
+# across rebuilds. The shipped staticlib is unaffected: built with this
+# section, and built with strip off for the whole profile, it carried no
+# __debug_ sections either way and differed by under 300 bytes.
+[profile.release.build-override]
+strip = false
