@@ -822,6 +822,7 @@ struct PopoverView: View {
                 }
                 .controlSize(.small)
                 .tint(.accentColor)
+                .modifier(PanelFooterButton())
                 .help("A new version is ready — click to install")
             }
             Button {
@@ -830,11 +831,13 @@ struct PopoverView: View {
                 Image(systemName: "gearshape")
             }
             .controlSize(.small)
+            .modifier(PanelFooterButton())
             .help("Settings")
             Button("Quit") {
                 NSApp.terminate(nil)
             }
             .controlSize(.small)
+            .modifier(PanelFooterButton())
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)

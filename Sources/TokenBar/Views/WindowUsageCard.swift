@@ -82,8 +82,10 @@ struct WindowUsageCard: View {
             }
         case let .quotaOnly(quota, scanFailed):
             card(quota, usage: nil, scanFailed: scanFailed)
+                .panelSwitchAnimation("\(asUsed)|\(selection)")
         case let .ready(quota, usage):
             card(quota, usage: usage, scanFailed: false)
+                .panelSwitchAnimation("\(asUsed)|\(selection)")
         }
     }
 
@@ -111,7 +113,7 @@ struct WindowUsageCard: View {
                     bars: usage?.bars ?? [], hits: usage?.hits ?? [],
                     samplePoints: q.samplePoints, curve: q.curve)
                 headline(geo)
-                chart(geo).zIndex(1)
+                chart(geo, window: quota.cardId).zIndex(1)
                 legend(geo).frame(height: Self.legendHeight)
                 undatedNote(usage)
                 scopeNote(usage, label: quota.windowLabel)
@@ -225,13 +227,15 @@ struct WindowUsageCard: View {
 
     // MARK: - Chart
 
-    private func chart(_ geo: ChartGeometry) -> some View {
+    private func chart(_ geo: ChartGeometry, window: String) -> some View {
         GeometryReader { proxy in
             let w = proxy.size.width
             let h = Self.chartHeight
             ZStack(alignment: .topLeading) {
-                Canvas { ctx, _ in draw(ctx, geo: geo, w: w, h: h) }
-                    .frame(width: w, height: h)
+                QuotaChartStage(geo: geo, window: window, asUsed: asUsed) {
+                    draw($0, geo: $1, w: w, h: h)
+                }
+                .frame(width: w, height: h)
                 if let hover, geo.hits.indices.contains(hover) {
                     overlay(geo, index: hover, w: w, h: h)
                 }
@@ -579,11 +583,133 @@ private struct WindowHoverTooltip: View {
         // of padding read as two different kinds of thing.
         .padding(8)
         .frame(width: 190, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+        .tooltipSurface()
         // Same measurement path as the usage chart's tooltip: a background
         // GeometryReader reports one frame late, which is exactly the frame
         // the placement is computed in.
         .onGeometryChange(for: CGSize.self) { $0.size } action: { measuredSize = $0 }
+    }
+}
+
+/// Owns the window chart's two animations under the glass panel. The
+/// remaining/used toggle mirrors every point (`y` becomes `100 - y`), so the
+/// line eases point by point. Switching to another window swaps in another
+/// sample set on another time span, so the line keeps its drawn shape and
+/// stretches or shrinks into the new one; see `MorphingQuotaCanvas`.
+private struct QuotaChartStage: View {
+    let geo: ChartGeometry
+    /// The card id `geo` was drawn for — the window on screen, which changes
+    /// in the same update as `geo`. Not the stored selection: that can name a
+    /// window the card fell back from, and it changes before `geo` arrives.
+    let window: String
+    let asUsed: Bool
+    let draw: (GraphicsContext, ChartGeometry) -> Void
+
+    @Environment(\.inGlassPanel) private var inGlassPanel
+    @State private var from: ChartGeometry?
+    @State private var drawnWindow: String?
+    @State private var spanProgress: Double = 1
+
+    var body: some View {
+        MorphingQuotaCanvas(
+            usedAmount: asUsed ? 1 : 0, spanProgress: spanProgress,
+            from: from, geo: geo, geoIsUsed: asUsed, draw: draw)
+            .panelSwitchAnimation(asUsed)
+            .onAppear { drawnWindow = window }
+            .onChange(of: geo) { old, _ in
+                // New samples arrive on every poll; only a window switch
+                // morphs the span.
+                defer { drawnWindow = window }
+                guard inGlassPanel, drawnWindow != nil, drawnWindow != window else { return }
+                from = old
+                spanProgress = 0
+                // Next turn: set and animated in one update would coalesce
+                // into a single no-op change from 1 to 1.
+                DispatchQueue.main.async {
+                    withAnimation(.easeInOut(duration: GlassPanelStyle.spanMorph)) {
+                        spanProgress = 1
+                    }
+                }
+            }
+    }
+}
+
+/// The window chart's Canvas, drawing `geo` with its quota line eased two
+/// ways. `usedAmount` (0 = remaining, 1 = used) mirrors each point's y, which
+/// is exact because the toggle moves nothing else. `spanProgress` (0 = the
+/// previous window as drawn, 1 = `geo`) resamples both lines to one point
+/// count and interpolates positions, so the old line stretches or shrinks into
+/// the new one; dots slide along the old line to their new places. Bars and
+/// hit zones belong to the new window at once. Without an animation in the
+/// transaction (outside the panel) both parameters land in one frame.
+private struct MorphingQuotaCanvas: View, Animatable {
+    var usedAmount: Double
+    var spanProgress: Double
+    let from: ChartGeometry?
+    let geo: ChartGeometry
+    let geoIsUsed: Bool
+    let draw: (GraphicsContext, ChartGeometry) -> Void
+
+    nonisolated var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(usedAmount, spanProgress) }
+        set {
+            usedAmount = newValue.first
+            spanProgress = newValue.second
+        }
+    }
+
+    var body: some View {
+        Canvas { ctx, _ in draw(ctx, blended) }
+    }
+
+    private var blended: ChartGeometry {
+        let target = mirrored(geo)
+        guard let from, spanProgress < 1 else { return target }
+        let source = mirrored(from)
+        let t = spanProgress
+        func lerp(_ a: Double, _ b: Double) -> Double { a + (b - a) * t }
+        func lerp(_ a: CurvePoint, _ b: CurvePoint) -> CurvePoint {
+            CurvePoint(x: lerp(a.x, b.x), y: lerp(a.y, b.y))
+        }
+        // A new window with fewer than two points has no line to grow into.
+        let count = max(source.curve.count, target.curve.count)
+        let curve = target.curve.count < 2 ? target.curve : (0..<count).compactMap { i in
+            let at = Double(i) / Double(count - 1)
+            guard let end = Self.point(on: target.curve, at: at) else { return nil }
+            return lerp(Self.point(on: source.curve, at: at) ?? end, end)
+        }
+        let dots = target.samplePoints.enumerated().map { i, dot in
+            let at = target.samplePoints.count < 2
+                ? 1 : Double(i) / Double(target.samplePoints.count - 1)
+            return lerp(Self.point(on: source.samplePoints, at: at) ?? dot, dot)
+        }
+        return ChartGeometry(
+            nowX: lerp(source.nowX, target.nowX),
+            firstSampleX: lerp(source.firstSampleX, target.firstSampleX),
+            bars: target.bars, hits: target.hits, samplePoints: dots, curve: curve)
+    }
+
+    /// `geo`'s quota points eased toward the used reading by `usedAmount`.
+    private func mirrored(_ geo: ChartGeometry) -> ChartGeometry {
+        func morph(_ points: [CurvePoint]) -> [CurvePoint] {
+            points.map { point in
+                let remaining = geoIsUsed ? 100 - point.y : point.y
+                return CurvePoint(x: point.x, y: remaining + usedAmount * (100 - 2 * remaining))
+            }
+        }
+        return ChartGeometry(
+            nowX: geo.nowX, firstSampleX: geo.firstSampleX, bars: geo.bars, hits: geo.hits,
+            samplePoints: morph(geo.samplePoints), curve: morph(geo.curve))
+    }
+
+    /// The point a fraction `at` (0...1) of the way along `points` by index.
+    private static func point(on points: [CurvePoint], at: Double) -> CurvePoint? {
+        guard let first = points.first else { return nil }
+        guard points.count > 1 else { return first }
+        let position = at * Double(points.count - 1)
+        let i = min(Int(position), points.count - 2)
+        let f = position - Double(i)
+        let a = points[i], b = points[i + 1]
+        return CurvePoint(x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f)
     }
 }

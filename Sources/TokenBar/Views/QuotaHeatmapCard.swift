@@ -191,6 +191,7 @@ struct QuotaHeatmapCard: View {
             }
         }
         .frame(height: 7 * Self.rowHeight + 6 * Self.cellGap)
+        .panelCrossfade(selectedRaw)
     }
 
     /// Occupied slots ramp between a floor and the peak; an empty one gets a
@@ -266,8 +267,7 @@ struct QuotaHeatmapCard: View {
             }
             .padding(8)
             .frame(width: Self.tooltipWidth, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .tooltipSurface()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
             .offset(
                 PopoverTooltipPlacement.offset(

@@ -10,7 +10,13 @@ permissions:
 
 jobs:
   release:
-    runs-on: macos-26
+    # Xcode 27 (the macOS 27 SDK): the dashboard's glass panel is built on
+    # NSStatusItem.expandedInterfaceDelegate, which older SDKs do not have.
+    # macos-26 carries Xcode 26.6 and fails to compile it; compiling the panel
+    # out instead would ship a release without it (see #343 in
+    # GlassBackground.swift). `xcode-27` is a GitHub public-preview image as of
+    # 2026-09 — expect occasional queueing.
+    runs-on: xcode-27
     steps:
       - uses: actions/checkout@v6
         with:

@@ -85,8 +85,7 @@ struct QuotaHistoryStripCard: View {
             }
             .padding(8)
             .frame(width: Self.tooltipWidth, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .tooltipSurface()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
             .offset(
                 PopoverTooltipPlacement.offset(

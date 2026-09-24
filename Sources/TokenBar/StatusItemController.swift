@@ -3,7 +3,9 @@ import SwiftUI
 import TokenBarCore
 
 /// Owns the NSStatusItem and its NSPopover (AppKit-hosted icon, SwiftUI
-/// popover content — the codexbar pattern). Later phases talk to it through
+/// popover content — the codexbar pattern). On macOS 27+ the popover is
+/// replaced by `GlassPanelPresenter`, driven by the menu bar's
+/// expanded-interface session. Later phases talk to it through
 /// `updateTitle(_:)` and `showPopover()`.
 @MainActor
 final class StatusItemController: NSObject {
@@ -21,6 +23,15 @@ final class StatusItemController: NSObject {
     private var lastClientTextColors: [String: NSColor] = [:]
     private let routeMemory: StatusItemRouteMemory
     private var popoverAnchorIdentity: String?
+    /// Non-nil on macOS 27+, where it replaces the popover.
+    private var glassPanel: GlassPanelPresenter?
+    /// True while the right-click quota menu tracks. The menu bar opens an
+    /// expanded session during that tracking, which must not show the panel.
+    /// (`NSApp.currentEvent` inside the session callback is no discriminator:
+    /// it read mouseExited or an undocumented type there, not the click.)
+    private var isShowingQuotaMenu = false
+
+    private var isShown: Bool { glassPanel?.isShown ?? popover.isShown }
 
     override init() {
         let defaults = UserDefaults.standard
@@ -41,7 +52,18 @@ final class StatusItemController: NSObject {
         // open in showPopover() against the status item's actual screen.
         host.sizingOptions = []
         popover.contentSize = NSSize(width: chrome.width, height: chrome.minHeight)
-        popover.contentViewController = host
+        if #available(macOS 27.0, *) {
+            let presenter = GlassPanelPresenter(contentViewController: host)
+            presenter.onHidden = { [weak self] in
+                guard let self else { return }
+                self.host?.rootView = AnyView(
+                    Color.clear.frame(width: self.chrome.width, height: self.chrome.minHeight))
+            }
+            glassPanel = presenter
+            statusItem.expandedInterfaceDelegate = self
+        } else {
+            popover.contentViewController = host
+        }
 
         // Swap the live UI for a placeholder when the popover closes for any
         // reason (transient outside-click, Esc, programmatic close) — mirrors
@@ -69,7 +91,11 @@ final class StatusItemController: NSObject {
 
         // The chrome model drives the popover window from three inputs: the
         // bottom drag handle, the settings slider, and the screen-size resolve.
-        chrome.onResize = { [weak popover] height, live in
+        chrome.onResize = { [weak self, weak popover] height, live in
+            if let glassPanel = self?.glassPanel {
+                glassPanel.layout(height: height, animate: !live)
+                return
+            }
             guard let popover else { return }
             popover.animates = !live // 1:1 tracking mid-drag; animate otherwise
             popover.contentSize = NSSize(width: PopoverChrome.width, height: height)
@@ -187,7 +213,7 @@ final class StatusItemController: NSObject {
 
     func showPopover() {
         guard let button = statusItem.button else { return }
-        guard !popover.isShown else { return }
+        guard !isShown else { return }
         let current = persistedRoute()
         applyRoute(routeMemory.activateMain(
             currentClient: current.clientId, currentView: current.view))
@@ -210,18 +236,32 @@ final class StatusItemController: NSObject {
 
     func closePopover() {
         popoverAnchorIdentity = nil
-        popover.performClose(nil)
+        if let glassPanel {
+            glassPanel.close()
+        } else {
+            popover.performClose(nil)
+        }
+    }
+
+    private func liveRoot() -> AnyView {
+        let view = PopoverView(routeMemory: routeMemory).environmentObject(chrome)
+        return glassPanel == nil ? AnyView(view) : AnyView(view.modifier(GlassPanelSurface()))
     }
 
     private func presentPopover(from button: NSStatusBarButton, identity: String) {
-        guard !popover.isShown else { return }
+        guard !isShown else { return }
         // Reinstall the live PopoverView so its .task loops start fresh
         // (the previous close swapped it for a static placeholder).
-        host?.rootView = AnyView(PopoverView(routeMemory: routeMemory).environmentObject(chrome))
+        host?.rootView = liveRoot()
         // Size against the screen the status item actually lives on (reliable,
         // unlike NSScreen.main at launch with no key window) every time we open.
         let visible = (button.window?.screen ?? NSScreen.main)?.visibleFrame.height ?? 900
         chrome.resolve(visibleHeight: visible)
+        if let glassPanel {
+            glassPanel.present(from: button, height: chrome.height)
+            popoverAnchorIdentity = identity
+            return
+        }
         // Accessory apps are never frontmost; activate so the transient
         // popover gets key status and closes on outside clicks.
         NSApp.activate(ignoringOtherApps: true)
@@ -285,6 +325,7 @@ final class StatusItemController: NSObject {
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         item.autosaveName = presentation.autosaveName
+        if #available(macOS 27.0, *), glassPanel != nil { item.expandedInterfaceDelegate = self }
         clientStatusItems[presentation.clientId] = item
         updateClientItem(item, presentation: presentation, textColor: textColor, image: image)
         return true
@@ -335,6 +376,10 @@ final class StatusItemController: NSObject {
         applyRoute(routeMemory.activateClient(
             clientId, currentClient: current.clientId, currentView: current.view))
         let identity = ClientTray.processIdentity(for: clientId)
+        // The expanded-interface session opens the panel instead. Measured on
+        // the main item: a left click sends no action once the delegate is
+        // set. Not measured on client items, so guard against a double open.
+        if glassPanel != nil { return }
         if popover.isShown {
             if popoverAnchorIdentity == identity {
                 closePopover()
@@ -356,7 +401,8 @@ final class StatusItemController: NSObject {
         defaultsObserver = nil
         if let closeObserver { NotificationCenter.default.removeObserver(closeObserver) }
         closeObserver = nil
-        if popover.isShown { closePopover() }
+        if isShown { closePopover() }
+        glassPanel?.tearDown()
         for clientId in Array(clientStatusItems.keys) {
             removeClientItem(clientId)
         }
@@ -369,9 +415,15 @@ final class StatusItemController: NSObject {
 
     @objc private func togglePopover(_ sender: Any?) {
         if NSApp.currentEvent?.type == .rightMouseUp {
+            isShowingQuotaMenu = true
             showQuotaMenu()
+            isShowingQuotaMenu = false
+            // The session the menu bar opened during tracking is ended only
+            // now: cancelling it while the menu tracked dismissed the menu.
+            if let glassPanel, !glassPanel.isShown { glassPanel.close() }
             return
         }
+        if glassPanel != nil { return } // left clicks arrive as sessions
         if popover.isShown {
             closePopover()
         } else {
@@ -455,5 +507,48 @@ final class StatusItemController: NSObject {
     @objc private func pickQuotaSource(_ sender: NSMenuItem) {
         guard let selection = sender.representedObject as? String else { return }
         UserDefaults.standard.set(selection, forKey: TrayAnimator.quotaSourceKey)
+    }
+}
+
+// Needs the macOS 27 SDK (Xcode 27) to compile, and CI and release build with
+// it. Do not wrap this in a compile-time check to build on an older SDK: that
+// builds and runs, and ships an app without the glass panel — the #343 trap
+// described in GlassBackground.swift.
+@available(macOS 27.0, *)
+extension StatusItemController: @preconcurrency NSStatusItemExpandedInterfaceDelegate {
+    func statusItem(_ item: NSStatusItem, didBegin session: NSStatusItemExpandedInterfaceSession) {
+        guard let glassPanel else { return session.cancel() }
+        // Opened without a session (`--open-popover`): a click closes it.
+        if glassPanel.isShown, !glassPanel.hasSession {
+            session.cancel()
+            closePopover()
+            return
+        }
+        // Still up for another item whose end has not arrived yet: hand over.
+        // That item's late end is ignored by the presenter's owner check.
+        if glassPanel.isShown { glassPanel.dismiss() }
+        glassPanel.adopt(item, cancelSession: { session.cancel() })
+        // Ended by togglePopover once the quota menu closes.
+        if isShowingQuotaMenu { return }
+        guard let button = item.button else { return session.cancel() }
+        let current = persistedRoute()
+        if item === statusItem {
+            applyRoute(routeMemory.activateMain(
+                currentClient: current.clientId, currentView: current.view))
+            presentPopover(from: button, identity: "main")
+        } else if let clientId = clientStatusItems.first(where: { $0.value === item })?.key {
+            applyRoute(routeMemory.activateClient(
+                clientId, currentClient: current.clientId, currentView: current.view))
+            presentPopover(from: button, identity: ClientTray.processIdentity(for: clientId))
+        } else {
+            session.cancel()
+        }
+    }
+
+    func statusItemDidEndExpandedInterfaceSession(_ item: NSStatusItem, animated: Bool) {
+        guard let glassPanel else { return }
+        let wasShown = glassPanel.isShown
+        glassPanel.sessionDidEnd(for: item)
+        if wasShown, !glassPanel.isShown { popoverAnchorIdentity = nil }
     }
 }

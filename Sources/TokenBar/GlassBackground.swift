@@ -52,8 +52,14 @@ struct GlassBackground: View {
 /// window (the .popover chrome reads nearly opaque in dark mode, burying the
 /// wallpaper blur that makes Liquid Glass cards come alive).
 struct PopoverBackdrop: View {
+    @Environment(\.inGlassPanel) private var inGlassPanel
+
     var body: some View {
-        VisualEffectBackground(material: .hudWindow)
+        if inGlassPanel {
+            Color.clear // the panel's own .regular glass is the backdrop
+        } else {
+            VisualEffectBackground(material: .hudWindow)
+        }
     }
 }
 

@@ -17,7 +17,7 @@ History 文件保留已驗證、仍能影響維護決策的結論，不是完整
 | History | 用途 | 狀態 |
 |---|---|---|
 | [`native-rewrite.md`](native-rewrite.md) | Tauri 到 native SwiftUI、Rust FFI 與出貨遷移 | historical baseline |
-| [`liquid-glass-experiments.md`](liquid-glass-experiments.md) | Liquid Glass 調查、否決的 spike 路線與 parked 結論 | parked |
+| [`liquid-glass-experiments.md`](liquid-glass-experiments.md) | Liquid Glass 調查、否決的 spike 路線、macOS 27 玻璃 panel 的出貨設計與已知限制 | active |
 | [`release-and-ui-incidents.md`](release-and-ui-incidents.md) | 發版、更新、UI lifecycle 與效能事故的根因 | historical runbook context |
 | [`dashboard-load-performance.md`](dashboard-load-performance.md) | 載入延遲調查：被推翻的假設、剖析結果、四項改動的實測與已知限制 | historical |
 

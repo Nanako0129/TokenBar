@@ -28,6 +28,7 @@ struct DashboardTabs: View {
     @State private var dragId: String?
     @State private var overId: String?
     @State private var tabFrames: [String: CGRect] = [:]
+    @Namespace private var thumb
 
     private static let dragSpace = "client-tabs-row"
 
@@ -73,6 +74,7 @@ struct DashboardTabs: View {
                             .highPriorityGesture(dragGesture(for: id))
                     }
                 }
+                .panelSelectionSlide(active)
                 .coordinateSpace(name: Self.dragSpace)
                 .onPreferenceChange(TabFramesKey.self) { tabFrames = $0 }
                 // Let a plain vertical mouse wheel scroll this horizontal row.
@@ -110,9 +112,8 @@ struct DashboardTabs: View {
             .foregroundStyle(active == id ? .primary : .secondary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
-            .background(
-                active == id ? AnyShapeStyle(.quaternary) : AnyShapeStyle(.clear),
-                in: Capsule())
+            .modifier(SelectionBackground(
+                isSelected: active == id, shape: Capsule(), namespace: thumb))
             .contentShape(Capsule())
         }
         .buttonStyle(.plain)

@@ -135,6 +135,7 @@ struct UsageChartCard: View {
                     grid: buildGrid(year: gridYear, perDayMap: stats.perDayMap), metric: metric,
                     year: gridYear)
                     .frame(height: 130)
+                    .panelCrossfade(metricRaw)
             } else {
                 legendView(legend)
                 chart(bars)
@@ -146,6 +147,7 @@ struct UsageChartCard: View {
             }
         }
         .zIndex(showsTooltip ? 1 : 0)
+        .panelSwitchAnimation("\(chartViewRaw)|\(stackByRaw)|\(metricRaw)")
     }
 
     // MARK: - Header toggles
@@ -234,6 +236,7 @@ struct UsageChartCard: View {
 
             ZStack(alignment: .topLeading) {
                 canvas(bars: bars, barWidth: barWidth, maxValue: maxValue)
+                    .panelChartRegrow("\(metricRaw)|\(stackByRaw)")
                 if let index = hoverIndex, bars.indices.contains(index),
                    !bars[index].isEmpty {
                     let bar = bars[index]
@@ -355,8 +358,7 @@ struct UsageChartCard: View {
         }
         .padding(8)
         .frame(width: Self.tooltipWidth, alignment: .leading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+        .tooltipSurface()
         .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
         .allowsHitTesting(false)
     }

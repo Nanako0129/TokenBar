@@ -89,6 +89,7 @@ struct SubscriptionTrendCard: View {
             case .chart:
                 if let trend {
                     chart(trend)
+                        .panelChartRegrow(metricRaw)
                     axis(trend)
                     legend(trend)
                     undeclaredHint(trend)
@@ -111,6 +112,7 @@ struct SubscriptionTrendCard: View {
         .overlay(alignment: .topLeading) { tooltipLayer }
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .global) } action: { cardFrame = $0 }
         .zIndex(hoverIndex == nil ? 0 : 1)
+        .panelSwitchAnimation(metricRaw)
     }
 
     private var peak: Double {
@@ -283,8 +285,7 @@ struct SubscriptionTrendCard: View {
             }
             .padding(8)
             .frame(width: Self.tooltipWidth, alignment: .leading)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
-            .overlay(RoundedRectangle(cornerRadius: 8).strokeBorder(.quaternary))
+            .tooltipSurface()
             .onGeometryChange(for: CGSize.self) { $0.size } action: { tooltipSize = $0 }
             .offset(
                 PopoverTooltipPlacement.offset(
