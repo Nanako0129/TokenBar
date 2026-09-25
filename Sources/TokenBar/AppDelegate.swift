@@ -96,6 +96,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // has not been asked and for someone who said no.
         GrokBotKeychainConsent.applyIfGranted()
 
+        // After the Syrtis rename, repoint a Dock tile still pinned to the
+        // old bundle file name. Background queue; a no-op unless it matches.
+        DockPinRepair.runIfNeeded()
+
         let controller = StatusItemController()
         statusController = controller
         let animator = TrayAnimator(controller: controller, source: usageSource)
