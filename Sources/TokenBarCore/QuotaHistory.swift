@@ -652,9 +652,19 @@ public enum QuotaHistoryFold {
 
     /// The messages a scoped window may count. One statement of the rule, so
     /// the three surfaces of a window cannot apply it differently.
+    ///
+    /// One verdict per distinct model id. `ModelScope.covers` tokenizes both
+    /// strings on every call, and this runs over the whole scan on the main
+    /// actor: tens of thousands of messages carrying a handful of model ids.
     public static func inScope(_ messages: [WindowMessage], _ scope: String?) -> [WindowMessage] {
         guard let scope else { return messages }
-        return messages.filter { ModelScope.covers(scope, modelId: $0.modelId) }
+        var verdicts: [String: Bool] = [:]
+        return messages.filter { message in
+            if let known = verdicts[message.modelId] { return known }
+            let verdict = ModelScope.covers(scope, modelId: message.modelId)
+            verdicts[message.modelId] = verdict
+            return verdict
+        }
     }
 
     private static func spanTotals(

@@ -12013,13 +12013,20 @@ enum SelfTest {
         // curve reader, with NO graph load or manually supplied client list.
         let botWindow = (card: "weekly.v1", key: "weekly.v1", resetsAt: wIso, durationSecs: Int64(604_800))
         let botOnly = windowPayload([(client: "grok-bot", windows: [botWindow])])
-        let buildAndBot = windowPayload([
-            (client: "grok", windows: [(card: "billing.weekly.v1", key: "billing.weekly.v1",
-                                       resetsAt: wIso, durationSecs: 604_800)]),
-            (client: "grok-bot", windows: [botWindow]),
-        ], generation: 8)
-        let switchedBot = windowPayload([(client: "grok-bot", windows: [botWindow])], generation: 9)
-        let noBotAllowance = try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(#"{"generatedAt":"t","publicationGeneration":10,"agents":[{"clientId":"grok-bot","source":"oauth","updatedAt":"t","windows":[],"error":"No included allowance"}]}"#.utf8))
+        // The same payload at any generation. Curves are read once per series
+        // per publication (`DashboardModel.cachedQuotaCurve`), so a case that
+        // changes what the source's curves answer has to publish again for the
+        // model to ask, exactly as a real change arrives with a publication.
+        func buildAndBotAt(_ generation: UInt64) -> AgentUsagePayload {
+            windowPayload([
+                (client: "grok", windows: [(card: "billing.weekly.v1", key: "billing.weekly.v1",
+                                           resetsAt: wIso, durationSecs: 604_800)]),
+                (client: "grok-bot", windows: [botWindow]),
+            ], generation: generation)
+        }
+        let buildAndBot = buildAndBotAt(8)
+        let switchedBot = windowPayload([(client: "grok-bot", windows: [botWindow])], generation: 12)
+        let noBotAllowance = try! JSONDecoder().decode(AgentUsagePayload.self, from: Data(#"{"generatedAt":"t","publicationGeneration":13,"agents":[{"clientId":"grok-bot","source":"oauth","updatedAt":"t","windows":[],"error":"No included allowance"}]}"#.utf8))
         let botCurve = windowCurve(resetAtSecs: wReset, durationSecs: 604_800,
                                   at: [(wNow - 3_000, 20), (wNow - 600, 35)], isActive: false)
         let buildCurve = windowCurve(resetAtSecs: wReset, durationSecs: 604_800,
@@ -12073,20 +12080,24 @@ enum SelfTest {
             src.curveByClient = [:]
             src.curve = nil
             src.curveReads = []
-            m.refreshWindowQuotaHalves()
+            await publish(buildAndBotAt(9))
             result["reads that answer nothing keep the history already published"] =
                 !summariesBeforeSilentReads.isEmpty
                 && m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
                 && !src.curveReads.isEmpty
             src.curveByClient = curvesByClientBackup
-            m.refreshWindowQuotaHalves()
+            await publish(buildAndBotAt(10))
             result["restoring the curves restores the strip without a relaunch"] =
                 m.quotaWindowSummaries.map(\.id).sorted() == summariesBeforeSilentReads
             src.curveReads = []
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok"], orderRaw: "")
-            m.refreshWindowQuotaHalves()
+            // Published again so the pass has to read: within one publication
+            // every curve is already held and nothing would be asked, which
+            // would satisfy "Build was not read" without testing it.
+            await publish(buildAndBotAt(11))
             result["hiding Build's quota preserves only Bot history"] =
                 m.windowCurves[buildKey] == nil && m.quotaWindowSummaries.map(\.clientId) == ["grok-bot"]
+                && src.curveReads.contains { $0.client == "grok-bot" }
                 && !src.curveReads.contains { $0.client == "grok" }
             m.configureQuotaVisibility(tabHidden: [], limitsHidden: ["grok-bot"], orderRaw: "")
             m.refreshWindowQuotaHalves()
@@ -12105,7 +12116,7 @@ enum SelfTest {
             result["a new account/team publication replaces history through its own binding"] =
                 m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 80 }) == true
                 && m.windowCurves[botKey]?.contains(where: { $0.usedPercent == 35 }) == false
-                && src.curveReads.allSatisfy { $0.generation == 9 }
+                && src.curveReads.allSatisfy { $0.generation == 12 }
                 && m.windowCurves[buildKey] == nil
             src.curveReads = []
             await publish(noBotAllowance)
@@ -12192,6 +12203,21 @@ enum SelfTest {
             poll.cancel()
             ClaudeExtraRoots.RegistryChange.signal()
             await poll.value
+            // Each change to what the curves answer is published, because the
+            // model reads a series once per publication and would otherwise
+            // serve the curve it already holds: the throw would never reach it.
+            @MainActor func republish(_ generation: UInt64) async {
+                src.payload = buildAndBotAt(generation)
+                let again = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage?.publicationGeneration != generation, spins < 2_000 {
+                    try? await Task.sleep(for: .milliseconds(1))
+                    spins += 1
+                }
+                again.cancel()
+                ClaudeExtraRoots.RegistryChange.signal()
+                await again.value
+            }
             var out: [String: Bool] = [:]
             let botKey = "grok-bot|weekly.v1"
             let buildKey = "grok|billing.weekly.v1"
@@ -12213,13 +12239,13 @@ enum SelfTest {
             out["control: the healthy pass produced qualifying cycles"] =
                 !qualifyingBefore.isEmpty
             src.failCurveReadClients = ["grok"]
-            m.refreshWindowQuotaHalves()
+            await republish(9)
             out["a failed window keeps its summary, grid and qualifying cycles"] =
                 m.quotaWindowSummaries.contains { $0.id == buildKey }
                 && m.quotaHeatmaps[buildKey] != nil
                 && Set(m.qualifyingCycleKeysForTesting) == qualifyingBefore
             src.failCurveReadClients = []
-            m.refreshWindowQuotaHalves()
+            await republish(10)
 
             // The state the defect actually needs, and the one the first
             // version of this case got wrong: the strip must be EMPTY when the
@@ -12238,7 +12264,7 @@ enum SelfTest {
             // Bot is untouched and still answers.
             src.failCurveReadClients = ["grok"]
             src.curveReads = []
-            m.refreshWindowQuotaHalves()
+            await republish(11)
             out["a permanently unreadable provider does not block a healthy one from publishing"] =
                 m.quotaWindowSummaries.contains { $0.id == botKey }
             out["the heatmap publishes the same way"] = m.quotaHeatmaps[botKey] != nil
@@ -12256,7 +12282,7 @@ enum SelfTest {
             // Not a latch: the moment the binding answers again the strip
             // follows, without a relaunch.
             src.failCurveReadClients = []
-            m.refreshWindowQuotaHalves()
+            await republish(12)
             out["recovery republishes both without a relaunch"] =
                 Set(m.quotaWindowSummaries.map(\.id)) == [botKey, buildKey]
             return out
@@ -12264,6 +12290,61 @@ enum SelfTest {
         expect(stripPartialFailure != nil, "#359 partial-failure fixture completes")
         for (label, passed) in (stripPartialFailure ?? [:]).sorted(by: { $0.key < $1.key }) {
             expect(passed, "#359: \(label)")
+        }
+
+        // CURVE-CACHE. Every curve read makes the engine load and parse the
+        // whole quota history store, and the synchronous refresh used to read
+        // each window once per surface: 14 reads, 134ms of a 140ms pass on the
+        // measuring machine, on the main actor, on every window switch
+        // (`--refresh-timing`). Each series is now read once per publication.
+        let curveCache: [String: Bool]? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
+            let src = WindowScanCountingSource(payload: buildAndBotAt(8))
+            src.curveByClient = ["grok-bot": botCurve, "grok": buildCurve]
+            let m = DashboardModel(source: src, initialYear: nil)
+            m.configureQuotaVisibility(tabHidden: [], limitsHidden: [], orderRaw: "")
+            @MainActor func publish(_ generation: UInt64) async {
+                src.payload = buildAndBotAt(generation)
+                let poll = Task { await m.pollAgentUsage() }
+                var spins = 0
+                while m.agentUsage?.publicationGeneration != generation, spins < 2_000 {
+                    try? await Task.sleep(for: .milliseconds(1))
+                    spins += 1
+                }
+                poll.cancel()
+                ClaudeExtraRoots.RegistryChange.signal()
+                await poll.value
+            }
+            var out: [String: Bool] = [:]
+            await publish(8)
+            out["control: the publication read both series"] =
+                Set(src.curveReads.map(\.client)) == ["grok", "grok-bot"]
+            out["each series is read once per publication, not once per surface"] =
+                src.curveReads.count == 2
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            m.refreshWindowQuotaHalves()
+            out["a refresh within the same publication reads nothing"] = src.curveReads.isEmpty
+            src.failCurveReadClients = ["grok"]
+            src.curveReads = []
+            await publish(9)
+            let failedAsks = src.curveReads.filter { $0.client == "grok" }.count
+            m.refreshWindowQuotaHalves()
+            out["a throw is not held: the failing series is asked again on the next pass"] =
+                failedAsks > 0
+                && src.curveReads.filter { $0.client == "grok" }.count > failedAsks
+                && src.curveReads.filter { $0.client == "grok-bot" }.count == 1
+            src.failCurveReadClients = []
+            src.curveReads = []
+            m.refreshWindowQuotaHalves()
+            out["once it answers, it is read once and then held"] =
+                src.curveReads.map(\.client) == ["grok"]
+            return out
+        }
+        expect(curveCache != nil, "CURVE-CACHE fixture completes")
+        for (label, passed) in (curveCache ?? [:]).sorted(by: { $0.key < $1.key }) {
+            expect(passed, "CURVE-CACHE \(label)")
         }
 
         // Strip restore across a popover reopen. `DashboardSnapshot` carries
@@ -12673,6 +12754,21 @@ enum SelfTest {
         expect(!ModelScope.covers("", modelId: "claude-fable-5"),
                "MS an empty scope selects nothing rather than everything")
 
+        // MS-MEMO. `inScope` asks `covers` once per distinct model id rather
+        // than once per message; the answer must be the per-message filter's,
+        // in the same order, with ids interleaved so a verdict carried across
+        // ids would show.
+        let memoMessages = try! JSONDecoder().decode(
+            [WindowMessage].self,
+            from: Data(("[" + ["claude-fable-5", "claude-sonnet-4-5", "claude-fable-5-20260101",
+                               "claude-sonnet-4-5", "claude-fable-5", "gpt-5"].enumerated().map { i, id in
+                #"{"timestamp":\#(1_000 + i),"client":"codex","providerId":"anthropic","modelId":"\#(id)","input":1,"output":0,"cacheRead":0,"cacheWrite":0,"reasoning":0,"cost":0,"isTurnStart":true}"#
+            }.joined(separator: ",") + "]").utf8))
+        let memoScoped = QuotaHistoryFold.inScope(memoMessages, "fable")
+        let naiveScoped = memoMessages.filter { ModelScope.covers("fable", modelId: $0.modelId) }
+        expect(memoScoped.map(\.timestamp) == naiveScoped.map(\.timestamp) && memoScoped.count == 3,
+               "MS-MEMO the per-id verdicts select exactly what the per-message filter selects")
+
         let msIso = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: Double(wNow + 3_600)))
         let msPayload = windowPayload([
@@ -13041,6 +13137,8 @@ enum SelfTest {
         // no engine call at all, which is why the cases above could not see it
         // — they only ever exercised the uncached path.
         let invCached: (scans: Int, failed: Bool, ready: Bool)? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
             let src = WindowScanCountingSource(payload: invPayload)
             let nowS = Int64(Date().timeIntervalSince1970)
             src.curve = windowCurve(
@@ -13066,6 +13164,20 @@ enum SelfTest {
             src.curve = windowCurve(
                 resetAtSecs: ahead + 3_600, durationSecs: 18_000,
                 at: [(ahead, 4), (ahead + 600, 9)], isActive: false)
+            // A changed curve arrives with a publication; the model reads each
+            // series once per publication and would otherwise keep the old one.
+            src.payload = windowPayload([
+                (client: "codex", windows: [(card: "session.v1", key: "session.v1",
+                                             resetsAt: invIso, durationSecs: 18_000)]),
+            ], generation: 8)
+            let again = Task { await m.pollAgentUsage() }
+            spins = 0
+            while m.agentUsage?.publicationGeneration != 8, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            again.cancel()
+            _ = await again.value
             m.refreshWindowQuotaHalves()
             src.scans = 0
             await m.refreshWindowUsage()
@@ -16203,14 +16315,15 @@ enum SelfTest {
         let m3fReset = m3fNow + 3_600
         let m3fResetIso = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: Double(m3fReset)))
-        let m3fPayload = try! JSONDecoder().decode(
+        func m3fPayloadAt(_ generation: UInt64) -> AgentUsagePayload { try! JSONDecoder().decode(
             AgentUsagePayload.self,
             from: Data("""
-                {"generatedAt":"now","publicationGeneration":11,"agents":[
+                {"generatedAt":"now","publicationGeneration":\(generation),"agents":[
                   \(m3nWindowJSON(accountKey: m3ExtraKey, used: 80, resetIso: m3fResetIso)),
                   \(m3nWindowJSON(accountKey: nil, used: 10, resetIso: m3fResetIso))
                 ]}
-                """.utf8))
+                """.utf8)) }
+        let m3fPayload = m3fPayloadAt(11)
         let m3fPrimaryCurve = windowCurve(
             resetAtSecs: m3fReset, durationSecs: 18_000, at: [(m3fNow - 3_000, 4)])
         let m3fExtraCurve = windowCurve(
@@ -16480,6 +16593,8 @@ enum SelfTest {
         // span the scan ends before and published the empty aggregate as a
         // current row instead of dropping the row.
         let m3qInv: (before: Int, after: Int)? = awaitMainActorValue {
+            AgentUsagePublicationCoordinator.resetForTesting()
+            defer { AgentUsagePublicationCoordinator.resetForTesting() }
             let src = WindowScanCountingSource(payload: m3fPayload)
             src.curveByAccount = [nil: m3qCurve(accountUsed: [40, 45, 50])]
             src.messagesByAccount = ["": m3qPrimaryRows]
@@ -16503,6 +16618,17 @@ enum SelfTest {
                 nil: runsCurve(
                     cycles: [[0, 40], [0, 45], [0, 50]], offsetSecs: 86_400),
             ]
+            // Published, because the moved cycles are a change in what the
+            // curve answers and the model reads a series once per publication.
+            src.payload = m3fPayloadAt(12)
+            let again = Task { await m.pollAgentUsage() }
+            spins = 0
+            while m.agentUsage?.publicationGeneration != 12, spins < 2_000 {
+                try? await Task.sleep(nanoseconds: 1_000_000)
+                spins += 1
+            }
+            again.cancel()
+            _ = await again.value
             m.refreshWindowQuotaHalves()
             await m.refreshWindowUsage()
             return (before: before, after: m.quotaEquivalences.count)
