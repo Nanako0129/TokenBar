@@ -35,13 +35,17 @@ back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.
 
 Click the icon and a Liquid Glass panel opens (a popover before macOS 27). A row of **app tabs** filters
 _which_ agents you're looking at; a **view switch** picks _how_ that data is
-broken down — seven lenses, plus the same year of usage as an orbitable 3D graph.
+broken down — eight lenses, plus the same year of usage as an orbitable 3D graph.
 
 <p align="center">
   <img src="docs/screenshots/graph-3d.png" alt="Interactive 3D contribution graph" width="400">
 </p>
 
 <table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/screenshots/overview.png" alt="Overview" width="300"><br><sub><b>Overview</b> — the tightest limit, today, and the year at a glance</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/quota.png" alt="Quota view" width="300"><br><sub><b>Quota</b> — past windows and when the allowance goes</sub></td>
+  </tr>
   <tr>
     <td align="center" width="50%"><img src="docs/screenshots/models.png" alt="Models view" width="300"><br><sub><b>Models</b> — every model ranked by cost</sub></td>
     <td align="center" width="50%"><img src="docs/screenshots/monthly.png" alt="Monthly view" width="300"><br><sub><b>Monthly</b> — active months, with month drill-down</sub></td>
@@ -124,8 +128,8 @@ Junho Yeo. Syrtis's shared
 [`tokscale-core`](https://github.com/Nanako0129/tokscale-core) engine derives
 from that core and handles session parsing, dedup, and pricing across 25+
 agents. The tokscale interactive TUI is also the blueprint for the whole
-dashboard: the seven lenses (Overview, Models, Monthly, Daily, Hourly, Stats,
-Agents) and their `In · Out · CR · CW` column breakdown are modeled on it.
+dashboard: the Overview, Models, Monthly, Daily, Hourly, Stats and Agents
+lenses and their `In · Out · CR · CW` column breakdown are modeled on it.
 
 The product line began as a fork of
 [tokcat](https://github.com/handlecusion/tokcat) by handlecusion — the original
