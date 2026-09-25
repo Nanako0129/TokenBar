@@ -85,7 +85,7 @@ enum DiscordPresence {
     /// print next to the Portal's upload field — and nowhere in this repo. It
     /// is written here rather than in `docs/` because the declaration is what
     /// the person doing the rename will actually have open.
-    static let largeImageKey = "tokenbar"
+    static let largeImageKey = "syrtis"
 
     /// The opt-in switch. Default-off.
     static let enabledKey = "tokenbar.discord.enabled"
