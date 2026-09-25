@@ -91,6 +91,8 @@ enum LaunchTimelineProbe {
         let quotaHalf = "\(client) window card: quota half"
         let cardReady = "\(client) window card: ready"
         let cardNoQuota = "\(client) window card: settled without quota (blocked / no history)"
+        let cardScanFailed = "\(client) window card: quota half, usage scan failed"
+        let cardSkipped = "\(client) window card: not shown (client hidden or not offered)"
         var milestones: [String] = []
         if wants("graph") || wants("pollgraph") { milestones.append("graph") }
         if wants("quota") { milestones += ["quota payload", quotaHalf, cardReady] }
@@ -98,20 +100,27 @@ enum LaunchTimelineProbe {
         if wants("trace") { milestones.append("trace (first answer)") }
         if only?.contains("tray") == true { milestones.append("tray forced refresh") }
         if wants("series") { milestones.append("attributed series") }
-        // A card that settles without a quota half will never be ready either;
-        // it satisfies both instead of holding the run until the deadline.
+        // A card that settles any other way will never be ready: it satisfies
+        // the card milestones instead of holding the run until the deadline,
+        // under its own name so it is never reported as ready.
         func pending(_ name: String) -> Bool {
             guard seen[name] == nil else { return false }
-            if name == quotaHalf || name == cardReady { return seen[cardNoQuota] == nil }
+            let settledOtherwise = seen[cardNoQuota] != nil || seen[cardSkipped] != nil
+            if name == quotaHalf { return !settledOtherwise }
+            if name == cardReady { return !settledOtherwise && seen[cardScanFailed] == nil }
             return true
         }
         let deadline = 90_000.0
         while milestones.contains(where: pending), ms() < deadline {
             mark("graph", model.stats != nil)
             mark("quota payload", model.agentUsage != nil)
+            // Hidden by the saved tab or limits settings, or not a quota
+            // client at all: the refresh never builds this card.
+            mark(cardSkipped, model.agentUsage != nil && !model.windowCardClients.contains(client))
             switch model.windowCards[client] {
-            case .quotaOnly?:
+            case let .quotaOnly(_, scanFailed)?:
                 mark(quotaHalf, true)
+                mark(cardScanFailed, scanFailed)
             case .ready?:
                 mark(quotaHalf, true)
                 mark(cardReady, true)
