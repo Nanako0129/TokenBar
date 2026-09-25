@@ -20,6 +20,11 @@ if CommandLine.arguments.contains("--window-probe") {
 if CommandLine.arguments.contains("--refresh-timing") {
     RefreshTimingProbe.start()
 }
+// Same kind of lane: when each part of the dashboard becomes drawable after
+// a cold start, with the popover's tasks contending. See `LaunchTimelineProbe`.
+if CommandLine.arguments.contains("--launch-timeline") {
+    LaunchTimelineProbe.start()
+}
 if CommandLine.arguments.contains("--selftest") {
     // Some assertions compare against English UI copy, so on a non-English Mac
     // they would fail for the wrong reason. Say so instead of looking broken.

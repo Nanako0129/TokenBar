@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::ffi::{c_char, CStr, CString};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{LazyLock, Mutex, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
 use usage_tail::UsageTailer;
@@ -277,6 +277,9 @@ static RAYON_INIT: LazyLock<()> = LazyLock::new(|| {
 /// re-aggregation just because time passed.
 type GraphCacheEntry = (Instant, u64, serde_json::Value);
 static GRAPH_CACHE: LazyLock<Mutex<HashMap<String, GraphCacheEntry>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// The graph computes in progress, by year. See `shared_compute`.
+static GRAPH_FLIGHTS: LazyLock<Mutex<HashMap<String, Arc<Flight>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 pub(crate) static WINDOW_USAGE_CACHE: LazyLock<
     Mutex<HashMap<window_usage::CacheKey, window_usage::CacheEntry>>,
@@ -692,6 +695,124 @@ fn graph_compute(year: &str) -> Result<serde_json::Value, String> {
     Ok(data)
 }
 
+/// One graph compute per year at a time.
+///
+/// The cache above answers calls that arrive after a compute has finished;
+/// calls that arrive while one is running all missed it and each computed the
+/// same payload. On launch that is three full computes of the all-time graph
+/// at once — the tray's forced title refresh, the popover model's `load()` and
+/// the attributed series. On real data the graph took 5.3–9.2s with the
+/// popover's tasks running, against 2.2s alone, and about 3.1s with only the
+/// attributed series beside it (`--launch-timeline`, release build).
+///
+/// `tb_graph` joins a compute already running for the same year and the same
+/// root generation; `tb_refresh_graph` always runs its own, because it
+/// promises a read that starts after the call. A compute started before the
+/// root registry moved is never joined, so a call after the move still reads
+/// the new roots, as it did before this existed.
+fn graph_shared(year: &str, join: bool) -> Result<serde_json::Value, String> {
+    shared_compute(
+        &GRAPH_FLIGHTS,
+        year,
+        join,
+        ROOT_GENERATION.load(Ordering::SeqCst),
+        || graph_compute(year),
+    )
+}
+
+/// A compute in progress: its result, once there is one, for every caller
+/// waiting on it.
+struct Flight {
+    generation: u64,
+    result: Mutex<Option<Result<serde_json::Value, String>>>,
+    done: Condvar,
+}
+
+impl Flight {
+    fn new(generation: u64) -> Self {
+        Self {
+            generation,
+            result: Mutex::new(None),
+            done: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> Result<serde_json::Value, String> {
+        let mut slot = self.result.lock().unwrap_or_else(|p| p.into_inner());
+        while slot.is_none() {
+            slot = self.done.wait(slot).unwrap_or_else(|p| p.into_inner());
+        }
+        slot.clone().expect("checked above")
+    }
+
+    fn complete(&self, result: Result<serde_json::Value, String>) {
+        let mut slot = self.result.lock().unwrap_or_else(|p| p.into_inner());
+        if slot.is_none() {
+            *slot = Some(result);
+        }
+        self.done.notify_all();
+    }
+}
+
+/// Run `compute` for `key`, or wait for the run already in progress.
+///
+/// The leader always answers its waiters, even when `compute` panics: the
+/// guard below completes the flight with an error on unwind, because a
+/// waiter left on the condition variable would block its FFI call forever.
+/// The panic itself still reaches the leader's own `guarded`.
+fn shared_compute(
+    flights: &Mutex<HashMap<String, Arc<Flight>>>,
+    key: &str,
+    join: bool,
+    generation: u64,
+    compute: impl FnOnce() -> Result<serde_json::Value, String>,
+) -> Result<serde_json::Value, String> {
+    let flight = {
+        let mut map = flights.lock().unwrap_or_else(|p| p.into_inner());
+        if join {
+            if let Some(running) = map.get(key).filter(|f| f.generation == generation) {
+                let running = Arc::clone(running);
+                drop(map);
+                return running.wait();
+            }
+        }
+        let flight = Arc::new(Flight::new(generation));
+        map.insert(key.to_string(), Arc::clone(&flight));
+        flight
+    };
+
+    struct Leader<'a> {
+        flights: &'a Mutex<HashMap<String, Arc<Flight>>>,
+        key: &'a str,
+        flight: Arc<Flight>,
+    }
+    impl Drop for Leader<'_> {
+        fn drop(&mut self) {
+            // A no-op when the result was already delivered.
+            self.flight
+                .complete(Err("graph compute panicked".to_string()));
+            let mut map = self.flights.lock().unwrap_or_else(|p| p.into_inner());
+            // Only this flight: a refresh that started while it ran has
+            // replaced the entry, and later calls should join that one.
+            if map
+                .get(self.key)
+                .is_some_and(|f| Arc::ptr_eq(f, &self.flight))
+            {
+                map.remove(self.key);
+            }
+        }
+    }
+    let leader = Leader {
+        flights,
+        key,
+        flight,
+    };
+    let result = compute();
+    leader.flight.complete(result.clone());
+    drop(leader);
+    result
+}
+
 /// Cache a freshly computed graph unless the root registry moved while it was
 /// being computed.
 ///
@@ -789,7 +910,8 @@ pub extern "C" fn tb_probe() -> *mut c_char {
 
 /// Contribution-graph payload (`UsagePayload` in types.ts) for `year`
 /// (NULL/empty = all time). Serves a cached payload when one was computed
-/// within the last `ONESHOT_MAX_AGE_SECS`.
+/// within the last `ONESHOT_MAX_AGE_SECS`, and otherwise joins a compute for
+/// the same year already in progress (`graph_shared`) before starting one.
 ///
 /// # Safety
 /// `year` must be NULL or a valid NUL-terminated string.
@@ -800,19 +922,21 @@ pub unsafe extern "C" fn tb_graph(year: *const c_char) -> *mut c_char {
             if let Some(data) = graph_cached(&year, Duration::from_secs(ONESHOT_MAX_AGE_SECS)) {
                 return Ok(data);
             }
-            graph_compute(&year)
+            graph_shared(&year, true)
         }))
     })
 }
 
-/// Force-recompute the contribution graph for `year`, bypassing the cache.
+/// Force-recompute the contribution graph for `year`, bypassing the cache. It
+/// never joins a compute already in progress; calls to `tb_graph` made while
+/// it runs join it.
 ///
 /// # Safety
 /// `year` must be NULL or a valid NUL-terminated string.
 #[no_mangle]
 pub unsafe extern "C" fn tb_refresh_graph(year: *const c_char) -> *mut c_char {
     guarded("tb_refresh_graph", || {
-        envelope(unsafe { year_from(year) }.and_then(|year| graph_compute(&year)))
+        envelope(unsafe { year_from(year) }.and_then(|year| graph_shared(&year, false)))
     })
 }
 
@@ -2332,6 +2456,231 @@ mod tests {
             48.0
         );
         fs::remove_dir_all(directory).expect("remove retention fixture");
+    }
+
+    // SHARED-GRAPH. `shared_compute` is exercised directly with its own map,
+    // so these cases neither touch the process-wide `GRAPH_FLIGHTS` nor need a
+    // real graph. Ordering is by handshake, not by sleeping: a leader's compute
+    // reports that it has started and then blocks until released, so the
+    // other callers provably arrive while it runs.
+    //
+    // Every case must FAIL rather than hang when the property breaks: a caller
+    // that should compute on its own but joins instead would wait for a release
+    // that only comes after it returns. So such callers run on their own thread
+    // with a bounded wait, and `Release` frees the leader on every exit path,
+    // an unwinding assertion included.
+    struct Gate {
+        started: std::sync::mpsc::Sender<()>,
+        release: Mutex<std::sync::mpsc::Receiver<()>>,
+    }
+
+    struct Release(std::sync::mpsc::Sender<()>);
+    impl Drop for Release {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    fn gate() -> (Gate, std::sync::mpsc::Receiver<()>, Release) {
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        (
+            Gate {
+                started: started_tx,
+                release: Mutex::new(release_rx),
+            },
+            started_rx,
+            Release(release_tx),
+        )
+    }
+
+    fn gated<'a>(
+        calls: &'a std::sync::atomic::AtomicUsize,
+        gate: Option<&'a Gate>,
+        value: i64,
+    ) -> impl FnOnce() -> Result<serde_json::Value, String> + Send + 'a {
+        move || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            if let Some(gate) = gate {
+                gate.started.send(()).unwrap();
+                gate.release.lock().unwrap().recv().unwrap();
+            }
+            Ok(serde_json::json!({ "v": value }))
+        }
+    }
+
+    /// Waits until `n` callers are parked on `key`'s flight: the map holds one
+    /// reference, the leader one, and each waiter one. False on timeout.
+    fn waiters_parked(flights: &Mutex<HashMap<String, Arc<Flight>>>, key: &str, n: usize) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if flights
+                .lock()
+                .unwrap()
+                .get(key)
+                .map_or(0, Arc::strong_count)
+                >= 2 + n
+            {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        false
+    }
+
+    /// Runs a second caller while the gated leader holds `key`, and returns what
+    /// it got and whether it answered before the leader was released. A caller
+    /// that joined cannot answer before the release.
+    fn second_caller_while_leading(
+        key_leader: &str,
+        key: &str,
+        join: bool,
+        generation: u64,
+    ) -> (usize, Result<serde_json::Value, String>, bool) {
+        let flights = Mutex::new(HashMap::new());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let (g, started, release) = gate();
+        let (result, independent) = std::thread::scope(|scope| {
+            let leader = scope.spawn(|| {
+                shared_compute(&flights, key_leader, true, 1, gated(&calls, Some(&g), 1))
+            });
+            started.recv().unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let (flights, calls) = (&flights, &calls);
+            scope.spawn(move || {
+                tx.send(shared_compute(
+                    flights,
+                    key,
+                    join,
+                    generation,
+                    gated(calls, None, 2),
+                ))
+                .unwrap();
+            });
+            let early = rx.recv_timeout(Duration::from_secs(2));
+            drop(release);
+            leader.join().unwrap().unwrap();
+            match early {
+                Ok(result) => (result, true),
+                Err(_) => (rx.recv().unwrap(), false),
+            }
+        });
+        (calls.load(Ordering::SeqCst), result, independent)
+    }
+
+    #[test]
+    fn shared_compute_runs_once_for_concurrent_joiners() {
+        let flights = Mutex::new(HashMap::new());
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let (g, started, release) = gate();
+        let (parked, results) = std::thread::scope(|scope| {
+            let leader =
+                scope.spawn(|| shared_compute(&flights, "", true, 1, gated(&calls, Some(&g), 7)));
+            started.recv().unwrap();
+            let joiners: Vec<_> = (0..4)
+                .map(|_| {
+                    scope.spawn(|| shared_compute(&flights, "", true, 1, gated(&calls, None, 99)))
+                })
+                .collect();
+            let parked = waiters_parked(&flights, "", 4);
+            drop(release);
+            let results: Vec<_> = std::iter::once(leader)
+                .chain(joiners)
+                .map(|h| h.join().unwrap())
+                .collect();
+            (parked, results)
+        });
+        assert!(parked, "the four callers waited on the running compute");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "one compute for five callers"
+        );
+        assert!(results
+            .iter()
+            .all(|r| r == &Ok(serde_json::json!({ "v": 7 }))));
+        assert!(
+            flights.lock().unwrap().is_empty(),
+            "the finished flight is removed"
+        );
+    }
+
+    #[test]
+    fn shared_compute_refresh_runs_its_own_compute() {
+        let (calls, result, independent) = second_caller_while_leading("", "", false, 1);
+        assert!(independent, "a refresh never waits on a running compute");
+        assert_eq!(calls, 2);
+        assert_eq!(result, Ok(serde_json::json!({ "v": 2 })));
+    }
+
+    #[test]
+    fn shared_compute_does_not_join_across_a_root_generation_change() {
+        let (calls, result, independent) = second_caller_while_leading("", "", true, 2);
+        assert!(
+            independent,
+            "a call after the roots moved does not wait on the old compute"
+        );
+        assert_eq!(calls, 2);
+        assert_eq!(
+            result,
+            Ok(serde_json::json!({ "v": 2 })),
+            "the new roots are read, not the old compute's"
+        );
+    }
+
+    #[test]
+    fn shared_compute_different_years_do_not_join() {
+        let (calls, result, independent) = second_caller_while_leading("2025", "2026", true, 1);
+        assert!(independent, "another year's compute is not joined");
+        assert_eq!(calls, 2);
+        assert_eq!(result, Ok(serde_json::json!({ "v": 2 })));
+    }
+
+    #[test]
+    fn shared_compute_waiters_get_the_error_when_the_leader_panics() {
+        // Arc and detached threads: if the property breaks, the waiter stays on
+        // the condition variable for good, and a scoped thread would hold the
+        // test open with it.
+        let flights: Arc<Mutex<HashMap<String, Arc<Flight>>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let leader_flights = Arc::clone(&flights);
+        std::thread::spawn(move || {
+            let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                shared_compute(&leader_flights, "", true, 1, || {
+                    started_tx.send(()).unwrap();
+                    let _ = release_rx.recv();
+                    panic!("boom")
+                })
+            }));
+        });
+        started_rx.recv().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter_flights = Arc::clone(&flights);
+        std::thread::spawn(move || {
+            let _ = tx.send(shared_compute(&waiter_flights, "", true, 1, || {
+                Ok(serde_json::json!(0))
+            }));
+        });
+        let parked = waiters_parked(&flights, "", 1);
+        release_tx.send(()).unwrap();
+        assert!(parked, "the waiter joined the running compute");
+        let waited = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the waiter was released");
+        assert!(
+            waited.is_err(),
+            "the waiter sees the leader's failure, got {waited:?}"
+        );
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !flights.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "a panicked flight is removed too"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     #[test]
