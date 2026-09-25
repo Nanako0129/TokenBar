@@ -458,9 +458,10 @@ struct PopoverView: View {
     private var header: some View {
         HStack {
             BrandMark()
-                .frame(width: 19, height: 19)
-            Text("Syrtis")
-                .font(.headline)
+                .frame(width: 17, height: 17)
+            Text("Σύρτις")
+                .font(.syrtisWordmark(size: 15))
+                .foregroundStyle(Color.syrtisAccent)
             Spacer()
             liveRateBadge
             yearMenu

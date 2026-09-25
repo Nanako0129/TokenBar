@@ -28,6 +28,7 @@ let package = Package(
             path: "Sources/Syrtis",
             resources: [
                 .copy("Resources/agent-icons"),
+                .copy("Resources/brandmark.pdf"),
                 .copy("Resources/anim-cat2"),
                 .copy("Resources/anim-cat2-light"),
                 .copy("Resources/anim-parrot"),

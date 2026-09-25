@@ -260,8 +260,7 @@ struct SettingsWindowView: View {
     private var sidebarFooter: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
-                Image(nsImage: appIcon)
-                    .resizable()
+                BrandMark()
                     .frame(width: 26, height: 26)
                 VStack(alignment: .leading, spacing: 0) {
                     Text(AppInfo.name)
@@ -286,15 +285,6 @@ struct SettingsWindowView: View {
         .padding(.horizontal, 6)
         .padding(.bottom, 12)
         .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// `NSApp.applicationIconImage` returns the icon with the macOS 26 system
-    /// mask applied, which leaves a light rim on the dark sidebar. The bundled
-    /// icns is already the finished artwork, so read that directly
-    /// (`NSImage(named:)` caches it); an unbundled dev build falls back to the
-    /// masked one.
-    private var appIcon: NSImage {
-        NSImage(named: "icon") ?? NSApp.applicationIconImage
     }
 
     nonisolated static func applyQuotaRemaining(
