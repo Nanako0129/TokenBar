@@ -129,7 +129,7 @@ Keep English and `zh-tw` copy aligned, preserve original TokenBar design, and tr
 
 ## Post-release verification
 
-The release notes path has two forms and at least three published surfaces: the GitHub Release body, the Sparkle appcast description, and the legacy update metadata notes.
+The release notes path has two forms and two published surfaces: the GitHub Release body and the Sparkle appcast description. The legacy Tauri manifest is frozen at v1.20.2 and does not carry the current notes.
 
 The two bodies are hand-written and bound to the tag by filename (`release-notes/<tag>.{md,txt}`), so they are deterministic and a missing one fails the release job rather than inheriting the previous version's text. What is still assembled at run time is the contributor credit line and GitHub's changelog tail: both come from the API under `GH_TOKEN` and are silently absent without it. So local preview text is still not proof of the CI artifact — the bodies will match, the credit and tail may not.
 
@@ -141,7 +141,7 @@ That gate is not currently runnable: the renderer is inline in `make_appcast.sh`
 |---|---|
 | GitHub Release | Claims match the actual diff; no previous release fix is re-claimed |
 | `appcast.xml` | Description is accurate HTML, item/channel/enclosure/signature are intact |
-| Legacy metadata | Notes match the same user-facing change set and signature remains valid |
+| Legacy metadata | `latest.json` on the release is the frozen v1.20.2 manifest, unchanged (sha256 `c39de81d…`), and the archive URL it names still returns 200 |
 | Homebrew | Cask points to the new release and checksum matches the asset |
 | Landing | Pages build and the deployed route serves the expected locale and assets |
 | Update path | Stable app can discover the new stable item; bridge behavior is described honestly |
