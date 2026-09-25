@@ -58,7 +58,7 @@ enum BridgeBuild {
     /// the cask install in Terminal (beta installs always have Homebrew —
     /// that's how they got here), then quit so the freshly-installed release
     /// app (same data dir, settings imported on first launch) takes over.
-    static func switchToRelease() {
+    @MainActor static func switchToRelease() {
         let releasePath = "/Applications/TokenBar.app"
         if FileManager.default.fileExists(atPath: releasePath) {
             NSWorkspace.shared.open(URL(fileURLWithPath: releasePath))

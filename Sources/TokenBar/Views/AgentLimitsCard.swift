@@ -139,7 +139,7 @@ struct AgentLimitsCard: View {
     /// points all predate this window would otherwise draw a flat line at
     /// whatever the last one said, which is a confident lie about a window
     /// nobody has sampled yet.
-    static func sparklineInterval(
+    nonisolated static func sparklineInterval(
         window: UsageWindow, samples: [QuotaSample], nowMs: Int64
     ) -> (start: Int64, end: Int64)? {
         guard let interval = WindowCardLoader.interval(

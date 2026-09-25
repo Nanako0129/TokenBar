@@ -874,7 +874,7 @@ private struct DashboardModelTestObservation: Sendable {
 }
 
 enum SelfTest {
-    static func run() -> Never {
+    @MainActor static func run() -> Never {
         var failures = 0
         func expect(_ condition: @autoclosure () -> Bool, _ label: String) {
             if condition() {
@@ -4194,14 +4194,19 @@ enum SelfTest {
                 && officialClientIDs.contains("kilo")
                 && !officialClientIDs.contains("junie"),
             "icon aliases are official while fallback-only clients are not")
-        let renderedBrandImage = MainActor.assumeIsolated {
-            AgentIconView.statusItemImage(clientId: "claude")
+        let renderedBrandImageMetrics = MainActor.assumeIsolated {
+            let image = AgentIconView.statusItemImage(clientId: "claude")
+            let representations = image?.representations.compactMap { $0 as? NSBitmapImageRep } ?? []
+            return (
+                isTemplate: image?.isTemplate == false,
+                widths: representations.map(\.pixelsWide),
+                heights: representations.map(\.pixelsHigh)
+            )
         }
-        let brandReps = renderedBrandImage?.representations.compactMap { $0 as? NSBitmapImageRep } ?? []
         expect(
-            renderedBrandImage?.isTemplate == false && brandReps.count == 2
-                && brandReps.map(\.pixelsWide) == [18, 36]
-                && brandReps.map(\.pixelsHigh) == [18, 36],
+            renderedBrandImageMetrics.isTemplate
+                && renderedBrandImageMetrics.widths == [18, 36]
+                && renderedBrandImageMetrics.heights == [18, 36],
             "official status icon has fixed 1x and 2x representations")
         expect(
             MainActor.assumeIsolated {
