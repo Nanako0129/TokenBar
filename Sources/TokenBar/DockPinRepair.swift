@@ -175,6 +175,7 @@ enum DockPinRepair {
         bundleID: String?,
         forced: Bool,
         immutable: Bool,
+        restartedHereBefore: Bool,
         existence: (String) -> Existence,
         bookmark: () -> Data?
     ) -> Outcome {
@@ -184,6 +185,12 @@ enum DockPinRepair {
             tiles: original, bundleURL: bundleURL, bundleID: bundleID,
             forced: forced, immutable: immutable, existence: existence, bookmark: bookmark)
         guard result.changed else { return .unchanged }
+        // A match after this path already had its one restart means the Dock
+        // did not keep the repair. Writing again without a restart changes
+        // nothing the Dock shows, so leave it alone.
+        guard !restartedHereBefore else {
+            return .gaveUp("already restarted the Dock once for this path")
+        }
         // The Dock may have saved since the read; never write over that.
         guard store.synchronize() else { return .gaveUp("synchronize failed before write") }
         guard modCountUnchanged(before, store.modCount()) else {
@@ -215,6 +222,8 @@ enum DockPinRepair {
     }
 
     private static func perform(bundleURL: URL, bundleID: String?) {
+        let path = bundleURL.standardizedFileURL.path
+        let defaults = UserDefaults.standard
         let store = Store(
             tiles: { CFPreferencesCopyAppValue(appsKey, dockDomain) as? [Any] },
             modCount: { CFPreferencesCopyAppValue(modCountKey, dockDomain) },
@@ -225,6 +234,7 @@ enum DockPinRepair {
             forced: CFPreferencesAppValueIsForced(appsKey, dockDomain),
             immutable: CFPreferencesGetAppBooleanValue("contents-immutable" as CFString, dockDomain, nil)
                 || CFPreferencesGetAppBooleanValue("static-only" as CFString, dockDomain, nil),
+            restartedHereBefore: defaults.string(forKey: targetKey) == path,
             existence: { path in
                 var info = stat()
                 if lstat(path, &info) == 0 { return .present }
@@ -246,12 +256,6 @@ enum DockPinRepair {
             break
         }
 
-        let path = bundleURL.standardizedFileURL.path
-        let defaults = UserDefaults.standard
-        if defaults.string(forKey: targetKey) == path {
-            NSLog("TokenBar: Dock pin repaired again for \(path); not restarting the Dock a second time")
-            return
-        }
         defaults.set(path, forKey: targetKey)
         guard let pid = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
             .first?.processIdentifier, pid > 0
@@ -386,7 +390,7 @@ enum DockPinRepair {
             var writes = 0
             init(_ tiles: [Any]) { self.tiles = tiles }
         }
-        func sequence(_ memory: Memory) -> Outcome {
+        func sequence(_ memory: Memory, restartedHereBefore: Bool = false) -> Outcome {
             let store = Store(
                 tiles: { memory.tiles },
                 modCount: { memory.modCount },
@@ -396,7 +400,8 @@ enum DockPinRepair {
                 },
                 write: { memory.tiles = $0; memory.writes += 1 })
             return rewrite(store: store, bundleURL: running, bundleID: id, forced: false,
-                           immutable: false, existence: { _ in .missing }, bookmark: { book })
+                           immutable: false, restartedHereBefore: restartedHereBefore,
+                           existence: { _ in .missing }, bookmark: { book })
         }
         let clean = Memory(input)
         expect(sequence(clean) == .wrote && clean.writes == 1
@@ -407,6 +412,10 @@ enum DockPinRepair {
         expect(sequence(raced) == .gaveUp("Dock preferences changed while repairing") && raced.writes == 0
                 && (raced.tiles as NSArray).isEqual(input as NSArray),
             "DOCK-PIN a mod-count change between read and write abandons without writing")
+        let again = Memory(input)
+        expect(sequence(again, restartedHereBefore: true)
+                == .gaveUp("already restarted the Dock once for this path") && again.writes == 0,
+            "DOCK-PIN a path that already had its one Dock restart is not written again")
         expect(!modCountUnchanged(nil, nil) && !modCountUnchanged(3, nil) && modCountUnchanged(3, 3),
             "DOCK-PIN a missing mod-count counts as changed")
     }
