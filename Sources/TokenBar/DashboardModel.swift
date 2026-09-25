@@ -1294,9 +1294,51 @@ private struct DashboardSnapshot {
     ///
     /// `windowCards` above holds only the selected window, which is all the
     /// detail card needs. The Agent-limits sparkline draws one line per row, so
-    /// it needs the others too. Each entry is a ~2ms read of an already
-    /// persisted file, so filling all of them stays inside the "instant" half.
+    /// it needs the others too. Each entry is one curve read per publication
+    /// (`cachedQuotaCurve`), so filling all of them stays inside the "instant"
+    /// half.
     var windowCurves: [String: [QuotaSample]] = [:]
+
+    /// Curves already read under the payload generation now published, keyed
+    /// per series. See `cachedQuotaCurve`.
+    @ObservationIgnored private var curveCache: (generation: UInt64, curves: [String: QuotaCurve?]) = (0, [:])
+
+    /// One curve read per series per publication, instead of one per use.
+    ///
+    /// Every read loads and parses the whole quota history store in the engine
+    /// (`read_series` → `load_store_at_with_mode`), about 9.5ms each on the
+    /// measuring machine in a release build. `refreshWindowQuotaHalves` used to
+    /// read each window up to four times in one pass (the sparklines, the card,
+    /// the strip, the cycles), 14 reads and 134ms of a 140ms pass, and it runs
+    /// on the main actor on every window switch. Measured with
+    /// `--refresh-timing`, not inferred.
+    ///
+    /// Keyed by generation because that is what the read is bound to: the
+    /// engine refuses a read for any generation but the current publication
+    /// (`quota_curve_result_with_reader`). This process records samples only
+    /// inside a publication: every production writer found is a provider fetch
+    /// in `agent_usage::run` (`apply_provider_outcome` → `enrich_snapshot`),
+    /// which `tb_agent_usage` runs under `with_agent_usage_publication_gate`
+    /// before binding the new generation. So its own writes always arrive with
+    /// a new generation and drop the whole cache.
+    /// A write by another process between two publications is not seen until
+    /// the next one; that is at most one poll interval, and the card already
+    /// shows that publication's payload.
+    ///
+    /// Only answers are kept, `nil` included, because `nil` is "no history" and
+    /// is an answer. A throw is not cached: it means "could not be read", and
+    /// the next refresh has to ask again rather than repeat the failure.
+    private func cachedQuotaCurve(
+        clientId: String, accountKey: String?, windowKey: String, generation: UInt64
+    ) throws -> QuotaCurve? {
+        if curveCache.generation != generation { curveCache = (generation, [:]) }
+        let key = [clientId, accountKey.map { "a:" + $0 } ?? "-", windowKey].joined(separator: "\u{1F}")
+        if let held = curveCache.curves[key] { return held }
+        let curve = try source.quotaCurveSync(
+            clientId: clientId, accountKey: accountKey, windowKey: windowKey, generation: generation)
+        curveCache.curves[key] = .some(curve)
+        return curve
+    }
 
     /// Stage 1. Synchronous and local: reads the in-memory payload and the
     /// persisted quota curve. Refreshes from already published data without
@@ -1341,9 +1383,8 @@ private struct DashboardSnapshot {
         // transient generation expiry be reported to the user as "this window
         // has no recorded quota history".
         let readCurve: (String, String?, String, UInt64) throws -> QuotaCurve? = {
-            [source] c, account, key, gen in
-            try source.quotaCurveSync(
-                clientId: c, accountKey: account, windowKey: key, generation: gen)
+            [self] c, account, key, gen in
+            try cachedQuotaCurve(clientId: c, accountKey: account, windowKey: key, generation: gen)
         }
         if let payload = agentUsage {
             for agent in visibleAgents {
@@ -1775,9 +1816,9 @@ private struct DashboardSnapshot {
     /// overview, which renders no window card at all.
     ///
     /// Deliberately NOT `windowCardClients`. That set drives the quota curves,
-    /// which are a ~2ms file read each and are wanted for every row. This one
-    /// drives the message scan, and scoping the two together was a measured
-    /// mistake: `copilot chat.v1` is a 31-day window, so unioning every
+    /// which are one read per series per publication and are wanted for every
+    /// row. This one drives the message scan, and scoping the two together
+    /// was a measured mistake: `copilot chat.v1` is a 31-day window, so unioning every
     /// displayed client stretched the range to 14.93 days and 109,278 messages
     /// — 67s cold — on a tab that displays none of it. The version before the
     /// two-stage split returned early here whenever no agent tab was open;

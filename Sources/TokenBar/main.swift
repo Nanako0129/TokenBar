@@ -15,6 +15,11 @@ if CommandLine.arguments.contains("--smoke") {
 if CommandLine.arguments.contains("--window-probe") {
     WindowProbe.run()
 }
+// Same kind of lane: times the synchronous quota refresh a window switch
+// runs on the main actor. See `RefreshTimingProbe`.
+if CommandLine.arguments.contains("--refresh-timing") {
+    RefreshTimingProbe.start()
+}
 if CommandLine.arguments.contains("--selftest") {
     // Some assertions compare against English UI copy, so on a non-English Mac
     // they would fail for the wrong reason. Say so instead of looking broken.
