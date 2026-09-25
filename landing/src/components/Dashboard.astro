@@ -1,0 +1,126 @@
+---
+// Lens order is the app's own tab order: `AppView` in
+// Sources/TokenBar/DashboardModel.swift (`case overview, quota, models,
+// monthly, daily, hourly, stats, agents`). Neither this list nor the CSS
+// hardcodes the count — `--lens-count` below reads `LENS_ORDER.length`.
+import { t, LENS_ORDER, type Locale, type LensId } from '../i18n/copy'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const c = t(locale)
+const base = import.meta.env.BASE_URL
+
+// Quota has no capture yet (per the plan's screenshot rules); every other
+// lens reuses the existing placeholder screenshots already in the repo.
+const shots: Partial<Record<LensId, string>> = {
+  overview: 'overview.png',
+  models: 'models.png',
+  monthly: 'monthly.png',
+  daily: 'daily.png',
+  hourly: 'hourly.png',
+  stats: 'stats.png',
+  agents: 'agents.png',
+}
+---
+
+<section class="stratum" id="dashboard">
+  <div class="ruler" aria-hidden="true"></div>
+  <div class="content">
+    <h2>{c.dashboard.h2}</h2>
+    <p class="lede">{c.dashboard.lede}</p>
+    <figure>
+      <div class="shot"><img src={`${base}screenshots/contribution-3d.png`} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
+      <figcaption>{c.dashboard.figcaption}</figcaption>
+    </figure>
+    <div class="scrolly" style={`--lens-count:${LENS_ORDER.length}`}>
+      <div class="pin">
+        <div class="explorer">
+          <h3>{c.dashboard.explorerH3}</h3>
+          <div class="lenses" role="tablist" aria-label="Dashboard lenses">
+            {LENS_ORDER.map((id, i) => (
+              <button type="button" role="tab" class="lens" data-lens={id} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>
+                <b>{c.lensName[id]}</b>
+                <span>{c.lens[id]}</span>
+              </button>
+            ))}
+          </div>
+          <figure class="lensshot" role="tabpanel">
+            <div class="stack" id="lensstack">
+              {LENS_ORDER.map((id, i) => (
+                shots[id] ? (
+                  <div class:list={['shot', { front: i === 0 }]} data-lens-panel={id}>
+                    <img src={`${base}screenshots/${shots[id]}`} alt={c.lensName[id]} loading={i === 0 ? 'eager' : 'lazy'} />
+                  </div>
+                ) : (
+                  <div class:list={['pending', { front: i === 0 }]} data-lens-panel={id}>
+                    <div><b>{c.lensName[id]}</b><span>{c.pending}</span></div>
+                  </div>
+                )
+              ))}
+            </div>
+          </figure>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+  // Scroll-pinned lens explorer: the list picks which pre-rendered panel is
+  // visible. Ported from the prototype, simplified — the prototype built
+  // each panel's DOM on the fly from a COPY/SHOTS object at runtime; here
+  // every panel already exists in the server-rendered markup (one per
+  // locale), so this script only ever toggles a `.front` class and updates
+  // `aria-selected`/`--p`, it never creates elements.
+  ;(() => {
+    const lenses = [...document.querySelectorAll<HTMLElement>('.lens')]
+    const stack = document.getElementById('lensstack')
+    if (!lenses.length || !stack) return
+    const panels = [...stack.querySelectorAll<HTMLElement>('[data-lens-panel]')]
+    let current: HTMLElement | null = null
+
+    function activate(b: HTMLElement) {
+      if (b === current) return
+      current = b
+      lenses.forEach((x) => { x.setAttribute('aria-selected', String(x === b)); x.tabIndex = x === b ? 0 : -1 })
+      panels.forEach((p) => p.classList.toggle('front', p.dataset.lensPanel === b.dataset.lens))
+    }
+
+    const scrolly = document.querySelector<HTMLElement>('.scrolly')!
+    const pinned = matchMedia('(min-width: 861px)')
+    function progress() {
+      const r = scrolly.getBoundingClientRect()
+      return Math.min(1, Math.max(0, -r.top / Math.max(1, r.height - innerHeight)))
+    }
+    function sync() {
+      if (!pinned.matches) return
+      const steps = progress() * lenses.length
+      const i = Math.min(lenses.length - 1, Math.floor(steps))
+      activate(lenses[i])
+      lenses[i].style.setProperty('--p', String(i === lenses.length - 1 && steps >= lenses.length ? 1 : steps - i))
+    }
+    let ticking = false
+    addEventListener('scroll', () => {
+      if (ticking) return; ticking = true
+      requestAnimationFrame(() => { ticking = false; sync() })
+    }, { passive: true })
+
+    lenses.forEach((b, i) => {
+      b.addEventListener('click', () => {
+        activate(b)
+        if (!pinned.matches) return
+        const top = scrolly.getBoundingClientRect().top + scrollY
+        const span = scrolly.offsetHeight - innerHeight
+        scrollTo({ top: top + span * (i + 0.5) / lenses.length })
+      })
+      b.addEventListener('keydown', (e) => {
+        const k = ({ ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 } as Record<string, number>)[e.key]
+        if (!k) return
+        e.preventDefault()
+        const n = lenses[(i + k + lenses.length) % lenses.length]
+        n.focus(); n.click()
+      })
+    })
+
+    activate(lenses[0])
+    sync()
+  })()
+</script>

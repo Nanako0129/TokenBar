@@ -1,0 +1,21 @@
+---
+import { t, type Locale } from '../i18n/copy'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const c = t(locale)
+const essayHref = 'https://claude.ai/code/artifact/d095bcac-5cd9-4642-b642-5e3292c76159'
+---
+
+<section class="stratum" id="name">
+  <div class="ruler" aria-hidden="true"></div>
+  <div class="content">
+    <h2>{c.name.h2}</h2>
+    <p>{c.name.body}</p>
+    <p><a href={essayHref}>{c.name.link}</a></p>
+    <div class="credits">
+      <div class="credit"><a href="https://github.com/junhoyeo/tokscale">tokscale</a><span>{c.credit.tokscale}</span></div>
+      <div class="credit"><a href="https://github.com/handlecusion/tokcat">tokcat</a><span>{c.credit.tokcat}</span></div>
+      <div class="credit"><a href="https://kyome.io/runcat/">RunCat</a><span>{c.credit.RunCat}</span></div>
+      <div class="credit"><a href="https://github.com/steipete/CodexBar">CodexBar</a><span>{c.credit.CodexBar}</span></div>
+    </div>
+  </div>
+</section>

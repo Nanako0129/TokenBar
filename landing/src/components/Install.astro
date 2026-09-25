@@ -1,100 +1,80 @@
 ---
+// Platform-switched install block: macOS is Homebrew-only (no GitHub
+// Releases download — ad-hoc signed, not notarized, until the post-v2.0
+// signing PR), Windows gets the two Syrtis-Windows installers plus Scoop.
+// Rendered twice per page (hero + closing); pre-selected by the visitor's
+// OS client-side, default macOS when unknown, matching the prototype.
 import { t, type Locale } from '../i18n/copy'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale).install
-const brew = 'brew install --cask nanako0129/tap/syrtis'
 ---
 
-<section class="section install" id="install">
-  <div class="container">
-    <div class="section-head reveal">
-      <p class="eyebrow">{c.eyebrow}</p>
-      <h2>{c.h2}</h2>
-      <p set:html={c.intro} />
-    </div>
-
-    <div class="channel glass reveal" style="--rd:.1s">
-      <div class="ch-head">
-        <h3>Syrtis</h3>
-        <span class="pill pill-hot mono">{c.pill}</span>
-      </div>
-      <p class="ch-desc" set:html={c.desc} />
-      <div class="term quiet">
-        <pre class="term-body"><code><span class="c">$</span> {brew}</code></pre>
-        <button class="term-copy mono" data-cmd={brew} data-copied={c.copied} type="button">{c.copyBtn}</button>
-      </div>
-    </div>
-
-    <p class="legacy-note reveal" style="--rd:.18s" set:html={c.legacy} />
+<div class="install">
+  <div class="seg os-switch" role="tablist" aria-label="Platform">
+    <button type="button" role="tab" data-os="mac">macOS</button>
+    <button type="button" role="tab" data-os="win">Windows</button>
   </div>
-</section>
+  <div class="panel" role="tabpanel" data-panel="mac">
+    <div class="cmd">
+      <code>brew install --cask nanako0129/tap/syrtis</code>
+      <button type="button" class="btn" data-copy data-copy-label={c.copy} data-copied-label={c.copied} data-selected-label={c.selected}>{c.copy}</button>
+    </div>
+    <span class="copied-hint" aria-live="polite"></span>
+    <span class="note">{c.macNote}</span>
+  </div>
+  <div class="panel" role="tabpanel" data-panel="win" hidden>
+    <div class="btns">
+      <a class="btn" href="https://github.com/Nanako0129/Syrtis-Windows/releases/latest/download/Nyanako.Syrtis-win-x64-Setup.exe">{c.winX64}</a>
+      <a class="btn ghost" href="https://github.com/Nanako0129/Syrtis-Windows/releases/latest/download/Nyanako.Syrtis-win-arm64-Setup.exe">{c.winArm64}</a>
+    </div>
+    <span class="note">{c.winNote}</span>
+    <div class="cmd">
+      <code>{`scoop bucket add syrtis https://github.com/Nanako0129/Syrtis-Windows\nscoop install syrtis`}</code>
+      <button type="button" class="btn" data-copy data-copy-label={c.copy} data-copied-label={c.copied} data-selected-label={c.selected}>{c.copy}</button>
+    </div>
+    <span class="copied-hint" aria-live="polite"></span>
+  </div>
+</div>
 
-<script is:inline>
-  document.querySelectorAll('.term-copy[data-cmd]').forEach((b) => {
-    b.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(b.dataset.cmd || '')
-        const t = b.textContent
-        b.textContent = b.dataset.copied || 'Copied ✓'
-        b.classList.add('ok')
-        setTimeout(() => { b.textContent = t; b.classList.remove('ok') }, 1600)
-      } catch {}
+<script>
+  // OS pre-selection (default macOS when unknown) shared across every
+  // `.install` instance on the page via one `data-os` state, persisted to
+  // localStorage so hero and closing panels — and repeat visits — agree.
+  // Ported from the prototype; the language half of its state is gone since
+  // this page is a single locale.
+  ;(() => {
+    const nav = navigator as Navigator & { userAgentData?: { platform?: string } }
+    let os: 'mac' | 'win' = /Win/i.test(nav.userAgentData?.platform || navigator.platform || '') ? 'win' : 'mac'
+    try {
+      const saved = JSON.parse(localStorage.getItem('syrtis-os') || '{}')
+      if (saved.os === 'mac' || saved.os === 'win') os = saved.os
+    } catch {}
+
+    function render() {
+      document.querySelectorAll<HTMLElement>('[data-os]').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.os === os)))
+      document.querySelectorAll<HTMLElement>('[data-panel]').forEach((p) => { p.hidden = p.dataset.panel !== os })
+      try { localStorage.setItem('syrtis-os', JSON.stringify({ os })) } catch {}
+    }
+    document.querySelectorAll<HTMLElement>('[data-os]').forEach((b) =>
+      b.addEventListener('click', () => { os = b.dataset.os as 'mac' | 'win'; render() }),
+    )
+    render()
+
+    // Copy a command; where the clipboard is refused, select it and say so.
+    document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const code = btn.parentElement!.querySelector('code')!
+        const hint = btn.closest('.panel')!.querySelector('.copied-hint')!
+        const copiedLabel = btn.dataset.copiedLabel!, copyLabel = btn.dataset.copyLabel!
+        navigator.clipboard.writeText(code.textContent || '').then(() => {
+          btn.textContent = copiedLabel; hint.textContent = ''
+          setTimeout(() => { btn.textContent = copyLabel }, 1600)
+        }).catch(() => {
+          const r = document.createRange(); r.selectNodeContents(code)
+          const s = getSelection(); s?.removeAllRanges(); s?.addRange(r)
+          hint.textContent = btn.dataset.selectedLabel || ''
+        })
+      })
     })
-  })
+  })()
 </script>
-
-<style>
-  .section-head code { font-family: var(--font-mono); font-size: .9em; color: var(--accent-bright); }
-  .channel {
-    max-width: 640px; margin-inline: auto;
-    padding: 30px 28px;
-    display: flex; flex-direction: column; gap: 14px;
-  }
-  .ch-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-  .ch-head h3 { font-size: 26px; }
-  .pill {
-    font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
-    padding: 5px 11px; border-radius: 999px;
-    border: 1px solid var(--line-strong); color: var(--muted); white-space: nowrap;
-  }
-  .pill-hot {
-    color: var(--accent-bright);
-    border-color: color-mix(in oklab, var(--accent) 48%, var(--line-strong));
-    background: color-mix(in oklab, var(--accent) 14%, transparent);
-  }
-  .ch-desc { color: var(--muted); font-size: 15px; }
-  .ch-desc strong { color: var(--ink-dim); }
-
-  /* in-glass terminal: translucent ink fill, no nested blur */
-  .term {
-    border: 1px solid var(--line); border-radius: var(--radius-sm);
-    background: color-mix(in oklab, var(--ink) 7%, transparent);
-    padding: 14px;
-  }
-  .term-body code {
-    font-family: var(--font-mono); font-size: clamp(11px, 3vw, 13.5px); color: var(--ink);
-    white-space: pre-wrap; overflow-wrap: anywhere; word-break: break-word;
-  }
-  .term-body .c { color: var(--accent-bright); }
-  .term-copy {
-    width: 100%; margin-top: 12px; padding: 12px; cursor: pointer;
-    background: color-mix(in oklab, var(--accent) 22%, transparent);
-    color: var(--ink);
-    border: 1px solid color-mix(in oklab, var(--accent) 48%, var(--line-strong));
-    border-radius: 999px; font-size: 14px; font-weight: 600;
-    transition: transform .18s, border-color .18s, background .18s, color .18s;
-  }
-  .term-copy:hover {
-    transform: translateY(-2px);
-    border-color: var(--accent);
-    background: color-mix(in oklab, var(--accent) 34%, transparent);
-  }
-  .term-copy.ok { color: var(--gauge-ok); border-color: color-mix(in oklab, var(--gauge-ok) 55%, var(--line-strong)); }
-
-  .legacy-note {
-    margin-top: 24px; font-size: 13.5px; color: var(--faint);
-    text-align: center; max-width: 70ch; margin-inline: auto;
-  }
-  .legacy-note code { font-family: var(--font-mono); font-size: .92em; color: var(--accent-bright); }
-  .legacy-note a { color: var(--ink-dim); border-bottom: 1px solid var(--line-strong); }
-</style>

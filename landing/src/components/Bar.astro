@@ -1,0 +1,24 @@
+---
+import { t, type Locale } from '../i18n/copy'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const c = t(locale)
+const base = import.meta.env.BASE_URL
+---
+
+<header class="bar">
+  <a class="brand" href="#top"><img src={`${base}favicon.png`} alt="" width="28" height="28" />Syrtis</a>
+  <nav aria-label="Sections">
+    <a href="#dashboard">{c.nav.dash}</a>
+    <a href="#limits">{c.nav.limits}</a>
+    <a href="#resets">{c.nav.resets}</a>
+    <a href="#privacy">{c.nav.privacy}</a>
+    <a href="#install">{c.nav.install}</a>
+  </nav>
+  <div class="bar-end">
+    <a class="gh" href="https://github.com/Nanako0129/TokenBar">GitHub</a>
+    <div class="seg" role="group" aria-label="Language">
+      <a href={base} aria-current={locale === 'en' ? 'true' : undefined}>EN</a>
+      <a href={`${base}zh-tw/`} aria-current={locale === 'zh-tw' ? 'true' : undefined}>中文</a>
+    </div>
+  </div>
+</header>

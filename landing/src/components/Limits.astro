@@ -1,0 +1,37 @@
+---
+import { t, type Locale } from '../i18n/copy'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const c = t(locale)
+---
+
+<section class="stratum" id="limits">
+  <div class="ruler" aria-hidden="true"></div>
+  <div class="content">
+    <h2>{c.limits.h2}</h2>
+    <p class="lede">{c.limits.lede}</p>
+    <div class="pair">
+      <div class="content">
+        <p>{c.limits.body}</p>
+        <div class="gauges" role="list" aria-label="Menu-bar gauge states">
+          <div class="gauge" role="listitem">
+            <div class="bars ok" aria-hidden="true"><i class="on" style="height:6px"></i><i class="on" style="height:11px"></i><i class="on" style="height:16px"></i><i style="height:22px"></i></div>
+            <span>{c.limits.gaugeOk}</span>
+          </div>
+          <div class="gauge" role="listitem">
+            <div class="bars warn" aria-hidden="true"><i class="on" style="height:6px"></i><i style="height:11px"></i><i style="height:16px"></i><i style="height:22px"></i></div>
+            <span>{c.limits.gaugeWarn}</span>
+          </div>
+          <div class="gauge" role="listitem">
+            <div class="bars low" aria-hidden="true"><i class="on" style="height:6px"></i><i style="height:11px"></i><i style="height:16px"></i><i style="height:22px"></i></div>
+            <span>{c.limits.gaugeLow}</span>
+          </div>
+        </div>
+        <p class="muted">{c.limits.glassNote}</p>
+      </div>
+      <figure>
+        <div class="pending bar-strip"><div><b>Menu bar</b><span>{c.pending}</span></div></div>
+        <figcaption>{c.limits.figcaption}</figcaption>
+      </figure>
+    </div>
+  </div>
+</section>
