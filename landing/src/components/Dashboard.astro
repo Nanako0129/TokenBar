@@ -12,13 +12,13 @@ const base = import.meta.env.BASE_URL
 // Quota has no capture yet (per the plan's screenshot rules); every other
 // lens reuses the existing placeholder screenshots already in the repo.
 const shots: Partial<Record<LensId, string>> = {
-  overview: 'overview.png',
-  models: 'models.png',
-  monthly: 'monthly.png',
-  daily: 'daily.png',
-  hourly: 'hourly.png',
-  stats: 'stats.png',
-  agents: 'agents.png',
+  overview: 'overview.webp',
+  models: 'models.webp',
+  monthly: 'monthly.webp',
+  daily: 'daily.webp',
+  hourly: 'hourly.webp',
+  stats: 'stats.webp',
+  agents: 'agents.webp',
 }
 ---
 
@@ -28,7 +28,7 @@ const shots: Partial<Record<LensId, string>> = {
     <h2>{c.dashboard.h2}</h2>
     <p class="lede">{c.dashboard.lede}</p>
     <figure>
-      <div class="shot"><img src={`${base}screenshots/contribution-3d.png`} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
+      <div class="shot"><img src={`${base}screenshots/contribution-3d.webp`} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
       <figcaption>{c.dashboard.figcaption}</figcaption>
     </figure>
     <div class="scrolly" style={`--lens-count:${LENS_ORDER.length}`}>
