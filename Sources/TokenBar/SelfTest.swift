@@ -919,6 +919,23 @@ enum SelfTest {
             return try? box.result?.get()
         }
 
+        // Packaged Local Network prompt copy. The key exists only in the
+        // Info.plist `scripts/bundle.sh` writes, so a bare SwiftPM run has
+        // nothing to read and must stay valid. Inside an `.app` this reads
+        // Bundle.main's actual value: missing, blank, and non-string fail.
+        // Keyed on the bundle being an `.app`, not on the shipping identifier
+        // — the local bundled gate uses a throwaway id and would otherwise
+        // skip it. Not `#if DEBUG`: `make selftest-bundled` runs the release
+        // binary. No production helper; the assertion is the reader.
+        if Bundle.main.bundleURL.pathExtension == "app" {
+            let localNetworkUsage = Bundle.main.object(
+                forInfoDictionaryKey: "NSLocalNetworkUsageDescription") as? String
+            expect(
+                localNetworkUsage?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+                "packaged Info.plist declares a nonempty NSLocalNetworkUsageDescription "
+                    + "(mutations: omitting the key, a blank string, or a non-string value)")
+        }
+
         // Per-level overrides survive reopening; Automatic restores the
         // original quota/native policy without discarding any saved colors.
         let textColorSuite = "com.tokenbar.selftest.menu-bar-text-color"
