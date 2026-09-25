@@ -1,0 +1,15 @@
+---
+// Same reason as zh-tw/index.astro: Noto Serif TC for zh headings on phones.
+import '@fontsource/noto-serif-tc/400.css'
+import Base from '../../layouts/Base.astro'
+import Bar from '../../components/Bar.astro'
+import Essay from '../../components/Essay.astro'
+import Footer from '../../components/Footer.astro'
+import { essay } from '../../i18n/essay'
+---
+
+<Base path="why-syrtis/" locale="zh-tw" title={`${essay['zh-tw'].title} · Syrtis`} description={essay['zh-tw'].dek}>
+  <Bar locale="zh-tw" essay />
+  <Essay locale="zh-tw" />
+  <Footer locale="zh-tw" />
+</Base>

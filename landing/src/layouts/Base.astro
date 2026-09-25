@@ -14,9 +14,11 @@ interface Props {
   title?: string
   description?: string
   locale?: Locale
+  /** Path under each locale's root, e.g. 'why-syrtis/', so hreflang pairs the same page. */
+  path?: string
 }
 
-const { locale = 'en' } = Astro.props
+const { locale = 'en', path = '' } = Astro.props
 const meta = t(locale).meta
 const { title = meta.title, description = meta.description } = Astro.props
 
@@ -29,8 +31,8 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href
 const ogImage = new URL(`${base}og-card-v4.png`, Astro.site).href
 const ogImageAlt = 'Syrtis — where your tokens settle, tracked from the macOS menu bar'
 
-const enUrl = new URL(base, Astro.site).href
-const zhUrl = new URL(`${base}zh-tw/`, Astro.site).href
+const enUrl = new URL(`${base}${path}`, Astro.site).href
+const zhUrl = new URL(`${base}zh-tw/${path}`, Astro.site).href
 
 const jsonLd = {
   '@context': 'https://schema.org',

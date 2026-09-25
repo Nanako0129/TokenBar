@@ -1,24 +1,31 @@
 ---
 import { t, type Locale } from '../i18n/copy'
-const { locale = 'en' } = Astro.props as { locale?: Locale }
+// `essay` renders the bar on the naming essay page: the section links and the
+// brand point back into the landing page, and the language switch keeps the
+// reader on the essay.
+const { locale = 'en', essay = false } = Astro.props as { locale?: Locale; essay?: boolean }
 const c = t(locale)
 const base = import.meta.env.BASE_URL
+const home = locale === 'en' ? base : `${base}zh-tw/`
+const sec = essay ? home : ''
+const enHref = essay ? `${base}why-syrtis/` : base
+const zhHref = essay ? `${base}zh-tw/why-syrtis/` : `${base}zh-tw/`
 ---
 
 <header class="bar">
-  <a class="brand" href="#top"><img src={`${base}favicon.png`} alt="" width="28" height="28" />Syrtis</a>
+  <a class="brand" href={essay ? home : '#top'}><img src={`${base}favicon.png`} alt="" width="28" height="28" />Syrtis</a>
   <nav aria-label="Sections">
-    <a href="#dashboard">{c.nav.dash}</a>
-    <a href="#limits">{c.nav.limits}</a>
-    <a href="#resets">{c.nav.resets}</a>
-    <a href="#privacy">{c.nav.privacy}</a>
-    <a href="#install">{c.nav.install}</a>
+    <a href={`${sec}#dashboard`}>{c.nav.dash}</a>
+    <a href={`${sec}#limits`}>{c.nav.limits}</a>
+    <a href={`${sec}#resets`}>{c.nav.resets}</a>
+    <a href={`${sec}#privacy`}>{c.nav.privacy}</a>
+    <a href={`${sec}#install`}>{c.nav.install}</a>
   </nav>
   <div class="bar-end">
     <a class="gh" href="https://github.com/Nanako0129/TokenBar">GitHub</a>
     <div class="seg" role="group" aria-label="Language">
-      <a href={base} aria-current={locale === 'en' ? 'true' : undefined}>EN</a>
-      <a href={`${base}zh-tw/`} aria-current={locale === 'zh-tw' ? 'true' : undefined}>中文</a>
+      <a href={enHref} aria-current={locale === 'en' ? 'true' : undefined}>EN</a>
+      <a href={zhHref} aria-current={locale === 'zh-tw' ? 'true' : undefined}>中文</a>
     </div>
   </div>
 </header>

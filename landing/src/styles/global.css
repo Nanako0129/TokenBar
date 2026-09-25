@@ -235,3 +235,18 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; }
   .lensshot img { max-height: 46vh; width: auto; }
   .lensshot .pending { height: 46vh; aspect-ratio: auto; }
 }
+
+/* ---- naming essay (/why-syrtis/): one reading column, figures centred ---- */
+.essay { max-width: 40rem; margin: 0 auto; padding-block: 3rem 5rem; }
+.essay h1 { font-size: clamp(2.2rem, 5vw, 3rem); line-height: 1.12; margin-top: 0.6rem; }
+.essay-dek { color: var(--muted); margin-top: 0.8rem; }
+.essay-body { line-height: 1.8; }
+.essay-body h2 { font-size: clamp(1.6rem, 3.2vw, 2rem); margin-top: 3rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
+.essay-body p, .essay-body ul { margin: 1rem 0; }
+.essay-body ul { padding-left: 1.2rem; }
+.essay-body li { margin: 0.8rem 0; }
+.essay-body strong { color: var(--teal); font-weight: 600; }
+.essay-body blockquote { margin: 1.4rem 0; }
+.essay-body figure { margin: 1.8rem 0; }
+.essay-body figure img { display: block; max-width: 100%; max-height: 30rem; width: auto; height: auto; margin: 0 auto; border-radius: 4px; }
+.essay-body figcaption { text-align: center; line-height: 1.55; }

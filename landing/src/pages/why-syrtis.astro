@@ -1,0 +1,13 @@
+---
+import Base from '../layouts/Base.astro'
+import Bar from '../components/Bar.astro'
+import Essay from '../components/Essay.astro'
+import Footer from '../components/Footer.astro'
+import { essay } from '../i18n/essay'
+---
+
+<Base path="why-syrtis/" locale="en" title={`${essay.en.title} · Syrtis`} description={essay.en.dek}>
+  <Bar locale="en" essay />
+  <Essay locale="en" />
+  <Footer locale="en" />
+</Base>
