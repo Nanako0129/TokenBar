@@ -62,7 +62,7 @@ Either form triggers the workflow identically — `push: tags: ["v*"]`, with the
 | Native app bundle | `.github/workflows/release.yml` and `scripts/bundle.sh` | Bundle launches and is ad-hoc signed as expected |
 | Sparkle archive/signature | Release workflow and Sparkle tools | EdDSA signature verifies against the published archive |
 | GitHub Release body | Hand-written `release-notes/<tag>.md`, assembled by `release_notes.sh` with GitHub's contributor tail | Body has accurate changes, links, and contribution credit |
-| Sparkle / appcast / `latest.json` text | Hand-written `release-notes/<tag>.txt`, assembled by `release_notes.sh` with the `Thanks:` credit line | Same change set as the body, no markdown, figures agree with it |
+| Sparkle / appcast text | Hand-written `release-notes/<tag>.txt`, assembled by `release_notes.sh` with the `Thanks:` credit line | Same change set as the body, no markdown, figures agree with it |
 | `appcast.xml` | `scripts/make_appcast.sh` and generated feed | XML parses, old items remain, channel semantics are correct |
 | Homebrew cask | Release workflow generator plus tap repository | Version, URL, checksum, and style match the published asset |
 | Install count | `update-install-count.yml` | Orphan badge branch contains the current filtered asset count |
@@ -109,7 +109,7 @@ CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled`,
 
 ## Legacy and beta migration
 
-The shipped native app replaced the archived Tauri app at the stable bundle identity. Stable releases may carry a legacy updater metadata artifact so remaining users can cross the old app boundary. The retired beta bridge cannot install a stable bundle with a different filename and bundle identity through Sparkle; its supported path is the in-app Switch action that installs the stable cask and lets the stable app migrate settings on first launch.
+The shipped native app replaced the archived Tauri app at the stable bundle identity. Stable releases re-upload a frozen legacy updater manifest, `scripts/legacy/tauri-latest.json` (the v1.20.2 `latest.json`, byte for byte, checked against a literal sha256 in `release.yml`), so a remaining Tauri install still lands on the v1.20.2 native build and Sparkle takes over from there; release notes no longer reach it, and the Tauri signing key is no longer used. The retired beta bridge cannot install a stable bundle with a different filename and bundle identity through Sparkle; its supported path is the in-app Switch action that installs the stable cask and lets the stable app migrate settings on first launch.
 
 > **Bridge rule：** A bridge update error that says “improperly signed” can be a bundle-selection failure rather than a cryptographic failure. For the retired bridge population, use the in-app Switch path or the documented Homebrew install path; do not promise cross-identity Sparkle installation.
 
@@ -129,7 +129,7 @@ Keep English and `zh-tw` copy aligned, preserve original TokenBar design, and tr
 
 ## Post-release verification
 
-The release notes path has two forms and at least three published surfaces: the GitHub Release body, the Sparkle appcast description, and the legacy update metadata notes.
+The release notes path has two forms and two published surfaces: the GitHub Release body and the Sparkle appcast description. The legacy Tauri manifest is frozen at v1.20.2 and does not carry the current notes.
 
 The two bodies are hand-written and bound to the tag by filename (`release-notes/<tag>.{md,txt}`), so they are deterministic and a missing one fails the release job rather than inheriting the previous version's text. What is still assembled at run time is the contributor credit line and GitHub's changelog tail: both come from the API under `GH_TOKEN` and are silently absent without it. So local preview text is still not proof of the CI artifact — the bodies will match, the credit and tail may not.
 
@@ -141,7 +141,7 @@ That gate is not currently runnable: the renderer is inline in `make_appcast.sh`
 |---|---|
 | GitHub Release | Claims match the actual diff; no previous release fix is re-claimed |
 | `appcast.xml` | Description is accurate HTML, item/channel/enclosure/signature are intact |
-| Legacy metadata | Notes match the same user-facing change set and signature remains valid |
+| Legacy metadata | `latest.json` on the release is the frozen v1.20.2 manifest, unchanged (sha256 `c39de81d…`), and the archive URL it names still returns 200 |
 | Homebrew | Cask points to the new release and checksum matches the asset |
 | Landing | Pages build and the deployed route serves the expected locale and assets |
 | Update path | Stable app can discover the new stable item; bridge behavior is described honestly |

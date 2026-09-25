@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Check that a release's two note bodies do not contradict each other.
 
-The plain-text notes reach the Sparkle dialog, appcast.xml and latest.json;
+The plain-text notes reach the Sparkle dialog and appcast.xml (the legacy
+Tauri latest.json is frozen and does not carry them);
 the markdown reaches the GitHub release page. They are written separately
 because those audiences need different shapes, which leaves room for the same
 change to be described with different figures in each. That is the failure this
@@ -76,8 +77,8 @@ def main() -> int:
 
     # An empty file is not a release with nothing to say; it is a file someone
     # created to get past the existence check. Both would ship: the appcast
-    # renderer skips its description when the text is empty, and latest.json
-    # would carry empty notes.
+    # renderer skips its description when the text is empty, and the release
+    # page would say nothing.
     empty = [p for p in (txt_path, md_path) if not p.read_text(encoding="utf-8").strip()]
     if empty:
         for p in empty:

@@ -28,8 +28,9 @@ jobs:
       # cut from an unreviewed commit — or pushed before its main run finishes —
       # would reach publication unchecked. `release_notes.sh` refuses a missing
       # or empty source on its own, but a nonempty pair whose figures disagree
-      # would otherwise ship to the release page, the appcast and latest.json
-      # with nothing in between.
+      # would otherwise ship to the release page and the appcast with nothing
+      # in between. (The legacy Tauri latest.json is frozen and carries no
+      # notes from this release.)
       #
       # First step, before the toolchain: a tag with bad notes should fail in
       # seconds rather than after a twenty-minute build.
@@ -54,7 +55,7 @@ jobs:
           shasum -a 256 "TokenBar.app.tar.gz" | awk '{print $1}' > sha256.txt
           echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
 
-      # release-notes.txt: plain text for Sparkle/appcast/latest.json.
+      # release-notes.txt: plain text for the Sparkle dialog and appcast.
       # release-notes.md: markdown for the GitHub release page, with PR
       # links, contributor credit, and GitHub's New Contributors tail.
       #
@@ -77,31 +78,24 @@ jobs:
           scripts/make_appcast.sh "TokenBar.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
           rm -f /tmp/sparkle_ed.key
 
-      # Tauri migration manifest: the old Tauri app's updater endpoint
+      # Legacy Tauri manifest. The old Tauri app's updater endpoint
       # (github.com/Nanako0129/TokenBar/releases/latest/download/latest.json)
-      # now resolves to this repo. A stable release drops a Tauri-format
-      # latest.json signed with the same minisign updater key, so the Tauri
-      # app accepts the archive and swaps itself for the native build (same
-      # app name + bundle id, file-level replace). Stable only — prereleases
-      # are excluded from releases/latest, so they'd never serve this anyway.
-      - name: Tauri migration manifest (stable only)
+      # resolves to this repo, and a Tauri install upgrades itself by fetching
+      # that file. It is frozen: `scripts/legacy/tauri-latest.json` is the
+      # v1.20.2 manifest byte for byte, pointing at v1.20.2's archive with the
+      # signature made for it, so a Tauri install still lands on a native build
+      # and Sparkle takes over from there. Every stable release re-uploads the
+      # same file so `releases/latest` keeps serving it. Nothing is signed here
+      # any more, so neither the Tauri signing key nor the Node-based signer
+      # is part of the release (REN-R0B). The literal digest below fails the
+      # release if the frozen file ever changes, including by a scripted
+      # rename.
+      - name: Legacy Tauri manifest (stable only)
         if: ${{ !contains(github.ref_name, '-') }}
-        env:
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         run: |
           set -euo pipefail
-          npx --yes @tauri-apps/cli@latest signer sign \
-            -k "$TAURI_SIGNING_PRIVATE_KEY" "TokenBar.app.tar.gz" >/dev/null
-          SIG=$(cat TokenBar.app.tar.gz.sig)
-          NOTES_JSON=$(jq -Rs . < release-notes.txt)
-          PUB=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-          URL="https://github.com/Nanako0129/TokenBar/releases/download/$GITHUB_REF_NAME/TokenBar.app.tar.gz"
-          jq -n --arg v "$VERSION" --argjson n "$NOTES_JSON" --arg p "$PUB" \
-            --arg s "$SIG" --arg u "$URL" \
-            '{version:$v, notes:$n, pub_date:$p,
-              platforms:{"darwin-aarch64":{signature:$s, url:$u}}}' > latest.json
-          echo "----- latest.json -----"; cat latest.json
+          echo "c39de81d85baa99351532952b88ef21074dc7633fc54aab90a2b81873426c0bf  scripts/legacy/tauri-latest.json" | shasum -a 256 -c -
+          cp scripts/legacy/tauri-latest.json latest.json
 
       - name: Create GitHub release
         env:
@@ -111,7 +105,7 @@ jobs:
           ASSETS="TokenBar.app.tar.gz"
           case "$VERSION" in
             *-*) PRERELEASE_FLAG="--prerelease";;
-            *) ASSETS="$ASSETS latest.json";;  # Tauri migration manifest
+            *) ASSETS="$ASSETS latest.json";;  # frozen legacy Tauri manifest
           esac
           NOTES="release-notes.md"
           [[ -s "$NOTES" ]] || NOTES="release-notes.txt"
