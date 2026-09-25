@@ -1,11 +1,12 @@
 ---
 import { t, type Locale } from '../i18n/copy'
+import DepthRuler from './DepthRuler.astro'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale)
 ---
 
 <section class="stratum" id="resets">
-  <div class="ruler" aria-hidden="true"></div>
+  <DepthRuler locale={locale} index={2} />
   <div class="content">
     <h2>{c.resets.h2}</h2>
     <blockquote><span>{c.resets.quote}</span><cite>{c.resets.cite}</cite></blockquote>

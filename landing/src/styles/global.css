@@ -65,16 +65,27 @@ img { max-width: 100%; display: block; }
 .seg a, .seg button { font: 600 0.78rem/1 var(--sans); border: 0; background: none; color: var(--muted); padding: 0.45rem 0.75rem; border-radius: 999px; cursor: pointer; text-decoration: none; display: inline-block; }
 .seg a[aria-current="true"], .seg button[aria-pressed="true"], .seg button[aria-selected="true"] { background: var(--teal); color: var(--bg); }
 
-/* ---- stratigraphic column: a decorative depth ruler beside each section.
-   Critique 2026-09-25: its numbers were never explained and stayed English
-   on the Chinese page, so the ruler now carries ticks only. ---- */
-.stratum { display: grid; grid-template-columns: 3rem minmax(0, 1fr); gap: 0 2.2rem; padding-block: 4.5rem; }
+/* ---- stratigraphic column: every section sits on a depth ruler, with a
+   depth reading (10^n tokens) and its stratum name. The user asked for the
+   readings back on 2026-09-26 after the critique pass had removed them;
+   the stratum names are now copy slots so the Chinese page is Chinese. ---- */
+.stratum { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0 2.2rem; padding-block: 4.5rem; }
 .ruler {
+  position: relative;
   border-right: 1px solid var(--line-strong);
   background:
     repeating-linear-gradient(to bottom, transparent 0 27px, var(--line-strong) 27px 28px) right top / 7px 100% no-repeat,
     repeating-linear-gradient(to bottom, transparent 0 139px, var(--line-strong) 139px 140px) right top / 14px 100% no-repeat;
 }
+.depth {
+  position: sticky; top: 1.25rem;
+  display: flex; flex-direction: column; gap: 0.15rem;
+  padding-right: 1.3rem; text-align: right;
+  font: 500 0.78rem/1.3 var(--mono); color: var(--faint);
+  font-variant-numeric: tabular-nums;
+}
+.depth b { font-weight: 500; color: var(--sand-ink); font-size: 0.95rem; }
+.depth sup { font-size: 0.68em; line-height: 0; vertical-align: 0.5em; margin-left: 0.05em; }
 .content { display: flex; flex-direction: column; gap: 1.4rem; min-width: 0; }
 
 h1, h2, h3 { font-family: var(--display); font-weight: 400; margin: 0; text-wrap: balance; letter-spacing: -0.005em; }
@@ -216,7 +227,8 @@ footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; }
 @media (max-width: 860px) {
   .hero, .pair, .explorer, .closing { grid-template-columns: minmax(0, 1fr); }
   .stratum { grid-template-columns: minmax(0, 1fr); padding-block: 3rem; }
-  .ruler { display: none; }
+  .ruler { border-right: 0; background: none; border-bottom: 1px solid var(--line-strong); padding-bottom: 0.5rem; }
+  .depth { position: static; flex-direction: row; gap: 0.6rem; text-align: left; padding-right: 0; align-items: baseline; }
   .bar nav, .bar .gh { display: none; }
   /* The picked screenshot stays in view above the list, so a tap shows. */
   .lensshot { position: sticky; top: 0; z-index: 1; background: var(--bg); padding-block: 0.5rem; order: -1; }

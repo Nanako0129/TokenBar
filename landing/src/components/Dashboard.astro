@@ -4,6 +4,7 @@
 // monthly, daily, hourly, stats, agents`). Neither this list nor the CSS
 // hardcodes the count — `--lens-count` below reads `LENS_ORDER.length`.
 import { t, LENS_ORDER, type Locale, type LensId } from '../i18n/copy'
+import DepthRuler from './DepthRuler.astro'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale)
 const base = import.meta.env.BASE_URL
@@ -22,7 +23,7 @@ const shots: Partial<Record<LensId, string>> = {
 ---
 
 <section class="stratum" id="dashboard">
-  <div class="ruler" aria-hidden="true"></div>
+  <DepthRuler locale={locale} index={0} />
   <div class="content">
     <h2>{c.dashboard.h2}</h2>
     <p class="lede">{c.dashboard.lede}</p>
@@ -90,8 +91,23 @@ const shots: Partial<Record<LensId, string>> = {
       const r = scrolly.getBoundingClientRect()
       return Math.min(1, Math.max(0, -r.top / Math.max(1, r.height - innerHeight)))
     }
+    // Narrow screens: the screenshot is stuck above the list, so the lens
+    // whose row has scrolled up to a line just below it is the selected
+    // one. Ported verbatim from the prototype's 2026-09-26 mobile fix.
+    const shotBox = document.querySelector('.lensshot')!
+    function syncStacked() {
+      const below = shotBox.getBoundingClientRect().bottom
+      const line = below + (innerHeight - below) * 0.35
+      const tops = lenses.map((b) => b.getBoundingClientRect().top)
+      if (tops[0] > innerHeight || lenses[lenses.length - 1].getBoundingClientRect().bottom < 0) return
+      let i = 0
+      tops.forEach((top, k) => { if (top <= line) i = k })
+      activate(lenses[i])
+      const end = i + 1 < tops.length ? tops[i + 1] : lenses[i].getBoundingClientRect().bottom
+      lenses[i].style.setProperty('--p', String(Math.min(1, Math.max(0, (line - tops[i]) / Math.max(1, end - tops[i])))))
+    }
     function sync() {
-      if (!pinned.matches) return
+      if (!pinned.matches) return syncStacked()
       const steps = progress() * lenses.length
       const i = Math.min(lenses.length - 1, Math.floor(steps))
       activate(lenses[i])

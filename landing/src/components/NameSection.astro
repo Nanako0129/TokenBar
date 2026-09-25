@@ -1,12 +1,13 @@
 ---
 import { t, type Locale } from '../i18n/copy'
+import DepthRuler from './DepthRuler.astro'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale)
 const essayHref = 'https://claude.ai/code/artifact/d095bcac-5cd9-4642-b642-5e3292c76159'
 ---
 
 <section class="stratum" id="name">
-  <div class="ruler" aria-hidden="true"></div>
+  <DepthRuler locale={locale} index={4} />
   <div class="content">
     <h2>{c.name.h2}</h2>
     <p>{c.name.body}</p>

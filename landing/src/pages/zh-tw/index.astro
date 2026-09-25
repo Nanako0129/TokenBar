@@ -1,4 +1,10 @@
 ---
+// Self-hosted, weight 400 only, imported on this page alone: iPhone has no
+// Songti TC and the site never loaded Noto Serif TC before, so zh headings
+// fell back to a generic serif on phones (2026-09-26 mobile feedback). The
+// English page's bundle never pulls this in, since it has no :lang(zh-Hant)
+// text to need it for.
+import '@fontsource/noto-serif-tc/400.css'
 import Base from '../../layouts/Base.astro'
 import Bar from '../../components/Bar.astro'
 import Hero from '../../components/Hero.astro'

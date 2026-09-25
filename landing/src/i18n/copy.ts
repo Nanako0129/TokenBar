@@ -14,6 +14,20 @@ export type Locale = 'en' | 'zh-tw'
 export const LENS_ORDER = ['overview', 'quota', 'models', 'monthly', 'daily', 'hourly', 'stats', 'agents'] as const
 export type LensId = (typeof LENS_ORDER)[number]
 
+// The five `.stratum` sections' depth-ruler readings (10^n tokens), in
+// document order — dashboard, limits, resets, privacy, name. Not locale
+// text (same figures on both pages), so it lives outside the dictionary;
+// the unit and stratum name next to each figure are. `exp` renders inside
+// a real <sup>, not a Unicode superscript character — the prototype
+// dropped ¹⁰'s mixed-height ¹ and ⁰ for the same reason (2026-09-26).
+export const DEPTH_READINGS = [
+  { base: '10', exp: '3' },
+  { base: '10', exp: '6' },
+  { base: '10', exp: '9' },
+  { base: '10', exp: '10' },
+  { base: '3.86×10', exp: '10' },
+] as const
+
 const en = {
   meta: {
     title: 'Syrtis — Where your tokens settle',
@@ -115,6 +129,14 @@ const en = {
     mac: 'Source (macOS)',
     win: 'Source (Windows)',
     essay: 'Why Syrtis',
+  },
+  depth: {
+    unit: 'tokens',
+    1: 'stratum I',
+    2: 'stratum II',
+    3: 'stratum III',
+    4: 'bedrock',
+    5: 'surfaced',
   },
   pending: 'Screenshot pending: to be captured from the v2.0 build.',
   counter: (n: string) => `≈ ${n} tokens settled · 1 grain = 1,000`,
@@ -221,6 +243,14 @@ const zhTw: typeof en = {
     mac: '原始碼（macOS）',
     win: '原始碼（Windows）',
     essay: '命名由來',
+  },
+  depth: {
+    unit: 'token',
+    1: '第一層',
+    2: '第二層',
+    3: '第三層',
+    4: '基岩',
+    5: '出露',
   },
   pending: '截圖待補：將取自 2.0 正式版本。',
   counter: (n: string) => `約 ${n} token 沉積・1 粒 = 1,000`,
