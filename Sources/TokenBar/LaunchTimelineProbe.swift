@@ -34,7 +34,7 @@ enum LaunchTimelineProbe {
         let t0 = DispatchTime.now()
         func ms() -> Double { Double(DispatchTime.now().uptimeNanoseconds - t0.uptimeNanoseconds) / 1e6 }
 
-        let source = LiveUsageDataSource()
+        let source = TimedSource()
         let model = DashboardModel(source: source)
         let series = AttributedSeriesModel()
         let d = UserDefaults.standard
@@ -54,10 +54,12 @@ enum LaunchTimelineProbe {
         var tasks: [Task<Void, Never>] = []
         if wants("graph") { tasks.append(Task { await model.load() }) }
         if wants("quota") { tasks.append(Task { await model.pollAgentUsage() }) }
+        var windowStagesDone = false
         if wants("window") {
             tasks.append(Task {
                 model.refreshWindowQuotaHalves()
                 await model.refreshWindowUsage()
+                windowStagesDone = true
             })
         }
         if wants("trace") { tasks.append(Task { await model.pollTrace() }) }
@@ -82,31 +84,100 @@ enum LaunchTimelineProbe {
                 print(String(format: "%8.0f ms  %@", seen[name]!, name))
             }
         }
+        // One milestone per selected task, so a subset never ends with nothing
+        // to report. Trace and the tray refresh are timed at the source (their
+        // results can legitimately be empty, so the model's state cannot say
+        // they have answered); the window stages by the task finishing.
+        let quotaHalf = "\(client) window card: quota half"
+        let cardReady = "\(client) window card: ready"
+        let cardNoQuota = "\(client) window card: settled without quota (blocked / no history)"
         var milestones: [String] = []
         if wants("graph") || wants("pollgraph") { milestones.append("graph") }
-        if wants("quota") {
-            milestones += ["quota payload", "\(client) window card: quota half",
-                           "\(client) window card: ready"]
-        }
+        if wants("quota") { milestones += ["quota payload", quotaHalf, cardReady] }
+        if wants("window") { milestones.append("window stages finished") }
+        if wants("trace") { milestones.append("trace (first answer)") }
+        if only?.contains("tray") == true { milestones.append("tray forced refresh") }
         if wants("series") { milestones.append("attributed series") }
+        // A card that settles without a quota half will never be ready either;
+        // it satisfies both instead of holding the run until the deadline.
+        func pending(_ name: String) -> Bool {
+            guard seen[name] == nil else { return false }
+            if name == quotaHalf || name == cardReady { return seen[cardNoQuota] == nil }
+            return true
+        }
         let deadline = 90_000.0
-        while seen.count < milestones.count, ms() < deadline {
+        while milestones.contains(where: pending), ms() < deadline {
             mark("graph", model.stats != nil)
             mark("quota payload", model.agentUsage != nil)
             switch model.windowCards[client] {
-            case .quotaOnly?, .ready?, .noQuotaHistory?, .blocked?:
-                mark("\(client) window card: quota half", true)
+            case .quotaOnly?:
+                mark(quotaHalf, true)
+            case .ready?:
+                mark(quotaHalf, true)
+                mark(cardReady, true)
+            case .blocked?, .noQuotaHistory?:
+                mark(cardNoQuota, true)
             default: break
             }
-            if case .ready? = model.windowCards[client] {
-                mark("\(client) window card: ready", true)
-            }
+            mark("window stages finished", windowStagesDone)
+            mark("trace (first answer)", source.answered("trace"))
+            mark("tray forced refresh", source.answered("refreshGraph"))
             mark("attributed series", series.points != nil)
             try? await Task.sleep(nanoseconds: 10_000_000)
         }
-        for name in milestones where seen[name] == nil {
+        for name in milestones where pending(name) {
             print("   never  \(name) (within \(Int(deadline / 1000)) s)")
         }
         tasks.forEach { $0.cancel() }
+    }
+}
+
+/// Forwards to the live source and records which calls have returned at least
+/// once, for milestones the model's own state cannot show.
+private final class TimedSource: UsageDataSource, @unchecked Sendable {
+    private let live = LiveUsageDataSource()
+    private let lock = NSLock()
+    private var returned: Set<String> = []
+
+    func answered(_ call: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return returned.contains(call)
+    }
+
+    private func note(_ call: String) {
+        lock.lock(); returned.insert(call); lock.unlock()
+    }
+
+    var allowsQuotaCachePersistence: Bool { live.allowsQuotaCachePersistence }
+    func graph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        try await live.graph(year: year, priority: priority)
+    }
+    func refreshGraph(year: String?, priority: TaskPriority) async throws -> UsagePayload {
+        defer { note("refreshGraph") }
+        return try await live.refreshGraph(year: year, priority: priority)
+    }
+    func modelReport(year: String?, priority: TaskPriority) async throws -> ModelReport {
+        try await live.modelReport(year: year, priority: priority)
+    }
+    func hourlyReport(year: String?, clients: [String]?, priority: TaskPriority) async throws -> HourlyReport {
+        try await live.hourlyReport(year: year, clients: clients, priority: priority)
+    }
+    func agentsReport(year: String?, clients: [String]?, priority: TaskPriority) async throws -> AgentsReport {
+        try await live.agentsReport(year: year, clients: clients, priority: priority)
+    }
+    func agentUsage() async throws -> AgentUsagePayload { try await live.agentUsage() }
+    func usageTrace(windowSecs: Int64) async throws -> [TraceBucket] {
+        defer { note("trace") }
+        return try await live.usageTrace(windowSecs: windowSecs)
+    }
+    func tokensPerMin() async throws -> Double { try await live.tokensPerMin() }
+    func windowUsage(accountKey: String?, from: Int64, until: Int64) async throws -> WindowUsage {
+        try await live.windowUsage(accountKey: accountKey, from: from, until: until)
+    }
+    func quotaCurve(clientId: String, accountKey: String?, windowKey: String, generation: UInt64) async throws -> QuotaCurve? {
+        try await live.quotaCurve(clientId: clientId, accountKey: accountKey, windowKey: windowKey, generation: generation)
+    }
+    func quotaCurveSync(clientId: String, accountKey: String?, windowKey: String, generation: UInt64) throws -> QuotaCurve? {
+        try live.quotaCurveSync(clientId: clientId, accountKey: accountKey, windowKey: windowKey, generation: generation)
     }
 }
