@@ -9,10 +9,17 @@ const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale)
 const base = import.meta.env.BASE_URL
 
-// Quota has no capture yet (per the plan's screenshot rules); every other
-// lens reuses the existing placeholder screenshots already in the repo.
+// Captures of the renamed v2.0 build, one set per locale so each page shows
+// its own UI language: `public/screenshots/{en,zh-tw}/<lens>.webp`. The map
+// stays partial so a lens without a capture falls back to the pending panel.
+const shotDir = `${base}screenshots/${locale}/`
+// The captures are 2x (Retina) pixels. They are referenced by `srcset` with a
+// `2x` descriptor and no `src`: when `src` names the same file, Chrome takes
+// it as the 1x candidate and lays the image out at full pixel size on 1x
+// screens (measured: 760 px wide instead of 380).
 const shots: Partial<Record<LensId, string>> = {
   overview: 'overview.webp',
+  quota: 'quota.webp',
   models: 'models.webp',
   monthly: 'monthly.webp',
   daily: 'daily.webp',
@@ -28,7 +35,7 @@ const shots: Partial<Record<LensId, string>> = {
     <h2>{c.dashboard.h2}</h2>
     <p class="lede">{c.dashboard.lede}</p>
     <figure>
-      <div class="shot"><img src={`${base}screenshots/contribution-3d.webp`} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
+      <div class="shot"><img srcset={`${shotDir}contribution-3d.webp` + " 2x"} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
       <figcaption>{c.dashboard.figcaption}</figcaption>
     </figure>
     <div class="scrolly" style={`--lens-count:${LENS_ORDER.length}`}>
@@ -48,7 +55,7 @@ const shots: Partial<Record<LensId, string>> = {
               {LENS_ORDER.map((id, i) => (
                 shots[id] ? (
                   <div class:list={['shot', { front: i === 0 }]} data-lens-panel={id}>
-                    <img src={`${base}screenshots/${shots[id]}`} alt={c.lensName[id]} loading={i === 0 ? 'eager' : 'lazy'} />
+                    <img srcset={`${shotDir}${shots[id]}` + " 2x"} alt={c.lensName[id]} loading={i === 0 ? 'eager' : 'lazy'} />
                   </div>
                 ) : (
                   <div class:list={['pending', { front: i === 0 }]} data-lens-panel={id}>
