@@ -179,8 +179,11 @@ enum DockPinRepair {
         existence: (String) -> Existence,
         bookmark: () -> Data?
     ) -> Outcome {
-        guard let original = store.tiles() else { return .unchanged }
+        // mod-count first: a Dock save landing between the two reads then
+        // shows up as a changed count instead of pairing a stale array with
+        // the new count.
         let before = store.modCount()
+        guard let original = store.tiles() else { return .unchanged }
         let result = repair(
             tiles: original, bundleURL: bundleURL, bundleID: bundleID,
             forced: forced, immutable: immutable, existence: existence, bookmark: bookmark)
@@ -213,12 +216,22 @@ enum DockPinRepair {
 
     /// Called once from `applicationDidFinishLaunching`; does its work on a
     /// background queue and never affects the app on failure.
-    static func runIfNeeded() {
+    static func runIfNeeded(arguments: [String] = CommandLine.arguments) {
+        guard mayRun(arguments: arguments) else { return }
         let bundleURL = Bundle.main.bundleURL
         let bundleID = Bundle.main.bundleIdentifier
         DispatchQueue.global(qos: .utility).async {
             perform(bundleURL: bundleURL, bundleID: bundleID)
         }
+    }
+
+    /// A demo, smoke, selftest or icon-gallery launch is not a user session
+    /// and must not write another app's preferences or restart the Dock, even
+    /// from an installed bundle (screenshots are taken with `--demo` from the
+    /// real app). Same set `BuildIdentity` uses to keep fixtures out of the
+    /// user's snapshot.
+    static func mayRun(arguments: [String]) -> Bool {
+        !BuildIdentity.isNonUserRuntime(arguments)
     }
 
     private static func perform(bundleURL: URL, bundleID: String?) {
@@ -238,7 +251,10 @@ enum DockPinRepair {
             existence: { path in
                 var info = stat()
                 if lstat(path, &info) == 0 { return .present }
-                return errno == ENOENT ? .missing : .error
+                let code = errno
+                if code == ENOENT { return .missing }
+                NSLog("TokenBar: Dock pin repair gave up: lstat failed for the old path (errno \(code))")
+                return .error
             },
             bookmark: {
                 do { return try bundleURL.bookmarkData() } catch {
@@ -387,12 +403,16 @@ enum DockPinRepair {
             var tiles: [Any]
             var modCount = 7
             var bumpOnSync = false
+            var bumpOnTilesRead = false
             var writes = 0
             init(_ tiles: [Any]) { self.tiles = tiles }
         }
         func sequence(_ memory: Memory, restartedHereBefore: Bool = false) -> Outcome {
             let store = Store(
-                tiles: { memory.tiles },
+                tiles: {
+                    if memory.bumpOnTilesRead { memory.modCount += 1; memory.bumpOnTilesRead = false }
+                    return memory.tiles
+                },
                 modCount: { memory.modCount },
                 synchronize: {
                     if memory.bumpOnSync { memory.modCount += 1; memory.bumpOnSync = false }
@@ -412,10 +432,20 @@ enum DockPinRepair {
         expect(sequence(raced) == .gaveUp("Dock preferences changed while repairing") && raced.writes == 0
                 && (raced.tiles as NSArray).isEqual(input as NSArray),
             "DOCK-PIN a mod-count change between read and write abandons without writing")
+        // A Dock save landing while the array is read: mod-count must already
+        // have been taken, so the save shows up as a change.
+        let midRead = Memory(input)
+        midRead.bumpOnTilesRead = true
+        expect(sequence(midRead) == .gaveUp("Dock preferences changed while repairing") && midRead.writes == 0,
+            "DOCK-PIN a Dock save during the array read abandons without writing")
         let again = Memory(input)
         expect(sequence(again, restartedHereBefore: true)
                 == .gaveUp("already restarted the Dock once for this path") && again.writes == 0,
             "DOCK-PIN a path that already had its one Dock restart is not written again")
+        expect(!mayRun(arguments: ["TokenBar", "--demo"]) && !mayRun(arguments: ["TokenBar", "--icon-gallery"])
+                && !mayRun(arguments: ["TokenBar", "--smoke"]) && mayRun(arguments: ["TokenBar"])
+                && mayRun(arguments: ["TokenBar", "--open-popover"]),
+            "DOCK-PIN demo, smoke and icon-gallery launches never run the repair; a user launch does")
         expect(!modCountUnchanged(nil, nil) && !modCountUnchanged(3, nil) && modCountUnchanged(3, 3),
             "DOCK-PIN a missing mod-count counts as changed")
     }
