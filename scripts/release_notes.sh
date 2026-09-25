@@ -1,9 +1,10 @@
 #!/bin/bash
 # Assemble release notes in two formats from hand-written, version-bound sources:
 #
-#   release-notes.txt  — plain text. Rendered by the Sparkle update dialog,
-#                        embedded in appcast.xml, and shipped in the Tauri
-#                        latest.json, so it must stay markdown-free. Ends
+#   release-notes.txt  — plain text. Rendered by the Sparkle update dialog
+#                        and embedded in appcast.xml, so it must stay
+#                        markdown-free. (The legacy Tauri latest.json is a
+#                        frozen file and does not carry these notes.) Ends
 #                        with a deterministic "Thanks: @…" line when the
 #                        release contains external PRs.
 #   release-notes.md   — GitHub-flavored markdown for the GitHub release
@@ -41,8 +42,7 @@ SRC_MD="release-notes/${TAG}.md"
 # --- Version-bound sources, required. ----------------------------------------
 # -s, not -f: an empty file would pass an existence check and then ship. The
 # appcast renderer skips its description when the text is empty (its own -s
-# guard) and latest.json would carry empty notes, so the release would complete
-# with nothing to show for it.
+# guard), so the release would complete with nothing to show for it.
 MISSING=()
 [[ -s "$SRC_TXT" ]] || MISSING+=("$SRC_TXT")
 [[ -s "$SRC_MD" ]] || MISSING+=("$SRC_MD")
@@ -76,7 +76,7 @@ CONTRIB="$(printf '%s\n' "$AUTO" | grep -oE 'by @[A-Za-z0-9_-]+' | sed 's/^by //
 AUTO_TAIL="$(printf '%s\n' "$AUTO" | awk '/^## New Contributors/{f=1} f' || true)"
 [[ -z "$AUTO_TAIL" ]] && AUTO_TAIL="$(printf '%s\n' "$AUTO" | grep '^\*\*Full Changelog' || true)"
 
-# --- Plain text for Sparkle / appcast / latest.json. --------------------------
+# --- Plain text for the Sparkle dialog and appcast. ---------------------------
 cp "$SRC_TXT" "$TXT"
 if [[ -n "$CONTRIB" ]]; then
   printf '\nThanks: %s\n' "$(printf '%s\n' "$CONTRIB" | paste -sd, - | sed 's/,/, /g')" >> "$TXT"

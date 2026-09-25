@@ -1,0 +1,11 @@
+{
+  "version": "1.20.2",
+  "notes": "Fixes:\n- With the Antigravity CLI signed out, TokenBar could open a Google sign-in page on every refresh. When the Antigravity IDE is closed and no Gemini CLI login is available, TokenBar asks the agy CLI for quota instead. Signed out, that command opens a browser tab for Google sign-in and waits, and TokenBar ran it on every refresh: once a minute with the popover open. TokenBar now checks that agy's login item exists in the Keychain before running it, and skips the CLI when it does not. Only the item's presence and modification date are read, never the token. If agy runs and still fails, it is not run again until you sign in to agy again or restart TokenBar; until then the Antigravity card shows the error from the other routes.\n",
+  "pub_date": "2026-09-24T02:27:18Z",
+  "platforms": {
+    "darwin-aarch64": {
+      "signature": "dW50cnVzdGVkIGNvbW1lbnQ6IHNpZ25hdHVyZSBmcm9tIHRhdXJpIHNlY3JldCBrZXkKUlVSOHdrbVZqaHg3S2JtSUp6VTNpSmMyL2U3MkhwS1NkbmRjTDhmR095Y0FkRjJZUUw1cXdDZXVzQ1gyM2FnY1dSdXRqMkppbjBDT3VxSm43RmRIUUQxR3UvT1hXYkNZT0FjPQp0cnVzdGVkIGNvbW1lbnQ6IHRpbWVzdGFtcDoxNzkwMjE2ODM4CWZpbGU6VG9rZW5CYXIuYXBwLnRhci5negozenIrM0FUZ2VXRm9aTkVGWDJFNnJKNTFuSy9KZHN1U1ovUytUYkdlcHdHVlNnS2p5cXdvbTFqZkxFRnR4TUh1bEFXeFpQZmZ4Ulg3ZEYwd3JLU3JEZz09Cg==",
+      "url": "https://github.com/Nanako0129/TokenBar/releases/download/v1.20.2/TokenBar.app.tar.gz"
+    }
+  }
+}

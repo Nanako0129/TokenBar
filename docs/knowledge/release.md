@@ -62,7 +62,7 @@ Either form triggers the workflow identically — `push: tags: ["v*"]`, with the
 | Native app bundle | `.github/workflows/release.yml` and `scripts/bundle.sh` | Bundle launches and is ad-hoc signed as expected |
 | Sparkle archive/signature | Release workflow and Sparkle tools | EdDSA signature verifies against the published archive |
 | GitHub Release body | Hand-written `release-notes/<tag>.md`, assembled by `release_notes.sh` with GitHub's contributor tail | Body has accurate changes, links, and contribution credit |
-| Sparkle / appcast / `latest.json` text | Hand-written `release-notes/<tag>.txt`, assembled by `release_notes.sh` with the `Thanks:` credit line | Same change set as the body, no markdown, figures agree with it |
+| Sparkle / appcast text | Hand-written `release-notes/<tag>.txt`, assembled by `release_notes.sh` with the `Thanks:` credit line | Same change set as the body, no markdown, figures agree with it |
 | `appcast.xml` | `scripts/make_appcast.sh` and generated feed | XML parses, old items remain, channel semantics are correct |
 | Homebrew cask | Release workflow generator plus tap repository | Version, URL, checksum, and style match the published asset |
 | Install count | `update-install-count.yml` | Orphan badge branch contains the current filtered asset count |
@@ -109,7 +109,7 @@ CI runs `scripts/bundle.sh` on pushes to `main` through `make selftest-bundled`,
 
 ## Legacy and beta migration
 
-The shipped native app replaced the archived Tauri app at the stable bundle identity. Stable releases may carry a legacy updater metadata artifact so remaining users can cross the old app boundary. The retired beta bridge cannot install a stable bundle with a different filename and bundle identity through Sparkle; its supported path is the in-app Switch action that installs the stable cask and lets the stable app migrate settings on first launch.
+The shipped native app replaced the archived Tauri app at the stable bundle identity. Stable releases re-upload a frozen legacy updater manifest, `scripts/legacy/tauri-latest.json` (the v1.20.2 `latest.json`, byte for byte, checked against a literal sha256 in `release.yml`), so a remaining Tauri install still lands on the v1.20.2 native build and Sparkle takes over from there; release notes no longer reach it, and the Tauri signing key is no longer used. The retired beta bridge cannot install a stable bundle with a different filename and bundle identity through Sparkle; its supported path is the in-app Switch action that installs the stable cask and lets the stable app migrate settings on first launch.
 
 > **Bridge rule：** A bridge update error that says “improperly signed” can be a bundle-selection failure rather than a cryptographic failure. For the retired bridge population, use the in-app Switch path or the documented Homebrew install path; do not promise cross-identity Sparkle installation.
 
