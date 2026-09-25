@@ -268,6 +268,15 @@ enum GlassPanelStyle {
     static let segmentThumbDark = Color.white.opacity(0.18)
     static let segmentThumbLight = Color.white.opacity(0.90)
     static let segmentThumbShadow: Double = 0.15
+    /// Tab-row selection thumb (client tabs, lens tabs) under the panel. A
+    /// share of `.primary`, not `.quaternary`: over a bright wallpaper the glass
+    /// turns its content dark while the app stays in dark mode, and
+    /// `.quaternary` kept resolving for dark mode, so the thumb went dark gray
+    /// behind black labels (seen 2026-09-26). `.primary` follows the label
+    /// color the glass chose, so the thumb is a light lift under light
+    /// content and a dark one under dark content. 0.14 is the first value the
+    /// maintainer accepted on the live panel.
+    static let tabThumbShare: Double = 0.14
     /// Selection thumb slide (segmented pickers, tab rows) and the crossfade
     /// or reflow of a card's content when its header toggle changes.
     static let selectionSlide: TimeInterval = 0.25
@@ -358,7 +367,8 @@ struct SelectionBackground<S: Shape>: ViewModifier {
         if inGlassPanel {
             content.background {
                 if isSelected {
-                    shape.fill(.quaternary).matchedGeometryEffect(id: "thumb", in: namespace)
+                    shape.fill(Color.primary.opacity(GlassPanelStyle.tabThumbShare))
+                        .matchedGeometryEffect(id: "thumb", in: namespace)
                 }
             }
         } else {
