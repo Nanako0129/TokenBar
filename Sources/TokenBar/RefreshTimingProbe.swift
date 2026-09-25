@@ -47,12 +47,24 @@ enum RefreshTimingProbe {
 
         t = DispatchTime.now()
         let poll = Task { await model.pollAgentUsage() }
-        while model.agentUsage == nil { try? await Task.sleep(nanoseconds: 50_000_000) }
+        // Settled without a payload means the fetch failed, and the poll would
+        // only retry after its interval; the deadline covers a fetch that never
+        // settles. Either way there is nothing to time, so say so and stop.
+        let deadline = DispatchTime.now().uptimeNanoseconds + 120 * 1_000_000_000
+        while model.agentUsage == nil, !model.agentUsageAttempted,
+              DispatchTime.now().uptimeNanoseconds < deadline {
+            try? await Task.sleep(nanoseconds: 50_000_000)
+        }
         poll.cancel()
+        guard model.agentUsage != nil else {
+            FileHandle.standardError.write(Data("refresh-timing: no quota payload (fetch failed or timed out after 120s)\n".utf8))
+            exit(1)
+        }
         print(String(format: "first quota payload          %8.1f ms", ms(t)))
 
         let args = CommandLine.arguments
-        let client = args.firstIndex(of: "--client").map { args[$0 + 1] } ?? "claude"
+        let client = args.firstIndex(of: "--client")
+            .flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil } ?? "claude"
         model.windowUsageClient = client
         print("client                       \(client)")
 
