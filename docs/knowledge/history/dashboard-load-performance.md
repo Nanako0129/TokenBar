@@ -118,6 +118,21 @@ sample <pid> 25 1 -file <輸出路徑>
 
 ---
 
+## 同時進來的 graph 請求合併成一次（2026-09-25）
+
+`--launch-timeline` 照面板打開時的方式同時啟動所有工作，才看出這個問題；各階段依序單獨量時看不到。app 啟動時系統匣的標題刷新會先做一次強制重讀（`AppDelegate.startTitleRefresh`，`lastFullRefresh` 初始為 `.distantPast`），面板打開時主模型的 `load()` 與依訂閱歸屬的序列（`AttributedSeriesModel.load`）又各發一次 `graph(year: nil)`。`tb_graph` 有快取，但同時進來的呼叫全部落空，各自完整重算。
+
+| 情境（release、真實資料、3 對交錯） | 修正前 graph | 修正後 graph |
+|---|---|---|
+| 面板打開時的完整工作組 | 5.6／3.7／4.6 秒 | 2.4／2.2／2.1 秒 |
+| graph＋依訂閱序列＋系統匣強制重讀 | 2.6／7.2／2.6 秒 | 2.5／2.3／3.2 秒 |
+
+第一組三對全部改善，而且修正後 graph 與序列在同一刻完成（共用同一次計算）。第二組不一致，只有一對改善，不宣稱量級。額度資料在兩邊都有 19–25 秒的離群值，是網路端的變異，這組資料對它不下結論。
+
+修法在 `crates/tb_core_ffi/src/lib.rs` 的 `graph_shared`／`shared_compute`：同一年份、同一 root generation 的計算同時只跑一次，`tb_graph` 加入進行中的計算，`tb_refresh_graph` 一定自己重算。領頭的計算失敗或 panic 時，等待者拿到錯誤而不是卡住。
+
+---
+
 ## 引擎批次平行解析（尚未進 app）
 
 在 `tokscale-core` 的 main 上（#6）。TokenBar 的 `vendor/tokscale-core` pin 在本文最後驗證時仍指向 `5546bd5`，所以**這個改善不在 app 裡**。要出貨得由另一個 TokenBar 變更推進 reviewed gitlink，並在該 PR 產生驗收證據。
