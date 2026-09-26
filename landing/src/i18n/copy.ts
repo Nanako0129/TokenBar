@@ -93,6 +93,7 @@ const en = {
     gaugeLow: 'under 10%',
     gaugesLabel: 'Menu-bar gauge states',
     menuBar: 'Menu bar',
+    menuBarAlt: 'Syrtis in the menu bar: a ring gauge and 63% quota left',
   },
   resets: {
     h2: 'Measuring the day',
@@ -218,6 +219,7 @@ const zhTw: typeof en = {
     gaugeLow: '低於 10%',
     gaugesLabel: '選單列量表狀態',
     menuBar: '選單列',
+    menuBarAlt: '選單列上的 Syrtis：環形量表與剩餘額度 63%',
   },
   resets: {
     h2: '測量行星的一天',

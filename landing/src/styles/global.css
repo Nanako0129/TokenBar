@@ -156,6 +156,9 @@ figure figcaption { margin-top: 0.6rem; font-size: 0.86rem; color: var(--faint);
 }
 .pending b { display: block; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; }
 .pending.bar-strip { aspect-ratio: auto; min-height: 7rem; }
+/* The real menu-bar capture, at actual size on a strip like the placeholder had. */
+.bar-strip-shot { display: flex; align-items: center; justify-content: center; min-height: 7rem; border: 1px solid var(--line); border-radius: 14px; background: var(--surface); }
+.bar-strip-shot img { display: block; border-radius: 6px; }
 
 .gauges { display: flex; gap: 1.6rem; flex-wrap: wrap; align-items: flex-end; }
 .gauge { display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
