@@ -1,0 +1,22 @@
+---
+import { t, type Locale } from '../i18n/copy'
+import DepthRuler from './DepthRuler.astro'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const c = t(locale)
+const essayHref = `${import.meta.env.BASE_URL}${locale === 'en' ? '' : 'zh-tw/'}why-syrtis/`
+---
+
+<section class="stratum" id="name">
+  <DepthRuler locale={locale} index={4} />
+  <div class="content">
+    <h2>{c.name.h2}</h2>
+    <p>{c.name.body}</p>
+    <p><a href={essayHref}>{c.name.link}</a></p>
+    <div class="credits">
+      <div class="credit"><a href="https://github.com/junhoyeo/tokscale">tokscale</a><span>{c.credit.tokscale}</span></div>
+      <div class="credit"><a href="https://github.com/handlecusion/tokcat">tokcat</a><span>{c.credit.tokcat}</span></div>
+      <div class="credit"><a href="https://kyome.io/runcat/">RunCat</a><span>{c.credit.RunCat}</span></div>
+      <div class="credit"><a href="https://github.com/steipete/CodexBar">CodexBar</a><span>{c.credit.CodexBar}</span></div>
+    </div>
+  </div>
+</section>

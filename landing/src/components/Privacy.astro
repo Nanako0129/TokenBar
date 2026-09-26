@@ -1,37 +1,18 @@
 ---
 import { t, type Locale } from '../i18n/copy'
+import DepthRuler from './DepthRuler.astro'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
-const c = t(locale).privacy
-const pillars = c.pillars.map((p, i) => ({ k: `0${i + 1}`, ...p }))
+const c = t(locale)
 ---
 
-<section class="section privacy" id="privacy">
-  <div class="container">
-    <div class="section-head reveal">
-      <p class="eyebrow">{c.eyebrow}</p>
-      <h2>{c.h2}</h2>
-      <p>{c.intro}</p>
-    </div>
+<section class="stratum" id="privacy">
+  <DepthRuler locale={locale} index={3} />
+  <div class="content">
+    <h2>{c.privacy.h2}</h2>
     <div class="pillars">
-      {pillars.map((p, i) => (
-        <div class="pillar glass reveal" style={`--rd: ${i * 0.09}s;`}>
-          <span class="k mono">{p.k}</span>
-          <h3>{p.title}</h3>
-          <p>{p.body}</p>
-        </div>
-      ))}
+      <div class="pillar"><h3>{c.privacy.p1t}</h3><p>{c.privacy.p1b}</p></div>
+      <div class="pillar"><h3>{c.privacy.p2t}</h3><p>{c.privacy.p2b}</p></div>
+      <div class="pillar"><h3>{c.privacy.p3t}</h3><p>{c.privacy.p3b}</p></div>
     </div>
   </div>
 </section>
-
-<style>
-  .pillars { display: grid; grid-template-columns: repeat(3, 1fr); gap: 18px; }
-  .pillar { padding: 28px 26px; }
-  .pillar .k {
-    font-size: 13px; color: var(--accent); letter-spacing: .1em;
-    display: block; margin-bottom: 18px;
-  }
-  .pillar h3 { font-size: 21px; margin-bottom: 10px; }
-  .pillar p { color: var(--muted); font-size: 15px; }
-  @media (max-width: 820px) { .pillars { grid-template-columns: 1fr; } }
-</style>

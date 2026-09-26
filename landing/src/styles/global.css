@@ -1,219 +1,252 @@
-/* ============================================================================
-   Syrtis landing — design system
-   "Liquid Glass mirror": the page *is* a Mac desktop. An aurora wallpaper
-   (violet blobs, pink + data-cyan collisions — not a linear gradient), a real
-   28px menu bar pinned on top, and every content block floating as a glass
-   panel — the same scrim + blur recipe the native app uses.
-   ========================================================================== */
-
+/* Ported from the Syrtis prototype (`.agent-local/syrtis/landing/template3.html`,
+   prototype B). Structure, values, and comments carried over verbatim; only
+   the two hard-coded lang-toggle rules are dropped since Astro now renders
+   one locale per page instead of switching client-side. */
 :root {
-  /* provider palette — mirrors src/lib/modelColors.ts; drives all data color */
-  --p-anthropic: #da7756;
-  --p-openai: #10a37f;
-  --p-google: #06b6d4;
-  --p-cursor: #a855f7;
-  --p-deepseek: #4d6bfe;
-  --p-meta: #0866ff;
-  --p-mistral: #fa520f;
-  --p-xai: #8b94a3;
-
-  /* primary accent = iris violet (from the avatar's purple X hairpin) */
-  --accent: #7c6cff;
-  --accent-bright: #9b8cff;
-  --accent-deep: #5b46d6;
-  --accent-pink: #ff5d8f; /* secondary, from the avatar's flag/blush pink */
-  --on-accent: #161228; /* dark ink for text sitting on the bright accent */
-
-  /* quota gauge palette — mirrors TrayIcons.gaugeColor */
-  --gauge-ok: #21c45e;
-  --gauge-warn: #f59e0b;
-  --gauge-low: #f04545;
-
-  /* dark desktop (default) */
-  --bg: #08070d;
-  --panel: #15131f; /* no-backdrop-filter fallback only */
-  --line: rgba(255, 255, 255, 0.09);
-  --line-strong: rgba(255, 255, 255, 0.16);
-  --ink: #f0eff5;
-  --ink-dim: #c6c5d4;
-  --muted: #9a98ad;
-  --faint: #5e5c70;
-
-  /* liquid glass recipe — mirrors the app: scrim over blur, hairline, top sheen */
-  --glass-scrim: rgba(12, 11, 20, 0.4);
-  --glass-scrim-deep: rgba(10, 9, 17, 0.56);
-  --glass-edge: rgba(255, 255, 255, 0.14);
-  --glass-sheen: rgba(255, 255, 255, 0.1);
-  --glass-shadow: 0 24px 70px -30px rgba(0, 0, 0, 0.75);
-
-  --font-display: 'Bricolage Grotesque Variable', 'Hanken Grotesk Variable', system-ui, sans-serif;
-  --font-body: 'Hanken Grotesk Variable', system-ui, -apple-system, sans-serif;
-  --font-mono: 'JetBrains Mono Variable', ui-monospace, 'SF Mono', Menlo, monospace;
-
-  --radius: 20px;
-  --radius-sm: 12px;
-  --maxw: 1140px;
-  --menubar-h: 30px;
+  --bg: #F3F5F4;
+  --surface: #FFFFFF;
+  --text: #13201E;
+  --muted: #536663;
+  /* Critique 2026-09-25: #7F918E measured 3.02:1 on --bg and carried the
+     install warning. #5F716E is the lightest step that clears 4.5:1. */
+  --faint: #5F716E;
+  --teal: #1B5E56;
+  --sand: #BD9F5F;
+  --sand-ink: #85692C;
+  --line: #D6DFDD;
+  --line-strong: #AFBEBB;
+  --water: 27, 94, 86;
+  --display: "GFS Didot", "Didot", "Bodoni 72", "Times New Roman", serif;
+  --sans: "Hanken Grotesk", -apple-system, "Segoe UI", "PingFang TC", "Microsoft JhengHei", sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  --lens-step: 30vh;
 }
-
-@media (prefers-color-scheme: light) {
-  :root {
-    --bg: #e9e6f4;
-    --panel: #f7f6fc;
-    --line: rgba(28, 22, 48, 0.1);
-    --line-strong: rgba(28, 22, 48, 0.18);
-    --ink: #1b1726;
-    --ink-dim: #3d3850;
-    --muted: #6c6781;
-    --faint: #a4a0b5;
-    --accent: #6849e0;
-    --accent-bright: #7c6cff;
-    --accent-deep: #4f37c4;
-    --accent-pink: #e84d80;
-    --on-accent: #ffffff;
-    --glass-scrim: rgba(255, 255, 255, 0.42);
-    --glass-scrim-deep: rgba(255, 255, 255, 0.6);
-    --glass-edge: rgba(255, 255, 255, 0.6);
-    --glass-sheen: rgba(255, 255, 255, 0.85);
-    --glass-shadow: 0 24px 60px -30px rgba(56, 36, 110, 0.4);
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #0B1514; --surface: #111E1D; --text: #E3EAE8; --muted: #93A8A4; --faint: #7D928E;
+    --teal: #56B7A6; --sand: #C7A751; --sand-ink: #D9BD74; --line: #1F302D; --line-strong: #33483F;
+    --water: 86, 183, 166;
   }
 }
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #0B1514; --surface: #111E1D; --text: #E3EAE8; --muted: #93A8A4; --faint: #7D928E;
+  --teal: #56B7A6; --sand: #C7A751; --sand-ink: #D9BD74; --line: #1F302D; --line-strong: #33483F;
+  --water: 86, 183, 166;
+}
 
-* { box-sizing: border-box; margin: 0; padding: 0; }
-
-html { scroll-behavior: smooth; scroll-padding-top: 48px; -webkit-text-size-adjust: 100%; }
-
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
 body {
-  font-family: var(--font-body);
+  margin: 0;
   background: var(--bg);
-  color: var(--ink);
-  line-height: 1.6;
-  font-size: 17px;
+  color: var(--text);
+  font: 400 17px/1.7 var(--sans);
   -webkit-font-smoothing: antialiased;
-  text-rendering: optimizeLegibility;
-  overflow-x: hidden;
-  position: relative;
 }
+::selection { background: color-mix(in srgb, var(--sand) 45%, transparent); color: var(--text); }
+a { color: var(--teal); text-underline-offset: 3px; text-decoration-thickness: 1px; }
+a:focus-visible, button:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; border-radius: 3px; }
+img { max-width: 100%; display: block; }
 
-/* ---------------------------------------------------------------------------
-   The wallpaper: aurora blobs (accent / pink / deep violet / a data-cyan spark)
-   drifting very slowly. Oversized + fixed so the drift never exposes an edge.
-   -------------------------------------------------------------------------- */
-body::before {
-  content: '';
-  position: fixed;
-  inset: -22%;
-  z-index: -2;
+.wrap { max-width: 72rem; margin: 0 auto; padding-inline: 20px; }
+
+/* ---- top bar ---- */
+.bar { display: flex; align-items: center; justify-content: space-between; gap: 1rem; padding-block: 1.1rem; }
+.brand { display: flex; align-items: center; gap: 0.55rem; font-weight: 600; letter-spacing: 0.01em; color: var(--text); text-decoration: none; }
+.brand img { width: 28px; height: 28px; }
+.bar nav { display: flex; gap: 1.2rem; font-size: 0.9rem; }
+.bar nav a, .bar .gh { color: var(--muted); text-decoration: none; }
+.bar nav a:hover, .bar .gh:hover { color: var(--text); }
+.bar-end { display: flex; align-items: center; gap: 1rem; font-size: 0.9rem; }
+.seg { display: inline-flex; border: 1px solid var(--line-strong); border-radius: 999px; padding: 2px; background: var(--surface); }
+.seg a, .seg button { font: 600 0.78rem/1 var(--sans); border: 0; background: none; color: var(--muted); padding: 0.45rem 0.75rem; border-radius: 999px; cursor: pointer; text-decoration: none; display: inline-block; }
+.seg a[aria-current="true"], .seg button[aria-pressed="true"], .seg button[aria-selected="true"] { background: var(--teal); color: var(--bg); }
+
+/* ---- stratigraphic column: every section sits on a depth ruler, with a
+   depth reading (10^n tokens) and its stratum name. The user asked for the
+   readings back on 2026-09-26 after the critique pass had removed them;
+   the stratum names are now copy slots so the Chinese page is Chinese. ---- */
+.stratum { display: grid; grid-template-columns: 6.5rem minmax(0, 1fr); gap: 0 2.2rem; padding-block: 4.5rem; }
+.ruler {
+  position: relative;
+  border-right: 1px solid var(--line-strong);
   background:
-    radial-gradient(38% 34% at 24% 26%, color-mix(in oklab, var(--accent) 34%, transparent), transparent 70%),
-    radial-gradient(30% 28% at 80% 14%, color-mix(in oklab, var(--accent-pink) 17%, transparent), transparent 70%),
-    radial-gradient(46% 40% at 72% 76%, color-mix(in oklab, var(--accent-deep) 38%, transparent), transparent 72%),
-    radial-gradient(22% 20% at 42% 88%, color-mix(in oklab, var(--p-google) 12%, transparent), transparent 70%),
-    radial-gradient(26% 24% at 8% 70%, color-mix(in oklab, var(--accent-deep) 22%, transparent), transparent 70%),
-    var(--bg);
-  animation: aurora 120s ease-in-out infinite alternate;
-  will-change: transform;
+    repeating-linear-gradient(to bottom, transparent 0 27px, var(--line-strong) 27px 28px) right top / 7px 100% no-repeat,
+    repeating-linear-gradient(to bottom, transparent 0 139px, var(--line-strong) 139px 140px) right top / 14px 100% no-repeat;
 }
-@keyframes aurora {
-  from { transform: translate3d(-1.5%, -1%, 0) scale(1); }
-  50% { transform: translate3d(1%, 1.5%, 0) scale(1.04); }
-  to { transform: translate3d(2%, -0.5%, 0) scale(1); }
+.depth {
+  position: sticky; top: 1.25rem;
+  display: flex; flex-direction: column; gap: 0.15rem;
+  padding-right: 1.3rem; text-align: right;
+  font: 500 0.78rem/1.3 var(--mono); color: var(--faint);
+  font-variant-numeric: tabular-nums;
 }
+.depth b { font-weight: 500; color: var(--sand-ink); font-size: 0.95rem; }
+.depth sup { font-size: 0.68em; line-height: 0; vertical-align: 0.5em; margin-left: 0.05em; }
+.content { display: flex; flex-direction: column; gap: 1.4rem; min-width: 0; }
 
-/* fine grain so the glass has something to bite on */
-body::after {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  pointer-events: none;
-  opacity: 0.05;
-  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+h1, h2, h3 { font-family: var(--display); font-weight: 400; margin: 0; text-wrap: balance; letter-spacing: -0.005em; }
+h2 { font-size: clamp(2rem, 4.2vw, 3rem); line-height: 1.12; }
+h3 { font-size: 1.45rem; line-height: 1.2; }
+p { margin: 0; max-width: 40rem; }
+.lede { font-size: 1.12rem; color: var(--muted); }
+.muted { color: var(--muted); }
+
+.strata { display: flex; flex-direction: column; gap: 3px; }
+.strata span { display: block; height: 1px; background: var(--line); }
+.strata span:nth-child(1) { height: 3px; background: var(--line-strong); }
+.strata span:nth-child(2) { width: 84%; }
+.strata span:nth-child(3) { height: 2px; width: 58%; }
+.strata span:nth-child(4) { width: 31%; }
+
+/* ---- hero ---- */
+.hero { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 2.5rem; align-items: center; padding-block: 2.5rem 1.5rem; }
+.greek { font-family: var(--display); font-size: clamp(4.4rem, 12vw, 6rem); line-height: 0.92; color: var(--teal); letter-spacing: 0.01em; }
+.gloss { font-size: 0.9rem; color: var(--muted); margin-top: 0.6rem; }
+.hero h1 { font-size: clamp(2.1rem, 4.6vw, 3.3rem); line-height: 1.08; margin-top: 1.6rem; }
+.hero .lede { margin-top: 1rem; }
+.works { margin-top: 1rem; font-size: 0.92rem; color: var(--muted); }
+
+/* ---- install: one component, rendered in the hero and at the end ---- */
+.install { margin-top: 1.6rem; display: flex; flex-direction: column; gap: 0.7rem; max-width: 36rem; }
+.install .os-switch { align-self: flex-start; }
+.panel { display: flex; flex-direction: column; gap: 0.55rem; }
+.panel[hidden] { display: none; }
+.cmd {
+  display: flex; align-items: center; gap: 0.6rem; max-width: 100%;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
+  padding: 0.55rem 0.55rem 0.55rem 0.9rem;
 }
-
-h1, h2, h3 { font-family: var(--font-display); font-weight: 700; line-height: 1.02; letter-spacing: -0.02em; }
-
-a { color: inherit; text-decoration: none; }
-
-::selection { background: color-mix(in oklab, var(--accent) 45%, transparent); color: var(--ink); }
-
-.container { width: min(100% - 40px, var(--maxw)); margin-inline: auto; }
-
-.mono { font-family: var(--font-mono); font-feature-settings: 'tnum' 1; }
-
-.eyebrow {
-  font-family: var(--font-mono);
-  font-size: 12px;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--accent-bright);
-}
-@media (prefers-color-scheme: light) {
-  .eyebrow { color: var(--accent); }
-}
-
-/* ---------------------------------------------------------------------------
-   .glass — the app's card recipe, verbatim: scrim + blur(22) saturate(1.4),
-   1px hairline, top inner sheen, soft drop. NEVER nest .glass inside .glass
-   (renders as a murky slab in the app too); in-card controls use translucent
-   primary fills instead.
-   -------------------------------------------------------------------------- */
-.glass {
-  position: relative;
-  border-radius: var(--radius);
-  border: 1px solid var(--glass-edge);
-  background: var(--glass-scrim);
-  -webkit-backdrop-filter: blur(22px) saturate(1.4);
-  backdrop-filter: blur(22px) saturate(1.4);
-  box-shadow: inset 0 1px 0 var(--glass-sheen), var(--glass-shadow);
-}
-.glass-deep { background: var(--glass-scrim-deep); }
-@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
-  .glass { background: var(--panel); }
-}
-
-/* translucent fills for controls living *inside* glass (no nested blur) */
-.quiet-fill { background: color-mix(in oklab, var(--ink) 8%, transparent); }
-.quiet-fill-strong { background: color-mix(in oklab, var(--ink) 14%, transparent); }
-
-/* shared section rhythm — generous air between floating panels */
-.section { padding: clamp(84px, 12vw, 168px) 0; position: relative; }
-.section-head { max-width: 640px; margin-bottom: 48px; }
-.section-head h2 { font-size: clamp(30px, 5vw, 50px); margin: 14px 0 16px; }
-.section-head p { color: var(--muted); font-size: 18px; }
-
-/* buttons */
+.cmd code { font: 500 0.86rem/1.5 var(--mono); overflow-x: auto; white-space: pre; flex: 1; min-width: 0; }
 .btn {
-  display: inline-flex; align-items: center; gap: 9px;
-  font-family: var(--font-mono); font-size: 14px; font-weight: 600;
-  padding: 13px 20px; border-radius: 999px;
-  border: 1px solid transparent; cursor: pointer;
-  transition: transform .18s ease, box-shadow .18s ease, background .18s ease, border-color .18s;
+  font: 600 0.84rem/1 var(--sans); color: var(--bg); background: var(--teal);
+  border: 0; border-radius: 6px; padding: 0.6rem 0.85rem; cursor: pointer; white-space: nowrap; text-decoration: none; display: inline-block;
 }
-.btn-primary {
-  background: linear-gradient(180deg, var(--accent-bright), var(--accent));
-  color: var(--on-accent);
-  box-shadow: 0 10px 28px -10px color-mix(in oklab, var(--accent) 70%, transparent);
-}
-.btn-primary:hover { transform: translateY(-2px); box-shadow: 0 16px 34px -12px color-mix(in oklab, var(--accent) 80%, transparent); }
-.btn-ghost { border-color: var(--line-strong); color: var(--ink); }
-.btn-ghost:hover { border-color: var(--accent); color: var(--accent-bright); transform: translateY(-2px); }
+.btn.ghost { background: none; color: var(--teal); border: 1px solid var(--line-strong); }
+.btns { display: flex; gap: 0.6rem; flex-wrap: wrap; }
+.note { font-size: 0.86rem; color: var(--faint); }
+.alt { font-size: 0.9rem; }
+.copied-hint { font-size: 0.82rem; color: var(--sand-ink); }
+.copied-hint:empty { display: none; }
 
-/* load-time reveal (hero only) */
-@keyframes rise { from { opacity: 0; transform: translateY(16px); } to { opacity: 1; transform: none; } }
-.rise { opacity: 0; animation: rise .7s cubic-bezier(.22,.61,.36,1) forwards; }
-
-/* scroll-time reveal — Base.astro's IntersectionObserver flips on .in;
-   stagger children with --rd (reveal delay) */
-.reveal {
-  opacity: 0;
-  transform: translateY(26px);
-  transition: opacity .8s ease var(--rd, 0s), transform .8s cubic-bezier(.22,.61,.36,1) var(--rd, 0s);
+.shoal { position: relative; aspect-ratio: 5 / 4; width: 100%; max-width: 100%; margin: 0; }
+.shoal canvas { width: 100%; height: 100%; display: block; border-radius: 4px; }
+.shoal figcaption {
+  position: absolute; left: 0.8rem; top: 0.8rem;
+  padding: 0.3rem 0.6rem; border-radius: 6px;
+  background: color-mix(in srgb, var(--bg) 82%, transparent);
+  border: 1px solid var(--line);
+  font: 500 0.85rem/1.3 var(--mono); color: var(--sand-ink); font-variant-numeric: tabular-nums;
+  max-width: calc(100% - 1.6rem); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
-.reveal.in { opacity: 1; transform: none; }
 
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation: none !important; transition: none !important; }
-  html { scroll-behavior: auto; }
-  .rise, .reveal { opacity: 1 !important; transform: none !important; }
+/* ---- figures ---- */
+.pair { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.8fr); gap: 2.4rem; align-items: start; }
+figure { margin: 0; }
+.shot { border-radius: 14px; overflow: hidden; border: 1px solid var(--line); background: var(--surface); width: fit-content; max-width: 100%; }
+figure figcaption { margin-top: 0.6rem; font-size: 0.86rem; color: var(--faint); }
+/* Honest placeholders until the v2.0 captures exist. */
+.pending {
+  display: grid; place-items: center; text-align: center; padding: 1.5rem;
+  aspect-ratio: 4 / 3; border: 1px dashed var(--line-strong); border-radius: 14px;
+  color: var(--faint); font-size: 0.9rem; background: var(--surface);
 }
+.pending b { display: block; color: var(--muted); font-weight: 600; margin-bottom: 0.3rem; }
+.pending.bar-strip { aspect-ratio: auto; min-height: 7rem; }
+
+.gauges { display: flex; gap: 1.6rem; flex-wrap: wrap; align-items: flex-end; }
+.gauge { display: flex; flex-direction: column; gap: 0.4rem; font-size: 0.82rem; color: var(--muted); }
+.bars { display: flex; gap: 3px; align-items: flex-end; height: 22px; }
+.bars i { width: 5px; background: var(--line-strong); border-radius: 1px; }
+.bars.ok i.on { background: var(--teal); }
+.bars.warn i.on { background: #B8741E; }
+.bars.low i.on { background: #C8463A; }
+
+blockquote {
+  margin: 0; padding: 0.2rem 0 0.2rem 1.2rem; border-left: 1px solid var(--sand);
+  font-family: var(--display); font-size: clamp(1.35rem, 2.6vw, 1.8rem); line-height: 1.35; max-width: 34rem;
+}
+blockquote cite { display: block; margin-top: 0.6rem; font-family: var(--sans); font-size: 0.86rem; color: var(--faint); font-style: normal; }
+
+.pillars { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1.6rem 2.2rem; }
+.pillar { display: flex; flex-direction: column; gap: 0.4rem; }
+.pillar h3 { font-family: var(--sans); font-size: 1.02rem; font-weight: 600; }
+.pillar p { font-size: 0.93rem; color: var(--muted); line-height: 1.6; }
+
+.credits { display: grid; grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr)); gap: 1.2rem 1.6rem; }
+.credit { display: flex; flex-direction: column; gap: 0.2rem; font-size: 0.9rem; }
+.credit a { font-weight: 600; text-decoration: none; }
+.credit span { color: var(--muted); line-height: 1.55; }
+
+.closing { padding-block: 4.5rem; display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 2.5rem; align-items: start; border-top: 1px solid var(--line); }
+.closing .install { margin-top: 0; }
+
+footer { padding-block: 2.5rem 3.5rem; border-top: 1px solid var(--line); display: flex; justify-content: space-between; gap: 1rem 2rem; flex-wrap: wrap; font-size: 0.88rem; color: var(--faint); }
+footer nav { display: flex; gap: 1.2rem; flex-wrap: wrap; }
+
+/* ---- lens explorer: the list picks the screenshot ---- */
+.explorer { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.85fr); gap: 2.4rem; align-items: start; }
+.explorer h3 { grid-column: 1 / -1; }
+.lenses { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.lens {
+  all: unset; box-sizing: border-box; cursor: pointer; position: relative;
+  display: grid; grid-template-columns: 0.9rem minmax(0, 1fr); gap: 0 0.7rem;
+  padding: 0.65rem 0.6rem 0.65rem 0; border-bottom: 1px solid var(--line);
+}
+.lens::before { content: ""; width: 0.45rem; height: 0.45rem; margin-top: 0.55rem; border-radius: 50%; border: 1.5px solid var(--line-strong); transition: background-color .25s ease, border-color .25s ease; }
+/* How far to the next lens: the selected lens's bottom rule fills with sand
+   as the scroll moves through its step (--p, 0..1). */
+.lens::after { content: ""; position: absolute; left: 0; bottom: -1px; height: 2px; width: calc(var(--p, 0) * 100%); background: var(--sand); opacity: 0; transition: opacity .2s ease; }
+.lens[aria-selected="true"]::after { opacity: 1; }
+.lens[aria-selected="true"]::before { background: var(--sand); border-color: var(--sand); }
+.lens b { font-weight: 600; grid-column: 2; transition: color .25s ease; }
+.lens span { grid-column: 2; font-size: 0.9rem; color: var(--muted); line-height: 1.5; }
+.lens:hover b, .lens[aria-selected="true"] b { color: var(--teal); }
+.lens:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; border-radius: 4px; }
+.lensshot .stack { display: grid; }
+.lensshot .stack > * { grid-area: 1 / 1; opacity: 0; transition: opacity .32s ease; }
+.lensshot .stack > .front { opacity: 1; }
+.lensshot .shot { margin-inline: auto; }
+@media (prefers-reduced-motion: reduce) { .lensshot .stack > *, .lens::before, .lens b { transition: none; } }
+:lang(zh-Hant) h1, :lang(zh-Hant) h2, :lang(zh-Hant) h3, :lang(zh-Hant) blockquote { font-family: "GFS Didot", "Songti TC", "Noto Serif TC", serif; }
+:lang(zh-Hant) .pillar h3 { font-family: var(--sans); }
+
+/* Pinned on desktop: the explorer stays still while the wheel steps through
+   the lenses. Height comes from --lens-count, set inline from the number of
+   lens buttons, so adding a lens needs no CSS change. */
+@media (min-width: 861px) {
+  .scrolly { height: calc(100vh + var(--lens-count, 8) * var(--lens-step)); }
+  .pin { position: sticky; top: 0; height: 100vh; display: flex; align-items: center; }
+  .pin .explorer { width: 100%; }
+  .lensshot img { max-height: 80vh; width: auto; }
+  .lensshot .pending { height: min(80vh, 36rem); aspect-ratio: auto; }
+}
+@media (max-width: 860px) {
+  .hero, .pair, .explorer, .closing { grid-template-columns: minmax(0, 1fr); }
+  .stratum { grid-template-columns: minmax(0, 1fr); padding-block: 3rem; }
+  .ruler { border-right: 0; background: none; border-bottom: 1px solid var(--line-strong); padding-bottom: 0.5rem; }
+  .depth { position: static; flex-direction: row; gap: 0.6rem; text-align: left; padding-right: 0; align-items: baseline; }
+  .bar nav, .bar .gh { display: none; }
+  /* The picked screenshot stays in view above the list, so a tap shows. */
+  .lensshot { position: sticky; top: 0; z-index: 1; background: var(--bg); padding-block: 0.5rem; order: -1; }
+  .lensshot img { max-height: 46vh; width: auto; }
+  .lensshot .pending { height: 46vh; aspect-ratio: auto; }
+}
+
+/* ---- naming essay (/why-syrtis/): one reading column, figures centred ---- */
+.essay { max-width: 40rem; margin: 0 auto; padding-block: 3rem 5rem; }
+.essay h1 { font-size: clamp(2.2rem, 5vw, 3rem); line-height: 1.12; margin-top: 0.6rem; }
+.essay-dek { color: var(--muted); margin-top: 0.8rem; }
+.essay-body { line-height: 1.8; }
+.essay-body h2 { font-size: clamp(1.6rem, 3.2vw, 2rem); margin-top: 3rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
+.essay-body p, .essay-body ul { margin: 1rem 0; }
+.essay-body ul { padding-left: 1.2rem; }
+.essay-body li { margin: 0.8rem 0; }
+.essay-body strong { color: var(--teal); font-weight: 600; }
+.essay-body blockquote { margin: 1.4rem 0; }
+.essay-body figure { margin: 1.8rem 0; }
+.essay-body figure img { display: block; max-width: 100%; max-height: 30rem; width: auto; height: auto; margin: 0 auto; border-radius: 4px; }
+.essay-body figcaption { text-align: center; line-height: 1.55; }

@@ -1,38 +1,19 @@
 ---
+// Hero and footer both name the two platforms (requirement 1). No macOS
+// download link — Homebrew is the only macOS install path until the
+// post-v2.0 signing PR; the footer's "Source (macOS)" link points at the
+// repo itself, never `${repo}/releases`.
 import { t, type Locale } from '../i18n/copy'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
-const c = t(locale).footer
-const base = import.meta.env.BASE_URL
-const repo = 'https://github.com/Nanako0129/syrtis'
+const c = t(locale)
+const essayHref = `${import.meta.env.BASE_URL}${locale === 'en' ? '' : 'zh-tw/'}why-syrtis/`
 ---
 
-<footer class="footer">
-  <div class="container foot-inner">
-    <div class="foot-brand">
-      <a class="wordmark" href="#top"><img class="appicon" src={`${base}favicon.png`} alt="" width="22" height="22" />Syrtis</a>
-      <p>{c.tagline}</p>
-    </div>
-    <nav class="foot-links">
-      <a href={repo}>GitHub</a>
-      <a href={`${repo}/releases`}>Releases</a>
-      <a href={`${repo}/blob/main/README.md`}>README</a>
-      <a href={c.langSwitch.href === '/' ? base : `${base}${c.langSwitch.href.slice(1)}`}>{c.langSwitch.label}</a>
-    </nav>
-  </div>
-  <div class="container foot-base mono">
-    <span>{c.stamp}</span>
-    <span>{c.copyright}</span>
-  </div>
+<footer>
+  <span><span>{c.footer.text}</span><br /><span>{c.footer.platforms}</span></span>
+  <nav aria-label={c.footer.linksLabel}>
+    <a href="https://github.com/Nanako0129/syrtis">{c.footer.mac}</a>
+    <a href="https://github.com/Nanako0129/Syrtis-Windows">{c.footer.win}</a>
+    <a href={essayHref}>{c.footer.essay}</a>
+  </nav>
 </footer>
-
-<style>
-  .footer { border-top: 1px solid var(--line); padding: 56px 0 40px; margin-top: 40px; }
-  .foot-inner { display: flex; justify-content: space-between; gap: 32px; flex-wrap: wrap; align-items: flex-start; }
-  .foot-brand .wordmark { font-family: var(--font-display); font-weight: 800; font-size: 19px; display: inline-flex; align-items: center; gap: 9px; }
-  .foot-brand .appicon { width: 22px; height: 22px; display: block; }
-  .foot-brand p { color: var(--muted); font-size: 14px; margin-top: 10px; max-width: 34ch; }
-  .foot-links { display: flex; flex-wrap: wrap; gap: 8px 22px; font-size: 14px; }
-  .foot-links a { color: var(--muted); transition: color .15s; }
-  .foot-links a:hover { color: var(--accent-bright); }
-  .foot-base { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-top: 36px; padding-top: 22px; border-top: 1px solid var(--line); font-size: 12px; color: var(--faint); }
-</style>

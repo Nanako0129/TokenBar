@@ -1,117 +1,97 @@
 <!doctype html>
-<!-- The OG/embed card, v2: the landing hero in miniature — aurora wallpaper,
-     mini menu bar with the live status item, wordmark + pills on the left and
-     the real popover screenshot springing in from the right. Render with
-     ./render.sh (writes a *versioned* filename: bump it on every redesign so
-     every platform's scrape cache misses). -->
+<!-- OG embed card, 1200×630. Render with ./render.sh (headless Chrome), which
+     writes a *versioned* filename: bump it on every redesign so social
+     platforms re-scrape. Syrtis design: the landing page's dark palette and
+     display face, the frozen app icon, and a v2.0 capture of the Overview
+     lens. Text is the landing's approved hero line and gloss; the pills are
+     plain facts. -->
 <html lang="en">
 <head>
-<meta charset="utf-8" />
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,700;12..96,800&family=Hanken+Grotesk:wght@500;600&family=JetBrains+Mono:wght@500;600&display=swap" rel="stylesheet" />
+<meta charset="utf-8">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=GFS+Didot&family=Noto+Serif+TC:wght@400&family=Noto+Serif+SC:wght@400&family=Hanken+Grotesk:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
 <style>
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0B1514; --text: #E3EAE8; --muted: #93A8A4; --faint: #7D928E;
+    --teal: #56B7A6; --sand: #C7A751; --line: #1F302D; --line-strong: #33483F;
+  }
+  * { box-sizing: border-box; margin: 0; }
   html, body { width: 1200px; height: 630px; overflow: hidden; }
   body {
-    font-family: 'Hanken Grotesk', sans-serif;
-    color: #f0eff5;
     background:
-      radial-gradient(46% 42% at 18% 22%, rgba(124, 108, 255, 0.45), transparent 70%),
-      radial-gradient(34% 30% at 60% 8%, rgba(255, 93, 143, 0.18), transparent 70%),
-      radial-gradient(56% 50% at 82% 80%, rgba(91, 70, 214, 0.5), transparent 72%),
-      radial-gradient(24% 22% at 30% 92%, rgba(6, 182, 212, 0.15), transparent 70%),
-      #08070d;
+      radial-gradient(900px 520px at 88% 8%, rgba(86, 183, 166, 0.16), transparent 60%),
+      radial-gradient(700px 420px at 10% 105%, rgba(199, 167, 81, 0.10), transparent 60%),
+      var(--bg);
+    color: var(--text);
+    font-family: "Hanken Grotesk", -apple-system, sans-serif;
     position: relative;
   }
-  body::after {
-    content: ''; position: absolute; inset: 0; opacity: 0.05; pointer-events: none;
-    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.85' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
+  /* A few sediment lines along the bottom, like the landing's strata. */
+  .strata { position: absolute; left: 72px; right: 520px; bottom: 58px; display: grid; gap: 5px; }
+  .strata span { display: block; height: 1px; background: var(--line-strong); }
+  .strata span:nth-child(2) { width: 78%; background: var(--line); }
+  .strata span:nth-child(3) { width: 52%; height: 2px; background: rgba(199, 167, 81, 0.45); }
+  .strata span:nth-child(4) { width: 30%; background: var(--line); }
+
+  .left { position: absolute; left: 72px; top: 76px; width: 600px; }
+  .brand { display: flex; align-items: center; gap: 18px; }
+  .brand img { width: 78px; height: 78px; }
+  .greek { font-family: "GFS Didot", serif; font-size: 84px; line-height: 1; color: var(--teal); letter-spacing: 0.01em; }
+  /* One line: at 62px the last word wrapped alone ("settle."), which read awkwardly. */
+  h1 { font-family: "GFS Didot", serif; font-weight: 400; font-size: 54px; line-height: 1.08; margin-top: 34px; letter-spacing: -0.005em; white-space: nowrap; }
+  .gloss { margin-top: 18px; font-size: 21px; line-height: 1.45; color: var(--muted); max-width: 540px; }
+  .pills { display: flex; gap: 12px; margin-top: 30px; }
+  .pills span {
+    font: 500 17px/1 "JetBrains Mono", ui-monospace, monospace; color: var(--text);
+    padding: 11px 16px; border: 1px solid var(--line-strong); border-radius: 999px;
+    background: rgba(255, 255, 255, 0.03);
   }
 
-  .menubar {
-    position: relative; z-index: 3;
-    height: 46px; display: flex; align-items: center; gap: 26px;
-    padding: 0 38px;
-    background: rgba(12, 11, 20, 0.45);
-    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
-    box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
-    font-size: 18px; color: #c6c5d4;
+  /* The Overview capture (2x, 800 px wide) shown at 400 px, bleeding off the
+     bottom edge so the card reads as a window into the app. */
+  .shot {
+    position: absolute; right: 70px; top: 62px; width: 400px;
+    border-radius: 22px; overflow: hidden;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(255, 255, 255, 0.06);
   }
-  .menubar b { color: #f0eff5; font-weight: 600; }
-  .menubar .spacer { flex: 1; }
-  .status {
-    display: inline-flex; align-items: center; gap: 10px;
-    height: 32px; padding: 0 13px; border-radius: 7px;
-    background: rgba(124, 108, 255, 0.34);
-    font-family: 'JetBrains Mono', monospace; font-size: 16px; color: #f0eff5;
-  }
-  .status svg { width: 18px; height: 18px; fill: #f0eff5; }
-
-  /* the popover springs from the status item, exactly like the landing hero */
-  .pop {
-    position: absolute; z-index: 2;
-    top: 60px; right: 64px; width: 360px;
-    border-radius: 15px;
-    border: 1px solid rgba(255, 255, 255, 0.18);
-    box-shadow:
-      0 60px 120px -40px rgba(0, 0, 0, 0.85),
-      0 24px 60px -28px rgba(91, 70, 214, 0.6);
-  }
-
-  .copy { position: absolute; z-index: 2; left: 80px; top: 158px; width: 660px; }
-  .wordmark {
-    font-family: 'Bricolage Grotesque', sans-serif; font-weight: 800;
-    font-size: 104px; letter-spacing: -0.03em; line-height: 1;
-    display: flex; align-items: center; gap: 26px;
-  }
-  .wordmark img {
-    width: 112px; height: 112px; flex: 0 0 auto; display: block;
-    filter: drop-shadow(0 0 40px rgba(124, 108, 255, 0.55));
-  }
-  .tagline {
-    margin-top: 30px; font-size: 37px; font-weight: 500; color: #d6d4e4;
-    letter-spacing: -0.01em; line-height: 1.3;
-  }
-  .tagline .hot {
-    background: linear-gradient(120deg, #9b8cff, #ff5d8f);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    font-weight: 600;
-  }
-  .sub {
-    margin-top: 14px; font-size: 22px; color: #9a98ad; white-space: nowrap;
-  }
-
-  .pills { margin-top: 44px; display: flex; gap: 14px; }
-  .pill {
-    font-family: 'JetBrains Mono', monospace; font-size: 17px; color: #d6d4e4;
-    padding: 10px 20px; border-radius: 999px;
-    border: 1px solid rgba(255, 255, 255, 0.2);
-    background: rgba(12, 11, 20, 0.5);
-  }
+  .shot img { display: block; width: 400px; }
+  /* Chinese cards: the display face has no CJK glyphs, so headings fall back
+     to Noto Serif in the matching script, and the short headline gets the
+     size the English line had before it was fitted to one line. */
+  :lang(zh-Hant) h1 { font-family: "GFS Didot", "Noto Serif TC", serif; font-size: 72px; }
+  :lang(zh-Hans) h1 { font-family: "GFS Didot", "Noto Serif SC", serif; font-size: 72px; }
+  /* One line: at 540px the last character pair ("洲。") wrapped alone. */
+  :lang(zh-Hant) .gloss, :lang(zh-Hans) .gloss { max-width: none; white-space: nowrap; }
+  :lang(zh-Hant) .pills span, :lang(zh-Hans) .pills span { font-family: "Hanken Grotesk", "PingFang TC", sans-serif; }
 </style>
 </head>
 <body>
-  <div class="menubar">
-    <b>Syrtis</b>
-    <span>Views</span><span>Privacy</span><span>Install</span>
-    <span class="spacer"></span>
-    <span class="status">
-      <svg viewBox="0 0 16 16"><rect x="0" y="10" width="3" height="5" rx="1.2"/><rect x="4" y="7" width="3" height="8" rx="1.2"/><rect x="8" y="4" width="3" height="11" rx="1.2"/><rect x="12" y="1" width="3" height="14" rx="1.2"/></svg>
-      1.2M tok/min
-    </span>
+  <div class="left">
+    <div class="brand"><img src="../public/favicon.png" alt=""><div class="greek">Σύρτις</div></div>
+    <h1>Where your tokens settle.</h1>
+    <p class="gloss">From σύρω, to drag: sand carried along until it settles into shoals.</p>
+    <div class="pills"><span>macOS · Windows</span><span>open source</span><span>0 telemetry</span></div>
   </div>
-
-  <img class="pop" src="../public/screenshots/native/popover-hero.png" alt="" />
-
-  <div class="copy">
-    <div class="wordmark"><img src="../public/favicon.png" alt="" />Syrtis</div>
-    <p class="tagline">Know every AI token you <span class="hot">burn</span>.</p>
-    <p class="sub">Claude Code · Codex · Cursor · 25+ agents, read from local logs</p>
-    <div class="pills">
-      <span class="pill">native Swift · Liquid Glass</span>
-      <span class="pill">open source</span>
-      <span class="pill">0 telemetry</span>
-    </div>
-  </div>
+  <div class="strata"><span></span><span></span><span></span><span></span></div>
+  <div class="shot"><img src="../public/screenshots/en/overview.webp" alt=""></div>
+<script>
+  // ?lang=zh-tw | zh-cn renders the Chinese card from the same layout. Text is
+  // the landing's approved zh hero line and gloss; zh-cn is its character-for-
+  // character Simplified form (the landing has no Simplified page).
+  const L = {
+    "zh-tw": { lang: "zh-Hant", h1: "積沙成洲", gloss: "源自 σύρω（拖曳）：潮水挾帶細沙前行，水緩處沉積成洲。",
+               pills: ["macOS · Windows", "開源", "零遙測"], shot: "../public/screenshots/zh-tw/overview.webp" },
+    "zh-cn": { lang: "zh-Hans", h1: "积沙成洲", gloss: "源自 σύρω（拖曳）：潮水挟带细沙前行，水缓处沉积成洲。",
+               pills: ["macOS · Windows", "开源", "零遥测"], shot: "overview-zh-cn.webp" },
+  }[new URLSearchParams(location.search).get("lang")];
+  if (L) {
+    document.documentElement.lang = L.lang;
+    document.querySelector("h1").textContent = L.h1;
+    document.querySelector(".gloss").textContent = L.gloss;
+    document.querySelectorAll(".pills span").forEach((s, i) => s.textContent = L.pills[i]);
+    document.querySelector(".shot img").src = L.shot;
+  }
+</script>
 </body>
 </html>

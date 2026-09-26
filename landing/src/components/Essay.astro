@@ -1,0 +1,17 @@
+---
+// The naming essay ("Why Syrtis"). Text and figures come from
+// `src/i18n/essay.ts`, generated from the approved essay source; images live
+// in `public/essay/` and every caption carries its source and licence.
+import { essay } from '../i18n/essay'
+import type { Locale } from '../i18n/copy'
+const { locale = 'en' } = Astro.props as { locale?: Locale }
+const e = essay[locale]
+const html = e.html.replaceAll('__BASE__', import.meta.env.BASE_URL)
+---
+
+<article class="essay" id="top">
+  <div class="greek" aria-hidden="true">Σύρτις</div>
+  <h1>{e.title}</h1>
+  <p class="essay-dek">{e.dek}</p>
+  <div class="essay-body" set:html={html} />
+</article>

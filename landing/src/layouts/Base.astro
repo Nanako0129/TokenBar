@@ -1,7 +1,10 @@
 ---
-// fonts are self-hosted (fontsource variable) so first paint never blocks on
-// a third-party stylesheet; opsz variant for Bricolage keeps the display axis
-import '@fontsource-variable/bricolage-grotesque/opsz.css'
+// fonts are self-hosted (fontsource) so first paint never blocks on a
+// third-party stylesheet, matching the prototype's --display/--sans/--mono
+// stack (GFS Didot / Hanken Grotesk / JetBrains Mono). GFS Didot is a new
+// dependency: the prototype specifies it for every heading and the site had
+// no serif display font before, so it is unavoidable for a faithful port.
+import '@fontsource/gfs-didot'
 import '@fontsource-variable/hanken-grotesk'
 import '@fontsource-variable/jetbrains-mono'
 import '../styles/global.css'
@@ -11,9 +14,11 @@ interface Props {
   title?: string
   description?: string
   locale?: Locale
+  /** Path under each locale's root, e.g. 'why-syrtis/', so hreflang pairs the same page. */
+  path?: string
 }
 
-const { locale = 'en' } = Astro.props
+const { locale = 'en', path = '' } = Astro.props
 const meta = t(locale).meta
 const { title = meta.title, description = meta.description } = Astro.props
 
@@ -21,24 +26,27 @@ const base = import.meta.env.BASE_URL
 const canonical = new URL(Astro.url.pathname, Astro.site).href
 // versioned brand card (1200×630) — bump the filename on every redesign:
 // social platforms cache scrapes per image URL and a fresh name is the only
-// reliable bust (og.png / og-card.png stay for already-shared links)
-const ogImage = new URL(`${base}og-card-v4.png`, Astro.site).href
-const ogImageAlt = 'Syrtis — know every AI token you burn, from the macOS menu bar'
+// reliable bust (og.png / og-card.png stay for already-shared links). The
+// v5 is the Syrtis card, one per page language (rendered by og-src/render.sh,
+// `LANG_QS=zh-tw` for the Chinese one).
+const ogImage = new URL(`${base}${locale === 'en' ? 'og-card-v5.png' : 'og-card-v5-zh-tw.png'}`, Astro.site).href
+const ogImageAlt = locale === 'en'
+  ? 'Syrtis — where your tokens settle, tracked from the macOS menu bar'
+  : 'Syrtis：積沙成洲'
 
-const enUrl = new URL(base, Astro.site).href
-const zhUrl = new URL(`${base}zh-tw/`, Astro.site).href
+const enUrl = new URL(`${base}${path}`, Astro.site).href
+const zhUrl = new URL(`${base}zh-tw/${path}`, Astro.site).href
 
 const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'SoftwareApplication',
   name: 'Syrtis',
   applicationCategory: 'DeveloperApplication',
-  operatingSystem: 'macOS 14+ (Apple Silicon)',
-  softwareVersion: '1.0.1',
+  operatingSystem: 'macOS 14+ (Apple Silicon); Windows x64/ARM64',
   offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
   description,
   url: canonical,
-  screenshot: new URL(`${base}screenshots/native/overview.png`, Astro.site).href,
+  screenshot: new URL(`${base}screenshots/en/overview.webp`, Astro.site).href,
   license: 'https://opensource.org/licenses/MIT',
 }
 ---
@@ -66,7 +74,8 @@ const jsonLd = {
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
     <meta property="og:image:alt" content={ogImageAlt} />
-    <meta name="theme-color" content="#08070d" />
+    <meta name="theme-color" content="#F3F5F4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0B1514" media="(prefers-color-scheme: dark)" />
     <meta property="og:locale" content={meta.ogLocale} />
     <meta property="og:locale:alternate" content={locale === 'en' ? 'zh_TW' : 'en_US'} />
     <meta name="twitter:card" content="summary_large_image" />
@@ -77,19 +86,8 @@ const jsonLd = {
     <script type="application/ld+json" set:html={JSON.stringify(jsonLd)} />
   </head>
   <body>
-    <slot />
-    <script is:inline>
-      // shared scroll reveal: every .reveal element floats in once on entry
-      (() => {
-        if (matchMedia('(prefers-reduced-motion: reduce)').matches) return
-        const io = new IntersectionObserver(
-          (entries) => entries.forEach((e) => {
-            if (e.isIntersecting) { e.target.classList.add('in'); io.unobserve(e.target) }
-          }),
-          { threshold: 0.12, rootMargin: '0px 0px -8% 0px' },
-        )
-        document.querySelectorAll('.reveal').forEach((el) => io.observe(el))
-      })()
-    </script>
+    <div class="wrap">
+      <slot />
+    </div>
   </body>
 </html>

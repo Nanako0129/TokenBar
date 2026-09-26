@@ -1,0 +1,20 @@
+---
+// The decorative ruler beside each `.stratum` section, restored with a
+// depth reading (10^n tokens) per the user's 2026-09-26 mobile-feedback
+// pass. `index` is this section's position (0-4) in document order —
+// dashboard, limits, resets, privacy, name — matching DEPTH_READINGS.
+import { t, DEPTH_READINGS, type Locale } from '../i18n/copy'
+interface Props { locale?: Locale; index: 0 | 1 | 2 | 3 | 4 }
+const { locale = 'en', index } = Astro.props
+const c = t(locale)
+const reading = DEPTH_READINGS[index]
+const depthKey = (index + 1) as 1 | 2 | 3 | 4 | 5
+---
+
+<div class="ruler" aria-hidden="true">
+  <div class="depth">
+    <b>{reading.base}<sup>{reading.exp}</sup></b>
+    <span>{c.depth.unit}</span>
+    <span>{c.depth[depthKey]}</span>
+  </div>
+</div>
