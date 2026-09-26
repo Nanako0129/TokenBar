@@ -16705,6 +16705,11 @@ enum SelfTest {
             "FLOW-WIDTH a legend row longer than the popover reports at most the "
                 + "proposed width instead of pushing the card past its frame")
 
+        // Dock pin repair: pure decision and write sequence over in-memory
+        // arrays only; never the real com.apple.dock domain. Fixtures live in
+        // DockPinRepair.swift so the rename script can skip that file whole.
+        DockPinRepair.selfTest { expect($0, $1) }
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
