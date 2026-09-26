@@ -6,10 +6,10 @@
 # Needs Chrome; fonts load from Google Fonts, so run online.
 set -e
 cd "$(dirname "$0")"
-OUT="${OUT:-../public/og-card-v4.png}"
+OUT="${OUT:-../public/og-card-v5.png}"
 # A localized render must never overwrite the default English card.
-if [ -n "$LANG_QS" ] && [ "$OUT" = "../public/og-card-v4.png" ]; then
-  OUT="../public/og-card-v4-$LANG_QS.png"
+if [ -n "$LANG_QS" ] && [ "$OUT" = "../public/og-card-v5.png" ]; then
+  OUT="../public/og-card-v5-$LANG_QS.png"
 fi
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 "$CHROME" --headless=new --screenshot="$OUT" \
