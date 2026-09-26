@@ -14,7 +14,7 @@ const zhHref = essay ? `${base}zh-tw/why-syrtis/` : `${base}zh-tw/`
 
 <header class="bar">
   <a class="brand" href={essay ? home : '#top'}><img src={`${base}favicon.png`} alt="" width="28" height="28" />Syrtis</a>
-  <nav aria-label="Sections">
+  <nav aria-label={c.bar.sections}>
     <a href={`${sec}#dashboard`}>{c.nav.dash}</a>
     <a href={`${sec}#limits`}>{c.nav.limits}</a>
     <a href={`${sec}#resets`}>{c.nav.resets}</a>
@@ -23,7 +23,7 @@ const zhHref = essay ? `${base}zh-tw/why-syrtis/` : `${base}zh-tw/`
   </nav>
   <div class="bar-end">
     <a class="gh" href="https://github.com/Nanako0129/syrtis">GitHub</a>
-    <div class="seg" role="group" aria-label="Language">
+    <div class="seg" role="group" aria-label={c.bar.language}>
       <a href={enHref} aria-current={locale === 'en' ? 'true' : undefined}>EN</a>
       <a href={zhHref} aria-current={locale === 'zh-tw' ? 'true' : undefined}>中文</a>
     </div>

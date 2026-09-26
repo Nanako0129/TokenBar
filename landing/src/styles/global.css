@@ -112,7 +112,7 @@ p { margin: 0; max-width: 40rem; }
 
 /* ---- install: one component, rendered in the hero and at the end ---- */
 .install { margin-top: 1.6rem; display: flex; flex-direction: column; gap: 0.7rem; max-width: 36rem; }
-.install [role="tablist"] { align-self: flex-start; }
+.install .os-switch { align-self: flex-start; }
 .panel { display: flex; flex-direction: column; gap: 0.55rem; }
 .panel[hidden] { display: none; }
 .cmd {

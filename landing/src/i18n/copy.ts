@@ -43,17 +43,24 @@ const en = {
     privacy: 'Privacy',
     install: 'Install',
   },
+  bar: {
+    sections: 'Sections',
+    language: 'Language',
+  },
   hero: {
     gloss: 'From σύρω, to drag: sand carried along until it settles into shoals.',
     h1: 'Where your tokens settle.',
     lede: 'Syrtis is a free, open-source macOS menu-bar app, with a tray version for Windows, that reads the session logs already on your computer to show what your AI coding tools cost. It tallies tokens and spend across 25+ agents on-device, with no account, no telemetry, and no cloud sync.',
     works: 'Reads session logs from 25+ tools, including Claude Code, Codex, Cursor, Gemini CLI, OpenCode, Copilot, Kiro, and Antigravity.',
+    canvasLabel: 'Sand settling into strata and rising above the waterline, reshaped by the current',
   },
   dashboard: {
     h2: 'Tokens settling into shape',
+    contributionAlt: 'A year of usage as a 3D contribution terrain',
     lede: 'A single prompt barely registers on a bill, but thousands of small completions accumulate over weeks of work. Syrtis scans the local logs left by your coding agents to reveal what has settled.',
     figcaption: 'A year of token usage rendered as an orbitable 3D terrain, stacked by model or agent in tokens or dollars.',
     explorerH3: 'The dashboard, one lens at a time',
+    lensesLabel: 'Dashboard lenses',
   },
   lens: {
     overview: 'Contribution chart, agent limits with pace, live session activity, model breakdown, and streaks.',
@@ -84,6 +91,8 @@ const en = {
     gaugeOk: '25% or more',
     gaugeWarn: 'under 25%',
     gaugeLow: 'under 10%',
+    gaugesLabel: 'Menu-bar gauge states',
+    menuBar: 'Menu bar',
   },
   resets: {
     h2: 'Measuring the day',
@@ -115,6 +124,7 @@ const en = {
   install: {
     h2: 'Install Syrtis',
     lede: 'Pick your platform. Both versions are free and MIT-licensed, sharing the same Rust parsing core for on-device logs.',
+    platformLabel: 'Platform',
     macNote: 'Requires Apple Silicon and macOS 14 or later. The Homebrew tap command is provisional until v2.0 ships. The app is not notarized, so install it through Homebrew: the cask clears the quarantine flag that would otherwise block it.',
     winX64: 'Download for x64',
     winArm64: 'Download for ARM64',
@@ -129,6 +139,7 @@ const en = {
     mac: 'Source (macOS)',
     win: 'Source (Windows)',
     essay: 'Why Syrtis',
+    linksLabel: 'Links',
   },
   depth: {
     unit: 'tokens',
@@ -157,17 +168,24 @@ const zhTw: typeof en = {
     privacy: '隱私',
     install: '安裝',
   },
+  bar: {
+    sections: '分節導覽',
+    language: '語言',
+  },
   hero: {
     gloss: '源自 σύρω（拖曳）：潮水挾帶細沙前行，水緩處沉積成洲。',
     h1: '積沙成洲',
     lede: 'Syrtis 是一款免費開源的 macOS 選單列軟體，也有 Windows 系統匣版本，直接讀取電腦上既有的 AI 寫程式工具紀錄，計算累積的 token 與花費。在本機解析超過 25 個 agent 的使用量，不需註冊帳號、不收集遙測資料，亦不同步至雲端。',
     works: '支援 25 款以上工具的紀錄讀取，涵蓋 Claude Code、Codex、Cursor、Gemini CLI、OpenCode、Copilot、Kiro 與 Antigravity。',
+    canvasLabel: '細沙層層沉積，隨水流改變形狀並漸漸浮出水面',
   },
   dashboard: {
     h2: '細沙沉積成形',
-    lede: '單次呼叫模型的 token 微小得難以察覺，但數週積累下來，終究會顯出輪廓。Syrtis 梳理 Mac 上既有的歷程檔案，清楚呈現這些零散呼叫沉積出的總量與花費。',
+    contributionAlt: '將一整年的使用量呈現為 3D 貢獻地形',
+    lede: '單次呼叫模型的 token 微小得難以察覺，但數週積累下來，終究會顯出輪廓。Syrtis 梳理本機既有的歷程檔案，清楚呈現這些零散呼叫沉積出的總量與花費。',
     figcaption: '將一整年的使用量渲染為可自由旋轉視角的 3D 地形，能按模型或 agent 堆疊，切換檢視 token 數或花費金額。',
     explorerH3: '儀表板的八種視圖',
+    lensesLabel: '儀表板檢視分頁',
   },
   lens: {
     overview: '貢獻度圖表、agent 額度與步調推算、目前的 session、模型佔比與連續使用天數。',
@@ -198,6 +216,8 @@ const zhTw: typeof en = {
     gaugeOk: '25% 以上',
     gaugeWarn: '低於 25%',
     gaugeLow: '低於 10%',
+    gaugesLabel: '選單列量表狀態',
+    menuBar: '選單列',
   },
   resets: {
     h2: '測量行星的一天',
@@ -209,7 +229,7 @@ const zhTw: typeof en = {
   privacy: {
     h2: '純本機運作',
     p1t: '本機直接解析',
-    p1b: '透過內嵌的 tokscale-core 程式庫，Syrtis 直接讀取本機已有的對話紀錄以計算 token 與花費。解析完全在 Mac 上執行，歷史檔案絕不上傳。',
+    p1b: '透過內嵌的 tokscale-core 程式庫，Syrtis 直接讀取本機已有的對話紀錄以計算 token 與花費。解析完全在本機執行，歷史檔案絕不上傳。',
     p2t: '無帳號、零遙測',
     p2b: '無需註冊帳號，不設使用者身分追蹤，也不收集任何遙測資料。軟體沒有雲端後端，不同步任何資料。',
     p3t: '連線請求完全透明',
@@ -229,6 +249,7 @@ const zhTw: typeof en = {
   install: {
     h2: '安裝 Syrtis',
     lede: '選擇你的作業系統平台。兩個版本皆為 MIT 授權的免費開源軟體，共用同一套 Rust 解析核心讀取本機紀錄。',
+    platformLabel: '作業系統平台',
     macNote: '需使用 Apple Silicon Mac，系統版本為 macOS 14 以上。Homebrew 安裝指令在 2.0 正式發行前為過渡版本。軟體尚未經過 Apple 公證，請透過 Homebrew 安裝，cask 會清除原本會擋下它的隔離標記。',
     winX64: '下載 x64 版',
     winArm64: '下載 ARM64 版',
@@ -243,6 +264,7 @@ const zhTw: typeof en = {
     mac: '原始碼（macOS）',
     win: '原始碼（Windows）',
     essay: '命名由來',
+    linksLabel: '相關連結',
   },
   depth: {
     unit: 'token',

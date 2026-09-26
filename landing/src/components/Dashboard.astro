@@ -35,30 +35,30 @@ const shots: Partial<Record<LensId, string>> = {
     <h2>{c.dashboard.h2}</h2>
     <p class="lede">{c.dashboard.lede}</p>
     <figure>
-      <div class="shot"><img srcset={`${shotDir}contribution-3d.webp` + " 2x"} alt="A year of usage as a 3D contribution terrain" loading="lazy" /></div>
+      <div class="shot"><img srcset={`${shotDir}contribution-3d.webp` + " 2x"} alt={c.dashboard.contributionAlt} loading="lazy" /></div>
       <figcaption>{c.dashboard.figcaption}</figcaption>
     </figure>
     <div class="scrolly" style={`--lens-count:${LENS_ORDER.length}`}>
       <div class="pin">
         <div class="explorer">
           <h3>{c.dashboard.explorerH3}</h3>
-          <div class="lenses" role="tablist" aria-label="Dashboard lenses">
+          <div class="lenses" role="tablist" aria-label={c.dashboard.lensesLabel}>
             {LENS_ORDER.map((id, i) => (
-              <button type="button" role="tab" class="lens" data-lens={id} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>
+              <button type="button" role="tab" id={`lens-tab-${id}`} aria-controls={`lens-panel-${id}`} class="lens" data-lens={id} aria-selected={i === 0 ? 'true' : 'false'} tabindex={i === 0 ? 0 : -1}>
                 <b>{c.lensName[id]}</b>
                 <span>{c.lens[id]}</span>
               </button>
             ))}
           </div>
-          <figure class="lensshot" role="tabpanel">
+          <figure class="lensshot">
             <div class="stack" id="lensstack">
               {LENS_ORDER.map((id, i) => (
                 shots[id] ? (
-                  <div class:list={['shot', { front: i === 0 }]} data-lens-panel={id}>
+                  <div class:list={['shot', { front: i === 0 }]} data-lens-panel={id} id={`lens-panel-${id}`} role="tabpanel" aria-labelledby={`lens-tab-${id}`} aria-hidden={i === 0 ? 'false' : 'true'}>
                     <img srcset={`${shotDir}${shots[id]}` + " 2x"} alt={c.lensName[id]} loading={i === 0 ? 'eager' : 'lazy'} />
                   </div>
                 ) : (
-                  <div class:list={['pending', { front: i === 0 }]} data-lens-panel={id}>
+                  <div class:list={['pending', { front: i === 0 }]} data-lens-panel={id} id={`lens-panel-${id}`} role="tabpanel" aria-labelledby={`lens-tab-${id}`} aria-hidden={i === 0 ? 'false' : 'true'}>
                     <div><b>{c.lensName[id]}</b><span>{c.pending}</span></div>
                   </div>
                 )
@@ -89,7 +89,11 @@ const shots: Partial<Record<LensId, string>> = {
       if (b === current) return
       current = b
       lenses.forEach((x) => { x.setAttribute('aria-selected', String(x === b)); x.tabIndex = x === b ? 0 : -1 })
-      panels.forEach((p) => p.classList.toggle('front', p.dataset.lensPanel === b.dataset.lens))
+      panels.forEach((p) => {
+        const active = p.dataset.lensPanel === b.dataset.lens
+        p.classList.toggle('front', active)
+        p.setAttribute('aria-hidden', String(!active))
+      })
     }
 
     const scrolly = document.querySelector<HTMLElement>('.scrolly')!

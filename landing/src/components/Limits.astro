@@ -13,7 +13,7 @@ const c = t(locale)
     <div class="pair">
       <div class="content">
         <p>{c.limits.body}</p>
-        <div class="gauges" role="list" aria-label="Menu-bar gauge states">
+        <div class="gauges" role="list" aria-label={c.limits.gaugesLabel}>
           <div class="gauge" role="listitem">
             <div class="bars ok" aria-hidden="true"><i class="on" style="height:6px"></i><i class="on" style="height:11px"></i><i class="on" style="height:16px"></i><i style="height:22px"></i></div>
             <span>{c.limits.gaugeOk}</span>
@@ -30,7 +30,7 @@ const c = t(locale)
         <p class="muted">{c.limits.glassNote}</p>
       </div>
       <figure>
-        <div class="pending bar-strip"><div><b>Menu bar</b><span>{c.pending}</span></div></div>
+        <div class="pending bar-strip"><div><b>{c.limits.menuBar}</b><span>{c.pending}</span></div></div>
         <figcaption>{c.limits.figcaption}</figcaption>
       </figure>
     </div>
