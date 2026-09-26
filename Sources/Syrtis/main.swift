@@ -35,6 +35,11 @@ if CommandLine.arguments.contains("--selftest") {
     SelfTest.run()
 }
 
+// First launch after the Syrtis rename: move TokenBar.app to Syrtis.app and
+// relaunch from there (exits on success). Before NSApplication, so nothing has
+// loaded a resource through the old path yet.
+BundleRename.runIfNeeded()
+
 let app = NSApplication.shared
 let delegate = AppDelegate()
 app.delegate = delegate
