@@ -12,7 +12,7 @@ sources: ["docs/knowledge/history/dashboard-load-performance.md", "docs/knowledg
 
 ## 文件目的
 
-TokenBar 的效能與正確性主張大多是**經驗性**的：某個改動更快、某個改動不改變輸出。這類主張很容易在看起來完全正常的情況下失效，而失效方式是可以列舉的。
+Syrtis 的效能與正確性主張大多是**經驗性**的：某個改動更快、某個改動不改變輸出。這類主張很容易在看起來完全正常的情況下失效，而失效方式是可以列舉的。
 
 這份文件記錄那些方式，以及對應的協定。它來自 2026-08 那輪載入延遲調查——那輪的 oracle 換了五個版本、每一版都通過了當時的檢查、前四版事後都證明是瞎的。實測數字與結論在 [`history/dashboard-load-performance.md`](history/dashboard-load-performance.md)。
 

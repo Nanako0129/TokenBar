@@ -32,7 +32,7 @@ jobs:
         run: |
           # Paginate: GitHub's default page is 30 releases. Sum outside jq so a
           # per-page `--jq` cannot emit multiple numbers into the badge JSON.
-          COUNT=$(gh api --paginate repos/Nanako0129/TokenBar/releases \
+          COUNT=$(gh api --paginate repos/Nanako0129/syrtis/releases \
             --jq '[.[].assets[] | select(.name | test("\\.(tar\\.gz|dmg|zip|pkg)$")) | .download_count] | add // 0' \
             | awk '{s+=$1} END {print s+0}')
           JSON="{\"schemaVersion\":1,\"label\":\"installs\",\"message\":\"${COUNT}\",\"color\":\"brightgreen\"}"

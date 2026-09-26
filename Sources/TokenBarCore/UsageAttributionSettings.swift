@@ -164,7 +164,7 @@ public enum UsageAttributionSettings {
     ///   `open-weights`, never `openai`.
     ///
     /// Only clients in `ClientRegistry` appear here; the survey covered more
-    /// products than TokenBar recognises.
+    /// products than Syrtis recognises.
     public static let subscriptionProviderMap: [String: Set<String>] = [
         // Single-vendor plans: the vendor's own product.
         "claude": ["anthropic"],
@@ -370,7 +370,7 @@ public enum UsageAttributionSettings {
     /// Clients that route through subscriptions they do not own, keyed to the
     /// subscription clients they are authed against.
     ///
-    /// opencode is the only one TokenBar can know this for, because its
+    /// opencode is the only one Syrtis can know this for, because its
     /// `auth.json` oauth entries are reported as `opencodeSubscriptions`. That
     /// declaration is what separates it from every other multi-provider source:
     /// a Cursor row is Cursor's own plan, but an opencode row was paid for by
@@ -407,9 +407,9 @@ public enum UsageAttributionSettings {
 
         // Own subscription wins, and asking the table directly rather than
         // `owners` is the point: `owners` is filtered by `subscriptionClients`,
-        // which lists only clients TokenBar has a quota snapshot for. Attribution
+        // which lists only clients Syrtis has a quota snapshot for. Attribution
         // answers who paid, not who has a gauge — Cursor's own plan covers the
-        // Anthropic models it serves whether or not TokenBar can draw its meter.
+        // Anthropic models it serves whether or not Syrtis can draw its meter.
         // Requiring a snapshot here is what made a Cursor row fall through and
         // get proposed against someone else's subscription entirely.
         if subscriptionProviderMap[sourceOwner]?.contains(provider) == true {

@@ -79,10 +79,10 @@ jobs:
         # Pace copy and Format's date output are localized, and several
         # assertions compare against the English text. Pin the language so the
         # result never depends on the runner's locale.
-        run: swift run TokenBar --selftest -AppleLanguages "(en)"
+        run: swift run Syrtis --selftest -AppleLanguages "(en)"
 
       - name: FFI smoke test
-        run: swift run TokenBar --smoke
+        run: swift run Syrtis --smoke
 
       # Every step above compiles the debug configuration, so nothing here can
       # see a `#if DEBUG` boundary break. The release configuration was first
@@ -119,7 +119,7 @@ jobs:
       # being non-nil is caught either way, but one keyed on the production
       # string takes the safe branch under any other identity — so the run that
       # blocks a release has to carry the real one. This runner is ephemeral and
-      # has no TokenBar installed, which is what makes that safe here and not on
+      # has no Syrtis installed, which is what makes that safe here and not on
       # a developer's Mac.
       #
       # Empty rather than the literal: a second copy of the identifier is a

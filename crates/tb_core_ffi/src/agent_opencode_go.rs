@@ -11,7 +11,7 @@
 //!
 //! - **Out-of-range is invalid, not clamped.** `provider-quota-pace.md` classes
 //!   a non-finite or out-of-bounds percentage as `invalid`: it must not be
-//!   recorded. mana.bar clamps `140` to `100`; TokenBar drops the window instead
+//!   recorded. mana.bar clamps `140` to `100`; Syrtis drops the window instead
 //!   so a malformed reading never becomes a plausible `100%` card.
 //! - **Sibling isolation.** Each of the three windows is decoded independently
 //!   (like `agent_copilot.rs`), so a wrong-typed percent or an object-valued

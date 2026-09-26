@@ -2,7 +2,7 @@
 import { t, type Locale } from '../i18n/copy'
 const { locale = 'en' } = Astro.props as { locale?: Locale }
 const c = t(locale).install
-const brew = 'brew install --cask nanako0129/tokenbar/tokenbar'
+const brew = 'brew install --cask nanako0129/tap/syrtis'
 ---
 
 <section class="section install" id="install">
@@ -15,7 +15,7 @@ const brew = 'brew install --cask nanako0129/tokenbar/tokenbar'
 
     <div class="channel glass reveal" style="--rd:.1s">
       <div class="ch-head">
-        <h3>TokenBar</h3>
+        <h3>Syrtis</h3>
         <span class="pill pill-hot mono">{c.pill}</span>
       </div>
       <p class="ch-desc" set:html={c.desc} />

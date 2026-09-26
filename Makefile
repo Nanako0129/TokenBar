@@ -22,12 +22,12 @@ build: rust
 # .build/debug, which only SwiftPM creates. Running it before a build fails on a
 # fresh or freshly cleaned checkout.
 run: build
-	swift run TokenBar
+	swift run Syrtis
 
 # Several assertions compare against English UI copy, so the language is
 # pinned here rather than inherited from the developer's Mac.
 selftest: build
-	swift run TokenBar --selftest -AppleLanguages "(en)"
+	swift run Syrtis --selftest -AppleLanguages "(en)"
 
 # The same suite from the configuration that ships: release, inside a .app.
 #
@@ -62,11 +62,11 @@ selftest: build
 # longer matches.
 #
 # The app NAME is not a second knob. It was, briefly, and it reintroduced the
-# same escape one attribute over: `CFBundleName == "TokenBar"`, or a check on
-# the bundle URL ending in `TokenBar.app`, would have taken the safe branch in a
+# same escape one attribute over: `CFBundleName == "Syrtis"`, or a check on
+# the bundle URL ending in `Syrtis.app`, would have taken the safe branch in a
 # gate whose bundle was called something else. So this assembles a real
-# `TokenBar.app` and keeps it out of the way by directory instead — OUT_DIR, not
-# APP_DISPLAY — which also still leaves a hand-built `dist/TokenBar.app` alone.
+# `Syrtis.app` and keeps it out of the way by directory instead — OUT_DIR, not
+# APP_DISPLAY — which also still leaves a hand-built `dist/Syrtis.app` alone.
 #
 # What remains different from a released bundle, stated rather than discovered
 # one review round at a time: the install path (`dist/selftest/` and not
@@ -86,7 +86,7 @@ selftest-bundled: rust
 # already guards.
 	@$(call rebuild_if_header_stale,release)
 	BUNDLE_ID=$(SELFTEST_BUNDLE_ID) OUT_DIR=dist/selftest scripts/bundle.sh
-	dist/selftest/TokenBar.app/Contents/MacOS/TokenBar --selftest -AppleLanguages "(en)"
+	dist/selftest/Syrtis.app/Contents/MacOS/Syrtis --selftest -AppleLanguages "(en)"
 
 clean:
 	cargo clean
@@ -102,8 +102,8 @@ bundle: rust
 # source changes it reuses the cached executable and silently ships stale
 # Rust code. Drop the executable whenever the staticlib is newer.
 define relink_if_stale
-	if [ target/release/libtb_core_ffi.a -nt .build/$(1)/TokenBar ]; then \
-		rm -f .build/$(1)/TokenBar; \
+	if [ target/release/libtb_core_ffi.a -nt .build/$(1)/Syrtis ]; then \
+		rm -f .build/$(1)/Syrtis; \
 	fi
 endef
 
@@ -115,9 +115,9 @@ endef
 # recompiles the importing target at all, so the old object keeps the old call
 # and links fine. Drop the importing targets' build products too.
 define rebuild_if_header_stale
-	if [ Sources/CTB/include/ctb.h -nt .build/$(1)/TokenBar ]; then \
+	if [ Sources/CTB/include/ctb.h -nt .build/$(1)/Syrtis ]; then \
 		rm -rf .build/*/$(1)/ModuleCache .build/*/$(1)/TokenBarCore.build \
-			.build/*/$(1)/TokenBar.build .build/$(1)/TokenBar; \
+			.build/*/$(1)/Syrtis.build .build/$(1)/Syrtis; \
 	fi
 endef
 
@@ -126,5 +126,5 @@ endef
 # them next to the binary is what makes a dev run show the same strings the
 # .app does. `scripts/bundle.sh` installs the same .lproj into the real app.
 define sync_localizations
-	cp -R Sources/TokenBar/Resources/Localizations/*.lproj .build/$(1)/
+	cp -R Sources/Syrtis/Resources/Localizations/*.lproj .build/$(1)/
 endef

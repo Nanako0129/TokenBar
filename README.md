@@ -1,11 +1,13 @@
-<h1 align="center">TokenBar</h1>
+<h1 align="center">Syrtis</h1>
 
 <p align="center">
   <strong>AI token usage &amp; quota monitor for the macOS menu bar — native Swift, Liquid Glass.</strong>
 </p>
 
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
+
 <p align="center">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/TokenBar/badges/install-count.json&style=flat-square" alt="Total installs">
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/syrtis/badges/install-count.json&style=flat-square" alt="Total installs">
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence">
   <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-success?style=flat-square" alt="Apple Silicon">
@@ -15,33 +17,31 @@
 
 <br>
 
-**TokenBar** sits in your menu bar and shows what you're spending across
-**25+ AI coding agents** — Claude Code, Codex, Cursor, OpenCode, Gemini CLI and
-more — read on-device from your local session logs. No Dock icon, no telemetry,
-no account.
+**Syrtis** is a free, open-source macOS menu-bar app that reads the session logs your AI coding tools already write to disk and displays your tokens, costs, and subscription quotas. It supports 25+ tools—including Claude Code, Codex, Cursor, OpenCode, Gemini CLI, Copilot, Kiro, and Antigravity—completely on-device, with no Dock icon, no telemetry, no user account, and no cloud sync.
+
+Until version 2.0, the app was called TokenBar on macOS; upgrading preserves your settings, history, and login item unchanged. A companion Windows tray version, also named [Syrtis](https://github.com/Nanako0129/Syrtis-Windows), is built on the same Rust core.
 
 <p align="center">
-  <img src="landing/public/og-card-v4.png" alt="TokenBar — know every AI token you burn from the macOS menu bar" width="800">
+  <img src="docs/screenshots/og-card.png" alt="Syrtis — where your tokens settle" width="800">
 </p>
 
-The menu-bar title shows today's tokens, cost, live tokens/min, or **how much
-subscription quota is left** — as signal bars, a ring, or a popsicle that melts
-as your window drains. And the **cat sprints faster the more you burn**, tracing
-back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.
+The menu-bar title displays today's token count, total cost, live tokens per minute, or remaining subscription quota—shown as signal bars, a progress ring, or a popsicle that melts as the window drains. The menu-bar cat spins faster the more tokens you burn, tracing back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.
 
 ---
 
 ## The dashboard
 
-Click the icon and a Liquid Glass panel opens (a popover before macOS 27). A row of **app tabs** filters
-_which_ agents you're looking at; a **view switch** picks _how_ that data is
-broken down — seven lenses, plus the same year of usage as an orbitable 3D graph.
+Clicking the icon opens a Liquid Glass panel (a popover before macOS 27). A row of **app tabs** filters which agents to inspect, while a **view switch** breaks down that usage across eight lenses—Overview, Quota, Models, Monthly, Daily, Hourly, Stats, and Agents—alongside the full year of activity rendered as an orbitable 3D graph.
 
 <p align="center">
   <img src="docs/screenshots/graph-3d.png" alt="Interactive 3D contribution graph" width="400">
 </p>
 
 <table>
+  <tr>
+    <td align="center" width="50%"><img src="docs/screenshots/overview.png" alt="Overview" width="300"><br><sub><b>Overview</b> — the tightest limit, today, and the year at a glance</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/quota.png" alt="Quota view" width="300"><br><sub><b>Quota</b> — past windows and when the allowance goes</sub></td>
+  </tr>
   <tr>
     <td align="center" width="50%"><img src="docs/screenshots/models.png" alt="Models view" width="300"><br><sub><b>Models</b> — every model ranked by cost</sub></td>
     <td align="center" width="50%"><img src="docs/screenshots/monthly.png" alt="Monthly view" width="300"><br><sub><b>Monthly</b> — active months, with month drill-down</sub></td>
@@ -59,37 +59,24 @@ broken down — seven lenses, plus the same year of usage as an orbitable 3D gra
   </tr>
 </table>
 
-Plus **OAuth quota cards** with pace projections, a live session trace, streaks,
-and full keyboard control (⌘1–9 tabs, ⌘G chart toggle, ⌘, settings). A failed
-refresh never blanks a reading — the last known value stays until a fresh one
-lands.
+The dashboard also provides **OAuth quota cards** with pace projections, a live session trace, activity streaks, and keyboard control (⌘1–9 tabs, ⌘G chart toggle, ⌘, settings). If a background refresh fails, Syrtis never blanks a reading: the last known value stays until a fresh one lands.
 
 ## Install
 
 ```sh
-brew install --cask nanako0129/tokenbar/tokenbar
+brew install --cask nanako0129/tap/syrtis
 ```
 
-In-app updates arrive via Sparkle; betas ride an opt-in channel
-(Settings → "Receive beta updates"). The app is ad-hoc signed (not notarized) —
-the cask clears the quarantine attribute on install, as disclosed. Requires an
-Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26 and the glass panel
-macOS 27; earlier systems get a vibrancy fallback). Building from source needs
-Xcode 27. Still on macOS 11–13? The final Tauri build stays as
-[`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri).
+In-app updates arrive via Sparkle; betas ride an opt-in channel (Settings → "Receive beta updates"). The app is ad-hoc signed (not notarized)—the cask clears the quarantine attribute on install, as disclosed. Requires an Apple Silicon Mac on macOS 14+ (Liquid Glass needs macOS 26 and the glass panel macOS 27; earlier systems get a vibrancy fallback). Building from source needs Xcode 27. Still on macOS 11–13? The final Tauri build stays as [`tokenbar@legacy`](https://github.com/Nanako0129/TokenBar-Tauri).
 
 ## How it works
 
-Rust owns the data: the public
-[tokscale-core](https://github.com/Nanako0129/tokscale-core) shared engine,
-pinned as a Git submodule, handles session parsing, aggregation, and pricing;
-the app-owned `crates/tb_core_ffi` adds quota fetching and exposes the C ABI.
-Swift owns the rest: SwiftUI views, the `NSStatusItem` shell, Sparkle updates.
+Rust owns the data: the public [tokscale-core](https://github.com/Nanako0129/tokscale-core) shared engine, pinned as a Git submodule, handles session parsing, aggregation, and pricing; the app-owned `crates/tb_core_ffi` adds quota fetching and exposes the C ABI. Swift owns the rest: SwiftUI views, the `NSStatusItem` shell, Sparkle updates.
 
 ```sh
 make                        # cargo build --release, then swift build
-make run                    # build + launch TokenBar
-swift run TokenBar --smoke  # run the FFI smoke test
+make run                    # build + launch Syrtis
+swift run Syrtis --smoke  # run the FFI smoke test
 ```
 
 The [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, shared-engine boundary, release chain, and maintenance state.
@@ -97,21 +84,13 @@ The [project knowledge base](docs/knowledge/README.md) is the canonical guide to
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
 
-## Support TokenBar
+## Support Syrtis
 
-TokenBar is local-first and needs no TokenBar account, but maintaining
-trustworthy numbers across 25+ AI coding agents is a wide compatibility job.
-Parser changes cross Rust, FFI, Swift, and the Windows sibling; live quota cards
-require real OAuth or subscription accounts and provider APIs; releases cover
-native macOS behavior, Sparkle signing and appcasts, Homebrew, and legacy
-migration metadata.
+Syrtis is local-first and needs no Syrtis account, but maintaining trustworthy numbers across 25+ AI coding agents is a wide compatibility job. Parser changes cross Rust, FFI, Swift, and the Windows sibling; live quota cards require real OAuth or subscription accounts and provider APIs; releases cover native macOS behavior, Sparkle signing and appcasts, Homebrew, and legacy migration metadata.
 
-Sponsorship helps cover test accounts, CI and release infrastructure, and the
-maintainer time required to keep readings accurate as upstream formats change.
-If TokenBar helps you understand where your AI budget goes, you can support its
-continued development on Patreon.
+Sponsorship helps cover test accounts, CI and release infrastructure, and the maintainer time required to keep readings accurate as upstream formats change. If Syrtis helps you understand where your AI budget goes, you can support its continued development on Patreon.
 
-[![Support TokenBar on Patreon](https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/Nanako0129/membership)
+[![Support Syrtis on Patreon](https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/Nanako0129/membership)
 
 ## Contributing
 
@@ -119,20 +98,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, change-specific guardrails, ve
 
 ## Credits
 
-TokenBar is built on **[tokscale](https://github.com/junhoyeo/tokscale)** by
-Junho Yeo. TokenBar's shared
-[`tokscale-core`](https://github.com/Nanako0129/tokscale-core) engine derives
-from that core and handles session parsing, dedup, and pricing across 25+
-agents. The tokscale interactive TUI is also the blueprint for the whole
-dashboard: the seven lenses (Overview, Models, Monthly, Daily, Hourly, Stats,
-Agents) and their `In · Out · CR · CW` column breakdown are modeled on it.
+Syrtis is built on **[tokscale](https://github.com/junhoyeo/tokscale)** by Junho Yeo. Syrtis's shared [`tokscale-core`](https://github.com/Nanako0129/tokscale-core) engine derives from that core and handles session parsing, dedup, and pricing across 25+ agents. The tokscale interactive TUI is also the blueprint for the whole dashboard: the Overview, Models, Monthly, Daily, Hourly, Stats and Agents lenses and their `In · Out · CR · CW` column breakdown are modeled on it.
 
-The product line began as a fork of
-[tokcat](https://github.com/handlecusion/tokcat) by handlecusion — the original
-Tauri menu-bar monitor (itself built on tokscale). This native app is a
-ground-up Swift rewrite that carries no tokcat code, but the menu-bar form and
-the spinning-cat signature are theirs; the cat traces back to
-[RunCat](https://kyome.io/runcat/) by Takuto Nakamura. The quota-pace cards
-reference [CodexBar](https://github.com/steipete/CodexBar) by Peter Steinberger.
+The product line began as a fork of [tokcat](https://github.com/handlecusion/tokcat) by handlecusion—the original Tauri menu-bar monitor (itself built on tokscale). This native app is a ground-up Swift rewrite that carries no tokcat code, but the menu-bar form and the spinning-cat signature are theirs; the cat traces back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura. The quota-pace cards reference [CodexBar](https://github.com/steipete/CodexBar) by Peter Steinberger.
 
 All MIT. Licensed under [MIT](LICENSE).

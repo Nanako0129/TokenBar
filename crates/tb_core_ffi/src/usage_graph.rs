@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const VERSION: &str = concat!("tokenbar-core/", env!("CARGO_PKG_VERSION"));
+const VERSION: &str = concat!("syrtis-core/", env!("CARGO_PKG_VERSION"));
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]

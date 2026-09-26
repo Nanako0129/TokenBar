@@ -1,0 +1,575 @@
+/* Syrtis — 繁體中文（台灣）
+
+   Key 就是原始碼裡的英文原文，沒有對應項目時會原樣顯示英文，不會壞掉。
+
+   保留不譯：Syrtis 與各家產品名（Claude、Codex、Copilot、Gemini…）、模型
+   名稱、token、Agent、2D／3D、In／Out／CR／CW 這類圖表縮寫，以及步調（pace）
+   狀態文案 —— 後者是 SelfTest 逐字斷言的邏輯層字串，這一版維持英文。
+
+   注意 `%` ：經過 String(format:) 的項目（key 帶 %lld／%@ 者）字面百分號要寫
+   成 %%；純查表的長句不經 format，`%` 原樣即可。
+*/
+
+/* ===== 分頁 ===== */
+"Overview" = "總覽";
+"Models" = "模型";
+"Monthly" = "每月";
+"Daily" = "每日";
+"Hourly" = "每小時";
+"Stats" = "統計";
+"Agents" = "Agent";
+
+/* ===== 彈出視窗外框 ===== */
+"Year" = "年份";
+"All years" = "全部年份";
+"All" = "全部";
+"Filter usage by year" = "依年份篩選用量";
+"Refresh usage data (⌘R)" = "重新整理用量資料（⌘R）";
+"Refresh usage data" = "重新整理用量資料";
+"Refresh usage data (⌘R) — showing data from %@" = "重新整理用量資料（⌘R）— 顯示的是%@的資料";
+"Updating usage data" = "正在更新用量資料";
+"Loading usage…" = "正在載入用量…";
+"Failed to load usage: %@" = "載入用量失敗：%@";
+"Loading…" = "載入中…";
+"Settings" = "設定";
+"Quit" = "結束";
+"Dismiss" = "關閉";
+"Drag to resize the popover height" = "拖曳可調整視窗高度";
+"Update %@" = "更新 %@";
+"A new version is ready — click to install" = "新版本已就緒，點一下即可安裝";
+"You're on the beta build" = "你目前使用的是 beta 版本";
+"Switch to the Syrtis 1.0 release — keeps your data" = "切換到 Syrtis 1.0 正式版，資料會保留";
+"Switch" = "切換";
+
+/* ===== 空狀態 ===== */
+"No usage in this range" = "這個區間沒有用量";
+"No model usage in this range" = "這個區間沒有模型用量";
+"No agent activity in this range" = "這個區間沒有 Agent 活動";
+"No activity in this window" = "這個時間窗內沒有活動";
+"No data" = "沒有資料";
+"Checking…" = "查詢中…";
+"No clients with usage data yet." = "目前沒有任何用戶端有用量資料。";
+"No supported agents yet" = "目前沒有支援的 Agent";
+"Checking agent limits…" = "正在查詢額度…";
+
+/* ===== 卡片標題 ===== */
+"Token Usage" = "Token 用量";
+"Streaks" = "連續紀錄";
+"Agent limits" = "Agent 額度";
+"OAuth quota" = "OAuth 額度";
+"Live session" = "即時工作階段";
+"Models by cost" = "模型費用排行";
+"Agents by cost" = "Agent 費用排行";
+"Hourly rhythm" = "每小時節奏";
+"Hourly usage" = "每小時用量";
+"Full year" = "整年";
+"Stacked by model" = "依模型堆疊";
+"Stacked by agent" = "依 Agent 堆疊";
+"%@ limits" = "%@ 額度";
+"%@ models" = "%@ 模型";
+"Session / weekly / model limits" = "工作階段／每週／模型額度";
+"↔ Routes through opencode" = "↔ 透過 opencode 轉送";
+"opencode also taps: %@" = "opencode 另外接上：%@";
+"Subscriptions: %@" = "訂閱：%@";
+
+/* ===== 統計數字 ===== */
+"Total" = "總計";
+"Tokens" = "Token";
+"Best day" = "最高單日";
+"Total tokens" = "Token 總數";
+"Total spend" = "總花費";
+"Active days" = "活躍天數";
+"Avg / day" = "每日平均";
+"Current streak" = "目前連續";
+"Longest streak" = "最長連續";
+"Favorite model" = "最常用模型";
+"Longest" = "最長";
+"Current" = "目前";
+"Your total spending is " = "你的總花費是 ";
+"%lld active days" = "%lld 天有用量";
+"%@ tokens" = "%@ tokens";
+"%@ msgs" = "%@ 則訊息";
+"%@ turns" = "%@ 互動";
+"Turns · %@ only" = "互動 · 僅計 %@";
+"Turns · %@ + %@ only" = "互動 · 僅計 %@、%@";
+" days" = " 天";
+
+/* ===== 數量摘要（英文分單複數，中文兩者相同）===== */
+"%lld model · %@ · %@" = "%1$lld 個模型 · %2$@ · %3$@";
+"%lld models · %@ · %@" = "%1$lld 個模型 · %2$@ · %3$@";
+"%lld model · %@" = "%1$lld 個模型 · %2$@";
+"%lld models · %@" = "%1$lld 個模型 · %2$@";
+"%lld agent · %@" = "%1$lld 個 Agent · %2$@";
+"%lld agents · %@" = "%1$lld 個 Agent · %2$@";
+"%lld active day" = "%lld 天有用量";
+"%lld active month" = "%lld 個月有用量";
+"%lld active months" = "%lld 個月有用量";
+
+/* ===== 圖表與明細 ===== */
+"Fit" = "適配";
+"Reset" = "重設";
+"Input" = "輸入";
+"Output" = "輸出";
+"Cache read" = "快取讀取";
+"Cache write" = "快取寫入";
+"Reasoning" = "推理";
+"Model" = "模型";
+"Agent" = "Agent";
+"Bars" = "長條圖";
+"Heatmap" = "熱點圖";
+"Window" = "時間窗";
+"Price" = "費用";
+"Show less" = "收合";
+"Show %lld more" = "再顯示 %lld 筆";
+"Show %lld more · %lld of %lld" = "再顯示 %1$lld 筆 · 已顯示 %2$lld／共 %3$lld 筆";
+"Show more" = "顯示更多";
+"Prices updated %@" = "價格更新於 %@";
+"LiteLLM pricing data; refreshes automatically about once an hour" = "LiteLLM 價格資料，大約每小時自動更新一次";
+"Cost reported by the client, about %@x the local price estimate" = "費用由用戶端自行回報，約為本機價格估算的 %@ 倍";
+"Timeline" = "時間軸";
+"Profile" = "分布";
+"peak %02lld:00 · %@" = "尖峰 %1$02lld:00 · %2$@";
+"%lld hrs · %@" = "%1$lld 小時 · %2$@";
+"last %lldm · %@/m total" = "最近 %1$lld 分鐘 · 合計 %2$@/分";
+
+/* ===== 額度視窗 ===== */
+"Session" = "工作階段";
+"Weekly" = "每週";
+"Pro" = "Pro";
+"Flash" = "Flash";
+"Extra usage" = "額外用量";
+"%lld%% left" = "剩餘 %lld%%";
+"%lld%% used" = "已用 %lld%%";
+"%@ used" = "已用 %@";
+"%@ less left" = "剩餘少 %@";
+"%@ more left" = "剩餘多 %@";
+"Expected %lld%% used by now" = "依進度目前應已使用 %lld%%";
+"Set up" = "待設定";
+/* Keychain consent. Deliberately not "待設定" — the Grok Bot login already is
+   set up; what is missing is permission to read it. */
+/* Badge: a STATE the card is in. */
+"Allow" = "待授權";
+/* Button: an ACTION the user takes. Deliberately not "待授權" — a state label
+   on a button describes the situation instead of offering to change it. */
+"consent.action.allow" = "允許";
+"Not now" = "暫時不要";
+"Waiting for macOS…" = "等待 macOS 回應…";
+"Grok Bot stores its login in your Keychain. To show your weekly limits, Syrtis needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. Syrtis never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，Syrtis 需要讀取它——macOS 會跳出視窗請你允許。讀到之後，這個登入會被送到 Grok Bot 的用量端點（api2.cursor.sh）去查詢你的額度。Syrtis 不會儲存、不會記錄，也不會送去任何其他地方。";
+"Syrtis is not reading your Grok Bot limits." = "Syrtis 沒有在讀取你的 Grok Bot 額度。";
+"macOS did not allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again — macOS will show its permission dialog." = "macOS 沒有允許存取 Grok Bot 的登入資訊，所以 Syrtis 停止詢問了。選擇「允許」可以再試一次——macOS 會再顯示一次權限視窗。";
+"Error" = "錯誤";
+"Live" = "使用中";
+"No quota" = "無額度";
+"Loading quotas…" = "正在載入額度…";
+"Menu bar tracks" = "選單列追蹤對象";
+"Auto (tightest window)" = "自動（最吃緊的時間窗）";
+"Auto (tightest)" = "自動（最吃緊）";
+"Unavailable selection" = "無法使用的選擇";
+"Quota window" = "額度時間窗";
+"Quota window %lld" = "額度時間窗 %lld";
+"Hidden client tab; the item is suppressed." = "用戶端分頁已隱藏，個別項目目前停用。";
+"Quota unavailable." = "額度無法使用。";
+"Using the last good quota window." = "使用上一個可用的額度時間窗。";
+"%@, %lld percent quota remaining" = "%1$@，剩餘額度 %2$lld%%";
+"%@, quota unavailable" = "%@，額度無法使用";
+"Show %@ individual item" = "顯示 %@ 個別項目";
+"Quota window for %@" = "%@ 的額度時間窗";
+"%@ — %lld%% quota remaining" = "%1$@ — 剩餘額度 %2$lld%%";
+"%@ — quota unavailable" = "%@ — 額度無法使用";
+"%@ — selected quota window unavailable" = "%@ — 所選的額度時間窗無法使用";
+"%@, selected quota window unavailable" = "%@，所選的額度時間窗無法使用";
+"%@ — %lld%% last known quota remaining" = "%1$@ — 上次已知剩餘額度 %2$lld%%";
+"%@, %lld percent last known quota remaining" = "%1$@，上次已知剩餘額度 %2$lld%%";
+"Copy command" = "複製指令";
+"Using a Claude `setup-token`? Syrtis auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？Syrtis 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
+
+/* ===== 時間格式 ===== */
+"Jan" = "1月";
+"Feb" = "2月";
+"Mar" = "3月";
+"Apr" = "4月";
+"May" = "5月";
+"Jun" = "6月";
+"Jul" = "7月";
+"Aug" = "8月";
+"Sep" = "9月";
+"Oct" = "10月";
+"Nov" = "11月";
+"Dec" = "12月";
+"format.monthDay" = "%1$@%2$lld日";
+"format.monthYear" = "%2$lld年%1$@";
+"just now" = "剛剛";
+"%lldm ago" = "%lld 分鐘前";
+"%lldh ago" = "%lld 小時前";
+"%lldd ago" = "%lld 天前";
+
+/* ===== 設定：區段標題 ===== */
+"Menubar title" = "選單列標題";
+"Startup" = "啟動";
+"Menubar icon" = "選單列圖示";
+"Quota source" = "額度來源";
+"Individual items" = "個別項目";
+"No eligible individual clients yet." = "目前沒有符合資格的個別用戶端。";
+"Looking for eligible clients…" = "正在尋找符合資格的用戶端…";
+"View tabs" = "分頁";
+"Client tabs (top bar)" = "用戶端分頁（頂端列）";
+"Live trace" = "即時追蹤";
+"Popover size" = "視窗尺寸";
+"Data refresh" = "資料更新";
+"Language" = "語言";
+"Discord" = "Discord";
+"About" = "關於";
+"Menu bar" = "選單列";
+"Dashboard" = "儀表板";
+"General" = "一般";
+"Agent limits card" = "Agent 額度卡片";
+"Live session card" = "即時工作階段卡片";
+"Usage attribution" = "用量歸屬";
+"API-list-price equivalent" = "API 列表價格等值";
+"Nothing is classified yet. Classify sources in Settings → Usage attribution." = "目前尚未分類任何內容。請前往「設定」→「用量歸屬」分類來源。";
+"No attributed usage in this range." = "這個區間沒有歸屬用量。";
+"Classify each observed client/provider source against the subscription it should count toward. Nothing here is inferred as a billing event." = "將每個觀察到的用戶端／供應商來源分類到它應計入的訂閱。這裡沒有任何內容是推測出的帳務事件。";
+"Provider IDs are compared exactly as the source emitted them, so related-looking routes may appear as separate rows and be classified independently. Some clients merge them before reporting — Vertex AI arriving as Anthropic, Codex as OpenAI — and a row that arrived merged cannot be split here." = "供應商 ID 會完全按照來源送出的內容進行比對，因此看起來相關的路由仍可能顯示為不同列，並分別分類。部分 client 會在回報前先行合併——Vertex AI 併入 Anthropic、Codex 併入 OpenAI——已合併送達的列在這裡無法再拆開。";
+"A declaration is your classification, not a billing fact." = "這項宣告是你的分類，不是帳務事實。";
+"No provider-split usage in this range." = "這個區間沒有按供應商分列的用量。";
+"Accept all suggestions (%lld)" = "接受所有建議（%lld）";
+"Suggestions are proposals; they do not change your classification until accepted." = "建議只是提案；接受前不會改變你的分類。";
+"%@ · %@" = "%1$@ · %2$@";
+"Observed %@ tokens · %@" = "觀察到 %@ tokens · %@";
+"Classification" = "分類";
+"Unassigned" = "未指定";
+"Not a subscription" = "不是訂閱";
+"Counts toward %@" = "計入 %@";
+"Suggested: counts toward %@" = "建議：計入 %@";
+"Suggested: not a subscription" = "建議：不是訂閱";
+"Usage could not be loaded, so there is nothing to classify yet." = "無法載入用量，因此目前沒有可分類的內容。";
+"Usage breakdown is unavailable right now." = "目前無法顯示用量拆分。";
+"Unspecified provider" = "未指定供應商";
+"Classification for %@" = "%@ 的分類";
+"Could not save this classification: existing attribution data is invalid or foreign." = "無法儲存這項分類：現有的歸屬資料無效或來自其他格式。";
+"Could not save this classification: the attribution entry limit was reached." = "無法儲存這項分類：已達歸屬項目上限。";
+"Could not save this classification: the new value is too large or unsupported." = "無法儲存這項分類：新值太大或不受支援。";
+"Claude accounts" = "Claude 帳號";
+
+/* ===== 設定：選項 ===== */
+"Launch at login" = "登入時開啟";
+"Animate based on token usage" = "依 token 用量調整動畫速度";
+"Show Agent limits card" = "顯示 Agent 額度卡片";
+"Show as used" = "改以已用量顯示";
+"Split by agent / model" = "依 Agent／模型分列";
+"Height" = "高度";
+"Auto" = "自動";
+"Fit the height to the screen automatically" = "自動調整為適合螢幕的高度";
+"Version" = "版本";
+"Check for updates" = "檢查更新";
+"Check Now" = "立即檢查";
+"Receive beta updates" = "接收 beta 版更新";
+"Show today's usage on Discord" = "在 Discord 顯示今日用量";
+"Open Settings" = "開啟設定";
+"Not now" = "暫時不要";
+"1.2M tokens today" = "今日 1.2M token";
+"Claude Code · $10-50" = "Claude Code · $10-50";
+"Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings." = "你的 Discord 個人檔案可以顯示你今天在做什麼。要顯示哪些內容——或什麼都不顯示——都在設定裡挑。";
+"Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds." = "預設關閉。會把你在下方勾選的內容——今日 token 數、用戶端名稱、花費級距或取整金額——依你指定的用戶端，連同一個 Syrtis 原始碼連結，發布到你的 Discord 個人檔案。工作時會持續更新，因此活動時段也會曝光。任何看得到你檔案的人都能讀取並保存每一次更新；關閉只會停止後續更新，無法收回已經送出的內容。已隱藏的用戶端不會送出；在這裡做的變更約 15 秒內反映到你的個人檔案。";
+"Include today's tokens" = "包含今日 token 數";
+"Include the client name" = "包含用戶端名稱";
+"Include cost" = "包含花費";
+"Untick everything and nothing is published at all." = "全部取消勾選就完全不發布任何內容。";
+"Show cost as a figure instead of a range" = "以金額而非級距顯示花費";
+"A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend." = "級距讓你和同一區間裡的其他人混在一起。金額會取整到整數美元、不含分位，但仍然每天多透露一些。若上方指定了單一用戶端，它就等於那個工具的每日花費。";
+"Whichever client you used most" = "用量最高的用戶端";
+"Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's." = "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 Syrtis 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。";
+"Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
+"Takes effect the next time Syrtis starts." = "下次啟動 Syrtis 時生效。";
+"Restart Syrtis?" = "重新啟動 Syrtis？";
+"Restart Syrtis to apply the new language." = "重新啟動 Syrtis 以套用新的語言。";
+"Restart Now" = "立即重新啟動";
+"Later" = "稍後";
+"Dark" = "深色";
+"Light" = "淺色";
+"System" = "跟隨系統";
+"(quota card only)" = "（僅額度卡片）";
+"Drag to reorder" = "拖曳可調整順序";
+
+"Today's tokens (50M)" = "今日 tokens（50M）";
+"Today's cost ($5.20)" = "今日花費（$5.20）";
+"Total tokens (1.5B)" = "累計 tokens（1.5B）";
+"Total cost ($889)" = "累計花費（$889）";
+"Tokens / min (12.4K/m)" = "每分鐘 tokens（12.4K/m）";
+"Quota left (57%)" = "剩餘額度（57%）";
+"Icon only" = "只顯示圖示";
+
+"Spinning cat" = "旋轉貓";
+"Party parrot" = "派對鸚鵡";
+"Signal bars" = "訊號格";
+"Ring gauge" = "環形儀表";
+"Melting popsicle" = "融化冰棒";
+"Color on warning only" = "僅警示時上色";
+"Always colored" = "一律上色";
+"Never colored" = "一律不上色";
+
+"Layout: Full" = "版面：完整";
+"Layout: Classic" = "版面：經典";
+"Pace: Historical" = "步調：歷史";
+"Pace: Linear" = "步調：線性";
+"Pace: Off" = "步調：關閉";
+
+"Every hour" = "每小時";
+"Every %lld min" = "每 %lld 分鐘";
+
+"Add config dir…" = "加入設定資料夾…";
+"Add" = "加入";
+"Not found on disk right now — kept in the list in case it's an unmounted drive or a typo you'll fix." = "目前在磁碟上找不到 —— 仍保留在清單中，以免是尚未掛載的磁碟或待修正的筆誤。";
+
+/* ===== 設定：說明文字 ===== */
+"Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
+"Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "儀表圖示會隨著所選額度時間窗耗盡而下降。「僅警示時上色」在剩餘 25%（琥珀色）與 10%（紅色）之前維持單色，行為與電池圖示一致。";
+"Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out." = "決定儀表圖示與「剩餘額度」標題的資料來源。自動會追蹤最接近用盡的時間窗。";
+"Keep the main Syrtis item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 Syrtis 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
+"Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
+"On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
+"The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker." = "超前／保留量的標記。歷史模式會學習每個額度時間窗的使用模式，學習期間會標示為線性估算；線性模式使用確切的重置週期；關閉則隱藏標記。";
+"Hides only that client's quota card here and on its own tab — the tab and its cost/token data stay visible. Useful for accounts with no OAuth quota (e.g. Claude Console). Grayed out when the tab itself is hidden below, since a hidden tab always hides its quota card too." = "只隱藏該用戶端在此處與自身分頁的額度卡片 —— 分頁本身與費用／token 資料仍會顯示。適合沒有 OAuth 額度的帳號（例如 Claude Console）。當下方把該分頁整個隱藏時，這裡會變成灰色，因為隱藏分頁一定連帶隱藏它的額度卡片。";
+"Off removes a tab from the popover's tab row. Cost/token data is unaffected." = "關閉會將該分頁從彈出視窗的分頁列移除。費用與 token 資料不受影響。";
+"Drag to set the order used by both the top tabs and the quota cards — or drag a tab directly in the top bar. The switch shows/hides a client's top tab (hiding also drops its quota card)." = "拖曳可設定頂端分頁與額度卡片共用的排序，也可以直接在頂端分頁列上拖曳分頁。開關用來顯示或隱藏該用戶端的頂端分頁（隱藏時也會一併移除它的額度卡片）。";
+"Present clients have a switch to show/hide their top tab — hiding also removes that client's quota card. Quota-only clients (OAuth quota, no local sessions, e.g. Antigravity) have no tab, so they appear here only to order their quota card. Drag order applies to both top tabs and quota cards." = "有本機資料的用戶端會有開關可顯示或隱藏頂端分頁 —— 隱藏時也會移除該用戶端的額度卡片。純額度用戶端（只有 OAuth 額度、沒有本機工作階段，例如 Antigravity）沒有分頁，出現在這裡只是為了排序它的額度卡片。拖曳排序會同時套用到頂端分頁與額度卡片。";
+"Affects the live-session card only: on, each agent & model gets its own row; off, rows collapse to one per app." = "只影響即時工作階段卡片：開啟時每個 Agent 與模型各佔一列，關閉時每個應用程式合併為一列。";
+"Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height." = "也可以拖曳彈出視窗底部邊緣的把手。寬度固定；「自動」約為螢幕高度的 60%。";
+"How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless." = "選單列重新讀取記錄檔的頻率。儀表板會在開啟彈出視窗時更新；即時的每分鐘 tokens 則不受此設定影響，每隔幾秒就會更新。";
+"Syrtis began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed." = "Syrtis 最初是 handlecusion 的 tokcat 分支。解析與計價來自 Junho Yeo 的 tokscale；選單列的做法參考 Peter Steinberger 的 CodexBar；跑動的貓則源自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
+"For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in Syrtis — there is no separate per-account view." = "第二個 Claude 帳號請以 CLAUDE_CONFIG_DIR 指向隔離資料夾來執行，再把該資料夾加到這裡。它的用量會合併進上方的總計 —— Syrtis 各處都不會分開顯示個別帳號。";
+"%lld of %lld path(s) can't be read right now — this is retried automatically on the next scan." = "%2$lld 個路徑中有 %1$lld 個目前無法讀取 —— 下次掃描時會自動重試。";
+"%lld path(s) can't be used as a scan folder and were not added." = "有 %lld 個路徑無法作為掃描資料夾，未加入清單。";
+
+/* ===== 步調（pace）=====
+   片段各自查表後以 " · " 串接，分隔符與語言無關，因此逐片段翻譯是安全的。
+   英文原文同時是 SelfTest 與 cross-check 的斷言對象，靠鎖定 en 取得 fallback。
+*/
+"On pace" = "依進度";
+"%lld%% in deficit" = "超前 %lld%%";
+"%lld%% in reserve" = "保留 %lld%%";
+"Lasts until reset" = "可撐到重置";
+"Projected empty now" = "預計即將用盡";
+"Projected empty in %@" = "預計 %@ 後用盡";
+"≈ %lld%% run-out risk" = "≈ %lld%% 用盡風險";
+
+"Learning history · Linear estimate" = "學習歷史中 · 線性估算";
+"Learning reset duration" = "學習重置週期中";
+"Linear" = "線性";
+"Pace unavailable · legacy data" = "無步調資料 · 舊版資料";
+"Pace unavailable · unavailable reason" = "無步調資料 · 原因不明";
+"Pace unavailable · unknown quota window" = "無步調資料 · 未知的額度時間窗";
+"Pace unavailable · missing reset" = "無步調資料 · 缺少重置時間";
+"Pace unavailable · invalid quota data" = "無步調資料 · 額度資料無效";
+"Pace unavailable · account identity unavailable" = "無步調資料 · 無法取得帳號識別";
+"Pace unavailable · history storage full" = "無步調資料 · 歷史儲存空間已滿";
+"Pace unavailable · history unavailable" = "無步調資料 · 沒有歷史資料";
+"Pace unavailable · non-recurring quota" = "無步調資料 · 非週期性額度";
+
+/* 緊湊時間長度，組合成「預計 3天2小時 後用盡」 */
+"duration.now" = "現在";
+"Resets now" = "現在重置";
+"Resets in %@" = "%@ 後重置";
+"%lldm" = "%lld分";
+"%lldh" = "%lld小時";
+"%lldh %lldm" = "%1$lld小時%2$lld分";
+"%lldd" = "%lld天";
+"%lldd %lldh" = "%1$lld天%2$lld小時";
+
+/* ===== 額度時間窗卡片 ===== */
+"Session window" = "工作階段時間窗";
+"Loading" = "載入中";
+"Waiting for quota…" = "正在等待額度…";
+"Waiting for quota" = "等待額度中";
+"%@ window" = "%@ 時間窗";
+"No quota history" = "沒有額度歷史紀錄";
+"This window has no recorded quota history, so there is no line to draw." = "這個時間窗沒有額度歷史紀錄，因此無法繪製曲線。";
+"Remaining" = "剩餘";
+"Used" = "已用";
+"Placing the window…" = "正在定位時間窗…";
+"Placing the window" = "正在定位時間窗";
+"Inferred window · resets in %@" = "推算時間窗 · %@ 後重置";
+"No window running" = "目前沒有執行中的時間窗";
+"Window unavailable" = "時間窗無法使用";
+"The last window ended and nothing has been used since — no window is running." = "上一個時間窗已結束，之後尚無用量——目前沒有執行中的時間窗。";
+"This subscription did not report a usable reset time, so the window cannot be placed." = "這個訂閱未回報可用的重置時間，因此無法定位時間窗。";
+"used" = "已用";
+"remaining" = "剩餘";
+"No quota reading in this window" = "這個時間窗內沒有額度讀數";
+"Reading local usage…" = "正在讀取本機用量…";
+"%@ readings" = "%@ 筆讀數";
+"Quota" = "額度";
+"Usage" = "用量";
+"No sample" = "無樣本";
+"No usage in this interval" = "這個區間沒有用量";
+"No quota reading in this interval" = "這個區間沒有額度讀數";
+"Quota %@%% %@" = "額度%2$@ %1$@%%";
+"%@%@%% this interval" = "此區間 %1$@%2$@%%";
+"10%% of quota ~ %@ · %@ API-equivalent, ±%@%%" = "額度 10%% ≈ %@ token · %@（API 等值，誤差 ±%@%%）";
+"Quota moved only %@%% — too little to estimate (±%@%%)" = "額度僅變動 %@%%，資料太少無法估算（±%@%%）";
+"Quota has not moved yet" = "額度尚未變動";
+"Quota moved %@%%, none of it recorded on this machine" = "額度變動了 %@%%，但這台機器上沒有記錄到";
+"Not enough quota readings yet" = "額度讀數還不夠";
+
+/* ===== 視窗 ===== */
+"Syrtis Settings" = "Syrtis 設定";
+"Sponsor" = "贊助";
+"The Agent limits card is turned off in Settings." = "Agent 額度卡片已在設定中關閉。";
+
+/* ===== 額度歷史 ===== */
+"Window history" = "時間窗歷史";
+"%@ windows" = "%@ 個窗";
+"Show %@ more" = "再顯示 %@ 個";
+"No earlier windows recorded yet. They accumulate as Syrtis runs." = "尚未記錄到更早的時間窗。Syrtis 執行期間會逐步累積。";
+"Syrtis observed %@%% of this window, so its usage figure is a floor." = "Syrtis 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
+"Nothing in this window was charged to this subscription." = "這個時間窗內沒有用量記在這個訂閱上。";
+"Other subscriptions in the same hours: %@ · %@" = "同一時段的其他訂閱：%@ · %@";
+"Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "金額是你歸類為 %@ 的用量按 API 定價換算的等值，不是訂閱實際收取的費用。";
+
+/* ===== 跨訂閱摘要 ===== */
+"Tightest right now: " = "目前最吃緊：";
+" at %lld%% left" = "，剩餘 %lld%%";
+"%lld other windows, all above %lld%%" = "另外 %1$lld 個時間窗，全部高於 %2$lld%%";
+"%lld of %lld other windows are below %lld%%" = "另外 %2$lld 個時間窗裡有 %1$lld 個低於 %3$lld%%";
+"No subscription is reporting a usage window right now." = "目前沒有任何訂閱回報使用時間窗。";
+"Burning fastest: " = "燒最快：";
+" · %lld%% ahead of pace" = " · 超前步調 %lld%%";
+"Today: %@ tokens · %@" = "今天：%@ tokens · %@";
+"Tightest" = "最吃緊";
+"Burning fastest" = "燒最快";
+"Today" = "今天";
+"%lld%% ahead of pace" = "超前步調 %lld%%";
+"Layout: Chart" = "版面：曲線";
+"Full is the wide card with the pace bar; Classic is the original compact layout without pace; Chart draws each window's quota over time, with the pace estimate as a second line. Chart needs recorded quota history and falls back to a bar for windows that have none." = "Full 是含步調長條的寬版卡片；Classic 是原本不含步調的精簡版面；Chart 把每個時間窗的額度畫成隨時間變化的曲線，步調估計是第二條線。Chart 需要已記錄的額度歷史，沒有歷史的時間窗會退回長條。";
+
+/* ===== 逐訂閱用量 ===== */
+
+/* ===== 逐訂閱每日趨勢 ===== */
+"Daily by subscription" = "每日・依訂閱";
+"since %@" = "自 %@";
+"No usage recorded in this range." = "這個範圍內沒有記錄到用量。";
+"Reading daily usage…" = "正在讀取每日用量…";
+"Unclassified" = "未分類";
+/* ===== 時間窗趨勢 ===== */
+"%lld%%" = "%lld%%";
+"Recent trend, projected %lld%% by reset" = "近期趨勢，預估重置時達 %lld%%";
+
+/* ===== 過去的時間窗 ===== */
+"Past windows" = "過去的時間窗";
+"never exhausted" = "從未用完";
+"No completed windows recorded yet. They accumulate as Syrtis runs." = "尚未記錄到完整的時間窗。Syrtis 執行期間會逐步累積。";
+"Reading quota history…" = "正在讀取額度歷史…";
+"Heaviest %@%% · never ran out" = "最多用到 %@%%，從未用完";
+"Heaviest %@%% · ran out at least once" = "最多用到 %@%%，至少用完過一次";
+"Pace" = "步調";
+"Every measured window is under its expected pace" = "量得到的時間窗都在預期步調之內";
+"10%% of quota ~ %@-%@ · %@-%@ API-equivalent" = "額度 10%% ≈ %@〜%@ token · %@〜%@（API 等值）";
+
+/* ===== 總覽卡片組裝 ===== */
+"Overview cards" = "總覽卡片";
+"Quota summary" = "額度摘要";
+"Limits" = "Agent 額度";
+"Chart" = "用量圖";
+"Trace" = "即時追蹤";
+"Which cards the Overview lens shows, in this order. The usage chart cannot be hidden — Overview is where every hidden lens falls back to, so it has to keep something. Cost and token data are unaffected." = "決定「總覽」分頁顯示哪些卡片，順序如上。用量圖無法隱藏——每個被隱藏的分頁都會退回總覽，所以它必須留下東西。花費與 token 資料不受影響。";
+"by reset %lld%%" = "重置時 %lld%%";
+"No usage this day" = "這天沒有用量";
+"Most recent window" = "最近一個時間窗";
+"%@ windows ago" = "%@ 個窗以前";
+"Consumed %@%% of the allowance" = "用掉了額度的 %@%%";
+"Ran out" = "已用完";
+"Consuming now · at this rate it runs out before reset (projected %lld%% used)" = "現在正在消耗・照這個速度會在重置前用完（預計已用 %lld%%）";
+"Consuming now · at this rate it reaches %lld%% used by reset" = "現在正在消耗・照這個速度重置時約已用 %lld%%";
+"Recent consumption" = "最近的消耗";
+"At this rate it runs out before reset · projected %lld%% used" = "照這個速度會在重置前用完・預計已用 %lld%%";
+"At this rate it reaches %lld%% used by reset" = "照這個速度，重置時約已用 %lld%%";
+"The pace line beside it compares you with your usual pattern instead." = "旁邊那行步調比的是「跟你平常相比」，兩者回答不同問題。";
+
+// Quota heatmap
+"When the allowance goes" = "額度花在什麼時候";
+"%@ days observed" = "觀察到 %@ 天";
+"No allowance movement recorded yet. It accumulates as Syrtis runs." = "還沒有記錄到額度變動。Syrtis 執行期間會逐步累積。";
+"%@%% consumed between readings too far apart to place" = "有 %@%% 落在間隔過長的兩次讀數之間，無法定位到時段";
+"No allowance consumed in this slot" = "這個時段沒有消耗額度";
+"%@ allowance-points spent here" = "這個時段累計花掉 %@ 個額度百分點";
+"~ %@ API-equivalent, ±%@%%" = "≈ %@（API 等值，誤差 ±%@%%）";
+"Not enough history to convert this window to a figure" = "這個窗的歷史還不足以換算成金額";
+"Mon" = "一";
+"Tue" = "二";
+"Wed" = "三";
+"Thu" = "四";
+"Fri" = "五";
+"Sat" = "六";
+"Sun" = "日";
+"Classify your usage in Settings to see what this window is worth" = "到設定裡分類用量，才能知道這個窗值多少";
+"Nothing is classified yet. Settings › Usage attribution splits this by subscription." = "還沒有分類過任何用量。設定 › 用量歸屬可以把這張圖拆成各個訂閱。";
+"%@ of %@ windows recorded — the estimate needs that many" = "已記錄 %@ 個時間窗，要 %@ 個才能給出估計";
+"runs out at this rate" = "照現速會用完";
+"Peaked at %@%% · never ran out" = "最高讀數 %@%%・從未用完";
+"Peaked at %@%% · ran out at least once" = "最高讀數 %@%%・至少用完過一次";
+"Quota could not be loaded." = "無法載入額度。";
+"This agent reported no quota windows." = "這個 agent 沒有回報任何額度時間窗。";
+"Not in the latest quota report." = "不在最近一次的額度回報裡。";
+"Quota unavailable" = "額度無法取得";
+"10%% of quota ~ %@, unpriced models, ±%@%%" = "額度 10%% ≈ %@ token（模型無定價，誤差 ±%@%%）";
+"unpriced models, ±%@%%" = "模型無定價，誤差 ±%@%%";
+"10%% of quota ~ %@ API-equivalent, tokens unavailable, ±%@%%" = "額度 10%% ≈ %@（API 等值，無 token 明細，誤差 ±%@%%）";
+"%@%% consumed, but every pair of readings was too far apart to place on the grid. It fills in as sampling gets denser." = "已消耗 %@%%，但每一組讀數的間隔都太遠，無法定位到格子上。取樣變密之後會逐步填上。";
+"Usage recorded, but none of it is priced." = "有記錄到用量，但都沒有定價。";
+"Usage recorded, but it carries no token counts." = "有記錄到用量，但沒有附帶 token 數。";
+"Other subscriptions in the same hours: %@" = "同一時段的其他訂閱：%@";
+"Local usage could not be read." = "無法讀取本機用量。";
+"tokens unavailable, ±%@%%" = "無 token 明細，誤差 ±%@%%";
+"~ %@ – %@ API-equivalent" = "≈ %@ – %@（API 等值）";
+"The allowance did not move in this window" = "這個時間窗內額度沒有變動";
+"The allowance moved too little to convert reliably" = "額度變動太小，無法可靠換算";
+"The allowance moved, but no usage was recorded on this machine" = "額度有變動，但這台機器上沒有記錄到用量";
+"Historically: lasts until reset" = "歷史：可撐到重置";
+"On average: lasts until reset" = "均速：可撐到重置";
+"Recently: runs out" = "近期：會用完";
+"%@ scanned rows have no usable timestamp, so no window can count them" = "掃描到 %@ 筆沒有可用的時間戳，任何視窗都無法計入";
+"No local usage matched %@, though this subscription has other usage in this window" = "本機沒有任何用量對應到「%@」，但這個訂閱在此視窗內有其他用量";
+"Quota history could not be read. It will be retried." = "無法讀取額度歷史，稍後會重試。";
+"Other subscriptions in the same hours:" = "同一時段的其他訂閱：";
+"Unclassified usage in the same hours:" = "同一時段的未分類用量：";
+"Other and unclassified usage in the same hours:" = "同一時段的其他與未分類用量：";
+"Excluded usage in the same hours:" = "同一時段的已排除用量：";
+"Other and excluded usage in the same hours:" = "同一時段的其他與已排除用量：";
+"%@ %@" = "%1$@%2$@";
+
+/* Menu bar text appearance */
+"Font color" = "字體顏色";
+"Automatic" = "自動";
+"Custom" = "自訂";
+"Custom color" = "自訂顏色";
+"Menu bar font color" = "選單列字體顏色";
+"Hex color" = "十六進位色碼";
+"Enter a 6-digit hex color, e.g. #000000." = "請輸入 6 位色碼，例如 #000000。";
+"Black" = "黑色";
+"Dark gray" = "深灰色";
+"Light gray" = "淺灰色";
+"White" = "白色";
+"Red" = "紅色";
+"Orange" = "橙色";
+"Amber" = "琥珀色";
+"Yellow" = "黃色";
+"Lime" = "萊姆綠";
+"Green" = "綠色";
+"Emerald" = "翠綠色";
+"Cyan" = "青色";
+"Blue" = "藍色";
+"Indigo" = "靛藍色";
+"Purple" = "紫色";
+"Pink" = "粉紅色";
+"Normal" = "正常";
+"Low" = "偏低";
+"Very low" = "不足";
+"More than 25% remaining, other text, or unavailable quota" = "剩餘超過 25%、其他文字，或額度無法取得";
+"More than 10% and up to 25% remaining" = "剩餘超過 10% 至 25%";
+"10% or less remaining" = "剩餘 10% 或以下";
+"Custom colors follow each item's remaining quota: normal above 25%, low above 10% through 25%, and very low at 10% or below. Other text and unavailable quota use the normal color. Automatic keeps the original colors." = "自訂顏色依各項目的剩餘額度套用：超過 25% 為正常，超過 10% 至 25% 為偏低，10% 或以下為不足。其他文字與無法取得的額度使用正常色。自動模式維持原有配色。";
+
+/* Grok Bot quota setup */
+"Loading Grok Bot limits…" = "正在載入 Grok Bot 額度…";
+"Sign in to Grok Bot on this Mac, then refresh to see its weekly limits." = "在這台 Mac 登入 Grok Bot，再重新整理以查看每週額度。";
+"No local usage records in this range." = "此期間沒有本機用量紀錄。";

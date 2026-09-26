@@ -15,7 +15,7 @@
 //! IDE token wins over an expired CLI token and the reverse. When every source
 //! is present but expired we return `Terminal` so the user sees a reauth prompt
 //! rather than a silently missing card. This mirrors mana.bar's `KiroProvider`
-//! discovery, narrowed to the single account TokenBar shows one card for.
+//! discovery, narrowed to the single account Syrtis shows one card for.
 //!
 //! Absent vs Terminal follows the Copilot loader's rule: a source that is
 //! simply not signed in is `Absent`, while a present-but-broken token entry, or

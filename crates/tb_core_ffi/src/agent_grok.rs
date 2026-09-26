@@ -1,7 +1,7 @@
 //! Grok Build subscription quota — two meters, shown as two windows.
 //!
 //! Grok Build stores OIDC credentials at `$GROK_HOME/auth.json` (default
-//! `~/.grok/auth.json`). TokenBar refreshes the access token against
+//! `~/.grok/auth.json`). Syrtis refreshes the access token against
 //! `auth.x.ai` and reads usage from two views of the same private billing
 //! endpoint the CLI uses:
 //!

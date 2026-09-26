@@ -12,7 +12,7 @@ sources: ["README.md", "AGENTS.md", "public GitHub contribution history", "canon
 
 ## 文件目的
 
-這份文件整理 TokenBar 對外協作的語言、排版、credit 與 review 回覆規則。它服務 GitHub、release notes、landing copy 與繁中說明；技術事實仍以程式碼、workflow 與 canonical knowledge 為準。
+這份文件整理 Syrtis 對外協作的語言、排版、credit 與 review 回覆規則。它服務 GitHub、release notes、landing copy 與繁中說明；技術事實仍以程式碼、workflow 與 canonical knowledge 為準。
 
 ## 目錄
 

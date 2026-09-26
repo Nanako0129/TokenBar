@@ -51,8 +51,8 @@ jobs:
 
       - name: Archive
         run: |
-          tar -czf "TokenBar.app.tar.gz" -C dist "TokenBar.app"
-          shasum -a 256 "TokenBar.app.tar.gz" | awk '{print $1}' > sha256.txt
+          tar -czf "Syrtis.app.tar.gz" -C dist "Syrtis.app"
+          shasum -a 256 "Syrtis.app.tar.gz" | awk '{print $1}' > sha256.txt
           echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
 
       # release-notes.txt: plain text for the Sparkle dialog and appcast.
@@ -75,7 +75,7 @@ jobs:
         run: |
           umask 077
           printf '%s' "$SPARKLE_PRIVATE_KEY" > /tmp/sparkle_ed.key
-          scripts/make_appcast.sh "TokenBar.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
+          scripts/make_appcast.sh "Syrtis.app.tar.gz" "$VERSION" "$GITHUB_REF_NAME" /tmp/sparkle_ed.key release-notes.txt
           rm -f /tmp/sparkle_ed.key
 
       # Legacy Tauri manifest. The old Tauri app's updater endpoint
@@ -102,7 +102,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           PRERELEASE_FLAG=""
-          ASSETS="TokenBar.app.tar.gz"
+          ASSETS="Syrtis.app.tar.gz"
           case "$VERSION" in
             *-*) PRERELEASE_FLAG="--prerelease";;
             *) ASSETS="$ASSETS latest.json";;  # frozen legacy Tauri manifest
@@ -111,7 +111,7 @@ jobs:
           [[ -s "$NOTES" ]] || NOTES="release-notes.txt"
           gh release create "$GITHUB_REF_NAME" \
             $ASSETS \
-            --title "TokenBar $VERSION" \
+            --title "Syrtis $VERSION" \
             --notes-file "$NOTES" $PRERELEASE_FLAG
 
       - name: Publish appcast to main
@@ -134,33 +134,39 @@ jobs:
         run: gh workflow run update-install-count.yml --ref main
 
       # Prereleases ship via the Sparkle beta channel only — no cask bump.
-      - name: Bump Homebrew cask (tokenbar)
+      # Only the new tap is written. The old TokenBar tap and its
+      # `tokenbar` cask are frozen by hand at the last TokenBar release (with
+      # `deprecate!`); CI never touches them again, so a heredoc rewrite can
+      # never erase that freeze or turn the old cask into a Syrtis install.
+      # The deploy key is scoped to `Nanako0129/homebrew-tap` only.
+      - name: Bump Homebrew cask (syrtis)
         if: ${{ !contains(github.ref_name, '-') }}
         env:
-          HOMEBREW_TAP_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+          HOMEBREW_TAP_SYRTIS_DEPLOY_KEY: ${{ secrets.HOMEBREW_TAP_SYRTIS_DEPLOY_KEY }}
         run: |
           umask 077
-          printf '%s\n' "$HOMEBREW_TAP_DEPLOY_KEY" > /tmp/tap_deploy_key
+          printf '%s\n' "$HOMEBREW_TAP_SYRTIS_DEPLOY_KEY" > /tmp/tap_deploy_key
           export GIT_SSH_COMMAND="ssh -i /tmp/tap_deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"
-          git clone git@github.com:Nanako0129/homebrew-tokenbar.git /tmp/tap
-          cat > "/tmp/tap/Casks/tokenbar.rb" <<CASK
-          cask "tokenbar" do
+          git clone git@github.com:Nanako0129/homebrew-tap.git /tmp/tap
+          mkdir -p /tmp/tap/Casks
+          cat > "/tmp/tap/Casks/syrtis.rb" <<CASK
+          cask "syrtis" do
             version "$VERSION"
             sha256 "$SHA256"
 
-            url "https://github.com/Nanako0129/TokenBar/releases/download/v#{version}/TokenBar.app.tar.gz"
-            name "TokenBar"
+            url "https://github.com/Nanako0129/syrtis/releases/download/v#{version}/Syrtis.app.tar.gz"
+            name "Syrtis"
             desc "Menubar dashboard for local AI token usage"
-            homepage "https://github.com/Nanako0129/TokenBar"
+            homepage "https://github.com/Nanako0129/syrtis"
 
             auto_updates true
             depends_on macos: :sonoma
             depends_on arch: :arm64
 
-            app "TokenBar.app"
+            app "Syrtis.app"
 
             postflight_steps do
-              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/TokenBar.app"]
+              run "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "{{appdir}}/Syrtis.app"]
             end
 
             zap trash: [
@@ -175,6 +181,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Casks
-          git commit -m "tokenbar $VERSION"
+          git commit -m "syrtis $VERSION"
           git push
           rm -f /tmp/tap_deploy_key

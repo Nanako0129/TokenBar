@@ -745,7 +745,7 @@ mod tests {
         // `work-d/sub` belongs to neither window, and that is the intended
         // answer rather than a leak in the other direction. It is a config
         // directory of its own, discovered through a `.cc-mirror` variant and
-        // never configured in TokenBar, so it is not the primary's usage and
+        // never configured in Syrtis, so it is not the primary's usage and
         // not D's — it is a third account nobody registered. Today it silently
         // inflates the primary's window; counting it for no quota is the honest
         // result, because there is no quota reading to divide it against.

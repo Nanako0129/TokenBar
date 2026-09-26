@@ -15,18 +15,18 @@
 
 ## 文件目的
 
-這份文件記錄 native TokenBar 的 synthetic usage mode：旗標如何選擇資料來源、哪些 usage surface 會被替換、哪些服務維持正常 runtime，以及 maintainer 應如何取得 selftest 與 GUI evidence。Synthetic fixture 位於 `Sources/TokenBar/DemoData.swift`，不依賴本機 usage logs、usage-provider network 或 Rust usage FFI。
+這份文件記錄 native Syrtis 的 synthetic usage mode：旗標如何選擇資料來源、哪些 usage surface 會被替換、哪些服務維持正常 runtime，以及 maintainer 應如何取得 selftest 與 GUI evidence。Synthetic fixture 位於 `Sources/Syrtis/DemoData.swift`，不依賴本機 usage logs、usage-provider network 或 Rust usage FFI。
 
 ## 旗標與建置範圍
 
-`--demo` 在 process 啟動時由 `UsageDataSources.current` 只選一次。所有可啟動 TokenBar 的 build 形態都接受同一個旗標；旗標不寫入 `UserDefaults`，重新啟動時必須再次傳入。
+`--demo` 在 process 啟動時由 `UsageDataSources.current` 只選一次。所有可啟動 Syrtis 的 build 形態都接受同一個旗標；旗標不寫入 `UserDefaults`，重新啟動時必須再次傳入。
 
 | Build 形態 | 入口 | 用途 |
 |---|---|---|
-| Debug SwiftPM | `swift run TokenBar --demo` | 日常開發；啟動後點擊新增的 status item 驗證 popover |
-| Debug settings | `swift run TokenBar --demo --settings` | 驗證 Settings preview、quota 與 trace |
-| Release SwiftPM | `swift run -c release TokenBar --demo` | 驗證 release optimization 下的資料流 |
-| Bundled `.app` | `open dist/TokenBar.app --args --demo` | 驗證實際 Sparkle、resource bundle 與 menu-bar app |
+| Debug SwiftPM | `swift run Syrtis --demo` | 日常開發；啟動後點擊新增的 status item 驗證 popover |
+| Debug settings | `swift run Syrtis --demo --settings` | 驗證 Settings preview、quota 與 trace |
+| Release SwiftPM | `swift run -c release Syrtis --demo` | 驗證 release optimization 下的資料流 |
+| Bundled `.app` | `open dist/Syrtis.app --args --demo` | 驗證實際 Sparkle、resource bundle 與 menu-bar app |
 
 > **注意：** `--demo` 是 maintainer-only hidden flag。不要在公開設定頁、README 或一般使用者文件中把它描述成支援的產品模式。
 
@@ -71,17 +71,17 @@ flowchart LR
 
 ## 啟動命令
 
-先以 repo root 建置 Rust staticlib 與 Swift executable，再傳入旗標。一般 Debug 截圖先啟動 app，再點擊新增的 TokenBar status item 開啟 popover：
+先以 repo root 建置 Rust staticlib 與 Swift executable，再傳入旗標。一般 Debug 截圖先啟動 app，再點擊新增的 Syrtis status item 開啟 popover：
 
 ```bash
 make build
-swift run TokenBar --demo
+swift run Syrtis --demo
 ```
 
 Settings window 可獨立啟動：
 
 ```bash
-swift run TokenBar --demo --settings
+swift run Syrtis --demo --settings
 ```
 
 > **注意：** 既有 `--open-popover` launch-time screenshot hook 在 remote-hosted status item 尚未建立可用 anchor 時可能不會開啟 popover，不能作為 demo mode 的 correctness gate。GUI 驗證以啟動 `--demo` 後實際點擊該測試 process 的 status item 為準。
@@ -90,13 +90,13 @@ swift run TokenBar --demo --settings
 
 ```bash
 make bundle
-open dist/TokenBar.app --args --demo
+open dist/Syrtis.app --args --demo
 ```
 
 要同時預選 year 或 client tab，可把既有 debug flags 接在 `--demo` 後面：
 
 ```bash
-swift run TokenBar --demo --year=2025 --tab=claude
+swift run Syrtis --demo --year=2025 --tab=claude
 ```
 
 ## Synthetic 資料語意
@@ -124,16 +124,16 @@ Year filter 的重要條件是：其他 year 也一定產生包含所選 year �
 `SelfTest` 是 hermetic data-contract gate，不會啟動 AppKit GUI，也不需要本機 usage logs。它會透過 `DemoData` 與 `DemoUsageDataSource` 檢查 source factory、14 天排序與連續性、summary totals、client 集合、四種 reports、trace、quota windows、positive rate，以及 nil/current/other year semantics。
 
 ```bash
-swift run TokenBar --selftest
+swift run Syrtis --selftest
 ```
 
 GUI evidence 則需要明確啟動 app，點擊該測試 process 的 status item，並確認六個 lenses、client tabs、quota card、trace card、tray title、gauge 與 animation 實際渲染；Settings 可用第二個命令自動開啟：
 
 ```bash
-swift run TokenBar --demo
-swift run TokenBar --demo --settings
+swift run Syrtis --demo
+swift run Syrtis --demo --settings
 ```
 
-> **限制：** `swift run TokenBar --demo --smoke` 會先命中 `main.swift` 的 `--smoke` 分支，執行 live FFI smoke，而不是啟動 demo source。這個組合只能用來驗證 FFI smoke；它不能證明 demo mode 的 no-live 邊界，也不應用作 GUI evidence。
+> **限制：** `swift run Syrtis --demo --smoke` 會先命中 `main.swift` 的 `--smoke` 分支，執行 live FFI smoke，而不是啟動 demo source。這個組合只能用來驗證 FFI smoke；它不能證明 demo mode 的 no-live 邊界，也不應用作 GUI evidence。
 
 Selftest 綠燈代表 synthetic contract 與 source wiring 通過；它不取代實際 menu-bar runtime、Sparkle bundle、AppKit rendering 或 resource loading 的 GUI 檢查。

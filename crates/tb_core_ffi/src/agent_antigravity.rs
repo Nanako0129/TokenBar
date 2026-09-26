@@ -1557,7 +1557,7 @@ where
         })?
         .to_string();
 
-    // The provider refresh lock serializes TokenBar writers, but the credential
+    // The provider refresh lock serializes Syrtis writers, but the credential
     // file has no cross-process compare-and-swap. Re-reading closes the network
     // wait race; an external writer can still race this check and atomic rename.
     let mut current_creds = load_remote_credentials(creds_path).map_err(|_| {
@@ -2132,7 +2132,7 @@ async fn agy_cli_artifact_candidates() -> Vec<PathBuf> {
 
     // PATH is the normal resolution rule. Only start a login shell when the
     // GUI process did not inherit a usable PATH entry. Do not cache an empty
-    // result: the CLI may be installed after TokenBar has started.
+    // result: the CLI may be installed after Syrtis has started.
     let candidates =
         if let Some(path) = executable_from_path(std::env::var_os("PATH").as_deref(), "agy") {
             vec![path]

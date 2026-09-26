@@ -7,7 +7,7 @@ export type Locale = 'en' | 'zh-tw'
 
 const en = {
   meta: {
-    title: 'TokenBar — track Claude Code & Codex token usage from the macOS menu bar',
+    title: 'Syrtis — track Claude Code & Codex token usage from the macOS menu bar',
     description:
       'Free, open-source menu-bar app that reads local logs to track AI coding spend across 25+ agents — Claude Code, Codex, Cursor, OpenCode and more. Live throughput, quota gauges, 3D usage graph. Native Swift, Liquid Glass, zero telemetry.',
     ogLocale: 'en_US',
@@ -21,24 +21,24 @@ const en = {
       { href: '#privacy', label: 'Privacy' },
       { href: '#install', label: 'Install' },
     ],
-    statusTitle: 'TokenBar lives right here',
+    statusTitle: 'Syrtis lives right here',
   },
   hero: {
     eyebrow: 'Local-first · Native macOS menu bar',
     h1: 'Know every AI<br />token you <span class="hot">burn</span>.',
-    lede: 'TokenBar reads your AI coding logs on-device and lays your spend bare across <strong>25+ agents</strong> — Claude Code, Codex, Cursor, OpenCode and more. Native Swift, dressed in Liquid Glass. No telemetry, no account. Just the numbers.',
+    lede: 'Syrtis reads your AI coding logs on-device and lays your spend bare across <strong>25+ agents</strong> — Claude Code, Codex, Cursor, OpenCode and more. Native Swift, dressed in Liquid Glass. No telemetry, no account. Just the numbers.',
     copy: 'copy',
     copied: 'copied',
     github: 'View on GitHub',
     statline: '25+ agents · 7 lenses · 160 fps 3D · 0 telemetry',
-    popAlt: 'The TokenBar popover: token usage dashboard with agent limits and live pace',
+    popAlt: 'The Syrtis popover: token usage dashboard with agent limits and live pace',
   },
   native: {
     eyebrow: 'Native Swift · Liquid Glass',
     h2: 'Rebuilt in Swift.<br />Dressed in Liquid Glass.',
     intro:
-      'This <em>is</em> TokenBar — since v1.0.0 the app is a ground-up native rewrite. Same dashboard, same numbers as the original, now with the system’s own glass, springs, and speed.',
-    shotAlt: 'The native TokenBar popover rendered in Liquid Glass over the desktop wallpaper',
+      'This <em>is</em> Syrtis — since v1.0.0 the app is a ground-up native rewrite. Same dashboard, same numbers as the original, now with the system’s own glass, springs, and speed.',
+    shotAlt: 'The native Syrtis popover rendered in Liquid Glass over the desktop wallpaper',
     points: [
       {
         title: '100% native Swift shell',
@@ -63,7 +63,7 @@ const en = {
     h2: 'The cat spins faster<br />the more you burn.',
     body: "Your token throughput as a single glanceable critter: idle when nothing's flowing, whirling when Claude Code is mid-refactor. One look at the menu bar tells you how fast the meter is running — no window required.",
     credit:
-      'The menu-bar pet, a critter that animates faster the harder you work it, is the invention of <a href="https://kyome.io/runcat/">RunCat</a> by <strong>Takuto Nakamura</strong>, and Party Parrot comes from there too. <a href="https://github.com/handlecusion/tokcat">tokcat</a> by <strong>handlecusion</strong> brought the idea to token tracking and made the oiiai spinning cat its signature. TokenBar began as a tokcat fork and reuses both, kept with gratitude.',
+      'The menu-bar pet, a critter that animates faster the harder you work it, is the invention of <a href="https://kyome.io/runcat/">RunCat</a> by <strong>Takuto Nakamura</strong>, and Party Parrot comes from there too. <a href="https://github.com/handlecusion/tokcat">tokcat</a> by <strong>handlecusion</strong> brought the idea to token tracking and made the oiiai spinning cat its signature. Syrtis began as a tokcat fork and reuses both, kept with gratitude.',
     crittersNote: 'oiiai cat from tokcat, Party Parrot from RunCat. Hover to feed them tokens.',
     gifAlt: "The oiiai cat spinning in the menu bar beside today's cost",
   },
@@ -84,7 +84,7 @@ const en = {
     h2: 'App tabs filter who. The view switch picks how.',
     intro:
       'Pick which agents you’re looking at, then choose how to break them down — a multi-view dashboard modeled on <a class="ilink" href="https://github.com/junhoyeo/tokscale">tokscale</a>’s TUI, lenses and columns and all.',
-    altPrefix: (name: string) => `TokenBar ${name} view`,
+    altPrefix: (name: string) => `Syrtis ${name} view`,
     items: [
       { name: 'Overview', desc: 'The whole picture — contribution chart, agent limits with pace, live session, model breakdown, streaks.' },
       { name: 'Models', desc: 'Every model ranked by cost, with its share and a dim In · Out · CR · CW split.' },
@@ -97,14 +97,14 @@ const en = {
     wideTitle: '3D contribution graph',
     wideDesc:
       'The same year of usage as an interactive GitHub-style tile terrain — orbit it, and the stacked 2D bars are one toggle away. Tokens stack by <strong>model</strong> (provider shades) or by <strong>agent</strong> (brand colors), in tokens or dollars.',
-    wideAlt: 'TokenBar interactive 3D contribution graph',
+    wideAlt: 'Syrtis interactive 3D contribution graph',
     lightboxLabel: 'Screenshot preview',
     lightboxClose: 'Close preview',
   },
   privacy: {
     eyebrow: 'Local-first by construction',
     h2: 'Your spend stays on your Mac.',
-    intro: 'TokenBar is built so the honest answer to “where does my data go?” is: nowhere.',
+    intro: 'Syrtis is built so the honest answer to “where does my data go?” is: nowhere.',
     pillars: [
       {
         title: 'Reads on-device',
@@ -112,7 +112,7 @@ const en = {
       },
       {
         title: 'No telemetry, no account',
-        body: 'No analytics, no sign-up, no cloud sync. TokenBar never phones home with what you do or what you spend.',
+        body: 'No analytics, no sign-up, no cloud sync. Syrtis never phones home with what you do or what you spend.',
       },
       {
         title: 'Every request, disclosed',
@@ -124,13 +124,13 @@ const en = {
     eyebrow: 'Two minutes, Apple Silicon',
     h2: 'One command. The cat moves in.',
     intro:
-      'TokenBar installs through Homebrew for <strong>Apple Silicon Macs</strong> on macOS 14+. The fully-qualified cask auto-taps, so there is no separate <code>brew tap</code> step.',
+      'Syrtis installs through Homebrew for <strong>Apple Silicon Macs</strong> on macOS 14+. The fully-qualified cask auto-taps, so there is no separate <code>brew tap</code> step.',
     pill: 'Native Swift · macOS 14+',
     desc: 'The shipping app. In-app updates arrive over a signed Sparkle feed and are verified before install; beta builds are an in-app <strong>Settings toggle</strong>, not a separate cask.',
     copyBtn: 'Copy command',
     copied: 'Copied ✓',
     legacy:
-      'Still on an older Mac? <code>tokenbar@legacy</code> pins the final Tauri build (v0.4.5, macOS 11+) — the <a href="https://github.com/Nanako0129/TokenBar-Tauri">legacy repo</a> is archived but the cask stays. Building from source? <a href="https://github.com/Nanako0129/TokenBar">Swift 6 + Rust</a>, Command Line Tools are enough.',
+      'Still on an older Mac? <code>tokenbar@legacy</code> pins the final Tauri build (v0.4.5, macOS 11+) — the <a href="https://github.com/Nanako0129/TokenBar-Tauri">legacy repo</a> is archived but the cask stays. Building from source? <a href="https://github.com/Nanako0129/syrtis">Swift 6 + Rust</a>, Command Line Tools are enough.',
   },
   faq: {
     eyebrow: 'Questions',
@@ -138,7 +138,7 @@ const en = {
     intro: 'The short answers most people want before installing.',
     items: [
       {
-        q: 'What exactly is TokenBar?',
+        q: 'What exactly is Syrtis?',
         a: 'A free, open-source native macOS menu-bar app that reads your local AI coding session logs and shows what you’re spending — across a contribution graph, per-model and per-agent breakdowns, monthly, daily, and hourly views, and live throughput. No CLI to run, no account.',
       },
       {
@@ -147,11 +147,11 @@ const en = {
       },
       {
         q: 'Does it cost anything?',
-        a: 'No. TokenBar is MIT-licensed and free — no subscription, no paid tier, no telemetry.',
+        a: 'No. Syrtis is MIT-licensed and free — no subscription, no paid tier, no telemetry.',
       },
       {
         q: 'What happened to the original (Tauri) app?',
-        a: 'TokenBar began as a Tauri fork of tokcat. With v1.0.0 (June 2026) it was replaced by a ground-up Swift rewrite around the same Rust parsing core — the `tokenbar` cask now installs the native app, and the Tauri repository is archived. A `tokenbar@legacy` cask pins the final Tauri build (v0.4.5) for macOS 11+.',
+        a: 'Syrtis began as a Tauri fork of tokcat. With v1.0.0 (June 2026) it was replaced by a ground-up Swift rewrite around the same Rust parsing core — the `tokenbar` cask now installs the native app, and the Tauri repository is archived. A `tokenbar@legacy` cask pins the final Tauri build (v0.4.5) for macOS 11+.',
       },
       {
         q: 'How do updates work?',
@@ -163,7 +163,7 @@ const en = {
       },
       {
         q: 'Intel Mac or Windows?',
-        a: 'TokenBar targets Apple Silicon (arm64) on macOS 14+; Liquid Glass needs macOS 26, earlier systems get a vibrancy fallback. The legacy Tauri build covers macOS 11+. There’s no Intel, Windows, or Linux build.',
+        a: 'Syrtis targets Apple Silicon (arm64) on macOS 14+; Liquid Glass needs macOS 26, earlier systems get a vibrancy fallback. The legacy Tauri build covers macOS 11+. There’s no Intel, Windows, or Linux build.',
       },
       {
         q: 'How do I uninstall it?',
@@ -174,35 +174,35 @@ const en = {
   credits: {
     eyebrow: 'Standing on shoulders',
     h2: 'Built on great open source.',
-    intro: 'TokenBar wouldn’t exist without these projects — thank you to their maintainers.',
+    intro: 'Syrtis wouldn’t exist without these projects — thank you to their maintainers.',
     go: 'View on GitHub ↗',
     items: [
       {
         name: 'tokscale',
         who: 'by Junho Yeo',
         href: 'https://github.com/junhoyeo/tokscale',
-        body: 'The foundation. Its vendored tokscale-core crate drives TokenBar’s session parsing, dedup, and pricing across 25+ agents — and its interactive TUI is the blueprint for the whole dashboard: the seven lenses and their In · Out · CR · CW column breakdown.',
+        body: 'The foundation. Its vendored tokscale-core crate drives Syrtis’s session parsing, dedup, and pricing across 25+ agents — and its interactive TUI is the blueprint for the whole dashboard: the seven lenses and their In · Out · CR · CW column breakdown.',
         accent: '--p-deepseek',
       },
       {
         name: 'tokcat',
         who: 'by handlecusion',
         href: 'https://github.com/handlecusion/tokcat',
-        body: 'Where TokenBar’s product line began — the original Tauri menu-bar monitor (itself built on tokscale). The native app is a ground-up Swift rewrite that carries no tokcat code, but the menu-bar pet form and the oiiai spinning-cat signature are theirs.',
+        body: 'Where Syrtis’s product line began — the original Tauri menu-bar monitor (itself built on tokscale). The native app is a ground-up Swift rewrite that carries no tokcat code, but the menu-bar pet form and the oiiai spinning-cat signature are theirs.',
         accent: '--p-anthropic',
       },
       {
         name: 'RunCat',
         who: 'by Takuto Nakamura',
         href: 'https://kyome.io/runcat/',
-        body: 'The original menu-bar pet, the creature that runs faster the busier you are. Party Parrot, and every critter that has sprinted across a Mac menu bar (tokcat’s and TokenBar’s included), traces back here.',
+        body: 'The original menu-bar pet, the creature that runs faster the busier you are. Party Parrot, and every critter that has sprinted across a Mac menu bar (tokcat’s and Syrtis’s included), traces back here.',
         accent: '--p-cursor',
       },
       {
         name: 'CodexBar',
         who: 'by Peter Steinberger',
         href: 'https://github.com/steipete/CodexBar',
-        body: 'TokenBar’s quota-pace presentation — ahead of or behind your window, projected run-dry time — references CodexBar’s approach.',
+        body: 'Syrtis’s quota-pace presentation — ahead of or behind your window, projected run-dry time — references CodexBar’s approach.',
         accent: '--p-openai',
       },
     ],
@@ -210,14 +210,14 @@ const en = {
   footer: {
     tagline: 'AI token usage monitor for the macOS menu bar. MIT licensed.',
     stamp: 'macOS 14+ · Apple Silicon · Swift + Rust · Liquid Glass · MIT',
-    copyright: '© TokenBar contributors',
+    copyright: '© Syrtis contributors',
     langSwitch: { href: '/zh-tw/', label: '繁體中文' },
   },
 }
 
 const zhTw: typeof en = {
   meta: {
-    title: 'TokenBar｜在 macOS 選單列追蹤 Claude Code／Codex 的 token 用量',
+    title: 'Syrtis｜在 macOS 選單列追蹤 Claude Code／Codex 的 token 用量',
     description:
       '免費開源的選單列 App，直接讀本機紀錄追蹤 25+ 個 AI 編碼 agent 的花費——Claude Code、Codex、Cursor、OpenCode 等。即時吞吐、額度儀錶、3D 用量圖。原生 Swift、Liquid Glass、零遙測。',
     ogLocale: 'zh_TW',
@@ -231,24 +231,24 @@ const zhTw: typeof en = {
       { href: '#privacy', label: '隱私' },
       { href: '#install', label: '安裝' },
     ],
-    statusTitle: 'TokenBar 就住在這裡',
+    statusTitle: 'Syrtis 就住在這裡',
   },
   hero: {
     eyebrow: 'Local-first · 原生 macOS 選單列',
     h1: '每顆 AI token<br />怎麼<span class="hot">燒</span>的，都知道。',
-    lede: 'TokenBar 在你的 Mac 上直接讀取 AI 編碼工具的本機紀錄，攤開 <strong>25+ 個 agent</strong> 的花費——Claude Code、Codex、Cursor、OpenCode 等等。原生 Swift、披上 Liquid Glass。零遙測、免帳號，只給你數字。',
+    lede: 'Syrtis 在你的 Mac 上直接讀取 AI 編碼工具的本機紀錄，攤開 <strong>25+ 個 agent</strong> 的花費——Claude Code、Codex、Cursor、OpenCode 等等。原生 Swift、披上 Liquid Glass。零遙測、免帳號，只給你數字。',
     copy: '複製',
     copied: '已複製',
     github: '在 GitHub 上看',
     statline: '25+ agents · 7 種視圖 · 160 fps 3D · 0 遙測',
-    popAlt: 'TokenBar popover：token 用量儀表板，含 agent 額度與即時進度',
+    popAlt: 'Syrtis popover：token 用量儀表板，含 agent 額度與即時進度',
   },
   native: {
     eyebrow: 'Native Swift · Liquid Glass',
     h2: '用 Swift 重寫。<br />披上 Liquid Glass。',
     intro:
-      '這<em>就是</em>現在的 TokenBar——自 v1.0.0 起，整個 app 都是從零重寫的原生程式。同一套儀表板、同樣的數字，多了系統原生的玻璃、彈簧動畫與速度。',
-    shotAlt: '原生 TokenBar popover 以 Liquid Glass 浮在桌布上',
+      '這<em>就是</em>現在的 Syrtis——自 v1.0.0 起，整個 app 都是從零重寫的原生程式。同一套儀表板、同樣的數字，多了系統原生的玻璃、彈簧動畫與速度。',
+    shotAlt: '原生 Syrtis popover 以 Liquid Glass 浮在桌布上',
     points: [
       {
         title: '100% 原生 Swift 外殼',
@@ -273,7 +273,7 @@ const zhTw: typeof en = {
     h2: '燒得越快，<br />貓轉得越快。',
     body: '你的 token 吞吐量濃縮成選單列上一隻一眼可讀的小生物：沒事時發呆，Claude Code 重構到一半時狂轉。瞄一眼選單列就知道錶轉多快——不用開任何視窗。',
     credit:
-      '選單列養寵物（動得多快反映你操得多兇）這個設計，源自 <strong>Takuto Nakamura</strong> 的 <a href="https://kyome.io/runcat/">RunCat</a>，party parrot 也是從這裡來的。<a href="https://github.com/handlecusion/tokcat">tokcat</a>（<strong>handlecusion</strong>）把它帶進 token 用量監視，並以 oiiai 旋轉貓當招牌。TokenBar 最初是 tokcat 的 fork，oiiai 貓與 party parrot 都心懷感激地沿用。',
+      '選單列養寵物（動得多快反映你操得多兇）這個設計，源自 <strong>Takuto Nakamura</strong> 的 <a href="https://kyome.io/runcat/">RunCat</a>，party parrot 也是從這裡來的。<a href="https://github.com/handlecusion/tokcat">tokcat</a>（<strong>handlecusion</strong>）把它帶進 token 用量監視，並以 oiiai 旋轉貓當招牌。Syrtis 最初是 tokcat 的 fork，oiiai 貓與 party parrot 都心懷感激地沿用。',
     crittersNote: 'oiiai 旋轉貓來自 tokcat，party parrot 來自 RunCat。滑過去餵牠們一點 token。',
     gifAlt: 'oiiai 旋轉貓在選單列今日花費旁打轉',
   },
@@ -294,7 +294,7 @@ const zhTw: typeof en = {
     h2: 'App 分頁選「看誰」，視圖切換選「怎麼看」。',
     intro:
       '先挑要看的 agent，再選拆解方式——多視圖儀表板的版面，連透鏡與欄位都照著 <a class="ilink" href="https://github.com/junhoyeo/tokscale">tokscale</a> 的 TUI 來設計。',
-    altPrefix: (name: string) => `TokenBar ${name} 視圖`,
+    altPrefix: (name: string) => `Syrtis ${name} 視圖`,
     items: [
       { name: 'Overview', desc: '全貌——貢獻圖、agent 額度與進度、即時 session、模型佔比、連續紀錄。' },
       { name: 'Models', desc: '每個模型按花費排名，附佔比與 In · Out · CR · CW 細目。' },
@@ -307,14 +307,14 @@ const zhTw: typeof en = {
     wideTitle: '3D 貢獻圖',
     wideDesc:
       '同一年的用量化成可互動的 GitHub 式方塊地形——旋轉它，2D 堆疊長條一鍵切換。Token 可按<strong>模型</strong>（供應商色階）或按 <strong>agent</strong>（品牌色）堆疊，單位可選 token 或美元。',
-    wideAlt: 'TokenBar 可互動的 3D 貢獻圖',
+    wideAlt: 'Syrtis 可互動的 3D 貢獻圖',
     lightboxLabel: '截圖預覽',
     lightboxClose: '關閉預覽',
   },
   privacy: {
     eyebrow: '骨子裡 local-first',
     h2: '你的花費，留在你的 Mac 上。',
-    intro: 'TokenBar 的設計，讓「我的資料去了哪？」可以誠實回答：哪都沒去。',
+    intro: 'Syrtis 的設計，讓「我的資料去了哪？」可以誠實回答：哪都沒去。',
     pillars: [
       {
         title: '本機讀取',
@@ -322,7 +322,7 @@ const zhTw: typeof en = {
       },
       {
         title: '零遙測、免帳號',
-        body: '沒有分析、不用註冊、沒有雲端同步。TokenBar 不會回報你做了什麼、花了多少。',
+        body: '沒有分析、不用註冊、沒有雲端同步。Syrtis 不會回報你做了什麼、花了多少。',
       },
       {
         title: '每個請求，攤開講',
@@ -334,13 +334,13 @@ const zhTw: typeof en = {
     eyebrow: '兩分鐘，Apple Silicon',
     h2: '一行指令，貓就搬進來。',
     intro:
-      'TokenBar 透過 Homebrew 安裝，需要 <strong>Apple Silicon Mac</strong> 與 macOS 14+。cask 全名會自動 tap，不用另外 <code>brew tap</code>。',
+      'Syrtis 透過 Homebrew 安裝，需要 <strong>Apple Silicon Mac</strong> 與 macOS 14+。cask 全名會自動 tap，不用另外 <code>brew tap</code>。',
     pill: 'Native Swift · macOS 14+',
     desc: '正式出貨版。App 內更新走簽章驗證的 Sparkle feed，安裝前都會驗證；beta 版只是<strong>設定裡的開關</strong>，不是另一個 cask。',
     copyBtn: '複製指令',
     copied: '已複製 ✓',
     legacy:
-      '還在用舊一點的 Mac？<code>tokenbar@legacy</code> 釘住最後一版 Tauri build（v0.4.5，macOS 11+）——<a href="https://github.com/Nanako0129/TokenBar-Tauri">legacy repo</a> 已封存，但 cask 會留著。想自己編譯？<a href="https://github.com/Nanako0129/TokenBar">Swift 6 + Rust</a>，Command Line Tools 就夠。',
+      '還在用舊一點的 Mac？<code>tokenbar@legacy</code> 釘住最後一版 Tauri build（v0.4.5，macOS 11+）——<a href="https://github.com/Nanako0129/TokenBar-Tauri">legacy repo</a> 已封存，但 cask 會留著。想自己編譯？<a href="https://github.com/Nanako0129/syrtis">Swift 6 + Rust</a>，Command Line Tools 就夠。',
   },
   faq: {
     eyebrow: '常見問題',
@@ -348,7 +348,7 @@ const zhTw: typeof en = {
     intro: '安裝前大家最想知道的幾個簡答。',
     items: [
       {
-        q: 'TokenBar 到底是什麼？',
+        q: 'Syrtis 到底是什麼？',
         a: '免費開源的原生 macOS 選單列 app，讀取本機的 AI 編碼 session 紀錄，把你的花費攤開來看——貢獻圖、各模型與各 agent 細目、每月、每日與每時視圖、即時吞吐量。不用跑 CLI、免帳號。',
       },
       {
@@ -357,11 +357,11 @@ const zhTw: typeof en = {
       },
       {
         q: '要錢嗎？',
-        a: '不用。TokenBar 採 MIT 授權、完全免費——沒有訂閱、沒有付費版、沒有遙測。',
+        a: '不用。Syrtis 採 MIT 授權、完全免費——沒有訂閱、沒有付費版、沒有遙測。',
       },
       {
         q: '原本的（Tauri）版本怎麼了？',
-        a: 'TokenBar 最初是 tokcat 的 Tauri fork。v1.0.0（2026 年 6 月）起換成從零重寫的原生 Swift app，沿用同一顆 Rust 解析核心——`tokenbar` cask 現在裝的就是原生版，Tauri repo 已封存。`tokenbar@legacy` cask 釘住最後一版 Tauri build（v0.4.5），支援 macOS 11+。',
+        a: 'Syrtis 最初是 tokcat 的 Tauri fork。v1.0.0（2026 年 6 月）起換成從零重寫的原生 Swift app，沿用同一顆 Rust 解析核心——`tokenbar` cask 現在裝的就是原生版，Tauri repo 已封存。`tokenbar@legacy` cask 釘住最後一版 Tauri build（v0.4.5），支援 macOS 11+。',
       },
       {
         q: '更新怎麼跑？',
@@ -373,7 +373,7 @@ const zhTw: typeof en = {
       },
       {
         q: 'Intel Mac 或 Windows 呢？',
-        a: 'TokenBar 鎖定 Apple Silicon（arm64）、macOS 14+；Liquid Glass 需要 macOS 26，較舊系統退回 vibrancy。Legacy Tauri 版涵蓋 macOS 11+。沒有 Intel、Windows 或 Linux 版。',
+        a: 'Syrtis 鎖定 Apple Silicon（arm64）、macOS 14+；Liquid Glass 需要 macOS 26，較舊系統退回 vibrancy。Legacy Tauri 版涵蓋 macOS 11+。沒有 Intel、Windows 或 Linux 版。',
       },
       {
         q: '怎麼移除？',
@@ -384,35 +384,35 @@ const zhTw: typeof en = {
   credits: {
     eyebrow: '站在肩膀上',
     h2: '建立在出色的開源之上。',
-    intro: '沒有這些專案就沒有 TokenBar——感謝每一位維護者。',
+    intro: '沒有這些專案就沒有 Syrtis——感謝每一位維護者。',
     go: '到 GitHub 看 ↗',
     items: [
       {
         name: 'tokscale',
         who: 'by Junho Yeo',
         href: 'https://github.com/junhoyeo/tokscale',
-        body: '整個專案的地基。vendored 的 tokscale-core crate 驅動 TokenBar 跨 25+ agent 的 session 解析、去重與計價——而它的互動式 TUI 更是整套儀表板的藍本：七種透鏡，連同 In · Out · CR · CW 的欄位拆解，都照著它來。',
+        body: '整個專案的地基。vendored 的 tokscale-core crate 驅動 Syrtis 跨 25+ agent 的 session 解析、去重與計價——而它的互動式 TUI 更是整套儀表板的藍本：七種透鏡，連同 In · Out · CR · CW 的欄位拆解，都照著它來。',
         accent: '--p-deepseek',
       },
       {
         name: 'tokcat',
         who: 'by handlecusion',
         href: 'https://github.com/handlecusion/tokcat',
-        body: 'TokenBar 產品線的起點——原版的 Tauri 選單列監視器（它自己也建立在 tokscale 之上）。原生版是從零的 Swift 重寫、不含任何 tokcat 程式碼，但選單列寵物的形態與 oiiai 旋轉貓的招牌創意都來自這裡。',
+        body: 'Syrtis 產品線的起點——原版的 Tauri 選單列監視器（它自己也建立在 tokscale 之上）。原生版是從零的 Swift 重寫、不含任何 tokcat 程式碼，但選單列寵物的形態與 oiiai 旋轉貓的招牌創意都來自這裡。',
         accent: '--p-anthropic',
       },
       {
         name: 'RunCat',
         who: 'by Takuto Nakamura',
         href: 'https://kyome.io/runcat/',
-        body: '選單列養寵物（動得多快反映你多忙）這個設計的始祖。party parrot、以及每一隻在 Mac 選單列上衝刺過的貓（tokcat 的和 TokenBar 的都算），都可以追溯到這裡。',
+        body: '選單列養寵物（動得多快反映你多忙）這個設計的始祖。party parrot、以及每一隻在 Mac 選單列上衝刺過的貓（tokcat 的和 Syrtis 的都算），都可以追溯到這裡。',
         accent: '--p-cursor',
       },
       {
         name: 'CodexBar',
         who: 'by Peter Steinberger',
         href: 'https://github.com/steipete/CodexBar',
-        body: 'TokenBar 的額度進度呈現——超前或落後視窗、預計耗盡時間——參考了 CodexBar 的做法。',
+        body: 'Syrtis 的額度進度呈現——超前或落後視窗、預計耗盡時間——參考了 CodexBar 的做法。',
         accent: '--p-openai',
       },
     ],
@@ -420,7 +420,7 @@ const zhTw: typeof en = {
   footer: {
     tagline: 'macOS 選單列的 AI token 用量監視器。MIT 授權。',
     stamp: 'macOS 14+ · Apple Silicon · Swift + Rust · Liquid Glass · MIT',
-    copyright: '© TokenBar contributors',
+    copyright: '© Syrtis contributors',
     langSwitch: { href: '/', label: 'English' },
   },
 }

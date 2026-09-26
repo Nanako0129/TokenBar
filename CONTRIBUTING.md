@@ -1,6 +1,6 @@
-# Contributing to TokenBar
+# Contributing to Syrtis
 
-TokenBar welcomes focused fixes, well-supported bug reports, and carefully scoped improvements. This document is the public entry point for contributors; it explains how to prepare a change and routes durable project facts to the repository knowledge base.
+Syrtis welcomes focused fixes, well-supported bug reports, and carefully scoped improvements. This document is the public entry point for contributors; it explains how to prepare a change and routes durable project facts to the repository knowledge base.
 
 > [`docs/knowledge/`](docs/knowledge/README.md) is the canonical source for architecture, verification, workflow, vendor, release, and maintenance decisions. If this guide and an execution source disagree, verify the execution source and update the canonical knowledge rather than copying a second version here.
 
@@ -20,7 +20,7 @@ TokenBar welcomes focused fixes, well-supported bug reports, and carefully scope
 
 ## Before you start
 
-TokenBar is in a maintenance phase. User-visible correctness, missing or stale data, cache invalidation, the Rust-to-Swift contract, and release-chain failures take priority over broad client expansion or large UI redesigns. The rolling tokscale inventory in [issue #45](https://github.com/Nanako0129/TokenBar/issues/45) is a decision surface, not a promise to implement every listed item.
+Syrtis is in a maintenance phase. User-visible correctness, missing or stale data, cache invalidation, the Rust-to-Swift contract, and release-chain failures take priority over broad client expansion or large UI redesigns. The rolling tokscale inventory in [issue #45](https://github.com/Nanako0129/syrtis/issues/45) is a decision surface, not a promise to implement every listed item.
 
 | Proposed contribution | Expected first step |
 |---|---|
@@ -47,24 +47,24 @@ If you use an automated coding client, it must also follow [`AGENTS.md`](AGENTS.
 | Sparkle, appcast, Homebrew, Pages, or release notes | [`release.md`](docs/knowledge/release.md) and [`workflow.md`](docs/knowledge/workflow.md) |
 | Landing site structure, deployment, or product claims | [`landing/AGENTS.md`](landing/AGENTS.md) and [`release.md`](docs/knowledge/release.md) |
 
-Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/bb9a2a9ac787344bb4bd3120d645208217b21016/UPSTREAM.md); TokenBar's source and pin belong in `vendor/README.md`. A reviewed Native pin advance normally uses only the exact `tokscale-core` gitlink; when it travels with an app-owned C ABI change, as the `tb_window_usage` account parameter does, that change is named and the Windows port is notified under the `ctb.h` signature rule. Consumer gates re-establish build-decoder compatibility, and the engine's LocalOnly, CostCoverage, embedded-cost, and partial-estimation semantics are not claimed to have reached Swift.
+Durable architecture, verification, workflow, and release facts belong in `docs/knowledge/`. The engine's exact upstream baseline and local patch records belong in its immutable [`UPSTREAM.md`](https://github.com/Nanako0129/tokscale-core/blob/bb9a2a9ac787344bb4bd3120d645208217b21016/UPSTREAM.md); Syrtis's source and pin belong in `vendor/README.md`. A reviewed Native pin advance normally uses only the exact `tokscale-core` gitlink; when it travels with an app-owned C ABI change, as the `tb_window_usage` account parameter does, that change is named and the Windows port is notified under the `ctb.h` signature rule. Consumer gates re-establish build-decoder compatibility, and the engine's LocalOnly, CostCoverage, embedded-cost, and partial-estimation semantics are not claimed to have reached Swift.
 
 ## Development environment
 
-The supported application target is Apple Silicon on macOS 14 or later. Building it needs Swift 6.2 or newer (Xcode 26+), which is a separate thing from that target and stricter than it: the Liquid Glass surfaces are compiled against the macOS 26 SDK, and `if #available(macOS 26.0, *)` guards them at runtime rather than at compile time, so an older toolchain cannot type-check them at all. `Package.swift` declares `swift-tools-version: 6.0`, which is the manifest format and not the floor — `Sources/TokenBar/GlassBackground.swift` states the floor with a `#error` so an older toolchain fails on that line instead of on the symbols it cannot see. CI uses stable Rust. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` before building. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
+The supported application target is Apple Silicon on macOS 14 or later. Building it needs Swift 6.2 or newer (Xcode 26+), which is a separate thing from that target and stricter than it: the Liquid Glass surfaces are compiled against the macOS 26 SDK, and `if #available(macOS 26.0, *)` guards them at runtime rather than at compile time, so an older toolchain cannot type-check them at all. `Package.swift` declares `swift-tools-version: 6.0`, which is the manifest format and not the floor — `Sources/Syrtis/GlassBackground.swift` states the floor with a `#error` so an older toolchain fails on that line instead of on the symbols it cannot see. CI uses stable Rust. Clone with `--recurse-submodules`, or run `git submodule update --init --recursive` before building. Run build and Swift commands from the repository root because the Rust static-library search path in [`Package.swift`](Package.swift) is relative.
 
 Build the Rust static library first, link the Swift package, and run the UI-free contract checks:
 
 ```bash
 make build
-swift run TokenBar --selftest
-swift run TokenBar --smoke
+swift run Syrtis --selftest
+swift run Syrtis --smoke
 ```
 
-Use `make run` to build and launch TokenBar. For ordinary popover or interaction acceptance that does not require `.app` bundle semantics, use:
+Use `make run` to build and launch Syrtis. For ordinary popover or interaction acceptance that does not require `.app` bundle semantics, use:
 
 ```bash
-swift run TokenBar --open-popover
+swift run Syrtis --open-popover
 ```
 
 These commands are onboarding checks, not the complete gate for every change. The canonical change-specific gates are in [`docs/knowledge/verification.md`](docs/knowledge/verification.md).
@@ -88,7 +88,7 @@ Create a topic branch from the current upstream `main` branch, and keep each bra
 
 > **Pre-aggregation:** Do not try to subtract a client after contributions have been combined into a mixed aggregate. Pass non-empty filters to the producer while client identity is still available, and preserve the documented `nil` or empty-list semantics across Swift, C, and Rust.
 
-> **Shared-engine boundary:** Land shared Rust changes and their ledger updates in `tokscale-core`, then advance TokenBar's submodule only to a reviewed engine commit. TokenBar keeps `tb_core_ffi`, the C header, Swift, root lockfile, and app wiring in this repository.
+> **Shared-engine boundary:** Land shared Rust changes and their ledger updates in `tokscale-core`, then advance Syrtis's submodule only to a reviewed engine commit. Syrtis keeps `tb_core_ffi`, the C header, Swift, root lockfile, and app wiring in this repository.
 
 | Change class | Required evidence or treatment |
 |---|---|
@@ -113,7 +113,7 @@ Select evidence that proves the behavior being changed. A live app run without t
 | FFI contract | Run the Rust and Swift gates, `--selftest`, and `--smoke`; verify ownership and envelope shape |
 | Popover, lens, keyboard, scroll, or appearance | Use the [local UX acceptance path](docs/knowledge/verification.md#local-build-and-ux-acceptance) and record the interaction checked |
 | Local icon, `Info.plist`, `LSUIElement`, or autostart behavior | Use the bundle-only path in the verification contract and record cleanup of temporary artifacts |
-| Homebrew, stable Sparkle update, or formal install path | Validate `/Applications/TokenBar.app` as documented; do not substitute the temporary `dist/TokenBar.app` |
+| Homebrew, stable Sparkle update, or formal install path | Validate `/Applications/Syrtis.app` as documented; do not substitute the temporary `dist/Syrtis.app` |
 
 If a smoke or live check is limited by local credentials, session data, or a provider response, report that environmental limitation separately. Do not use it to replace or invalidate hermetic evidence.
 

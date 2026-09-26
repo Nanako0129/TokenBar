@@ -8,7 +8,7 @@ private enum TokenBarLocalization {
     private static let bundles: [Bundle] = {
         var result = [Bundle.main]
         if let resourceURL = Bundle.main.resourceURL?
-            .appendingPathComponent("TokenBar_TokenBar.bundle"),
+            .appendingPathComponent("Syrtis_Syrtis.bundle"),
            let resourceBundle = Bundle(url: resourceURL)
         {
             result.append(resourceBundle)

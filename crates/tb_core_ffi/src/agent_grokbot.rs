@@ -8,7 +8,7 @@
 //! macOS Keychain. Query DashboardService/GetSandUsageStatus with that account
 //! and its selected team, just as the desktop app does. Fall back to the
 //! Cursor IDE's `state.vscdb` only when no desktop login exists.
-//! Credentials are read-only and never logged or persisted by TokenBar.
+//! Credentials are read-only and never logged or persisted by Syrtis.
 //! Grok Bot owns token refresh; expired logins produce an actionable error.
 //!
 //! `TOKENBAR_GROK_BOT_SECRETS` / `TOKENBAR_CURSOR_STATE_VSCDB` override the
@@ -430,7 +430,7 @@ fn parse_timestamp(value: &Value) -> Option<DateTime<Utc>> {
 /// yet. Rendering it as an error would tell a user who answered "don't allow"
 /// that the app malfunctioned.
 pub(crate) const GROK_BOT_KEYCHAIN_CONSENT_REQUIRED: &str =
-    "TokenBar needs your permission to read the Grok Bot login from Keychain.";
+    "Syrtis needs your permission to read the Grok Bot login from Keychain.";
 
 fn load_credentials() -> Result<Option<GrokBotCredentials>, String> {
     #[cfg(target_os = "macos")]

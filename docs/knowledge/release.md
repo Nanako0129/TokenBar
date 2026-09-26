@@ -5,14 +5,14 @@ kind: canonical
 scope: repository
 read_when: changing release scripts, code signing, appcast, Sparkle, Homebrew, Pages, packaged Info.plist, or post-release notes
 last_verified: 2026-09-21
-sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/TokenBar/SelfTest.swift", "public release history"]
+sources: [".github/workflows/release.yml", ".github/workflows/ci.yml", ".github/workflows/pages.yml", ".github/workflows/update-install-count.yml", "scripts/bundle.sh", "scripts/build-sparkle.sh", "appcast.xml", "Makefile", "docs/knowledge/plans/provider-quota-pace.md", "Sources/Syrtis/SelfTest.swift", "public release history"]
 ---
 
 # Release and delivery
 
 ## 文件目的
 
-這份文件描述 TokenBar 從 tag 到 appcast、GitHub Release、Homebrew、舊版遷移與 landing Pages 的交付鏈。runtime workflow 與 script 是執行 source；本文件只整理順序、邊界與已驗證的事故結論。
+這份文件描述 Syrtis 從 tag 到 appcast、GitHub Release、Homebrew、舊版遷移與 landing Pages 的交付鏈。runtime workflow 與 script 是執行 source；本文件只整理順序、邊界與已驗證的事故結論。
 
 ## 目錄
 
@@ -49,9 +49,9 @@ flowchart LR
 
 The release workflow is tag-driven. It validates and bundles the native app, produces the archive and update metadata, creates the GitHub Release, publishes the appcast update, updates the Homebrew cask, and dispatches the install-count refresh. Stable and prerelease behavior is decided from the tag and release workflow, not from a hand-edited README.
 
-**Tags are annotated, named `TokenBar <version>` without the `v`** — `git tag -a v1.18.0 <sha> -m "TokenBar 1.18.0"` — matching the GitHub Release title. An annotated tag carries its own author, date and message; a lightweight one is a bare pointer, so who cut a release and when is only answerable from the commit it happens to point at.
+**Tags are annotated, named `Syrtis <version>` without the `v`** — `git tag -a v1.18.0 <sha> -m "Syrtis 1.18.0"` — matching the GitHub Release title. An annotated tag carries its own author, date and message; a lightweight one is a bare pointer, so who cut a release and when is only answerable from the commit it happens to point at.
 
-This is a decision, not a description. Of the 44 tags before it, 29 were lightweight and 15 annotated, alternating in runs — v1.1.0–v1.1.1 annotated, v1.1.2–v1.1.4 not, v1.5.0–v1.11.0 annotated, v1.12.0–v1.16.0 not, v1.17.0 annotated again. The message format varied too (`TokenBar 1.17.0`, `TokenBar v1.11.0`, `TokenBar v1.14.2 — Antigravity quota when the IDE is closed`). Reading a habit off the last two or three tags produces a different answer depending on which two or three, which is exactly what happened while cutting v1.18.0.
+This is a decision, not a description. Of the 44 tags before it, 29 were lightweight and 15 annotated, alternating in runs — v1.1.0–v1.1.1 annotated, v1.1.2–v1.1.4 not, v1.5.0–v1.11.0 annotated, v1.12.0–v1.16.0 not, v1.17.0 annotated again. The message format varied too (`Syrtis 1.17.0`, `Syrtis v1.11.0`, `Syrtis v1.14.2 — Antigravity quota when the IDE is closed`). Reading a habit off the last two or three tags produces a different answer depending on which two or three, which is exactly what happened while cutting v1.18.0.
 
 **Existing tags are left alone.** Retagging rewrites the object that 43 GitHub Releases, their appcast items and the Homebrew cask all resolve through. The inconsistency above stops at v1.18.0 rather than being tidied away.
 
@@ -73,7 +73,7 @@ Either form triggers the workflow identically — `push: tags: ["v*"]`, with the
 
 ## Local network usage description
 
-`scripts/bundle.sh` writes `NSLocalNetworkUsageDescription` into the packaged `Info.plist`. That script is the production packaging path for the release workflow and for `make selftest-bundled`. The string says TokenBar connects to providers to read quota information, and that macOS may ask for local network access when a VPN routes that traffic through a local network. The wording stays conditional: it does not say that every VPN prompts, and it does not say that the traffic stays on the machine.
+`scripts/bundle.sh` writes `NSLocalNetworkUsageDescription` into the packaged `Info.plist`. That script is the production packaging path for the release workflow and for `make selftest-bundled`. The string says Syrtis connects to providers to read quota information, and that macOS may ask for local network access when a VPN routes that traffic through a local network. The wording stays conditional: it does not say that every VPN prompts, and it does not say that the traffic stays on the machine.
 
 Whether a tunnel-free path prompts was not measured. This document records the packaging requirement only; it does not treat a VPN as a proven cause of the dialog in every configuration.
 
@@ -125,7 +125,7 @@ The install-count workflow writes a single JSON file to an orphan branch rather 
 
 The landing site is an independent Astro build. `.github/workflows/pages.yml` runs `npm ci` and `npm run build` in `landing/`, supplies the public site URL, uploads `landing/dist`, and deploys through GitHub Pages. App CI ignores landing-only changes; Pages deployment is the runtime gate for site-only changes.
 
-Keep English and `zh-tw` copy aligned, preserve original TokenBar design, and treat the landing page as a presentation consumer of product facts rather than a runtime source.
+Keep English and `zh-tw` copy aligned, preserve original Syrtis design, and treat the landing page as a presentation consumer of product facts rather than a runtime source.
 
 ## Post-release verification
 
@@ -135,7 +135,7 @@ The two bodies are hand-written and bound to the tag by filename (`release-notes
 
 A durable escaping regression occurred when a note first contained literal `<`: awk replacement semantics turned `&lt;` into `<lt;`. Changes to **the awk renderer in `scripts/make_appcast.sh`, or to anything else on the path from `release-notes.txt` to the appcast `<description>`**, must use fixtures containing literal `<`, `&`, and `>` and verify the HTML round-trip. Writing the notes themselves does not touch that path.
 
-That gate is not currently runnable: the renderer is inline in `make_appcast.sh` and writes into a `mktemp -d` its own `EXIT` trap deletes, so its output cannot be observed without changing the script, and a test carrying its own copy of the awk would prove nothing about the shipping path. Tracked in [#313](https://github.com/Nanako0129/TokenBar/issues/313). Until it is closed, this rule is stated but unenforced — do not read it as satisfied.
+That gate is not currently runnable: the renderer is inline in `make_appcast.sh` and writes into a `mktemp -d` its own `EXIT` trap deletes, so its output cannot be observed without changing the script, and a test carrying its own copy of the awk would prove nothing about the shipping path. Tracked in [#313](https://github.com/Nanako0129/syrtis/issues/313). Until it is closed, this rule is stated but unenforced — do not read it as satisfied.
 
 | After release | Check |
 |---|---|
