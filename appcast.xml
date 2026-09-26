@@ -3,6 +3,37 @@
     <channel>
         <title>TokenBar updates</title>
         <item>
+            <title>2.0.0</title>
+            <pubDate>Sat, 26 Sep 2026 03:39:03 +0000</pubDate>
+            <link>https://github.com/Nanako0129/syrtis/releases/tag/v2.0.0</link>
+            <sparkle:version>1242</sparkle:version>
+            <sparkle:shortVersionString>2.0.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <description><![CDATA[<b>Before you update:</b>
+<ul>
+<li>TokenBar is now Syrtis, and the first launch renames the app on disk. The update installs over TokenBar.app; on its first launch the app renames itself to Syrtis.app in the same folder and starts again from there. The bundle identifier has not changed, so settings, usage history and the login item carry over. If TokenBar.app is pinned in the Dock, the tile is repointed at Syrtis.app and the Dock restarts once: windows you had minimized to the Dock leave it (clicking their app brings them back), and the pinned tile may keep the old icon until you click it once. The rename is skipped when a Syrtis.app already sits beside it, or when the account cannot write to the Applications folder; the app then keeps the name TokenBar.app and works the same.</li>
+<li>Homebrew has a new tap. New installs use brew install --cask nanako0129/tap/syrtis. An existing install from nanako0129/tokenbar keeps updating through the app itself; that cask stays on the last TokenBar release.</li>
+<li>Some clients re-scan once, and two of them count differently. Copilot, Grok, OpenClaw, RooCode, KiloCode, Cline, Cursor, OpenCode, Pi and Droid each rebuild their cache once on the first launch; every other client, Claude and Codex included, is read from its existing cache. Pi counts fall if you fork sessions: a forked session's copied replies were counted again, and each reply now counts once. OpenClaw counts can move either way: archived sessions are now read, and compaction checkpoints are no longer counted as usage. Droid totals are unchanged, now split across a session's replies.</li>
+</ul>
+<b>Features:</b>
+<ul>
+<li>On macOS 27, the dashboard opens in a Liquid Glass panel whose glass refracts the actual wallpaper. It closes on Esc or a click anywhere else, and right-clicking the menu bar item still opens the menu. Below macOS 27 the popover is unchanged.</li>
+<li>A new icon and name in the app: the Syrtis mark and the Greek wordmark in the panel header and Settings, and the new icon in Discord presence. The site is now syrtis.nyanako.com; old TokenBar links redirect.</li>
+</ul>
+<b>Fixes:</b>
+<ul>
+<li>A quota window's readings were deleted when they could not be modelled, for example after a provider moved a reset later. They are now kept, and still do not feed the pace model.</li>
+<li>Codex asked you to sign in again while a refresh token was available. The access token's own expiry is now checked, and it is refreshed within five minutes of it.</li>
+<li>Switching windows on the quota window card paused the app for 131-144 ms. It now takes 12-15 ms.</li>
+<li>Opening the dashboard right after launch computed the usage graph up to three times. It is now computed once.</li>
+<li>The Local Network prompt now explains that Syrtis connects to your providers to read quota information.</li>
+</ul>
+<p>Thanks: @mvanhorn, @snowman12320</p>
+]]></description>
+            <enclosure url="https://github.com/Nanako0129/syrtis/releases/download/v2.0.0/Syrtis.app.tar.gz" length="11057568" type="application/octet-stream" sparkle:edSignature="WXuw7zM9/4z/a2eFwSbYvyYj0YLtxaFowld8wofEMfRO8ia0Del7OIn4yKNjnYy0JUxDY1yRuSVfD6+LOetpCQ=="/>
+        </item>
+        <item>
             <title>1.20.2</title>
             <pubDate>Thu, 24 Sep 2026 02:27:15 +0000</pubDate>
             <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.20.2</link>
@@ -73,27 +104,6 @@
 </ul>
 ]]></description>
             <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.19.1/TokenBar.app.tar.gz" length="10547020" type="application/octet-stream" sparkle:edSignature="57sgKn/upAmLiTqXC9VrD6+moOcZg2bqE+J2XZZmvxXsYK7Wc2m9IRyo59G5igWS57exAxUD8mWH4HNIB3C/Dw=="/>
-        </item>
-        <item>
-            <title>1.19.0</title>
-            <pubDate>Fri, 18 Sep 2026 23:19:23 +0000</pubDate>
-            <link>https://github.com/Nanako0129/TokenBar/releases/tag/v1.19.0</link>
-            <sparkle:version>1125</sparkle:version>
-            <sparkle:shortVersionString>1.19.0</sparkle:shortVersionString>
-            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
-            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
-            <description><![CDATA[<b>Before you update:</b>
-<ul>
-<li>Tabs for providers you never set up disappear. v1.18.0 began including configured quota sources in the tab bar alongside local usage, which is right for a provider you use and wrong for one you don't. Codex, Claude and Antigravity are built as cards that always exist, so the presence of a card said nothing about whether anything had been set up, and Codex and Antigravity took a tab on every install. A provider with no credential at all now has no tab. One whose credential exists and cannot be read - a permission problem, a corrupt file - keeps its tab and shows what went wrong.</li>
-<li>Antigravity's two tabs become one. Its IDE and CLI clients draw on one subscription and had a tab each. They now share one, labelled Antigravity, the arrangement Grok Build and Grok Bot already use: the CLI's usage and the IDE's quota card sit under it together. Your own settings survive the merge - a hidden Antigravity CLI tab stays hidden, and its place in your saved tab order becomes the merged tab's.</li>
-</ul>
-<b>Fixes:</b>
-<ul>
-<li>An agy installed after TokenBar started was never found. Antigravity's CLI discovery cached its answer for the life of the process, including the answer that there was nothing to find. Installing agy while TokenBar was running therefore changed nothing until the next launch, and the card went on reporting the error it had been given before. An empty result is now retried on a later refresh.</li>
-</ul>
-<p>Thanks: @iF2007</p>
-]]></description>
-            <enclosure url="https://github.com/Nanako0129/TokenBar/releases/download/v1.19.0/TokenBar.app.tar.gz" length="10545746" type="application/octet-stream" sparkle:edSignature="BmOkd8y0RjfPP+tN6OESrLoJ8lQpGcN7pIJo82nV2HhGTaCT7956WwBx2yLJaJBoN8s0O1/3XqBFXY1GMwdvDg=="/>
         </item>
         <item>
             <title>1.1.1</title>
