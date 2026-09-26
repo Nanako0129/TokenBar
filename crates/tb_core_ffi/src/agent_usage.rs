@@ -5587,7 +5587,14 @@ fn string_key(
 }
 
 fn jwt_payload(token: &str) -> Option<Value> {
-    let payload = token.split('.').nth(1)?;
+    let mut parts = token.split('.');
+    let header = parts.next()?;
+    let payload = parts.next()?;
+    let signature = parts.next()?;
+    if header.is_empty() || payload.is_empty() || signature.is_empty() || parts.next().is_some() {
+        return None;
+    }
+
     let mut encoded = payload.replace('-', "+").replace('_', "/");
     while encoded.len() % 4 != 0 {
         encoded.push('=');
@@ -5995,6 +6002,44 @@ mod tests {
         ));
         assert!(codex_credentials_needs_refresh_at("not-a-jwt", None, now));
         assert!(jwt_expiration("header.eyJleHAiOiJub3QtYS1udW1iZXIifQ.signature").is_none());
+    }
+
+    #[test]
+    fn jwt_payload_requires_exactly_three_nonempty_segments() {
+        let token = codex_test_access_token(1_758_080_400);
+        let payload = token.split('.').nth(1).unwrap();
+        assert_eq!(jwt_payload(&token).unwrap()["exp"], 1_758_080_400);
+
+        for malformed in [
+            format!("header.{payload}"),
+            format!("header.{payload}.signature.extra"),
+            format!(".{payload}.signature"),
+            format!("header.{payload}."),
+            "header..signature".to_string(),
+            format!("header.{payload}.signature."),
+        ] {
+            assert!(jwt_payload(&malformed).is_none(), "{malformed}");
+        }
+    }
+
+    #[test]
+    fn codex_refresh_uses_last_refresh_for_malformed_jwt_segments() {
+        let now = Utc.timestamp_opt(1_758_080_400, 0).single().unwrap();
+        let stale_last_refresh = Some(now - chrono::Duration::days(9));
+        let token = codex_test_access_token((now + chrono::Duration::hours(1)).timestamp());
+
+        assert!(!codex_credentials_needs_refresh_at(
+            &token,
+            stale_last_refresh,
+            now,
+        ));
+        let two_segments = token.rsplit_once('.').unwrap().0;
+        for malformed in [two_segments.to_string(), format!("{token}.extra")] {
+            assert!(
+                codex_credentials_needs_refresh_at(&malformed, stale_last_refresh, now),
+                "{malformed}"
+            );
+        }
     }
 
     #[test]
