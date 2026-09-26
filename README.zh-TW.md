@@ -34,28 +34,28 @@
 點選圖示即可開啟 Liquid Glass 面板（在 macOS 27 之前的系統為彈出視窗 popover）。上方的 **App 標籤頁**可篩選要檢視的 agent；**視圖切換**則提供八種視圖：總覽、額度、模型、每月、每日、每小時、統計與 Agent；此外還能將全年的用量呈現為可自由旋轉視角的 3D 圖表。
 
 <p align="center">
-  <img src="docs/screenshots/graph-3d.png" alt="互動式 3D 貢獻圖" width="400">
+  <img src="docs/screenshots/zh-TW/graph-3d.png" alt="互動式 3D 貢獻圖" width="400">
 </p>
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/overview.png" alt="總覽" width="300"><br><sub><b>總覽</b> — 最吃緊的額度上限、今日用量，以及全年概況</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/quota.png" alt="額度檢視" width="300"><br><sub><b>額度</b> — 歷史週期與額度重置時間</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/overview.png" alt="總覽" width="300"><br><sub><b>總覽</b> — 最吃緊的額度上限、今日用量，以及全年概況</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/quota.png" alt="額度檢視" width="300"><br><sub><b>額度</b> — 歷史週期與額度重置時間</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/models.png" alt="模型檢視" width="300"><br><sub><b>模型</b> — 依花費排序的各模型用量</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/monthly.png" alt="每月檢視" width="300"><br><sub><b>每月</b> — 活躍月份與單月用量展開</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/models.png" alt="模型檢視" width="300"><br><sub><b>模型</b> — 依花費排序的各模型用量</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/monthly.png" alt="每月檢視" width="300"><br><sub><b>每月</b> — 活躍月份與單月用量展開</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/daily.png" alt="每日檢視" width="300"><br><sub><b>每日</b> — 活躍日期與單日用量展開</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/hourly.png" alt="每小時檢視" width="300"><br><sub><b>每小時</b> — 一天之中各時段的 token 消耗分佈</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/daily.png" alt="每日檢視" width="300"><br><sub><b>每日</b> — 活躍日期與單日用量展開</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/hourly.png" alt="每小時檢視" width="300"><br><sub><b>每小時</b> — 一天之中各時段的 token 消耗分佈</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/stats.png" alt="統計檢視" width="300"><br><sub><b>統計</b> — 重點摘要與連續使用天數</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/agents.png" alt="Agent 檢視" width="300"><br><sub><b>Agent</b> — 依花費排序的子 agent</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/stats.png" alt="統計檢視" width="300"><br><sub><b>統計</b> — 重點摘要與連續使用天數</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-TW/agents.png" alt="Agent 檢視" width="300"><br><sub><b>Agent</b> — 依花費排序的子 agent</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/screenshots/settings.png" alt="設定" width="300"><br><sub><b>設定</b> — 選單列標題、圖示與額度資料來源</sub></td>
+    <td align="center" colspan="2"><img src="docs/screenshots/zh-TW/settings.png" alt="設定" width="300"><br><sub><b>設定</b> — 選單列標題、圖示與額度資料來源</sub></td>
   </tr>
 </table>
 
