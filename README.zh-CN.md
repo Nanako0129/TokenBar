@@ -34,28 +34,28 @@
 点击图标即可展开 Liquid Glass 面板（macOS 27 之前的系统为浮层弹窗 popover）。上方的 **App 标签页**用于筛选要查看的 agent；**视图切换器**提供八种观察维度：概览、额度、模型、每月、每日、每小时、统计与 Agent；此外还能将全年的使用情况呈现为支持任意视角旋转的 3D 图表。
 
 <p align="center">
-  <img src="docs/screenshots/graph-3d.png" alt="交互式 3D 贡献图" width="400">
+  <img src="docs/screenshots/zh-CN/graph-3d.png" alt="交互式 3D 贡献图" width="400">
 </p>
 
 <table>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/overview.png" alt="概览" width="300"><br><sub><b>概览</b> — 最紧绷的额度上限、今日用量与年度概况</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/quota.png" alt="额度视图" width="300"><br><sub><b>额度</b> — 历史周期与额度重置时间</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/overview.png" alt="概览" width="300"><br><sub><b>概览</b> — 最紧绷的额度上限、今日用量与年度概况</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/quota.png" alt="额度视图" width="300"><br><sub><b>额度</b> — 历史周期与额度重置时间</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/models.png" alt="模型视图" width="300"><br><sub><b>模型</b> — 按费用排序的各模型用量</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/monthly.png" alt="每月视图" width="300"><br><sub><b>每月</b> — 活跃月份与单月明细下钻</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/models.png" alt="模型视图" width="300"><br><sub><b>模型</b> — 按费用排序的各模型用量</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/monthly.png" alt="每月视图" width="300"><br><sub><b>每月</b> — 活跃月份与单月明细下钻</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/daily.png" alt="每日视图" width="300"><br><sub><b>每日</b> — 活跃日期与单日明细下钻</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/hourly.png" alt="每小时视图" width="300"><br><sub><b>每小时</b> — 一天中各时段的 token 消耗分布</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/daily.png" alt="每日视图" width="300"><br><sub><b>每日</b> — 活跃日期与单日明细下钻</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/hourly.png" alt="每小时视图" width="300"><br><sub><b>每小时</b> — 一天中各时段的 token 消耗分布</sub></td>
   </tr>
   <tr>
-    <td align="center" width="50%"><img src="docs/screenshots/stats.png" alt="统计视图" width="300"><br><sub><b>统计</b> — 核心数据摘要与连续使用天数</sub></td>
-    <td align="center" width="50%"><img src="docs/screenshots/agents.png" alt="Agent 视图" width="300"><br><sub><b>Agent</b> — 按费用排序的子 Agent</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/stats.png" alt="统计视图" width="300"><br><sub><b>统计</b> — 核心数据摘要与连续使用天数</sub></td>
+    <td align="center" width="50%"><img src="docs/screenshots/zh-CN/agents.png" alt="Agent 视图" width="300"><br><sub><b>Agent</b> — 按费用排序的子 Agent</sub></td>
   </tr>
   <tr>
-    <td align="center" colspan="2"><img src="docs/screenshots/settings.png" alt="设置" width="300"><br><sub><b>设置</b> — 菜单栏标题、图标与额度数据源</sub></td>
+    <td align="center" colspan="2"><img src="docs/screenshots/zh-CN/settings.png" alt="设置" width="300"><br><sub><b>设置</b> — 菜单栏标题、图标与额度数据源</sub></td>
   </tr>
 </table>
 
