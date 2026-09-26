@@ -4,7 +4,7 @@
   <strong>AI token usage &amp; quota monitor for the macOS menu bar — native Swift, Liquid Glass.</strong>
 </p>
 
-<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center"><b>English</b> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
 
 <p align="center">
   <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/syrtis/badges/install-count.json&style=flat-square" alt="Total installs">

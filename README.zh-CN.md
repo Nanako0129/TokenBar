@@ -4,7 +4,7 @@
   <strong>macOS 菜单栏 AI token 用量与额度监控工具 — 原生 Swift、Liquid Glass 设计。</strong>
 </p>
 
-<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <a href="README.zh-CN.md">简体中文</a></p>
+<p align="center"><a href="README.md">English</a> · <a href="README.zh-TW.md">繁體中文</a> · <b>简体中文</b></p>
 
 <p align="center">
   <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/syrtis/badges/install-count.json&style=flat-square" alt="Total installs">
