@@ -16710,6 +16710,9 @@ enum SelfTest {
         // DockPinRepair.swift so the rename script can skip that file whole.
         DockPinRepair.selfTest { expect($0, $1) }
 
+        // Bundle rename: pure decision only; never moves a real bundle.
+        BundleRename.selfTest { expect($0, $1) }
+
         if failures > 0 {
             print("\(failures) selftest check(s) failed")
             exit(1)
