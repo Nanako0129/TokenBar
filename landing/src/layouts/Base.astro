@@ -27,9 +27,12 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href
 // versioned brand card (1200×630) — bump the filename on every redesign:
 // social platforms cache scrapes per image URL and a fresh name is the only
 // reliable bust (og.png / og-card.png stay for already-shared links). The
-// asset itself is unchanged by this PR — Syrtis brand assets are PR C's scope.
-const ogImage = new URL(`${base}og-card-v4.png`, Astro.site).href
-const ogImageAlt = 'Syrtis — where your tokens settle, tracked from the macOS menu bar'
+// v5 is the Syrtis card, one per page language (rendered by og-src/render.sh,
+// `LANG_QS=zh-tw` for the Chinese one).
+const ogImage = new URL(`${base}${locale === 'en' ? 'og-card-v5.png' : 'og-card-v5-zh-tw.png'}`, Astro.site).href
+const ogImageAlt = locale === 'en'
+  ? 'Syrtis — where your tokens settle, tracked from the macOS menu bar'
+  : 'Syrtis：積沙成洲'
 
 const enUrl = new URL(`${base}${path}`, Astro.site).href
 const zhUrl = new URL(`${base}zh-tw/${path}`, Astro.site).href
