@@ -238,7 +238,7 @@ public struct TrayTotals: Sendable {
     /// visible stripe. Client **id** only — display labels and the outbound
     /// allowlist belong to the app layer, not to this cross-platform surface.
     ///
-    /// Windows port obligation: TokenBar.Core is a file-by-file port of this
+    /// Windows port obligation: Syrtis.Core is a file-by-file port of this
     /// module (docs/knowledge/verification.md "Cross-port fixture cross-check"),
     /// so this field must be mirrored there on the next sync. The four figures
     /// above are unchanged, so the existing cross-check cases are unaffected.

@@ -92,7 +92,7 @@ enum DiscordIPC {
     /// stays at 598 ok / 0 FAIL while the bundled run reports 3 FAIL, from
     /// `A-wire`, `A26-URL` and the pid/nonce leaf count independently. The same
     /// three fire on a suffix keyed on `bundleIdentifier`'s literal value, and
-    /// again on one keyed on `CFBundleName == "TokenBar"`.
+    /// again on one keyed on `CFBundleName == "Syrtis"`.
     ///
     /// What the gate still cannot see is named in the Makefile: install path,
     /// version, build number, signature. A value keyed on those would need an
@@ -103,7 +103,7 @@ enum DiscordIPC {
     /// the bytes, in the configuration users get. The same exposure has always
     /// applied to `pid()` and `nonce()`, and the same run covers them.
     static let buttonLabel = "View on GitHub"
-    static let buttonURL = "https://github.com/Nanako0129/TokenBar"
+    static let buttonURL = "https://github.com/Nanako0129/syrtis"
 
     /// Whether a publish invalidates work computed before it.
     ///

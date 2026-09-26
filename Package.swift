@@ -4,7 +4,7 @@ import PackageDescription
 // The Rust staticlib must be built first: `cargo build --release` (or `make`).
 // `swift build` must run from the repo root so the relative -L path resolves.
 let package = Package(
-    name: "TokenBar",
+    name: "Syrtis",
     platforms: [.macOS(.v14)],
     products: [
         .executable(name: "crosscheck-harness", targets: ["CrossCheckHarness"]),
@@ -20,12 +20,12 @@ let package = Package(
             path: "Sources/TokenBarCore"
         ),
         .executableTarget(
-            name: "TokenBar",
+            name: "Syrtis",
             dependencies: [
                 "TokenBarCore",
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            path: "Sources/TokenBar",
+            path: "Sources/Syrtis",
             resources: [
                 .copy("Resources/agent-icons"),
                 .copy("Resources/anim-cat2"),
@@ -44,7 +44,7 @@ let package = Package(
         ),
         // Swift↔C# fixture cross-check harness. Depends on TokenBarCore (which
         // links the Rust staticlib), so it needs the same rustLinkerSettings.
-        // Format.swift is symlinked in from Sources/TokenBar so the harness
+        // Format.swift is symlinked in from Sources/Syrtis so the harness
         // compiles the exact shipping formatter source, not a reimplementation.
         .executableTarget(
             name: "CrossCheckHarness",

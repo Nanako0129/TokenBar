@@ -459,7 +459,7 @@ struct PopoverView: View {
         HStack {
             BrandMark()
                 .frame(width: 19, height: 19)
-            Text("TokenBar")
+            Text("Syrtis")
                 .font(.headline)
             Spacer()
             liveRateBadge
@@ -517,7 +517,7 @@ struct PopoverView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("You're on the beta build")
                     .font(.caption.weight(.semibold))
-                Text("Switch to the TokenBar 1.0 release — keeps your data")
+                Text("Switch to the Syrtis 1.0 release — keeps your data")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }

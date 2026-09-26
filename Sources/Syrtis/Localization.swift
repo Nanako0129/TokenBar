@@ -69,7 +69,7 @@ enum AppLanguage: String, CaseIterable {
         guard Bundle.main.bundleURL.pathExtension != "app",
               let resourceURL = Bundle.main.resourceURL,
               let packageBundle = Bundle(
-                url: resourceURL.appendingPathComponent("TokenBar_TokenBar.bundle")),
+                url: resourceURL.appendingPathComponent("Syrtis_Syrtis.bundle")),
               let packageResourceURL = packageBundle.resourceURL
         else { return }
 

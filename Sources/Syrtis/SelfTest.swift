@@ -4,7 +4,7 @@ import Foundation
 import SwiftUI
 import TokenBarCore
 
-// Logic checks for the pure TokenBarCore ports, run via `TokenBar --selftest`.
+// Logic checks for the pure TokenBarCore ports, run via `Syrtis --selftest`.
 // Plain assertions instead of swift-testing/XCTest because the dev machine has
 // Command Line Tools only (no testing modules); CI runs this the same way.
 
@@ -2056,7 +2056,7 @@ enum SelfTest {
             "every subscription client is registered (unknown: \(unknownSubscriptionClients.sorted()))")
 
         // The case the whole survey was run for. Cursor sells its own plan
-        // covering Anthropic models, and TokenBar has no Cursor quota gauge — so
+        // covering Anthropic models, and Syrtis has no Cursor quota gauge — so
         // a rule that asks `subscriptionClients` cannot see it, and the row gets
         // proposed against whatever else happens to cover anthropic.
         expect(
@@ -2335,7 +2335,7 @@ enum SelfTest {
             ) == "[]",
             "unassigned attribution update removes its declaration")
 
-        let attributionDefaultsName = "TokenBar.SelfTest.UsageAttribution.\(UUID().uuidString)"
+        let attributionDefaultsName = "Syrtis.SelfTest.UsageAttribution.\(UUID().uuidString)"
         if let attributionDefaults = UserDefaults(suiteName: attributionDefaultsName) {
             defer { attributionDefaults.removePersistentDomain(forName: attributionDefaultsName) }
             let suggestion = UsageAttribution.Record(
@@ -2381,7 +2381,7 @@ enum SelfTest {
                     updating: invalidAttributionRecordRaw, record: crossAssignment) == nil,
             "invalid attribution records are rejected at parse time")
 
-        let malformedDefaultsName = "TokenBar.SelfTest.UsageAttribution.Malformed.\(UUID().uuidString)"
+        let malformedDefaultsName = "Syrtis.SelfTest.UsageAttribution.Malformed.\(UUID().uuidString)"
         if let malformedDefaults = UserDefaults(suiteName: malformedDefaultsName) {
             defer { malformedDefaults.removePersistentDomain(forName: malformedDefaultsName) }
             malformedDefaults.set("not-json", forKey: UsageAttribution.confirmedKey)
@@ -2403,7 +2403,7 @@ enum SelfTest {
             expect(false, "isolated malformed attribution defaults suite is available")
         }
 
-        let wrongTypeDefaultsName = "TokenBar.SelfTest.UsageAttribution.WrongType.\(UUID().uuidString)"
+        let wrongTypeDefaultsName = "Syrtis.SelfTest.UsageAttribution.WrongType.\(UUID().uuidString)"
         if let wrongTypeDefaults = UserDefaults(suiteName: wrongTypeDefaultsName) {
             defer { wrongTypeDefaults.removePersistentDomain(forName: wrongTypeDefaultsName) }
             wrongTypeDefaults.set(["foreign"], forKey: UsageAttribution.confirmedKey)
@@ -2425,7 +2425,7 @@ enum SelfTest {
             expect(false, "isolated wrong-type attribution defaults suite is available")
         }
 
-        let absentDefaultsName = "TokenBar.SelfTest.UsageAttribution.Absent.\(UUID().uuidString)"
+        let absentDefaultsName = "Syrtis.SelfTest.UsageAttribution.Absent.\(UUID().uuidString)"
         if let absentDefaults = UserDefaults(suiteName: absentDefaultsName) {
             defer { absentDefaults.removePersistentDomain(forName: absentDefaultsName) }
             let read = UsageAttribution.confirmed(defaults: absentDefaults)
@@ -2485,7 +2485,7 @@ enum SelfTest {
             UsageAttribution.suggestionsRaw(updating: $0, record: $1)
         }
         let suggestionTable = UsageAttribution.parseRaw(suggestionRaw)
-        let oneDayDefaultsName = "TokenBar.SelfTest.AttributedSeries.\(UUID().uuidString)"
+        let oneDayDefaultsName = "Syrtis.SelfTest.AttributedSeries.\(UUID().uuidString)"
         if let oneDayDefaults = UserDefaults(suiteName: oneDayDefaultsName) {
             defer { oneDayDefaults.removePersistentDomain(forName: oneDayDefaultsName) }
             let confirmedRaw = oneDayConfirmed.reduce(String?.none) {
@@ -4215,7 +4215,7 @@ enum SelfTest {
             },
             "fallback-only and unknown clients cannot create status icons")
 
-        let clientDefaultsName = "TokenBar.SelfTest.ClientTray.\(UUID().uuidString)"
+        let clientDefaultsName = "Syrtis.SelfTest.ClientTray.\(UUID().uuidString)"
         if let clientDefaults = UserDefaults(suiteName: clientDefaultsName) {
             defer { clientDefaults.removePersistentDomain(forName: clientDefaultsName) }
 
@@ -4874,7 +4874,7 @@ enum SelfTest {
             quotaApplyEvents == ["store", "reconcile", "persist", "render", "notify"],
             "quota payload applies scalar state before render and notification")
 
-        let suiteName = "TokenBar.SelfTest.PT0.\(UUID().uuidString)"
+        let suiteName = "Syrtis.SelfTest.PT0.\(UUID().uuidString)"
         if let defaults = UserDefaults(suiteName: suiteName) {
             let sentinelKey = "pt0.sentinel"
             defaults.set("keep", forKey: sentinelKey)
@@ -4895,7 +4895,7 @@ enum SelfTest {
                 "successful quota payload replaces cached scalar and defaults")
 
             let trayRaceRejected = MainActor.assumeIsolated { () -> Bool in
-                let raceSuiteName = "TokenBar.SelfTest.PT0.Race.\(UUID().uuidString)"
+                let raceSuiteName = "Syrtis.SelfTest.PT0.Race.\(UUID().uuidString)"
                 guard let raceDefaults = UserDefaults(suiteName: raceSuiteName) else { return false }
                 defer { raceDefaults.removePersistentDomain(forName: raceSuiteName) }
                 var remaining: Double? = fresh
@@ -4925,7 +4925,7 @@ enum SelfTest {
 
             let dashboardGeneration3 = settingsQuotaPayload(generation: 3, remaining: 80)
             let dashboardPublicationReachesTray = MainActor.assumeIsolated { () -> Bool in
-                let dashboardSuiteName = "TokenBar.SelfTest.PT0.Dashboard.\(UUID().uuidString)"
+                let dashboardSuiteName = "Syrtis.SelfTest.PT0.Dashboard.\(UUID().uuidString)"
                 guard let dashboardDefaults = UserDefaults(suiteName: dashboardSuiteName) else {
                     return false
                 }
@@ -5052,12 +5052,12 @@ enum SelfTest {
                 "optional provider absence clears an explicit cached scalar")
 
             let standardBefore = UserDefaults.standard.persistentDomain(
-                forName: Bundle.main.bundleIdentifier ?? "TokenBar")
+                forName: Bundle.main.bundleIdentifier ?? "Syrtis")
             let demoFresh = TrayAnimator.applyQuotaRemaining(
                 payload: quotaPayload, persistedSelection: "codex|session.v1", excluding: [],
                 cachedRemaining: nil, defaults: nil)
             let standardAfter = UserDefaults.standard.persistentDomain(
-                forName: Bundle.main.bundleIdentifier ?? "TokenBar")
+                forName: Bundle.main.bundleIdentifier ?? "Syrtis")
             expect(
                 demoFresh == 80 && NSDictionary(dictionary: standardBefore ?? [:])
                     .isEqual(to: standardAfter ?? [:]),
@@ -5631,7 +5631,7 @@ enum SelfTest {
           {"clientId":"claude","source":"unconfigured","updatedAt":"now",
            "windows":[],"error":"Claude OAuth credentials not found."},
           {"clientId":"grok-bot","source":"keychain-consent","updatedAt":"now",
-           "windows":[],"error":"TokenBar needs your permission to read the Grok Bot login from Keychain."}
+           "windows":[],"error":"Syrtis needs your permission to read the Grok Bot login from Keychain."}
         ]}
         """
         let consentPayload = try! JSONDecoder().decode(
@@ -7425,7 +7425,7 @@ enum SelfTest {
         // section uses for "declared in exactly one place".
         func lp2bSource(_ name: String) -> String {
             let root = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()  // Sources/TokenBar
+                .deletingLastPathComponent()  // Sources/Syrtis
             for sub in ["", "Views/"] {
                 let url = root.appendingPathComponent(sub + name)
                 if let text = try? String(contentsOf: url, encoding: .utf8) { return text }
@@ -7802,8 +7802,8 @@ enum SelfTest {
         // Synthetic --demo source: one fixture must drive every usage lens,
         // quota card, trace row, tray rate, and year selection without a live
         // FFI call. The fixture itself is the only data definition here.
-        let demoSource = UsageDataSources.make(arguments: ["TokenBar", "--demo"])
-        let liveSource = UsageDataSources.make(arguments: ["TokenBar"])
+        let demoSource = UsageDataSources.make(arguments: ["Syrtis", "--demo"])
+        let liveSource = UsageDataSources.make(arguments: ["Syrtis"])
         expect(demoSource is DemoUsageDataSource, "usage source factory selects demo mode")
         expect(liveSource is LiveUsageDataSource, "usage source factory selects live mode")
         expect(!demoSource.allowsQuotaCachePersistence, "demo source disables quota cache persistence")
@@ -8778,7 +8778,7 @@ enum SelfTest {
         // Absent and malformed are different answers. An absent key is an
         // upgrade and keeps every component; a present non-string is a
         // malformed write and gets what a string of only unknown tokens gets.
-        let dpCompSuite = "TokenBar.SelfTest.DiscordComponents"
+        let dpCompSuite = "Syrtis.SelfTest.DiscordComponents"
         if let dpCompDefaults = UserDefaults(suiteName: dpCompSuite) {
             defer { UserDefaults.standard.removePersistentDomain(forName: dpCompSuite) }
             let dpAbsent = DiscordPresence.components(defaults: dpCompDefaults)
@@ -8917,7 +8917,7 @@ enum SelfTest {
         // Absent, malformed and named are three answers. One `as? String` cast
         // would send a key holding a number down the ABSENT branch and widen a
         // one-client selection to every registered client.
-        let dpSelSuite = "TokenBar.SelfTest.DiscordSelection"
+        let dpSelSuite = "Syrtis.SelfTest.DiscordSelection"
         if let dpSelDefaults = UserDefaults(suiteName: dpSelSuite) {
             defer { UserDefaults.standard.removePersistentDomain(forName: dpSelSuite) }
             let dpSelAbsent = DiscordPresence.selection(defaults: dpSelDefaults)
@@ -8994,7 +8994,7 @@ enum SelfTest {
         // The intro card. One contract, behavioural: nothing it does turns the
         // feature on. A source scan counting writes to the key name is exactly
         // the shape #148 removed and #147 showed gets relocated around.
-        let dpIntroSuite = "TokenBar.SelfTest.DiscordIntro"
+        let dpIntroSuite = "Syrtis.SelfTest.DiscordIntro"
         if let dpIntroDefaults = UserDefaults(suiteName: dpIntroSuite) {
             defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroSuite) }
             // Deciding CONSUMES the flag: presentation is what marks it, not
@@ -9033,7 +9033,7 @@ enum SelfTest {
             // Already using it: nothing to introduce, and interrupting would be
             // noise. Asserted on a second suite so the flag above cannot be
             // what makes this pass.
-            let dpIntroOnSuite = "TokenBar.SelfTest.DiscordIntroOn"
+            let dpIntroOnSuite = "Syrtis.SelfTest.DiscordIntroOn"
             if let dpIntroOn = UserDefaults(suiteName: dpIntroOnSuite) {
                 defer { UserDefaults.standard.removePersistentDomain(forName: dpIntroOnSuite) }
                 dpIntroOn.set(true, forKey: DiscordPresence.enabledKey)
@@ -9324,7 +9324,7 @@ enum SelfTest {
                     // anything — a `?ref=` parameter being the obvious one —
                     // fails right here instead of being admitted as just
                     // another field.
-                    + ["View on GitHub", "https://github.com/Nanako0129/TokenBar"]
+                    + ["View on GitHub", "https://github.com/Nanako0129/syrtis"]
                     + ["SET_ACTIVITY", "NONCE-1", "4242"]).sorted()
                 && DiscordIPC.leafKeys(dpWire).sorted() == [
                     "activity", "args", "assets", "buttons", "cmd", "details",
@@ -9501,7 +9501,7 @@ enum SelfTest {
         // riding along as one more payload field.
         let dpLivePayloadLeaves = [
             "12K tokens today", "Amp · $1-5", "tokenbar", "SET_ACTIVITY",
-            "View on GitHub", "https://github.com/Nanako0129/TokenBar",
+            "View on GitHub", "https://github.com/Nanako0129/syrtis",
         ]
         let dpLiveExtra = dpLiveLeaves.filter { !dpLivePayloadLeaves.contains($0) }
         let dpLiveNonce = dpLiveExtra.first {
@@ -10292,9 +10292,9 @@ enum SelfTest {
         expect(
             dpTestFlags.allSatisfy {
                 AppDelegate.makeDiscordClient(
-                    arguments: ["TokenBar", $0, "--open-popover"], enabled: true) == nil
+                    arguments: ["Syrtis", $0, "--open-popover"], enabled: true) == nil
                     && AppDelegate.makeDiscordClient(
-                        existing: dpLiveClient, arguments: ["TokenBar", $0], enabled: true) == nil
+                        existing: dpLiveClient, arguments: ["Syrtis", $0], enabled: true) == nil
                     && !DiscordPresence.mayConnect(arguments: [$0], enabled: true)
             },
             "A1: no demo/smoke/selftest run builds a client or keeps an existing one, even with "
@@ -10305,10 +10305,10 @@ enum SelfTest {
         // The control half. Without it every assertion above passes on a
         // factory that refuses everything unconditionally.
         expect(
-            AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: true) != nil
-                && AppDelegate.makeDiscordClient(arguments: ["TokenBar"], enabled: false) == nil
+            AppDelegate.makeDiscordClient(arguments: ["Syrtis"], enabled: true) != nil
+                && AppDelegate.makeDiscordClient(arguments: ["Syrtis"], enabled: false) == nil
                 && AppDelegate.makeDiscordClient(
-                    existing: dpLiveClient, arguments: ["TokenBar"], enabled: true) === dpLiveClient
+                    existing: dpLiveClient, arguments: ["Syrtis"], enabled: true) === dpLiveClient
                 && DiscordPresence.mayConnect(arguments: [], enabled: true)
                 && !DiscordPresence.mayConnect(arguments: [], enabled: false),
             "A1 control: an ordinary run builds a client, reuses the one it was given rather "
@@ -10346,7 +10346,7 @@ enum SelfTest {
         // persistent domain all leave it behind. A fresh name per run
         // therefore deposits one more ~/Library/Preferences file every time
         // the suite runs. One reused name caps it at a single empty file.
-        let dpSuiteName = "TokenBar.SelfTest.Discord"
+        let dpSuiteName = "Syrtis.SelfTest.Discord"
         if let dpDefaults = UserDefaults(suiteName: dpSuiteName) {
             // On `UserDefaults.standard`, not on the suite's own instance:
             // calling it on the instance leaves the plist behind, so every run
@@ -10412,7 +10412,7 @@ enum SelfTest {
         // compile-time path.
         func dpSourceFiles() -> [(name: String, text: String)] {
             let root = URL(fileURLWithPath: #filePath)
-                .deletingLastPathComponent()  // Sources/TokenBar
+                .deletingLastPathComponent()  // Sources/Syrtis
                 .deletingLastPathComponent()  // Sources
             guard let walk = FileManager.default.enumerator(
                 at: root, includingPropertiesForKeys: nil) else { return [] }
@@ -10574,7 +10574,7 @@ enum SelfTest {
             }
         expect(
             dpOccurrences(
-                "static let buttonURL = \"https://github.com/Nanako0129/TokenBar\"",
+                "static let buttonURL = \"https://github.com/Nanako0129/syrtis\"",
                 in: dpSources.filter { $0.name == "DiscordIPC.swift" }) == 1
                 && dpOccurrences(
                     "static let buttonLabel = \"View on GitHub\"",
@@ -11237,21 +11237,21 @@ enum SelfTest {
                 shortVersion: "1.2.3", buildNumber: "456")
         }
         expect(
-            lp3ShippingIdentity(["/Applications/TokenBar.app"]) != nil,
+            lp3ShippingIdentity(["/Applications/Syrtis.app"]) != nil,
             "LP3 isolation control: the production bundle triple with no non-user flag DOES "
                 + "yield an identity — without this every assertion below would pass on a "
                 + "function that always returns nil")
         for flag in BuildIdentity.nonUserRuntimeFlags {
             expect(
-                lp3ShippingIdentity(["/Applications/TokenBar.app", flag]) == nil,
+                lp3ShippingIdentity(["/Applications/Syrtis.app", flag]) == nil,
                 "LP3 isolation: \(flag) yields no shipping identity even on a production "
                     + "bundle, so no production snapshot path exists for a fixture model")
         }
         expect(
-            lp3ShippingIdentity(["/Applications/TokenBar.app", "--demo", "--selftest"]) == nil,
+            lp3ShippingIdentity(["/Applications/Syrtis.app", "--demo", "--selftest"]) == nil,
             "LP3 isolation: combined non-user flags still yield no shipping identity")
         expect(
-            !BuildIdentity.isNonUserRuntime(["/Applications/TokenBar.app"]),
+            !BuildIdentity.isNonUserRuntime(["/Applications/Syrtis.app"]),
             "LP3 isolation control: an ordinary launch is NOT classified as a non-user "
                 + "runtime — without this the assertions above would pass on a predicate "
                 + "that always returns true")

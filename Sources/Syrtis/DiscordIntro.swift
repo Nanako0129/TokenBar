@@ -85,7 +85,7 @@ enum DiscordIntro {
     @MainActor
     private static func previewView() -> NSView {
         let preview = DiscordPresencePreview(
-            title: "TokenBar".localized,
+            title: "Syrtis".localized,
             details: "1.2M tokens today".localized,
             state: "Claude Code · $10-50".localized,
             button: DiscordIPC.buttonLabel.localized)
@@ -129,7 +129,7 @@ private struct DiscordPresencePreview: View {
     var body: some View {
         HStack(alignment: .top, spacing: 10) {
             // The app's own icon, because that is literally what Discord
-            // shows: `largeImageKey` resolves to the TokenBar art uploaded to
+            // shows: `largeImageKey` resolves to the Syrtis art uploaded to
             // the Developer Portal. A stand-in symbol would make the preview
             // decorative rather than accurate.
             Image(nsImage: NSApp.applicationIconImage)

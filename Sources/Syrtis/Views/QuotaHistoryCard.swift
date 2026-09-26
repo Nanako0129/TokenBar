@@ -126,7 +126,7 @@ struct QuotaHistoryCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if cycles.isEmpty {
-                Text("No earlier windows recorded yet. They accumulate as TokenBar runs.")
+                Text("No earlier windows recorded yet. They accumulate as Syrtis runs.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -446,7 +446,7 @@ struct QuotaHistoryCard: View {
                 .font(.system(size: 9).monospacedDigit())
                 .foregroundStyle(.tertiary)
             if cycle.observedFraction < Self.thinObservation {
-                Text("TokenBar observed %@%% of this window, so its usage figure is a floor."
+                Text("Syrtis observed %@%% of this window, so its usage figure is a floor."
                     .localized(String(Int((cycle.observedFraction * 100).rounded()))))
                     .font(.system(size: 9))
                     .foregroundStyle(.orange)

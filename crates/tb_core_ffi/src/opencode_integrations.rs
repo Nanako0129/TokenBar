@@ -212,7 +212,7 @@ pub(crate) enum OpenCodeGoCredentialLoad {
 /// entry, or an empty key is `Absent`; storage, syntax, canonicalization, or a
 /// present malformed entry is `Terminal` and must not be hidden as signed-out.
 /// This mirrors mana.bar's `OpenCodeGoProvider.loadApiKey`, minus the env-var
-/// key override, which TokenBar does not use.
+/// key override, which Syrtis does not use.
 pub(crate) fn opencode_go_credential() -> OpenCodeGoCredentialLoad {
     let Some(path) = auth_path() else {
         return OpenCodeGoCredentialLoad::Terminal(

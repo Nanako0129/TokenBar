@@ -19,7 +19,7 @@ import SwiftUI
 // also refuse an older toolchain: that setting additionally moves language-mode
 // and manifest defaults, which is a larger change than stating a requirement.
 #if !compiler(>=6.2)
-#error("TokenBar requires Swift 6.2 or newer (Xcode 26+). Liquid Glass is compiled against the macOS 26 SDK; an older toolchain cannot build this file, and removing those surfaces to make it compile would ship the app without them.")
+#error("Syrtis requires Swift 6.2 or newer (Xcode 26+). Liquid Glass is compiled against the macOS 26 SDK; an older toolchain cannot build this file, and removing those surfaces to make it compile would ship the app without them.")
 #endif
 
 /// Reusable backdrop for popover/panel content. Uses Liquid Glass on

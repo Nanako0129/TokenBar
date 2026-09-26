@@ -6,7 +6,7 @@
 # Why this exists: SPARKLE_NORMALIZE_INSTALLED_APPLICATION_NAME is a
 # compile-time macro (Sparkle's Configurations/ConfigCommon.xcconfig sets it to
 # 0), not an Info.plist key, so the official prebuilt xcframework can never
-# perform the v2.0 TokenBar.app -> Syrtis.app rename no matter what the app
+# perform the v2.0 Syrtis.app -> Syrtis.app rename no matter what the app
 # declares. Enabling it requires compiling Sparkle ourselves. OpenAI did the
 # same for the Codex -> ChatGPT rename.
 #

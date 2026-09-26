@@ -23,7 +23,7 @@ const canonical = new URL(Astro.url.pathname, Astro.site).href
 // social platforms cache scrapes per image URL and a fresh name is the only
 // reliable bust (og.png / og-card.png stay for already-shared links)
 const ogImage = new URL(`${base}og-card-v4.png`, Astro.site).href
-const ogImageAlt = 'TokenBar — know every AI token you burn, from the macOS menu bar'
+const ogImageAlt = 'Syrtis — know every AI token you burn, from the macOS menu bar'
 
 const enUrl = new URL(base, Astro.site).href
 const zhUrl = new URL(`${base}zh-tw/`, Astro.site).href
@@ -31,7 +31,7 @@ const zhUrl = new URL(`${base}zh-tw/`, Astro.site).href
 const jsonLd = {
   '@context': 'https://schema.org',
   '@type': 'SoftwareApplication',
-  name: 'TokenBar',
+  name: 'Syrtis',
   applicationCategory: 'DeveloperApplication',
   operatingSystem: 'macOS 14+ (Apple Silicon)',
   softwareVersion: '1.0.1',
@@ -58,7 +58,7 @@ const jsonLd = {
     <link rel="alternate" hreflang="x-default" href={enUrl} />
 
     <meta property="og:type" content="website" />
-    <meta property="og:site_name" content="TokenBar" />
+    <meta property="og:site_name" content="Syrtis" />
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:url" content={canonical} />

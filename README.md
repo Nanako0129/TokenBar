@@ -1,11 +1,11 @@
-<h1 align="center">TokenBar</h1>
+<h1 align="center">Syrtis</h1>
 
 <p align="center">
   <strong>AI token usage &amp; quota monitor for the macOS menu bar — native Swift, Liquid Glass.</strong>
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/TokenBar/badges/install-count.json&style=flat-square" alt="Total installs">
+  <img src="https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/Nanako0129/syrtis/badges/install-count.json&style=flat-square" alt="Total installs">
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square" alt="MIT Licence">
   <img src="https://img.shields.io/badge/macOS-14%2B-black?style=flat-square&logo=apple" alt="macOS 14+">
   <img src="https://img.shields.io/badge/Apple%20Silicon-arm64-success?style=flat-square" alt="Apple Silicon">
@@ -15,13 +15,13 @@
 
 <br>
 
-**TokenBar** sits in your menu bar and shows what you're spending across
+**Syrtis** sits in your menu bar and shows what you're spending across
 **25+ AI coding agents** — Claude Code, Codex, Cursor, OpenCode, Gemini CLI and
 more — read on-device from your local session logs. No Dock icon, no telemetry,
 no account.
 
 <p align="center">
-  <img src="landing/public/og-card-v4.png" alt="TokenBar — know every AI token you burn from the macOS menu bar" width="800">
+  <img src="landing/public/og-card-v4.png" alt="Syrtis — know every AI token you burn from the macOS menu bar" width="800">
 </p>
 
 The menu-bar title shows today's tokens, cost, live tokens/min, or **how much
@@ -67,7 +67,7 @@ lands.
 ## Install
 
 ```sh
-brew install --cask nanako0129/tokenbar/tokenbar
+brew install --cask nanako0129/tap/syrtis
 ```
 
 In-app updates arrive via Sparkle; betas ride an opt-in channel
@@ -88,8 +88,8 @@ Swift owns the rest: SwiftUI views, the `NSStatusItem` shell, Sparkle updates.
 
 ```sh
 make                        # cargo build --release, then swift build
-make run                    # build + launch TokenBar
-swift run TokenBar --smoke  # run the FFI smoke test
+make run                    # build + launch Syrtis
+swift run Syrtis --smoke  # run the FFI smoke test
 ```
 
 The [project knowledge base](docs/knowledge/README.md) is the canonical guide to the Rust-to-Swift architecture, verification gates, shared-engine boundary, release chain, and maintenance state.
@@ -97,9 +97,9 @@ The [project knowledge base](docs/knowledge/README.md) is the canonical guide to
 > Run `swift build` from the repo root — the linker's `-L target/release` path
 > in `Package.swift` is relative.
 
-## Support TokenBar
+## Support Syrtis
 
-TokenBar is local-first and needs no TokenBar account, but maintaining
+Syrtis is local-first and needs no Syrtis account, but maintaining
 trustworthy numbers across 25+ AI coding agents is a wide compatibility job.
 Parser changes cross Rust, FFI, Swift, and the Windows sibling; live quota cards
 require real OAuth or subscription accounts and provider APIs; releases cover
@@ -108,10 +108,10 @@ migration metadata.
 
 Sponsorship helps cover test accounts, CI and release infrastructure, and the
 maintainer time required to keep readings accurate as upstream formats change.
-If TokenBar helps you understand where your AI budget goes, you can support its
+If Syrtis helps you understand where your AI budget goes, you can support its
 continued development on Patreon.
 
-[![Support TokenBar on Patreon](https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/Nanako0129/membership)
+[![Support Syrtis on Patreon](https://img.shields.io/badge/Support_on_Patreon-FF424D?style=for-the-badge&logo=patreon&logoColor=white)](https://www.patreon.com/cw/Nanako0129/membership)
 
 ## Contributing
 
@@ -119,8 +119,8 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for setup, change-specific guardrails, ve
 
 ## Credits
 
-TokenBar is built on **[tokscale](https://github.com/junhoyeo/tokscale)** by
-Junho Yeo. TokenBar's shared
+Syrtis is built on **[tokscale](https://github.com/junhoyeo/tokscale)** by
+Junho Yeo. Syrtis's shared
 [`tokscale-core`](https://github.com/Nanako0129/tokscale-core) engine derives
 from that core and handles session parsing, dedup, and pricing across 25+
 agents. The tokscale interactive TUI is also the blueprint for the whole

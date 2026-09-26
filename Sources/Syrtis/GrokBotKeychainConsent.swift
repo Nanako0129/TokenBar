@@ -1,7 +1,7 @@
 import Foundation
 import TokenBarCore
 
-/// Whether the user has agreed to let TokenBar read the Grok Bot login from
+/// Whether the user has agreed to let Syrtis read the Grok Bot login from
 /// the macOS Keychain, and the wiring that carries that answer into the core.
 ///
 /// The core registry (`tb_set_keychain_consent`) is an in-memory `RwLock` that

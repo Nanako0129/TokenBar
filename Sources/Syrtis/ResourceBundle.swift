@@ -11,7 +11,7 @@ extension Bundle {
     /// fall back to Bundle.module for bare `swift run` / selftest runs.
     static let tokenBarResources: Bundle = {
         if let url = Bundle.main.resourceURL?
-            .appendingPathComponent("TokenBar_TokenBar.bundle"),
+            .appendingPathComponent("Syrtis_Syrtis.bundle"),
             let bundle = Bundle(url: url)
         {
             return bundle

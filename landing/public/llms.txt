@@ -1,4 +1,4 @@
-# TokenBar
+# Syrtis
 
 > A local-first AI token usage monitor for the macOS menu bar. It reads your
 > AI coding session logs on-device and shows what you spend across 25+ coding
@@ -21,7 +21,7 @@
 - Agents: sub-agents ranked by cost with source apps, message count, and tokens.
 
 ## Menu bar
-- The status item shows live token throughput as an animated menu-bar pet (the oiiai spinning cat, tokcat's signature; or Party Parrot, from RunCat) or a subscription-quota gauge: signal bars, a ring, or a popsicle that melts as the five-hour window drains, with battery-style warning colors. The menu-bar pet concept and Party Parrot originate with RunCat; TokenBar reuses tokcat's choices, it did not originate them.
+- The status item shows live token throughput as an animated menu-bar pet (the oiiai spinning cat, tokcat's signature; or Party Parrot, from RunCat) or a subscription-quota gauge: signal bars, a ring, or a popsicle that melts as the five-hour window drains, with battery-style warning colors. The menu-bar pet concept and Party Parrot originate with RunCat; Syrtis reuses tokcat's choices, it did not originate them.
 
 ## Updates
 - In-app updates over a signed Sparkle (EdDSA) feed; release notes are summarized from the actual commits. Beta builds are a Settings toggle, not a separate install.
@@ -31,12 +31,12 @@
 - Network access is limited to the signed updater feed, public model-pricing data, and optional Codex/Claude quota lookups that reuse the OAuth credentials already on the machine.
 
 ## Install
-- Homebrew: `brew install --cask nanako0129/tokenbar/tokenbar` (macOS 14+, Apple Silicon)
+- Homebrew: `brew install --cask nanako0129/tap/syrtis` (macOS 14+, Apple Silicon)
 - Legacy (final Tauri build, macOS 11+): `brew install --cask nanako0129/tokenbar/tokenbar@legacy`
 
 ## Links
-- Website: https://tokenbar.nyanako.com (繁體中文: https://tokenbar.nyanako.com/zh-tw/)
-- Repository: https://github.com/Nanako0129/TokenBar
+- Website: https://syrtis.nyanako.com (繁體中文: https://syrtis.nyanako.com/zh-tw/)
+- Repository: https://github.com/Nanako0129/syrtis
 - Legacy (archived) Tauri repository: https://github.com/Nanako0129/TokenBar-Tauri
 - Forked from tokcat by handlecusion: https://github.com/handlecusion/tokcat
 - Parsing powered by tokscale by Junho Yeo: https://github.com/junhoyeo/tokscale

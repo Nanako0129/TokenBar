@@ -72,7 +72,7 @@ struct QuotaHeatmapCard: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else if attempted {
-                Text("No allowance movement recorded yet. It accumulates as TokenBar runs.")
+                Text("No allowance movement recorded yet. It accumulates as Syrtis runs.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

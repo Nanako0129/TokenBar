@@ -117,11 +117,11 @@ final class StatusItemController: NSObject {
         if let button = statusItem.button {
             let placeholder = NSImage(size: .zero)
             placeholder.isTemplate = true
-            placeholder.accessibilityDescription = "TokenBar"
+            placeholder.accessibilityDescription = "Syrtis"
             button.image = placeholder
             button.imagePosition = .imageLeft
-            button.toolTip = "TokenBar"
-            button.setAccessibilityLabel("TokenBar")
+            button.toolTip = "Syrtis"
+            button.setAccessibilityLabel("Syrtis")
             button.target = self
             button.action = #selector(togglePopover(_:))
             // Right-click opens the quota-source menu (battery-icon pattern).
@@ -164,7 +164,7 @@ final class StatusItemController: NSObject {
         guard !hasPresentedIcon,
               let image = NSImage(
                   systemSymbolName: "chart.bar.fill",
-                  accessibilityDescription: "TokenBar")
+                  accessibilityDescription: "Syrtis")
         else { return }
         setStaticIcon(image, isTemplate: true)
     }

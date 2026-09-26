@@ -47,7 +47,7 @@ const CLAUDE_MESSAGES_URL: &str = "https://api.anthropic.com/v1/messages";
 // outlives model retirements.
 const CLAUDE_PROBE_MODEL: &str = "claude-haiku-4-5";
 // Keychain generic-password service holding a RAW setup-token (`sk-ant-oat01-…`),
-// the launch-method-independent way to hand TokenBar a token for the limits card:
+// the launch-method-independent way to hand Syrtis a token for the limits card:
 //   security add-generic-password -a "$USER" -s tokenbar-claude-oauth-token -w "<token>"
 const CLAUDE_RAW_TOKEN_KEYCHAIN_SERVICE: &str = "tokenbar-claude-oauth-token";
 
@@ -1641,7 +1641,7 @@ async fn fetch_grok() -> Option<AgentUsageSnapshot> {
                 updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                 identity: data.identity,
                 account_scope: data.account_scope,
-                // Grok has no authoritative owner ID in anything TokenBar fetches.
+                // Grok has no authoritative owner ID in anything Syrtis fetches.
                 history_scope: agent_account_scope::resolve_history_scope("grok", None),
                 windows: data.windows,
                 credits: None,
@@ -1673,7 +1673,7 @@ async fn fetch_kiro() -> Option<AgentUsageSnapshot> {
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
                         account_scope: data.account_scope,
-                        // Kiro has no authoritative owner ID in what TokenBar fetches.
+                        // Kiro has no authoritative owner ID in what Syrtis fetches.
                         history_scope: agent_account_scope::resolve_history_scope("kiro", None),
                         windows: data.windows,
                         credits: None,
@@ -1747,7 +1747,7 @@ async fn fetch_opencode_go() -> Option<AgentUsageSnapshot> {
                         updated_at: now.to_rfc3339_opts(SecondsFormat::Millis, true),
                         identity: data.identity,
                         account_scope: data.account_scope,
-                        // OpenCode Go has no authoritative owner ID in what TokenBar fetches.
+                        // OpenCode Go has no authoritative owner ID in what Syrtis fetches.
                         history_scope: agent_account_scope::resolve_history_scope("opencode", None),
                         windows: data.windows,
                         credits: None,
@@ -3238,13 +3238,13 @@ const CLAUDE_CREDENTIALS_LOAD_ERROR: &str = "Claude credentials could not be loa
 /// setup-token fallback for an isolated account, and naming one would send the
 /// user to a credential that belongs to the other account.
 const CLAUDE_EXTRA_UNCONFIGURED_ERROR: &str = "No Claude login found for this config directory. Run `claude` with CLAUDE_CONFIG_DIR set to it.";
-/// TokenBar refreshes only the primary directory's credential in place, so an
+/// Syrtis refreshes only the primary directory's credential in place, so an
 /// isolated account's expired token has to be rotated by Claude Code itself.
 const CLAUDE_EXTRA_EXPIRED_ERROR: &str = "Claude credentials for this config directory have expired. Run `claude` with CLAUDE_CONFIG_DIR set to it.";
 
 /// Full-login credentials: structured `claudeAiOauth` blobs (Keychain
 /// `Claude Code-credentials`, then `~/.claude/.credentials.json`) plus the
-/// TokenBar env override. Only a genuinely missing higher-priority store falls
+/// Syrtis env override. Only a genuinely missing higher-priority store falls
 /// through; the explicit #26 logout shape stops full-login precedence.
 fn load_claude_login_credentials() -> ClaudeLoginResolution {
     match load_claude_credentials_from_environment() {
@@ -3336,7 +3336,7 @@ async fn resolve_claude_code_oauth_token() -> Option<ResolvedClaudeToken> {
         })
 }
 
-/// The `tokenbar-claude-oauth-token` Keychain item (a TokenBar-specific setup
+/// The `tokenbar-claude-oauth-token` Keychain item (a Syrtis-specific setup
 /// token). A last-resort fallback, below the stored `/login`.
 fn resolve_claude_keychain_token() -> Result<Option<ResolvedClaudeToken>, String> {
     load_claude_raw_token_from_keychain().map(|token| {
@@ -3695,19 +3695,19 @@ fn load_claude_raw_token_from_keychain() -> Result<Option<String>, String> {
             "-w",
         ])
         .output()
-        .map_err(|e| format!("read TokenBar Claude token from Keychain: {}", e))?;
+        .map_err(|e| format!("read Syrtis Claude token from Keychain: {}", e))?;
     if !output.status.success() {
         return if keychain_item_not_found(&output.status) {
             Ok(None)
         } else {
-            Err("TokenBar Claude Keychain token could not be read.".to_string())
+            Err("Syrtis Claude Keychain token could not be read.".to_string())
         };
     }
     let raw = String::from_utf8(output.stdout)
-        .map_err(|_| "TokenBar Claude Keychain token is not UTF-8.".to_string())?;
+        .map_err(|_| "Syrtis Claude Keychain token is not UTF-8.".to_string())?;
     let raw = raw.trim().to_string();
     if raw.is_empty() {
-        return Err("TokenBar Claude Keychain token is empty.".to_string());
+        return Err("Syrtis Claude Keychain token is empty.".to_string());
     }
     Ok(Some(raw))
 }
@@ -4210,7 +4210,7 @@ where
 
 /// Replace `path` atomically: write a sibling temp file, then rename over the
 /// target. A crash or partial write leaves the original credentials intact
-/// rather than a truncated file that would break both TokenBar and the Claude
+/// rather than a truncated file that would break both Syrtis and the Claude
 /// CLI (the rename is atomic within one filesystem).
 fn atomic_write(path: &Path, data: &str) -> Result<(), String> {
     let parent = path.parent().ok_or_else(|| {
@@ -4582,7 +4582,7 @@ fn save_codex_credentials(
 }
 
 /// Restore the pre-refresh Codex root only while this refresh still owns the
-/// exact root it persisted. External Codex writers do not share TokenBar's
+/// exact root it persisted. External Codex writers do not share Syrtis's
 /// refresh lock, so the compare-to-rename interval remains a known residual
 /// window rather than a filesystem compare-and-swap.
 fn rollback_codex_credentials_if_unchanged(

@@ -39,7 +39,7 @@ public enum WindowEquivalence {
     /// Internal on purpose. `deltaQualifies` below is the whole admission rule
     /// and this is only its single-rise half; a caller holding the bare number
     /// can write `delta >= minimumDelta` and silently drop the run scaling,
-    /// which is exactly what happened at two sites in the `TokenBar` target and
+    /// which is exactly what happened at two sites in the `Syrtis` target and
     /// took a review round to find. Keeping it inside this module makes that
     /// comparison fail to compile out there rather than fail review. The
     /// previous guard was a `git grep` showing one comparison, which is a

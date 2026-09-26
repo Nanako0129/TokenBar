@@ -276,7 +276,7 @@ struct SettingsWindowView: View {
                 FooterLink(
                     title: "GitHub",
                     systemImage: "chevron.left.forwardslash.chevron.right",
-                    url: "https://github.com/Nanako0129/TokenBar")
+                    url: "https://github.com/Nanako0129/syrtis")
                 FooterLink(
                     title: "Sponsor",
                     systemImage: "heart",
@@ -367,7 +367,7 @@ struct SettingsWindowView: View {
     }
 }
 
-/// One mock menu-bar strip (dark or light) with the TokenBar status item
+/// One mock menu-bar strip (dark or light) with the Syrtis status item
 /// rendered from the same inputs the real one uses: TrayIcons gauges or the
 /// cat/parrot frame sets, plus TrayMode's title over live data.
 private struct MenuBarMock: View {
@@ -405,7 +405,7 @@ private struct MenuBarMock: View {
                 .font(.caption2)
                 .foregroundStyle(ink.opacity(0.4))
             Spacer()
-            // The TokenBar status item, hover-highlighted to stand out.
+            // The Syrtis status item, hover-highlighted to stand out.
             HStack(spacing: title.isEmpty ? 0 : 4) {
                 icon(remaining: remaining)
                 if !title.isEmpty {

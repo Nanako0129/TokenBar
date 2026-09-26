@@ -1,8 +1,8 @@
 /*
  StatusItemAnimationSurface.swift
- TokenBar
+ Syrtis
 
- Adapted and modified for TokenBar from RunCat Neo's status-item rendering
+ Adapted and modified for Syrtis from RunCat Neo's status-item rendering
  architecture.
 
  Copyright 2026 Kyome22 (Takuto Nakamura)
@@ -100,7 +100,7 @@ final class StatusItemAnimationSurface {
         let staticImage = first.copy() as? NSImage ?? first
         staticImage.size = first.size
         staticImage.isTemplate = true
-        staticImage.accessibilityDescription = "TokenBar"
+        staticImage.accessibilityDescription = "Syrtis"
         button.image = staticImage
         button.layoutSubtreeIfNeeded()
 
@@ -133,7 +133,7 @@ final class StatusItemAnimationSurface {
         let staticImage = image.copy() as? NSImage ?? image
         staticImage.size = image.size
         staticImage.isTemplate = isTemplate
-        staticImage.accessibilityDescription = "TokenBar"
+        staticImage.accessibilityDescription = "Syrtis"
         button.image = staticImage
         button.layoutSubtreeIfNeeded()
     }

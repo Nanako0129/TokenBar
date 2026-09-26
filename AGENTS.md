@@ -1,4 +1,4 @@
-# TokenBar agent routing
+# Syrtis agent routing
 
 > `docs/knowledge/` is the canonical project knowledge base. This adapter routes work to it; it does not copy project facts.
 
@@ -24,7 +24,7 @@ Read [`docs/knowledge/README.md`](docs/knowledge/README.md) for every task befor
 | Source of truth | Add canonical project facts to `docs/knowledge/`; keep adapters as routing and guardrails. |
 | Cross-language seam | Preserve the Rust -> C ABI -> Swift contract; verify both sides when a boundary changes. |
 | Pre-aggregation | Do not attempt to remove a contribution after a mixed aggregate has been computed; pass the filter to the producer. |
-| Shared-engine boundary | Land shared Rust changes in `tokscale-core`; advance only a reviewed gitlink, and keep app-owned FFI, C ABI, Swift, and build wiring in TokenBar. |
+| Shared-engine boundary | Land shared Rust changes in `tokscale-core`; advance only a reviewed gitlink, and keep app-owned FFI, C ABI, Swift, and build wiring in Syrtis. |
 | Public repository | Never add private paths, credentials, machine-specific tooling details, or unpublished security work to tracked docs. |
 
 ## Authorization boundary

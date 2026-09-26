@@ -5,7 +5,7 @@ kind: canonical
 scope: repository
 read_when: considering a glass, popover, panel, or transparency redesign
 last_verified: 2026-09-25
-sources: ["sanitized local experiment source", "sanitized Liquid Glass project memory", "Sources/TokenBar/GlassBackground.swift", "Sources/TokenBar/Views/Cards.swift", "Sources/TokenBar/GlassPanelPresenter.swift", "Sources/TokenBar/StatusItemController.swift", "macOS 27.0 SDK AppKit headers (NSStatusItem.h, NSGlassEffectView.h)", "2026-09-24/25 live panel spike rounds"]
+sources: ["sanitized local experiment source", "sanitized Liquid Glass project memory", "Sources/Syrtis/GlassBackground.swift", "Sources/Syrtis/Views/Cards.swift", "Sources/Syrtis/GlassPanelPresenter.swift", "Sources/Syrtis/StatusItemController.swift", "macOS 27.0 SDK AppKit headers (NSStatusItem.h, NSGlassEffectView.h)", "2026-09-24/25 live panel spike rounds"]
 ---
 
 # Liquid Glass experiments

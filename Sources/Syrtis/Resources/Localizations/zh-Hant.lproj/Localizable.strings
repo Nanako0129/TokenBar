@@ -1,8 +1,8 @@
-/* TokenBar — 繁體中文（台灣）
+/* Syrtis — 繁體中文（台灣）
 
    Key 就是原始碼裡的英文原文，沒有對應項目時會原樣顯示英文，不會壞掉。
 
-   保留不譯：TokenBar 與各家產品名（Claude、Codex、Copilot、Gemini…）、模型
+   保留不譯：Syrtis 與各家產品名（Claude、Codex、Copilot、Gemini…）、模型
    名稱、token、Agent、2D／3D、In／Out／CR／CW 這類圖表縮寫，以及步調（pace）
    狀態文案 —— 後者是 SelfTest 逐字斷言的邏輯層字串，這一版維持英文。
 
@@ -38,7 +38,7 @@
 "Update %@" = "更新 %@";
 "A new version is ready — click to install" = "新版本已就緒，點一下即可安裝";
 "You're on the beta build" = "你目前使用的是 beta 版本";
-"Switch to the TokenBar 1.0 release — keeps your data" = "切換到 TokenBar 1.0 正式版，資料會保留";
+"Switch to the Syrtis 1.0 release — keeps your data" = "切換到 Syrtis 1.0 正式版，資料會保留";
 "Switch" = "切換";
 
 /* ===== 空狀態 ===== */
@@ -154,9 +154,9 @@
 "consent.action.allow" = "允許";
 "Not now" = "暫時不要";
 "Waiting for macOS…" = "等待 macOS 回應…";
-"Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. TokenBar never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，TokenBar 需要讀取它——macOS 會跳出視窗請你允許。讀到之後，這個登入會被送到 Grok Bot 的用量端點（api2.cursor.sh）去查詢你的額度。TokenBar 不會儲存、不會記錄，也不會送去任何其他地方。";
-"TokenBar is not reading your Grok Bot limits." = "TokenBar 沒有在讀取你的 Grok Bot 額度。";
-"macOS did not allow access to the Grok Bot login, so TokenBar stopped asking. Choose Allow to try again — macOS will show its permission dialog." = "macOS 沒有允許存取 Grok Bot 的登入資訊，所以 TokenBar 停止詢問了。選擇「允許」可以再試一次——macOS 會再顯示一次權限視窗。";
+"Grok Bot stores its login in your Keychain. To show your weekly limits, Syrtis needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. Syrtis never stores it, never logs it, and sends it nowhere else." = "Grok Bot 把登入資訊存在你的鑰匙圈裡。要顯示每週額度，Syrtis 需要讀取它——macOS 會跳出視窗請你允許。讀到之後，這個登入會被送到 Grok Bot 的用量端點（api2.cursor.sh）去查詢你的額度。Syrtis 不會儲存、不會記錄，也不會送去任何其他地方。";
+"Syrtis is not reading your Grok Bot limits." = "Syrtis 沒有在讀取你的 Grok Bot 額度。";
+"macOS did not allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again — macOS will show its permission dialog." = "macOS 沒有允許存取 Grok Bot 的登入資訊，所以 Syrtis 停止詢問了。選擇「允許」可以再試一次——macOS 會再顯示一次權限視窗。";
 "Error" = "錯誤";
 "Live" = "使用中";
 "No quota" = "無額度";
@@ -181,7 +181,7 @@
 "%@ — %lld%% last known quota remaining" = "%1$@ — 上次已知剩餘額度 %2$lld%%";
 "%@, %lld percent last known quota remaining" = "%1$@，上次已知剩餘額度 %2$lld%%";
 "Copy command" = "複製指令";
-"Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？TokenBar 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
+"Using a Claude `setup-token`? Syrtis auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:" = "使用 Claude 的 `setup-token`？Syrtis 會自動從你的登入 shell 讀取 `CLAUDE_CODE_OAUTH_TOKEN`。如果額度沒有出現，請把 token 存進鑰匙圈 —— 執行以下指令，然後在提示處貼上 token：";
 
 /* ===== 時間格式 ===== */
 "Jan" = "1月";
@@ -270,7 +270,7 @@
 "1.2M tokens today" = "今日 1.2M token";
 "Claude Code · $10-50" = "Claude Code · $10-50";
 "Your Discord profile can show what you have been building today. Pick exactly what appears — or nothing at all — in Settings." = "你的 Discord 個人檔案可以顯示你今天在做什麼。要顯示哪些內容——或什麼都不顯示——都在設定裡挑。";
-"Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds." = "預設關閉。會把你在下方勾選的內容——今日 token 數、用戶端名稱、花費級距或取整金額——依你指定的用戶端，連同一個 TokenBar 原始碼連結，發布到你的 Discord 個人檔案。工作時會持續更新，因此活動時段也會曝光。任何看得到你檔案的人都能讀取並保存每一次更新；關閉只會停止後續更新，無法收回已經送出的內容。已隱藏的用戶端不會送出；在這裡做的變更約 15 秒內反映到你的個人檔案。";
+"Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds." = "預設關閉。會把你在下方勾選的內容——今日 token 數、用戶端名稱、花費級距或取整金額——依你指定的用戶端，連同一個 Syrtis 原始碼連結，發布到你的 Discord 個人檔案。工作時會持續更新，因此活動時段也會曝光。任何看得到你檔案的人都能讀取並保存每一次更新；關閉只會停止後續更新，無法收回已經送出的內容。已隱藏的用戶端不會送出；在這裡做的變更約 15 秒內反映到你的個人檔案。";
 "Include today's tokens" = "包含今日 token 數";
 "Include the client name" = "包含用戶端名稱";
 "Include cost" = "包含花費";
@@ -278,11 +278,11 @@
 "Show cost as a figure instead of a range" = "以金額而非級距顯示花費";
 "A range keeps you among everyone else in that band. A figure is rounded to the dollar, never cents, but still says more about you — every day. With one client named above, it becomes that tool's daily spend." = "級距讓你和同一區間裡的其他人混在一起。金額會取整到整數美元、不含分位，但仍然每天多透露一些。若上方指定了單一用戶端，它就等於那個工具的每日花費。";
 "Whichever client you used most" = "用量最高的用戶端";
-"Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones TokenBar does not recognise. The cost becomes that one tool's daily spend rather than the whole day's." = "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 TokenBar 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。";
+"Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's." = "指定單一用戶端後只會發布它的用量，因此數字可能與選單列不同——選單列會計入所有用戶端，包含 Syrtis 未收錄的。花費也會變成那一個工具的當日金額，而非整天的總額。";
 "Live preview — settings apply immediately." = "即時預覽，設定會立即套用。";
-"Takes effect the next time TokenBar starts." = "下次啟動 TokenBar 時生效。";
-"Restart TokenBar?" = "重新啟動 TokenBar？";
-"Restart TokenBar to apply the new language." = "重新啟動 TokenBar 以套用新的語言。";
+"Takes effect the next time Syrtis starts." = "下次啟動 Syrtis 時生效。";
+"Restart Syrtis?" = "重新啟動 Syrtis？";
+"Restart Syrtis to apply the new language." = "重新啟動 Syrtis 以套用新的語言。";
 "Restart Now" = "立即重新啟動";
 "Later" = "稍後";
 "Dark" = "深色";
@@ -325,7 +325,7 @@
 "Spins faster as the live token rate climbs (idle 2 fps, 1M tokens/min tops out at 40 fps)." = "即時 token 速率越高轉得越快（閒置 2 fps，每分鐘 100 萬 tokens 時達到上限 40 fps）。";
 "Gauge icons drain as the selected quota window empties. \"Color on warning only\" stays monochrome until under 25% left (amber) and 10% (red), like the battery icon." = "儀表圖示會隨著所選額度時間窗耗盡而下降。「僅警示時上色」在剩餘 25%（琥珀色）與 10%（紅色）之前維持單色，行為與電池圖示一致。";
 "Feeds the gauge icons and the \"Quota left\" title. Auto follows whichever window is closest to running out." = "決定儀表圖示與「剩餘額度」標題的資料來源。自動會追蹤最接近用盡的時間窗。";
-"Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 TokenBar 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
+"Keep the main Syrtis item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client." = "主 Syrtis 項目會保留。可選的個別用戶端項目會顯示各自選定的額度時間窗；自動會在該用戶端內選擇最吃緊且健康的時間窗。";
 "Off hides the Agent-limits quota card everywhere — the Overview summary, every client's own tab, and this preview. Cost/token data is unaffected." = "關閉後會在所有位置隱藏 Agent 額度卡片 —— 包含總覽摘要、各用戶端分頁與此預覽。費用與 token 資料不受影響。";
 "On, bars count up as quota is used; off, they count down to what's left. The color always warns as quota runs low." = "開啟時長條隨用量往上累加，關閉時則往下遞減顯示剩餘。無論何者，額度偏低時顏色都會提出警示。";
 "The deficit/reserve marker. Historical learns each quota window's usage pattern; during learning, the Linear estimate is labeled; Linear uses the exact reset duration; Off hides the marker." = "超前／保留量的標記。歷史模式會學習每個額度時間窗的使用模式，學習期間會標示為線性估算；線性模式使用確切的重置週期；關閉則隱藏標記。";
@@ -336,8 +336,8 @@
 "Affects the live-session card only: on, each agent & model gets its own row; off, rows collapse to one per app." = "只影響即時工作階段卡片：開啟時每個 Agent 與模型各佔一列，關閉時每個應用程式合併為一列。";
 "Or drag the handle at the bottom edge of the popover. Width is fixed; \"Auto\" fits about 60% of your screen height." = "也可以拖曳彈出視窗底部邊緣的把手。寬度固定；「自動」約為螢幕高度的 60%。";
 "How often the tray re-reads your logs. The dashboard refreshes when the popover opens; live tokens/min updates every few seconds regardless." = "選單列重新讀取記錄檔的頻率。儀表板會在開啟彈出視窗時更新；即時的每分鐘 tokens 則不受此設定影響，每隔幾秒就會更新。";
-"TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed." = "TokenBar 最初是 handlecusion 的 tokcat 分支。解析與計價來自 Junho Yeo 的 tokscale；選單列的做法參考 Peter Steinberger 的 CodexBar；跑動的貓則源自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
-"For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in TokenBar — there is no separate per-account view." = "第二個 Claude 帳號請以 CLAUDE_CONFIG_DIR 指向隔離資料夾來執行，再把該資料夾加到這裡。它的用量會合併進上方的總計 —— TokenBar 各處都不會分開顯示個別帳號。";
+"Syrtis began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed." = "Syrtis 最初是 handlecusion 的 tokcat 分支。解析與計價來自 Junho Yeo 的 tokscale；選單列的做法參考 Peter Steinberger 的 CodexBar；跑動的貓則源自 Takuto Nakamura 的 RunCat。採用 MIT 授權。";
+"For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in Syrtis — there is no separate per-account view." = "第二個 Claude 帳號請以 CLAUDE_CONFIG_DIR 指向隔離資料夾來執行，再把該資料夾加到這裡。它的用量會合併進上方的總計 —— Syrtis 各處都不會分開顯示個別帳號。";
 "%lld of %lld path(s) can't be read right now — this is retried automatically on the next scan." = "%2$lld 個路徑中有 %1$lld 個目前無法讀取 —— 下次掃描時會自動重試。";
 "%lld path(s) can't be used as a scan folder and were not added." = "有 %lld 個路徑無法作為掃描資料夾，未加入清單。";
 
@@ -412,7 +412,7 @@
 "Not enough quota readings yet" = "額度讀數還不夠";
 
 /* ===== 視窗 ===== */
-"TokenBar Settings" = "TokenBar 設定";
+"Syrtis Settings" = "Syrtis 設定";
 "Sponsor" = "贊助";
 "The Agent limits card is turned off in Settings." = "Agent 額度卡片已在設定中關閉。";
 
@@ -420,8 +420,8 @@
 "Window history" = "時間窗歷史";
 "%@ windows" = "%@ 個窗";
 "Show %@ more" = "再顯示 %@ 個";
-"No earlier windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到更早的時間窗。TokenBar 執行期間會逐步累積。";
-"TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
+"No earlier windows recorded yet. They accumulate as Syrtis runs." = "尚未記錄到更早的時間窗。Syrtis 執行期間會逐步累積。";
+"Syrtis observed %@%% of this window, so its usage figure is a floor." = "Syrtis 只觀測到這個時間窗的 %@%%，因此用量是下限而非實際值。";
 "Nothing in this window was charged to this subscription." = "這個時間窗內沒有用量記在這個訂閱上。";
 "Other subscriptions in the same hours: %@ · %@" = "同一時段的其他訂閱：%@ · %@";
 "Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "金額是你歸類為 %@ 的用量按 API 定價換算的等值，不是訂閱實際收取的費用。";
@@ -457,7 +457,7 @@
 /* ===== 過去的時間窗 ===== */
 "Past windows" = "過去的時間窗";
 "never exhausted" = "從未用完";
-"No completed windows recorded yet. They accumulate as TokenBar runs." = "尚未記錄到完整的時間窗。TokenBar 執行期間會逐步累積。";
+"No completed windows recorded yet. They accumulate as Syrtis runs." = "尚未記錄到完整的時間窗。Syrtis 執行期間會逐步累積。";
 "Reading quota history…" = "正在讀取額度歷史…";
 "Heaviest %@%% · never ran out" = "最多用到 %@%%，從未用完";
 "Heaviest %@%% · ran out at least once" = "最多用到 %@%%，至少用完過一次";
@@ -488,7 +488,7 @@
 // Quota heatmap
 "When the allowance goes" = "額度花在什麼時候";
 "%@ days observed" = "觀察到 %@ 天";
-"No allowance movement recorded yet. It accumulates as TokenBar runs." = "還沒有記錄到額度變動。TokenBar 執行期間會逐步累積。";
+"No allowance movement recorded yet. It accumulates as Syrtis runs." = "還沒有記錄到額度變動。Syrtis 執行期間會逐步累積。";
 "%@%% consumed between readings too far apart to place" = "有 %@%% 落在間隔過長的兩次讀數之間，無法定位到時段";
 "No allowance consumed in this slot" = "這個時段沒有消耗額度";
 "%@ allowance-points spent here" = "這個時段累計花掉 %@ 個額度百分點";

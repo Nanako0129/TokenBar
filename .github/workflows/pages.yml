@@ -40,7 +40,7 @@ jobs:
         run: npm run build
         working-directory: landing
         env:
-          PUBLIC_SITE_URL: ${{ vars.PUBLIC_SITE_URL || 'https://tokenbar.nyanako.com' }}
+          PUBLIC_SITE_URL: ${{ vars.PUBLIC_SITE_URL || 'https://syrtis.nyanako.com' }}
       - if: github.event_name != 'pull_request'
         uses: actions/upload-pages-artifact@v3
         with:

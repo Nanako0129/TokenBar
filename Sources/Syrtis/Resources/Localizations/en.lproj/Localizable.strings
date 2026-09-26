@@ -1,4 +1,4 @@
-/* TokenBar — English (source language).
+/* Syrtis — English (source language).
 
    The English UI text is itself the lookup key, so a missing entry renders as
    written in the Swift source. That is why this file is nearly empty: it only
@@ -67,8 +67,8 @@
 /* ===== window history ===== */
 "Window history" = "Window history";
 "%@ windows" = "%@ windows";
-"No earlier windows recorded yet. They accumulate as TokenBar runs." = "No earlier windows recorded yet. They accumulate as TokenBar runs.";
-"TokenBar observed %@%% of this window, so its usage figure is a floor." = "TokenBar observed %@%% of this window, so its usage figure is a floor.";
+"No earlier windows recorded yet. They accumulate as Syrtis runs." = "No earlier windows recorded yet. They accumulate as Syrtis runs.";
+"Syrtis observed %@%% of this window, so its usage figure is a floor." = "Syrtis observed %@%% of this window, so its usage figure is a floor.";
 "Nothing in this window was charged to this subscription." = "Nothing in this window was charged to this subscription.";
 "Other subscriptions in the same hours: %@ · %@" = "Other subscriptions in the same hours: %@ · %@";
 "Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged." = "Amounts are API list-price equivalents for usage you declared as %@ — not what the subscription charged.";
@@ -105,7 +105,7 @@
 /* ===== past windows ===== */
 "Past windows" = "Past windows";
 "never exhausted" = "never exhausted";
-"No completed windows recorded yet. They accumulate as TokenBar runs." = "No completed windows recorded yet. They accumulate as TokenBar runs.";
+"No completed windows recorded yet. They accumulate as Syrtis runs." = "No completed windows recorded yet. They accumulate as Syrtis runs.";
 "Reading quota history…" = "Reading quota history…";
 "Heaviest %@%% · never ran out" = "Heaviest %@%% · never ran out";
 "Heaviest %@%% · ran out at least once" = "Heaviest %@%% · ran out at least once";
@@ -140,7 +140,7 @@
 // Quota heatmap
 "When the allowance goes" = "When the allowance goes";
 "%@ days observed" = "%@ days observed";
-"No allowance movement recorded yet. It accumulates as TokenBar runs." = "No allowance movement recorded yet. It accumulates as TokenBar runs.";
+"No allowance movement recorded yet. It accumulates as Syrtis runs." = "No allowance movement recorded yet. It accumulates as Syrtis runs.";
 "%@%% consumed between readings too far apart to place" = "%@%% consumed between readings too far apart to place";
 "No allowance consumed in this slot" = "No allowance consumed in this slot";
 "%@ allowance-points spent here" = "%@ allowance-points spent here";

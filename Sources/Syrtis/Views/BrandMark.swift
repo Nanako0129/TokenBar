@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// The TokenBar mark (ascending bars, cat ears on the tallest, tail-loop
+/// The Syrtis mark (ascending bars, cat ears on the tallest, tail-loop
 /// baseline) as a flat monochrome glyph — the app-icon geometry from
 /// scripts/render_icon.swift without the squircle, for in-app use like the
 /// popover header. Tinted by the current foreground style.

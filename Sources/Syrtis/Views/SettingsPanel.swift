@@ -218,11 +218,11 @@ struct SettingsPanel: View {
             guard !Task.isCancelled, !autostartMutationCommitted else { return }
             autostartEnabled = enabled
         }
-        .alert("Restart TokenBar?", isPresented: $showLanguageRestartPrompt) {
+        .alert("Restart Syrtis?", isPresented: $showLanguageRestartPrompt) {
             Button("Later", role: .cancel) {}
             Button("Restart Now") { AppRelauncher.relaunch() }
         } message: {
-            Text("Restart TokenBar to apply the new language.")
+            Text("Restart Syrtis to apply the new language.")
         }
         .task(id: attributionInputSignature) {
             refreshAttributionSuggestions()
@@ -324,7 +324,7 @@ struct SettingsPanel: View {
             officialClients: AgentIconView.availableOfficialClientIDs())
 
         section("Individual items") {
-            hint("Keep the main TokenBar item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client.")
+            hint("Keep the main Syrtis item. Optional client items show each client's selected quota window; Auto chooses the tightest healthy window for that client.")
             if rows.isEmpty, isLoading {
                 LoadingLine(title: "Looking for eligible clients…")
             } else if rows.isEmpty {
@@ -754,7 +754,7 @@ struct SettingsPanel: View {
         // Every target this row can legitimately hold has to be selectable, and
         // `targetClients` only lists clients with a quota snapshot. Two kinds of
         // target fall outside it: one already confirmed, and one being suggested
-        // for a plan TokenBar draws no meter for — a Cursor row is exactly that.
+        // for a plan Syrtis draws no meter for — a Cursor row is exactly that.
         // Offering the suggestion while the picker cannot select it leaves
         // "Accept all" as the only way to take it, and then undoing everything
         // else it accepted.
@@ -952,7 +952,7 @@ struct SettingsPanel: View {
             // user reads BEFORE opting in, rather than only next to the switch
             // itself. Saying "a cost range" while a setting below can turn it
             // into a figure would describe a state the app may not be in.
-            hint("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to TokenBar's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds.")
+            hint("Off by default. Publishes what you pick below — today's tokens, a client name, a cost range or rounded figure — for whichever client you choose, and a link to Syrtis's source to your Discord profile. It updates while you work, so your active hours show too. Anyone who can see your profile can read and keep every update; switching this off stops new ones but cannot unshare what already went out. Hidden clients are never included, and a change here reaches your profile within about 15 seconds.")
             toggleRow("Include today's tokens", isOn: componentBinding(.tokens))
             toggleRow("Include the client name", isOn: componentBinding(.client))
             toggleRow("Include cost", isOn: componentBinding(.cost))
@@ -997,7 +997,7 @@ struct SettingsPanel: View {
             // Two consequences, and neither is obvious from the control. The
             // first reads as a bug when it is a decision; the second is the one
             // that compounds with the switch below it.
-            hint("Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones TokenBar does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.")
+            hint("Naming one client publishes only its usage, so the totals can differ from the menu bar, which counts every client including ones Syrtis does not recognise. The cost becomes that one tool's daily spend rather than the whole day's.")
             toggleRow("Show cost as a figure instead of a range", isOn: $discordWholeDollars)
             // Says what the trade is, not that there is one. A range puts you
             // in a group; a figure is closer to a value only you have, and a
@@ -1021,12 +1021,12 @@ struct SettingsPanel: View {
                         showLanguageRestartPrompt = true
                     }),
                 options: AppLanguage.allCases.map { ($0.rawValue, $0.label) })
-            hint("Takes effect the next time TokenBar starts.")
+            hint("Takes effect the next time Syrtis starts.")
         }
     }
 
     /// A second (or further) Claude account isolated with `CLAUDE_CONFIG_DIR`
-    /// is otherwise invisible to TokenBar's scan (see `docs/knowledge/
+    /// is otherwise invisible to Syrtis's scan (see `docs/knowledge/
     /// architecture.md`'s extra-scan-paths section). Each config dir here
     /// expands to its `projects`/`transcripts` sub-roots and merges into the
     /// single reported total — there is no per-account breakdown.
@@ -1069,7 +1069,7 @@ struct SettingsPanel: View {
                 hint("%lld path(s) can't be used as a scan folder and were not added.".localized(
                     result.rejected.count))
             }
-            hint("For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in TokenBar — there is no separate per-account view.")
+            hint("For a second Claude account, run it with CLAUDE_CONFIG_DIR pointed at an isolated folder, then add that folder here. Its usage is merged into the totals above everywhere in Syrtis — there is no separate per-account view.")
         }
         .onAppear { refreshMissingClaudeRoots() }
     }
@@ -1117,7 +1117,7 @@ struct SettingsPanel: View {
                         .labelsHidden()
                 }
             }
-            hint("TokenBar began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed.")
+            hint("Syrtis began as a fork of tokcat by handlecusion. Parsing & pricing come from tokscale by Junho Yeo; the menu-bar patterns reference CodexBar by Peter Steinberger; the running cat traces back to RunCat by Takuto Nakamura. MIT licensed.")
         }
     }
 
@@ -1457,6 +1457,6 @@ enum AppInfo {
     /// Read from the bundle rather than hard-coded, so a rename carries into the
     /// UI with the Info.plist instead of leaving a stale name behind.
     static var name: String {
-        Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "TokenBar"
+        Bundle.main.infoDictionary?["CFBundleName"] as? String ?? "Syrtis"
     }
 }

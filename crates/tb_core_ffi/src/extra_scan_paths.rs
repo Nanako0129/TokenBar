@@ -5,7 +5,7 @@
 //! process-wide registry `tb_set_extra_scan_paths` writes into and that
 //! `LocalSourceContext` reads on every report/parse call.
 //!
-//! A `RwLock`, not an env var: TokenBar keeps a resident rayon scan pool
+//! A `RwLock`, not an env var: Syrtis keeps a resident rayon scan pool
 //! (`RAYON_INIT` in lib.rs), and Settings changes must take effect without an
 //! app restart. `std::env::set_var` is unsafe in a multi-threaded process for
 //! exactly that reason (see D1 in the extra-root plan).
@@ -37,7 +37,7 @@ pub(crate) fn snapshot() -> BTreeMap<String, Vec<PathBuf>> {
 /// is not actually scannable must be rejected here, not accepted into a
 /// registry entry that will never contribute to a report.
 ///
-/// Extend this list when TokenBar wires extra-root support for another
+/// Extend this list when Syrtis wires extra-root support for another
 /// client.
 const SUPPORTED_CLIENTS: &[&str] = &["claude"];
 

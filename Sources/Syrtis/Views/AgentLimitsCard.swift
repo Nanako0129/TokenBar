@@ -810,7 +810,7 @@ struct AgentLimitsCard: View {
             })
     }
 
-    /// Keychain command that hands TokenBar a Claude setup-token when the
+    /// Keychain command that hands Syrtis a Claude setup-token when the
     /// automatic shell/env detection can't reach it (e.g. a plain `~/.zshrc`
     /// export a Finder-launched app never inherits).
     // `-U` updates the item if it already exists (so re-pasting after a wrong
@@ -841,7 +841,7 @@ struct AgentLimitsCard: View {
 
     @ViewBuilder private func claudeSetupPrompt() -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text("Using a Claude `setup-token`? TokenBar auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:")
+            Text("Using a Claude `setup-token`? Syrtis auto-detects `CLAUDE_CODE_OAUTH_TOKEN` from your login shell. If limits don't appear, store the token in Keychain — run this, then paste the token at the prompt:")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -882,14 +882,14 @@ struct AgentLimitsCard: View {
             if accessDenied {
                 // The user said yes here and macOS said no. Naming which half
                 // failed is the whole point: a generic error would send them
-                // looking for a problem in TokenBar, and the collapsed
+                // looking for a problem in Syrtis, and the collapsed
                 // "not reading your limits" line would imply they chose this.
-                Text("macOS did not allow access to the Grok Bot login, so TokenBar stopped asking. Choose Allow to try again — macOS will show its permission dialog.")
+                Text("macOS did not allow access to the Grok Bot login, so Syrtis stopped asking. Choose Allow to try again — macOS will show its permission dialog.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             } else if consentDeclined {
-                Text("TokenBar is not reading your Grok Bot limits.")
+                Text("Syrtis is not reading your Grok Bot limits.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -912,7 +912,7 @@ struct AgentLimitsCard: View {
                 // mistake that produced the first draft. Reassurance that
                 // cannot be checked does not belong in a permission prompt,
                 // even when it is probably true.
-                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, TokenBar needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. TokenBar never stores it, never logs it, and sends it nowhere else.")
+                Text("Grok Bot stores its login in your Keychain. To show your weekly limits, Syrtis needs to read it — macOS will ask you to allow this. The login is then sent to Grok Bot's usage endpoint (api2.cursor.sh) to look up your limits. Syrtis never stores it, never logs it, and sends it nowhere else.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

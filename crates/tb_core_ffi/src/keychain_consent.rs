@@ -3,7 +3,7 @@
 //! would otherwise put a system authorization dialog in front of the user with
 //! no warning.
 //!
-//! Reading a Keychain item makes macOS — not TokenBar — ask the question, and
+//! Reading a Keychain item makes macOS — not Syrtis — ask the question, and
 //! by then it is too late to explain what is being read or why. An adapter
 //! therefore asks this registry first and declines to reach the Keychain at
 //! all until the answer is yes. The app owns the explanation and the "Allow"
@@ -52,7 +52,7 @@ const CONSENTABLE_CLIENTS: &[&str] = &["grok-bot"];
 static KEYCHAIN_CONSENT: LazyLock<RwLock<BTreeSet<String>>> =
     LazyLock::new(|| RwLock::new(BTreeSet::new()));
 
-/// Whether the user has agreed to let TokenBar read this client's Keychain
+/// Whether the user has agreed to let Syrtis read this client's Keychain
 /// item. `false` by default, which is what makes "we never asked" and "the
 /// user said no" behave identically without either being stored.
 pub(crate) fn allowed(client_id: &str) -> bool {

@@ -6,7 +6,7 @@ import TokenBarCore
 // diff.py can compare it field-by-field against the C# port. See the contract
 // in the Windows repo: crosscheck/README.md.
 //
-// Format.swift is symlinked in from Sources/TokenBar so the harness compiles the
+// Format.swift is symlinked in from Sources/Syrtis so the harness compiles the
 // exact same source the app ships (the README says TokenBarCore/Format.swift;
 // it actually lives in the app target). No reimplementation — fidelity is the point.
 
@@ -56,7 +56,7 @@ let args: [String] = {
 // An unpinned run on a non-English host silently emits values the byte-exact C#
 // comparison can never match, which reads as a port defect rather than a harness
 // misinvocation. The argument check above is authoritative even when a sibling
-// `TokenBar_TokenBar.bundle` is present: TokenBarCore's shared lookup searches
+// `Syrtis_Syrtis.bundle` is present: TokenBarCore's shared lookup searches
 // that bundle, while Bundle.main belongs to this harness executable.
 let language = Bundle.main.preferredLocalizations.first ?? "en"
 guard language == "en" else {

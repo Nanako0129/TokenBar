@@ -362,7 +362,7 @@ extension CostPlausibility {
     /// that carries this text is summoned by a pointer and nothing else.
     ///
     /// Lives here rather than beside the threshold in TokenBarCore because it
-    /// needs `Format` and `.localized`, which are TokenBar-side.
+    /// needs `Format` and `.localized`, which are Syrtis-side.
     static func warningText(_ ratio: Double) -> String {
         "Cost reported by the client, about %@x the local price estimate"
             .localized(Format.compactRatio(ratio))

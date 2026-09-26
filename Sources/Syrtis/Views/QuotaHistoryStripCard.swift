@@ -42,7 +42,7 @@ struct QuotaHistoryStripCard: View {
                     }
                 }
             } else if attempted {
-                Text("No completed windows recorded yet. They accumulate as TokenBar runs.")
+                Text("No completed windows recorded yet. They accumulate as Syrtis runs.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)

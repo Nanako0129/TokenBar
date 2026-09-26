@@ -82,7 +82,7 @@ enum SnapshotStore {
     static let maxAge: TimeInterval = 60 * 60 * 24 * 90
 
     private static let fileName = "dashboard-snapshot.json"
-    private static let directoryName = "TokenBarDashboardSnapshot"
+    private static let directoryName = "SyrtisDashboardSnapshot"
 
     // MARK: - Location
 

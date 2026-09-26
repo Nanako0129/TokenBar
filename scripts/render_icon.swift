@@ -97,7 +97,7 @@ let sizes: [(Int, String)] = [
     (512, "512x512"), (1024, "512x512@2x"),
 ]
 for theme in ["dark", "light"] {
-    let dir = "/tmp/TokenBar-\(theme).iconset"
+    let dir = "/tmp/Syrtis-\(theme).iconset"
     try? FileManager.default.removeItem(atPath: dir)
     try! FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     for (px, name) in sizes {

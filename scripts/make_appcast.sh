@@ -14,11 +14,11 @@
 #
 # generate_appcast authors item fields from the bundle's Info.plist, so the one
 # thing it does not produce is our release notes; we render them to an
-# HTML sidecar named after the archive (TokenBar.app.html) and pass
+# HTML sidecar named after the archive (Syrtis.app.html) and pass
 # --embed-release-notes so they land in the item's <description> CDATA.
 set -euo pipefail
 
-ARCHIVE="$1"        # freshly built TokenBar.app.tar.gz
+ARCHIVE="$1"        # freshly built Syrtis.app.tar.gz
 VERSION="$2"
 TAG="$3"            # git tag, e.g. v1.1.2 — used for the per-release download URL
 KEY_FILE="$4"
@@ -26,8 +26,8 @@ NOTES_FILE="${5:-}"
 
 GENERATE_APPCAST=".build/artifacts/sparkle/Sparkle/bin/generate_appcast"
 REPO_APPCAST="appcast.xml"
-ARCHIVE_BASENAME=$(basename "$ARCHIVE")                  # TokenBar.app.tar.gz
-NOTES_BASENAME="${ARCHIVE_BASENAME%.tar.gz}.html"        # TokenBar.app.html
+ARCHIVE_BASENAME=$(basename "$ARCHIVE")                  # Syrtis.app.tar.gz
+NOTES_BASENAME="${ARCHIVE_BASENAME%.tar.gz}.html"        # Syrtis.app.html
 
 WORK=$(mktemp -d)
 trap 'rm -rf "$WORK"' EXIT
@@ -74,8 +74,8 @@ esac
 
 "$GENERATE_APPCAST" \
   --ed-key-file "$KEY_FILE" \
-  --download-url-prefix "https://github.com/Nanako0129/TokenBar/releases/download/$TAG/" \
-  --link "https://github.com/Nanako0129/TokenBar/releases/tag/$TAG" \
+  --download-url-prefix "https://github.com/Nanako0129/syrtis/releases/download/$TAG/" \
+  --link "https://github.com/Nanako0129/syrtis/releases/tag/$TAG" \
   --embed-release-notes \
   --maximum-versions 5 \
   $CHANNEL_ARG \
