@@ -1,0 +1,15 @@
+Before you update:
+- TokenBar is now Syrtis, and the first launch renames the app on disk. The update installs over TokenBar.app; on its first launch the app renames itself to Syrtis.app in the same folder and starts again from there. The bundle identifier has not changed, so settings, usage history and the login item carry over. If TokenBar.app is pinned in the Dock, the tile is repointed at Syrtis.app and the Dock restarts once: windows you had minimized to the Dock leave it (clicking their app brings them back), and the pinned tile may keep the old icon until you click it once. The rename is skipped when a Syrtis.app already sits beside it, or when the account cannot write to the Applications folder; the app then keeps the name TokenBar.app and works the same.
+- Homebrew has a new tap. New installs use brew install --cask nanako0129/tap/syrtis. An existing install from nanako0129/tokenbar keeps updating through the app itself; that cask stays on the last TokenBar release.
+- Some clients re-scan once, and two of them count differently. Copilot, Grok, OpenClaw, RooCode, KiloCode, Cline, Cursor, OpenCode, Pi and Droid each rebuild their cache once on the first launch; every other client, Claude and Codex included, is read from its existing cache. Pi counts fall if you fork sessions: a forked session's copied replies were counted again, and each reply now counts once. OpenClaw counts can move either way: archived sessions are now read, and compaction checkpoints are no longer counted as usage. Droid totals are unchanged, now split across a session's replies.
+
+Features:
+- On macOS 27, the dashboard opens in a Liquid Glass panel whose glass refracts the actual wallpaper. It closes on Esc or a click anywhere else, and right-clicking the menu bar item still opens the menu. Below macOS 27 the popover is unchanged.
+- A new icon and name in the app: the Syrtis mark and the Greek wordmark in the panel header and Settings, and the new icon in Discord presence. The site is now syrtis.nyanako.com; old TokenBar links redirect.
+
+Fixes:
+- A quota window's readings were deleted when they could not be modelled, for example after a provider moved a reset later. They are now kept, and still do not feed the pace model.
+- Codex asked you to sign in again while a refresh token was available. The access token's own expiry is now checked, and it is refreshed within five minutes of it.
+- Switching windows on the quota window card paused the app for 131-144 ms. It now takes 12-15 ms.
+- Opening the dashboard right after launch computed the usage graph up to three times. It is now computed once.
+- The Local Network prompt now explains that Syrtis connects to your providers to read quota information.
