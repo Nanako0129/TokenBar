@@ -22,7 +22,7 @@
 Until version 2.0, the app was called TokenBar on macOS; upgrading preserves your settings, history, and login item unchanged. A companion Windows tray version, also named [Syrtis](https://github.com/Nanako0129/Syrtis-Windows), is built on the same Rust core.
 
 <p align="center">
-  <img src="landing/public/og-card-v4.png" alt="Syrtis — know every AI token you burn from the macOS menu bar" width="800">
+  <img src="docs/screenshots/og-card.png" alt="Syrtis — where your tokens settle" width="800">
 </p>
 
 The menu-bar title displays today's token count, total cost, live tokens per minute, or remaining subscription quota—shown as signal bars, a progress ring, or a popsicle that melts as the window drains. The menu-bar cat spins faster the more tokens you burn, tracing back to [RunCat](https://kyome.io/runcat/) by Takuto Nakamura.

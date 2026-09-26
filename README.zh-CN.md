@@ -22,7 +22,7 @@
 在 2.0 版本之前，本软件在 macOS 上名为 TokenBar；升级至 2.0 会完整保留原有的偏好设置、历史记录与开机启动项。同时提供基于相同 Rust 核心构建的 Windows 系统托盘版本 [Syrtis](https://github.com/Nanako0129/Syrtis-Windows)。
 
 <p align="center">
-  <img src="landing/public/og-card-v4.png" alt="Syrtis — 从 macOS 菜单栏掌握每一枚消耗的 AI token" width="800">
+  <img src="docs/screenshots/zh-CN/og-card.png" alt="Syrtis：积沙成洲" width="800">
 </p>
 
 菜单栏标题可显示今日 token 用量、花费、实时每分钟消耗速率，或当前窗口剩余的订阅额度——呈现方式包括信号格、环形进度条，或随着时间窗口消耗而逐渐融化的冰棒。菜单栏上的猫咪会随着用量上升越转越快，这一设计源自 Takuto Nakamura 开发的 [RunCat](https://kyome.io/runcat/)。
